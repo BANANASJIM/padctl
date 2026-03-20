@@ -1,0 +1,78 @@
+[device]
+name = "Test Vader 5"
+vid = 0x37d7
+pid = 0x2401
+
+[[device.interface]]
+id = 0
+class = "vendor"
+
+[[device.interface]]
+id = 1
+class = "hid"
+
+[device.init]
+commands = ["5aa5 0102 03", "5aa5 a102 a3"]
+response_prefix = [0x5a, 0xa5]
+
+[[report]]
+name = "extended"
+interface = 1
+size = 32
+
+[report.match]
+offset = 0
+expect = [0x5a, 0xa5, 0xef]
+
+[report.fields]
+left_x = { offset = 3, type = "i16le" }
+left_y = { offset = 5, type = "i16le", transform = "negate" }
+gyro_x = { offset = 17, type = "i16le" }
+
+[report.button_group]
+source = { offset = 11, size = 2 }
+map = { A = 0, B = 1, X = 3, Y = 4 }
+
+[report.checksum]
+algo = "crc32"
+range = [0, 29]
+expect = { offset = 30, type = "u16le" }
+
+[[report]]
+name = "standard"
+interface = 0
+size = 20
+
+[report.match]
+offset = 0
+expect = [0x00]
+
+[report.fields]
+left_x = { offset = 6, type = "i16le" }
+
+[commands.rumble]
+interface = 0
+template = "00 08 00 {strong} {weak} 00 00 00"
+
+[commands.led]
+interface = 1
+template = "5aa5 2001 {r} {g} {b} 00"
+
+[output]
+name = "Test Vader 5"
+vid = 0x3820
+pid = 0x0001
+
+[output.axes]
+left_x = { code = "ABS_X", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+
+[output.buttons]
+A = "BTN_SOUTH"
+B = "BTN_EAST"
+
+[output.dpad]
+type = "hat"
+
+[output.force_feedback]
+type = "rumble"
+max_effects = 16

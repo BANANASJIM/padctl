@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
+    const toml_mod = toml_dep.module("toml");
+
     const exe = b.addExecutable(.{
         .name = "padctl",
         .root_module = b.createModule(.{
@@ -45,4 +48,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+
+    const spike_exe = b.addExecutable(.{
+        .name = "toml-spike",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("spike/toml_spike.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    spike_exe.root_module.addImport("toml", toml_mod);
+
+    const spike_step = b.step("spike", "Run TOML spike");
+    spike_step.dependOn(&b.addRunArtifact(spike_exe).step);
 }
