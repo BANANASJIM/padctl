@@ -7,13 +7,16 @@ pub fn build(b: *std.Build) void {
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
 
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("toml", toml_mod);
+
     const exe = b.addExecutable(.{
         .name = "padctl",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = exe_mod,
     });
     exe.linkSystemLibrary("usb-1.0");
     exe.linkLibC();
@@ -40,13 +43,15 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(capture_exe);
 
     const test_step = b.step("test", "Run unit tests");
-    const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    test_mod.addImport("toml", toml_mod);
+
+    const unit_tests = b.addTest(.{ .root_module = test_mod });
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
     const spike_exe = b.addExecutable(.{
