@@ -1,0 +1,80 @@
+// OpenPlan Configuration — full schema (Phase 5.6)
+{
+  // CI mode: "strict" | "relaxed"
+  "ci": {
+    "mode": "strict",
+    "hooks": ["commit-msg", "pre-commit", "pre-merge-commit"],
+    "root_file_limit_lines": 150
+  },
+
+  // Permission system
+  "permissions": {
+    "mode": "strict",
+    "roles": {}
+  },
+
+  // Repository paths (docs = design SSOT, code = implementation)
+  "repos": {
+    "docs": "/home/jim_z/Dev/Dev_Vault/padctl",
+    "code": "/home/jim_z/Dev/padctl"
+  },
+
+  // Git configuration
+  "git": {
+    "worktree_dir": ".worktrees",
+    "rerere": false,
+    "notes_namespaces": ["budget", "reviews", "sudo", "dispatch", "deviations", "hotfix"],
+    "merge_drivers": true,
+    "branch_pattern": "feature/[^ ]+"
+  },
+
+  // Staleness detection (ADR-019)
+  "staleness": {
+    "enabled": true,
+    "check_existence": true,
+    "check_adr_chain": true,
+    "check_hash_drift": true
+  },
+
+  // Dual-repo branch pairing (ADR-020)
+  "dual_repo": {
+    "branch_check": true,
+    "default_strategy": "same-name",
+    "branch_map": {}
+  },
+
+  // Budget tracking
+  "budget": {
+    "default_task_tokens": null
+  },
+
+  // Deduplication
+  "dedup": {
+    "enabled": false,
+    "threshold": 0.8,
+    "exclude": ["_templates/"]
+  },
+
+  // Skills auto-loading
+  "skills": {
+    "auto_load": true
+  },
+
+  // Archive settings
+  "archive": {
+    "auto_tag": true,
+    "summary_section": "Summary"
+  },
+
+  // Validation checks
+  "checks": {
+    "depends_validation": true,
+    "openspec_completeness": true
+  },
+
+  // Observability
+  "observability": {
+    "track_model": false,
+    "capture_transcript": "off"
+  }
+}
