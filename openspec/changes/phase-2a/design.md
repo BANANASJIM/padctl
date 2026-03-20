@@ -75,12 +75,17 @@ pub const Mapper = struct {
     layer: LayerState,
     state: GamepadState,      // current frame (fully resolved)
     prev: GamepadState,       // previous frame (used for differential)
+    gyro: GyroProcessor,
+    stick_left: StickProcessor,
+    stick_right: StickProcessor,
     suppressed_buttons: u32,
     injected_buttons: u32,
+    timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
 
     pub fn init(
         config: *const MappingConfig,
+        timer_fd: std.posix.fd_t,
         allocator: std.mem.Allocator,
     ) !Mapper;
 
@@ -89,7 +94,6 @@ pub const Mapper = struct {
     pub fn apply(
         self: *Mapper,
         delta: GamepadStateDelta,
-        timer_fd: std.posix.fd_t,
     ) !OutputEvents;
 
     pub fn onTimerExpired(self: *Mapper) void;
@@ -214,7 +218,7 @@ Phase 2a state: `mode="gamepad"` → `process()` returns zeroed `StickOutput`; a
 [1] applyDelta(self.state, delta)
     Merge incoming delta fields into self.state (null fields = keep previous value).
 
-[2] layer.processLayerTriggers(self.state, timer_fd)
+[2] layer.processLayerTriggers(self.state, self.timer_fd)
     For each LayerConfig in declaration order:
       Hold: trigger press → PENDING (arm timerfd); timeout → ACTIVE; release → tap or exit
       Toggle: trigger release → add/remove from toggled set; clear tap_hold on Toggle activate
@@ -322,7 +326,7 @@ pub fn disarmTimer(fd: std.posix.fd_t) !void                 // sets itimerspec 
 // ppoll dispatch: timer_fd ready → read 8 bytes → mapper.onTimerExpired()
 ```
 
-`EventLoop.run()` gains a `mapper: *Mapper` parameter and passes `timer_fd` to `Mapper.apply()` each frame. When timerfd fires, `mapper.onTimerExpired()` is called before the next regular frame.
+`EventLoop.run()` gains a `mapper: *Mapper` parameter. `timer_fd` is stored in `Mapper` during `init()` and used internally by `apply()`; it is not passed as a parameter each frame. When timerfd fires, `mapper.onTimerExpired()` is called before the next regular frame.
 
 ---
 
@@ -391,5 +395,5 @@ Layer remap overrides individual buttons; buttons not present in the active laye
 ## Build Changes
 
 - Remove `src/core/remap.zig` module from `build.zig`; add `src/core/mapper.zig`, `src/core/layer.zig`, `src/core/gyro.zig`, `src/core/stick.zig`
-- `src/main.zig` call site: replace `Remap` initialisation with `Mapper.init()`; pass `timer_fd` to `EventLoop.run()`
+- `src/main.zig` call site: replace `Remap` initialisation with `Mapper.init(config, allocator)`; pass `mapper` (not `timer_fd`) to `EventLoop.run()`
 - New integration test file: `src/test/integration/phase2a.zig` (L1 CI tests + L2 `error.SkipZigTest` guards)

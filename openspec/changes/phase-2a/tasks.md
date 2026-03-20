@@ -198,13 +198,17 @@ pub const Mapper = struct {
     layer: LayerState,
     state: GamepadState,
     prev: GamepadState,
+    gyro: GyroProcessor,
+    stick_left: StickProcessor,
+    stick_right: StickProcessor,
     suppressed_buttons: u32,
     injected_buttons: u32,
+    timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
 
-    pub fn init(config: *const MappingConfig, allocator: std.mem.Allocator) !Mapper;
+    pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper;
     pub fn deinit(self: *Mapper) void;
-    pub fn apply(self: *Mapper, delta: GamepadStateDelta, timer_fd: std.posix.fd_t) !OutputEvents;
+    pub fn apply(self: *Mapper, delta: GamepadStateDelta) !OutputEvents;
     pub fn onTimerExpired(self: *Mapper) void;
 };
 ```
