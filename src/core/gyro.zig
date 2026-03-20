@@ -31,8 +31,8 @@ pub const GyroProcessor = struct {
         }
 
         // [1] deadzone
-        const fx: f32 = if (@abs(gx) < cfg.deadzone) 0.0 else @floatFromInt(gx);
-        const fy: f32 = if (@abs(gy) < cfg.deadzone) 0.0 else @floatFromInt(gy);
+        const fx: f32 = if (@abs(@as(i32, gx)) < cfg.deadzone) 0.0 else @floatFromInt(gx);
+        const fy: f32 = if (@abs(@as(i32, gy)) < cfg.deadzone) 0.0 else @floatFromInt(gy);
 
         // [2] EMA smoothing
         self.ema_x = self.ema_x * cfg.smoothing + fx * (1.0 - cfg.smoothing);

@@ -73,7 +73,7 @@ pub const StickProcessor = struct {
 };
 
 fn applyDeadzone(val: i16, deadzone: i16) f32 {
-    if (@abs(val) < deadzone) return 0;
+    if (@abs(@as(i32, val)) < deadzone) return 0;
     return @floatFromInt(val);
 }
 

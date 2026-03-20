@@ -216,7 +216,7 @@ pub fn main() !void {
         try loop.addDevice(dev);
     }
 
-    try loop.run(devices, &interp, output, null);
+    try loop.run(devices, &interp, output, null, null);
 }
 
 test {
@@ -324,7 +324,7 @@ test "pipeline: known frame dispatched to output" {
     var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .out = &out };
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.out.outputDevice(), null);
+            try c.loop.run(c.devs, c.interp, c.out.outputDevice(), null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -369,7 +369,7 @@ test "pipeline: unknown report does not call output.emit" {
     var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .out = &out };
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.out.outputDevice(), null);
+            try c.loop.run(c.devs, c.interp, c.out.outputDevice(), null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -408,7 +408,7 @@ test "pipeline: signalfd stop — no fd leak" {
     var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .out = &out };
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.out.outputDevice(), null);
+            try c.loop.run(c.devs, c.interp, c.out.outputDevice(), null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});

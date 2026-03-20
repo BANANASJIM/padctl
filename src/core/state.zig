@@ -45,6 +45,24 @@ pub const GamepadState = struct {
     accel_x: i16 = 0,
     accel_y: i16 = 0,
     accel_z: i16 = 0,
+
+    pub fn applyDelta(self: *GamepadState, delta: GamepadStateDelta) void {
+        if (delta.ax) |v| self.ax = v;
+        if (delta.ay) |v| self.ay = v;
+        if (delta.rx) |v| self.rx = v;
+        if (delta.ry) |v| self.ry = v;
+        if (delta.lt) |v| self.lt = v;
+        if (delta.rt) |v| self.rt = v;
+        if (delta.dpad_x) |v| self.dpad_x = v;
+        if (delta.dpad_y) |v| self.dpad_y = v;
+        if (delta.buttons) |v| self.buttons = v;
+        if (delta.gyro_x) |v| self.gyro_x = v;
+        if (delta.gyro_y) |v| self.gyro_y = v;
+        if (delta.gyro_z) |v| self.gyro_z = v;
+        if (delta.accel_x) |v| self.accel_x = v;
+        if (delta.accel_y) |v| self.accel_y = v;
+        if (delta.accel_z) |v| self.accel_z = v;
+    }
 };
 
 pub const GamepadStateDelta = struct {

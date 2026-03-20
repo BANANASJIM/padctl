@@ -19,24 +19,7 @@ pub const RemapRule = struct {
 };
 
 pub const AuxEvent = @import("../io/uinput.zig").AuxEvent;
-pub const AuxEventList = struct {
-    buffer: [64]AuxEvent = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *AuxEventList, val: AuxEvent) error{Overflow}!void {
-        if (self.len >= 64) return error.Overflow;
-        self.buffer[self.len] = val;
-        self.len += 1;
-    }
-
-    pub fn get(self: *const AuxEventList, i: usize) AuxEvent {
-        return self.buffer[i];
-    }
-
-    pub fn slice(self: *const AuxEventList) []const AuxEvent {
-        return self.buffer[0..self.len];
-    }
-};
+pub const AuxEventList = @import("mapper.zig").AuxEventList;
 
 pub const Remap = struct {
     rules: []const RemapRule,

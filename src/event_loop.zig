@@ -110,6 +110,7 @@ pub const EventLoop = struct {
         interpreter: *const Interpreter,
         output: OutputDevice,
         mapper: ?*mapper_mod.Mapper,
+        aux_output: ?@import("io/uinput.zig").AuxOutputDevice,
     ) !void {
         self.running = true;
         var buf: [64]u8 = undefined;
@@ -159,10 +160,13 @@ pub const EventLoop = struct {
                     if (interpreter.processReport(interface_id, buf[0..n]) catch null) |delta| {
                         if (mapper) |m| {
                             const events = try m.apply(delta);
-                            applyDelta(&self.gamepad_state, delta);
+                            self.gamepad_state.applyDelta(delta);
                             try output.emit(events.gamepad);
+                            if (aux_output) |ao| {
+                                if (events.aux.len > 0) try ao.emitAux(events.aux.slice());
+                            }
                         } else {
-                            applyDelta(&self.gamepad_state, delta);
+                            self.gamepad_state.applyDelta(delta);
                             try output.emit(self.gamepad_state);
                         }
                     }
@@ -184,24 +188,6 @@ pub const EventLoop = struct {
         posix.close(self.timer_fd);
     }
 };
-
-fn applyDelta(s: *state.GamepadState, delta: state.GamepadStateDelta) void {
-    if (delta.ax) |v| s.ax = v;
-    if (delta.ay) |v| s.ay = v;
-    if (delta.rx) |v| s.rx = v;
-    if (delta.ry) |v| s.ry = v;
-    if (delta.lt) |v| s.lt = v;
-    if (delta.rt) |v| s.rt = v;
-    if (delta.dpad_x) |v| s.dpad_x = v;
-    if (delta.dpad_y) |v| s.dpad_y = v;
-    if (delta.buttons) |v| s.buttons = v;
-    if (delta.gyro_x) |v| s.gyro_x = v;
-    if (delta.gyro_y) |v| s.gyro_y = v;
-    if (delta.gyro_z) |v| s.gyro_z = v;
-    if (delta.accel_x) |v| s.accel_x = v;
-    if (delta.accel_y) |v| s.accel_y = v;
-    if (delta.accel_z) |v| s.accel_z = v;
-}
 
 // --- tests ---
 
@@ -351,7 +337,7 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.mapper);
+            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.mapper, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -463,7 +449,7 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devices, c.interp, c.output, null);
+            try c.loop.run(c.devices, c.interp, c.output, null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});

@@ -1,10 +1,11 @@
 const std = @import("std");
-const linux = std.os.linux;
 const toml = @import("toml");
 const mapping = @import("../config/mapping.zig");
 const state = @import("state.zig");
 const layer = @import("layer.zig");
 const gyro = @import("gyro.zig");
+const stick = @import("stick.zig");
+const event_loop = @import("../event_loop.zig");
 
 pub const RemapTargetResolved = @import("remap.zig").RemapTargetResolved;
 pub const resolveTarget = @import("remap.zig").resolveTarget;
@@ -48,8 +49,11 @@ pub const Mapper = struct {
     state: GamepadState,
     prev: GamepadState,
     gyro_proc: gyro.GyroProcessor,
+    stick_left: stick.StickProcessor,
+    stick_right: stick.StickProcessor,
     suppressed_buttons: u32,
     injected_buttons: u32,
+    pending_tap_release: ?u32,
     timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
 
@@ -60,8 +64,11 @@ pub const Mapper = struct {
             .state = .{},
             .prev = .{},
             .gyro_proc = .{},
+            .stick_left = .{},
+            .stick_right = .{},
             .suppressed_buttons = 0,
             .injected_buttons = 0,
+            .pending_tap_release = null,
             .timer_fd = timer_fd,
             .allocator = allocator,
         };
@@ -72,14 +79,22 @@ pub const Mapper = struct {
     }
 
     pub fn apply(self: *Mapper, delta: GamepadStateDelta) !OutputEvents {
+        // flush pending tap release from previous frame
+        var aux = AuxEventList{};
+        if (self.pending_tap_release) |mask| {
+            self.injected_buttons &= ~mask;
+            self.pending_tap_release = null;
+            // inject release into emit state at end of this frame
+        }
+
         // [1] merge delta into current state
-        applyDelta(&self.state, delta);
+        self.state.applyDelta(delta);
 
         // [2] layer trigger processing
         const configs = self.config.layer orelse &.{};
         const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons);
-        if (action.arm_timer_ms) |ms| try armTimer(self.timer_fd, @intCast(ms));
-        if (action.disarm_timer) disarmTimer(self.timer_fd);
+        if (action.arm_timer_ms) |ms| try event_loop.armTimer(self.timer_fd, @intCast(ms));
+        if (action.disarm_timer) event_loop.disarmTimer(self.timer_fd);
 
         // reset accumulators
         self.suppressed_buttons = 0;
@@ -88,18 +103,36 @@ pub const Mapper = struct {
         // per-source inject map: null = not mapped, Some = last-write target
         const BUTTON_COUNT = @typeInfo(ButtonId).@"enum".fields.len;
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
-        var aux = AuxEventList{};
 
         // [3] mode processing
         var suppress_dpad_hat: bool = false;
         {
-            const gcfg = resolveGyroConfig(self.config);
+            const gcfg = self.effectiveGyroConfig();
             const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
             if (std.mem.eql(u8, gcfg.mode, "mouse")) {
                 if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
                 if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
             }
-            const dpad_cfg = self.config.dpad orelse mapping.DpadConfig{};
+
+            const left_cfg = self.effectiveStickConfig(.left);
+            const left_out = self.stick_left.process(&left_cfg, self.state.ax, self.state.ay, 16);
+            if (std.mem.eql(u8, left_cfg.mode, "mouse")) {
+                if (left_out.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = left_out.rel_x } }) catch {};
+                if (left_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = left_out.rel_y } }) catch {};
+            } else if (std.mem.eql(u8, left_cfg.mode, "scroll")) {
+                if (left_out.wheel != 0) aux.append(.{ .rel = .{ .code = 8, .value = left_out.wheel } }) catch {};
+            }
+
+            const right_cfg = self.effectiveStickConfig(.right);
+            const right_out = self.stick_right.process(&right_cfg, self.state.rx, self.state.ry, 16);
+            if (std.mem.eql(u8, right_cfg.mode, "mouse")) {
+                if (right_out.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = right_out.rel_x } }) catch {};
+                if (right_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = right_out.rel_y } }) catch {};
+            } else if (std.mem.eql(u8, right_cfg.mode, "scroll")) {
+                if (right_out.wheel != 0) aux.append(.{ .rel = .{ .code = 8, .value = right_out.wheel } }) catch {};
+            }
+
+            const dpad_cfg = self.effectiveDpadConfig();
             @import("dpad.zig").processDpad(
                 self.state.dpad_x,
                 self.state.dpad_y,
@@ -144,7 +177,7 @@ pub const Mapper = struct {
 
         // emit tap event if any
         if (action.tap_event) |tap| {
-            emitTapEvent(tap, &aux);
+            emitTapEvent(tap, &aux, &self.injected_buttons, &self.pending_tap_release);
         }
 
         // assemble emit state
@@ -155,9 +188,25 @@ pub const Mapper = struct {
             emit_state.dpad_y = 0;
         }
 
+        // suppress stick axes when mode != gamepad
+        const left_cfg = self.effectiveStickConfig(.left);
+        const right_cfg = self.effectiveStickConfig(.right);
+        if (left_cfg.suppress_gamepad or !std.mem.eql(u8, left_cfg.mode, "gamepad")) {
+            emit_state.ax = 0;
+            emit_state.ay = 0;
+        }
+        if (right_cfg.suppress_gamepad or !std.mem.eql(u8, right_cfg.mode, "gamepad")) {
+            emit_state.rx = 0;
+            emit_state.ry = 0;
+        }
+
         // [7] prev-frame masking: same masks applied to prev before diff
         var masked_prev = self.prev;
         masked_prev.buttons = (self.prev.buttons & ~self.suppressed_buttons) | self.injected_buttons;
+        if (suppress_dpad_hat) {
+            masked_prev.dpad_x = 0;
+            masked_prev.dpad_y = 0;
+        }
 
         self.prev = self.state;
 
@@ -167,43 +216,68 @@ pub const Mapper = struct {
     pub fn onTimerExpired(self: *Mapper) void {
         _ = self.layer.onTimerExpired();
     }
+
+    fn effectiveGyroConfig(self: *const Mapper) gyro.GyroConfig {
+        const configs = self.config.layer orelse &.{};
+        if (self.layer.getActive(configs)) |active| {
+            if (active.gyro) |g| return resolveGyroConfig2(&g);
+        }
+        return resolveGyroConfig(self.config);
+    }
+
+    fn effectiveDpadConfig(self: *const Mapper) mapping.DpadConfig {
+        const configs = self.config.layer orelse &.{};
+        if (self.layer.getActive(configs)) |active| {
+            if (active.dpad) |d| return d;
+        }
+        return self.config.dpad orelse mapping.DpadConfig{};
+    }
+
+    const StickSide = enum { left, right };
+
+    fn effectiveStickConfig(self: *const Mapper, side: StickSide) stick.StickConfig {
+        const configs = self.config.layer orelse &.{};
+        if (self.layer.getActive(configs)) |active| {
+            const layer_sc = switch (side) {
+                .left => active.stick_left,
+                .right => active.stick_right,
+            };
+            if (layer_sc) |sc| return resolveStickConfig(&sc);
+        }
+        const base_pair = self.config.stick orelse return stick.StickConfig{};
+        const base_sc = switch (side) {
+            .left => base_pair.left,
+            .right => base_pair.right,
+        };
+        return if (base_sc) |sc| resolveStickConfig(&sc) else stick.StickConfig{};
+    }
 };
 
-fn armTimer(fd: std.posix.fd_t, timeout_ms: u32) !void {
-    const spec = linux.itimerspec{
-        .it_value = .{
-            .sec = @intCast(timeout_ms / 1000),
-            .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
-        },
-        .it_interval = .{ .sec = 0, .nsec = 0 },
-    };
-    _ = linux.timerfd_settime(fd, .{}, &spec, null);
+fn resolveGyroConfig(config: *const MappingConfig) gyro.GyroConfig {
+    const mc = config.gyro orelse return .{};
+    return resolveGyroConfig2(&mc);
 }
 
-fn disarmTimer(fd: std.posix.fd_t) void {
-    const spec = linux.itimerspec{
-        .it_value = .{ .sec = 0, .nsec = 0 },
-        .it_interval = .{ .sec = 0, .nsec = 0 },
+fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
+    return .{
+        .mode = mc.mode,
+        .sensitivity_x = if (mc.sensitivity_x) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
+        .sensitivity_y = if (mc.sensitivity_y) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
+        .deadzone = if (mc.deadzone) |v| @intCast(v) else 0,
+        .smoothing = if (mc.smoothing) |v| @floatCast(v) else 0.3,
+        .curve = if (mc.curve) |v| @floatCast(v) else 1.0,
+        .invert_x = mc.invert_x orelse false,
+        .invert_y = mc.invert_y orelse false,
     };
-    _ = linux.timerfd_settime(fd, .{}, &spec, null);
 }
 
-fn applyDelta(s: *GamepadState, delta: GamepadStateDelta) void {
-    if (delta.ax) |v| s.ax = v;
-    if (delta.ay) |v| s.ay = v;
-    if (delta.rx) |v| s.rx = v;
-    if (delta.ry) |v| s.ry = v;
-    if (delta.lt) |v| s.lt = v;
-    if (delta.rt) |v| s.rt = v;
-    if (delta.dpad_x) |v| s.dpad_x = v;
-    if (delta.dpad_y) |v| s.dpad_y = v;
-    if (delta.buttons) |v| s.buttons = v;
-    if (delta.gyro_x) |v| s.gyro_x = v;
-    if (delta.gyro_y) |v| s.gyro_y = v;
-    if (delta.gyro_z) |v| s.gyro_z = v;
-    if (delta.accel_x) |v| s.accel_x = v;
-    if (delta.accel_y) |v| s.accel_y = v;
-    if (delta.accel_z) |v| s.accel_z = v;
+fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {
+    return .{
+        .mode = mc.mode,
+        .deadzone = if (mc.deadzone) |v| @intCast(v) else 128,
+        .sensitivity = if (mc.sensitivity) |v| @floatCast(v) else 1.0,
+        .suppress_gamepad = mc.suppress_gamepad orelse false,
+    };
 }
 
 fn collectRemapMap(
@@ -221,21 +295,12 @@ fn collectRemapMap(
     }
 }
 
-fn resolveGyroConfig(config: *const MappingConfig) gyro.GyroConfig {
-    const mc = config.gyro orelse return .{};
-    return .{
-        .mode = mc.mode,
-        .sensitivity_x = if (mc.sensitivity_x) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
-        .sensitivity_y = if (mc.sensitivity_y) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
-        .deadzone = if (mc.deadzone) |v| @intCast(v) else 0,
-        .smoothing = if (mc.smoothing) |v| @floatCast(v) else 0.3,
-        .curve = if (mc.curve) |v| @floatCast(v) else 1.0,
-        .invert_x = mc.invert_x orelse false,
-        .invert_y = mc.invert_y orelse false,
-    };
-}
-
-fn emitTapEvent(target: RemapTargetResolved, aux: *AuxEventList) void {
+fn emitTapEvent(
+    target: RemapTargetResolved,
+    aux: *AuxEventList,
+    injected_buttons: *u32,
+    pending_tap_release: *?u32,
+) void {
     switch (target) {
         .key => |code| {
             aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
@@ -245,9 +310,11 @@ fn emitTapEvent(target: RemapTargetResolved, aux: *AuxEventList) void {
             aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {};
             aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {};
         },
-        .gamepad_button => |_| {
-            // gamepad tap: would need two-frame press+release; not fully supported in single apply()
-            // Phase 2a: emit as best-effort key inject in this frame
+        .gamepad_button => |dst| {
+            const dst_idx: u5 = @intCast(@intFromEnum(dst));
+            const mask: u32 = @as(u32, 1) << dst_idx;
+            injected_buttons.* |= mask;
+            pending_tap_release.* = mask;
         },
         .disabled => {},
     }
@@ -503,4 +570,117 @@ test "onTimerExpired: PENDING -> ACTIVE activates layer" {
     const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
     const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
     try testing.expect((events.gamepad.buttons & (@as(u32, 1) << b_idx)) != 0);
+}
+
+test "layer gyro override: active layer gyro config used" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "off"
+        \\
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.gyro]
+        \\mode = "mouse"
+        \\sensitivity = 100.0
+        \\smoothing = 0.0
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const configs = parsed.value.layer.?;
+    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTimerExpired();
+
+    // With layer active, gyro should be in mouse mode
+    const gcfg = m.effectiveGyroConfig();
+    try testing.expectEqualStrings("mouse", gcfg.mode);
+}
+
+test "layer dpad override: active layer dpad config used" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[dpad]
+        \\mode = "gamepad"
+        \\
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.dpad]
+        \\mode = "arrows"
+        \\suppress_gamepad = true
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const configs = parsed.value.layer.?;
+    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTimerExpired();
+
+    const dcfg = m.effectiveDpadConfig();
+    try testing.expectEqualStrings("arrows", dcfg.mode);
+    try testing.expectEqual(@as(?bool, true), dcfg.suppress_gamepad);
+}
+
+test "gamepad_button tap: injected this frame, released next frame" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\tap = "A"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_idx: u5 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u32 = @as(u32, 1) << lt_idx;
+    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u32 = @as(u32, 1) << a_idx;
+
+    // Press LT -> PENDING
+    _ = try m.apply(.{ .buttons = lt_mask });
+    // Release LT -> tap fires (PENDING->IDLE with tap)
+    const ev_tap = try m.apply(.{ .buttons = 0 });
+    // A should be injected this frame
+    try testing.expect((ev_tap.gamepad.buttons & a_mask) != 0);
+    try testing.expect(m.pending_tap_release != null);
+
+    // Next frame: pending_tap_release should clear A
+    const ev_release = try m.apply(.{});
+    try testing.expectEqual(@as(u32, 0), ev_release.gamepad.buttons & a_mask);
+    try testing.expect(m.pending_tap_release == null);
+}
+
+test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[dpad]
+        \\mode = "arrows"
+        \\suppress_gamepad = true
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Frame 1: dpad up
+    const ev1 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 });
+    try testing.expectEqual(@as(i8, 0), ev1.gamepad.dpad_y);
+
+    // Frame 2: same dpad — masked_prev should also have dpad_y = 0
+    const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 });
+    try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
 }

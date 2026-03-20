@@ -102,7 +102,6 @@ pub const LayerState = struct {
                     if (res.disarm_timer) action.disarm_timer = true;
                     if (res.tap_event) |ev| action.tap_event = ev;
                     if (res.layer_activated or res.layer_deactivated) action.active_changed = true;
-                    if (res.layer_deactivated) action.active_changed = true;
                 }
             } else { // toggle
                 if (!pressed and was_pressed) {
