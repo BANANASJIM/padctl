@@ -78,6 +78,8 @@ fn verifyChecksum(report: *const ReportConfig, raw: []const u8) ProcessError!voi
     }
 }
 
+// TODO(Phase 1.1): pre-compile field name and button name lookups at config load time
+// to avoid per-frame string comparisons (MAJOR #6/#7). Acceptable for <20 fields (Vader 5 ~15).
 fn extractAndFill(report: *const ReportConfig, raw: []const u8, delta: *GamepadStateDelta) ProcessError!void {
     if (report.fields) |fields| {
         var it = fields.map.iterator();
@@ -166,7 +168,11 @@ fn applyTransformChain(initial: i64, chain: []const u8, type_str: []const u8) i6
 
 fn applyTransform(val: i64, seg: []const u8, type_str: []const u8) i64 {
     if (std.mem.eql(u8, seg, "negate")) return -val;
-    if (std.mem.eql(u8, seg, "abs")) return @intCast(@abs(val));
+    if (std.mem.eql(u8, seg, "abs")) {
+        // clamp minInt to avoid @abs overflow
+        const clamped = if (val == std.math.minInt(i64)) std.math.maxInt(i64) else val;
+        return @intCast(@abs(clamped));
+    }
     if (std.mem.startsWith(u8, seg, "scale(")) return applyScale(val, seg, type_str);
     if (std.mem.startsWith(u8, seg, "clamp(")) return applyClamp(val, seg);
     if (std.mem.startsWith(u8, seg, "deadzone(")) return applyDeadzone(val, seg);
@@ -198,8 +204,10 @@ fn applyScale(val: i64, seg: []const u8, type_str: []const u8) i64 {
     const out_max = args.b;
     const t_max = typeMax(type_str);
     if (t_max == 0) return val;
-    // val * (out_max - out_min) / type_max + out_min
-    return @divTrunc(val * (out_max - out_min), t_max) + out_min;
+    // Use i128 to avoid overflow in intermediate multiply
+    const v: i128 = val;
+    const result = @divTrunc(v * (out_max - out_min), t_max) + out_min;
+    return @intCast(result);
 }
 
 fn applyClamp(val: i64, seg: []const u8) i64 {
@@ -209,7 +217,8 @@ fn applyClamp(val: i64, seg: []const u8) i64 {
 
 fn applyDeadzone(val: i64, seg: []const u8) i64 {
     const threshold = parseArgs1(seg);
-    return if (@abs(val) < threshold) 0 else val;
+    const t: u64 = if (threshold < 0) 0 else @intCast(threshold);
+    return if (@abs(val) < t) 0 else val;
 }
 
 fn fillDeltaField(delta: *GamepadStateDelta, name: []const u8, val: i64) void {

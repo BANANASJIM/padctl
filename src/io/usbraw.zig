@@ -63,6 +63,7 @@ pub const UsbrawDevice = struct {
     ring: RingBuffer,
     should_stop: std.atomic.Value(bool),
     thread: std.Thread,
+    allocator: std.mem.Allocator,
 
     pub fn open(
         alloc: std.mem.Allocator,
@@ -108,6 +109,7 @@ pub const UsbrawDevice = struct {
             .ring = .{},
             .should_stop = std.atomic.Value(bool).init(false),
             .thread = undefined,
+            .allocator = alloc,
         };
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;
@@ -154,16 +156,17 @@ pub const UsbrawDevice = struct {
 
     fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
         const self: *UsbrawDevice = @ptrCast(@alignCast(ptr));
-        // Drain the pipe byte first
         var dummy: [1]u8 = undefined;
-        _ = std.posix.read(self.pipe_r, &dummy) catch {};
+        const pipe_n = std.posix.read(self.pipe_r, &dummy) catch 0;
+
+        if (pipe_n > 0 and dummy[0] == 0x00) {
+            const ring_n = self.ring.pop(buf);
+            if (ring_n == 0) return DeviceIO.ReadError.Disconnected;
+            return ring_n;
+        }
 
         const n = self.ring.pop(buf);
         if (n == 0) return DeviceIO.ReadError.Again;
-
-        // Check sentinel: byte 0x00 means disconnected
-        if (dummy[0] == 0x00 and n == 0) return DeviceIO.ReadError.Disconnected;
-
         return n;
     }
 
@@ -201,6 +204,7 @@ pub const UsbrawDevice = struct {
         _ = c.libusb_release_interface(self.handle, self.interface_id);
         c.libusb_close(self.handle);
         c.libusb_exit(self.ctx);
+        self.allocator.destroy(self);
     }
 };
 

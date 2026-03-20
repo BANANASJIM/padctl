@@ -290,7 +290,7 @@ pub const UinputDevice = struct {
             const curr_val = getAxisValue(s, self.axis_state_offsets[i]);
             const prev_val = getAxisValue(self.prev, self.axis_state_offsets[i]);
             if (curr_val != prev_val) {
-                events[n] = .{ .type = c.EV_ABS, .code = self.axis_codes[i], .value = curr_val, .time = undefined };
+                events[n] = .{ .type = c.EV_ABS, .code = self.axis_codes[i], .value = curr_val, .time = std.mem.zeroes(c.timeval)};
                 n += 1;
             }
         }
@@ -298,11 +298,11 @@ pub const UinputDevice = struct {
         // DPad hat: differential
         if (self.has_dpad_hat) {
             if (s.dpad_x != self.prev.dpad_x) {
-                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_HAT0X, .value = s.dpad_x, .time = undefined };
+                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_HAT0X, .value = s.dpad_x, .time = std.mem.zeroes(c.timeval)};
                 n += 1;
             }
             if (s.dpad_y != self.prev.dpad_y) {
-                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_HAT0Y, .value = s.dpad_y, .time = undefined };
+                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_HAT0Y, .value = s.dpad_y, .time = std.mem.zeroes(c.timeval)};
                 n += 1;
             }
         }
@@ -320,14 +320,14 @@ pub const UinputDevice = struct {
                     .type = c.EV_KEY,
                     .code = code,
                     .value = if (curr_pressed) @as(i32, 1) else @as(i32, 0),
-                    .time = undefined,
+                    .time = std.mem.zeroes(c.timeval),
                 };
                 n += 1;
             }
         }
 
         if (n > 0) {
-            events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = undefined };
+            events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval)};
             n += 1;
             _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
         }
@@ -422,17 +422,17 @@ pub const AuxDevice = struct {
         for (events) |ev| {
             switch (ev) {
                 .key => |k| {
-                    buf[n] = .{ .type = c.EV_KEY, .code = k.code, .value = if (k.pressed) @as(i32, 1) else 0, .time = undefined };
+                    buf[n] = .{ .type = c.EV_KEY, .code = k.code, .value = if (k.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval)};
                     n += 1;
                 },
                 .mouse_button => |mb| {
-                    buf[n] = .{ .type = c.EV_KEY, .code = mb.code, .value = if (mb.pressed) @as(i32, 1) else 0, .time = undefined };
+                    buf[n] = .{ .type = c.EV_KEY, .code = mb.code, .value = if (mb.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval)};
                     n += 1;
                 },
             }
         }
         if (n > 0) {
-            buf[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = undefined };
+            buf[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval)};
             n += 1;
             _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(buf[0..n]));
         }
