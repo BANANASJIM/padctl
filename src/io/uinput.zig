@@ -312,17 +312,18 @@ pub const UinputDevice = struct {
         inline for (btn_fields, 0..) |_, i| {
             const mask: u32 = @as(u32, 1) << i;
             const code = self.button_codes[i];
-            if (code == 0) continue;
-            const curr_pressed = (s.buttons & mask) != 0;
-            const prev_pressed = (self.prev.buttons & mask) != 0;
-            if (curr_pressed != prev_pressed) {
-                events[n] = .{
-                    .type = c.EV_KEY,
-                    .code = code,
-                    .value = if (curr_pressed) @as(i32, 1) else @as(i32, 0),
-                    .time = std.mem.zeroes(c.timeval),
-                };
-                n += 1;
+            if (code != 0) {
+                const curr_pressed = (s.buttons & mask) != 0;
+                const prev_pressed = (self.prev.buttons & mask) != 0;
+                if (curr_pressed != prev_pressed) {
+                    events[n] = .{
+                        .type = c.EV_KEY,
+                        .code = code,
+                        .value = if (curr_pressed) @as(i32, 1) else @as(i32, 0),
+                        .time = std.mem.zeroes(c.timeval),
+                    };
+                    n += 1;
+                }
             }
         }
 
