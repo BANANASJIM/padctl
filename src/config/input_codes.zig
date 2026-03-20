@@ -152,6 +152,131 @@ const btn_table = [_]CodeEntry{
     .{ .name = "BTN_TRIGGER_HAPPY40", .code = c.BTN_TRIGGER_HAPPY40 },
 };
 
+const key_table = [_]CodeEntry{
+    .{ .name = "KEY_ESC", .code = c.KEY_ESC },
+    .{ .name = "KEY_1", .code = c.KEY_1 },
+    .{ .name = "KEY_2", .code = c.KEY_2 },
+    .{ .name = "KEY_3", .code = c.KEY_3 },
+    .{ .name = "KEY_4", .code = c.KEY_4 },
+    .{ .name = "KEY_5", .code = c.KEY_5 },
+    .{ .name = "KEY_6", .code = c.KEY_6 },
+    .{ .name = "KEY_7", .code = c.KEY_7 },
+    .{ .name = "KEY_8", .code = c.KEY_8 },
+    .{ .name = "KEY_9", .code = c.KEY_9 },
+    .{ .name = "KEY_0", .code = c.KEY_0 },
+    .{ .name = "KEY_MINUS", .code = c.KEY_MINUS },
+    .{ .name = "KEY_EQUAL", .code = c.KEY_EQUAL },
+    .{ .name = "KEY_BACKSPACE", .code = c.KEY_BACKSPACE },
+    .{ .name = "KEY_TAB", .code = c.KEY_TAB },
+    .{ .name = "KEY_Q", .code = c.KEY_Q },
+    .{ .name = "KEY_W", .code = c.KEY_W },
+    .{ .name = "KEY_E", .code = c.KEY_E },
+    .{ .name = "KEY_R", .code = c.KEY_R },
+    .{ .name = "KEY_T", .code = c.KEY_T },
+    .{ .name = "KEY_Y", .code = c.KEY_Y },
+    .{ .name = "KEY_U", .code = c.KEY_U },
+    .{ .name = "KEY_I", .code = c.KEY_I },
+    .{ .name = "KEY_O", .code = c.KEY_O },
+    .{ .name = "KEY_P", .code = c.KEY_P },
+    .{ .name = "KEY_A", .code = c.KEY_A },
+    .{ .name = "KEY_S", .code = c.KEY_S },
+    .{ .name = "KEY_D", .code = c.KEY_D },
+    .{ .name = "KEY_F", .code = c.KEY_F },
+    .{ .name = "KEY_G", .code = c.KEY_G },
+    .{ .name = "KEY_H", .code = c.KEY_H },
+    .{ .name = "KEY_J", .code = c.KEY_J },
+    .{ .name = "KEY_K", .code = c.KEY_K },
+    .{ .name = "KEY_L", .code = c.KEY_L },
+    .{ .name = "KEY_Z", .code = c.KEY_Z },
+    .{ .name = "KEY_X", .code = c.KEY_X },
+    .{ .name = "KEY_C", .code = c.KEY_C },
+    .{ .name = "KEY_V", .code = c.KEY_V },
+    .{ .name = "KEY_B", .code = c.KEY_B },
+    .{ .name = "KEY_N", .code = c.KEY_N },
+    .{ .name = "KEY_M", .code = c.KEY_M },
+    .{ .name = "KEY_ENTER", .code = c.KEY_ENTER },
+    .{ .name = "KEY_LEFTCTRL", .code = c.KEY_LEFTCTRL },
+    .{ .name = "KEY_RIGHTCTRL", .code = c.KEY_RIGHTCTRL },
+    .{ .name = "KEY_LEFTSHIFT", .code = c.KEY_LEFTSHIFT },
+    .{ .name = "KEY_RIGHTSHIFT", .code = c.KEY_RIGHTSHIFT },
+    .{ .name = "KEY_LEFTALT", .code = c.KEY_LEFTALT },
+    .{ .name = "KEY_RIGHTALT", .code = c.KEY_RIGHTALT },
+    .{ .name = "KEY_LEFTMETA", .code = c.KEY_LEFTMETA },
+    .{ .name = "KEY_RIGHTMETA", .code = c.KEY_RIGHTMETA },
+    .{ .name = "KEY_SPACE", .code = c.KEY_SPACE },
+    .{ .name = "KEY_CAPSLOCK", .code = c.KEY_CAPSLOCK },
+    .{ .name = "KEY_F1", .code = c.KEY_F1 },
+    .{ .name = "KEY_F2", .code = c.KEY_F2 },
+    .{ .name = "KEY_F3", .code = c.KEY_F3 },
+    .{ .name = "KEY_F4", .code = c.KEY_F4 },
+    .{ .name = "KEY_F5", .code = c.KEY_F5 },
+    .{ .name = "KEY_F6", .code = c.KEY_F6 },
+    .{ .name = "KEY_F7", .code = c.KEY_F7 },
+    .{ .name = "KEY_F8", .code = c.KEY_F8 },
+    .{ .name = "KEY_F9", .code = c.KEY_F9 },
+    .{ .name = "KEY_F10", .code = c.KEY_F10 },
+    .{ .name = "KEY_F11", .code = c.KEY_F11 },
+    .{ .name = "KEY_F12", .code = c.KEY_F12 },
+    .{ .name = "KEY_F13", .code = c.KEY_F13 },
+    .{ .name = "KEY_F14", .code = c.KEY_F14 },
+    .{ .name = "KEY_F15", .code = c.KEY_F15 },
+    .{ .name = "KEY_F16", .code = c.KEY_F16 },
+    .{ .name = "KEY_F17", .code = c.KEY_F17 },
+    .{ .name = "KEY_F18", .code = c.KEY_F18 },
+    .{ .name = "KEY_F19", .code = c.KEY_F19 },
+    .{ .name = "KEY_F20", .code = c.KEY_F20 },
+    .{ .name = "KEY_F21", .code = c.KEY_F21 },
+    .{ .name = "KEY_F22", .code = c.KEY_F22 },
+    .{ .name = "KEY_F23", .code = c.KEY_F23 },
+    .{ .name = "KEY_F24", .code = c.KEY_F24 },
+    .{ .name = "KEY_UP", .code = c.KEY_UP },
+    .{ .name = "KEY_DOWN", .code = c.KEY_DOWN },
+    .{ .name = "KEY_LEFT", .code = c.KEY_LEFT },
+    .{ .name = "KEY_RIGHT", .code = c.KEY_RIGHT },
+    .{ .name = "KEY_HOME", .code = c.KEY_HOME },
+    .{ .name = "KEY_END", .code = c.KEY_END },
+    .{ .name = "KEY_PAGEUP", .code = c.KEY_PAGEUP },
+    .{ .name = "KEY_PAGEDOWN", .code = c.KEY_PAGEDOWN },
+    .{ .name = "KEY_INSERT", .code = c.KEY_INSERT },
+    .{ .name = "KEY_DELETE", .code = c.KEY_DELETE },
+    .{ .name = "KEY_PRINT", .code = c.KEY_PRINT },
+    .{ .name = "KEY_SCROLLLOCK", .code = c.KEY_SCROLLLOCK },
+    .{ .name = "KEY_PAUSE", .code = c.KEY_PAUSE },
+    .{ .name = "KEY_NUMLOCK", .code = c.KEY_NUMLOCK },
+    .{ .name = "KEY_MUTE", .code = c.KEY_MUTE },
+    .{ .name = "KEY_VOLUMEDOWN", .code = c.KEY_VOLUMEDOWN },
+    .{ .name = "KEY_VOLUMEUP", .code = c.KEY_VOLUMEUP },
+    .{ .name = "KEY_MEDIA_PLAY_PAUSE", .code = c.KEY_PLAYPAUSE },
+    .{ .name = "KEY_PLAYPAUSE", .code = c.KEY_PLAYPAUSE },
+    .{ .name = "KEY_NEXTSONG", .code = c.KEY_NEXTSONG },
+    .{ .name = "KEY_PREVIOUSSONG", .code = c.KEY_PREVIOUSSONG },
+};
+
+// Mouse button shortcuts (vader5 compat)
+const mouse_table = [_]CodeEntry{
+    .{ .name = "mouse_left", .code = c.BTN_LEFT },
+    .{ .name = "mouse_right", .code = c.BTN_RIGHT },
+    .{ .name = "mouse_middle", .code = c.BTN_MIDDLE },
+    .{ .name = "mouse_side", .code = c.BTN_SIDE },
+    .{ .name = "mouse_extra", .code = c.BTN_EXTRA },
+    .{ .name = "mouse_forward", .code = c.BTN_FORWARD },
+    .{ .name = "mouse_back", .code = c.BTN_BACK },
+};
+
+pub fn resolveKeyCode(name: []const u8) error{UnknownKeyCode}!u16 {
+    for (key_table) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.code;
+    }
+    return error.UnknownKeyCode;
+}
+
+pub fn resolveMouseCode(name: []const u8) error{UnknownMouseCode}!u16 {
+    for (mouse_table) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.code;
+    }
+    return error.UnknownMouseCode;
+}
+
 pub fn resolveAbsCode(name: []const u8) error{UnknownAbsCode}!u16 {
     for (abs_table) |entry| {
         if (std.mem.eql(u8, entry.name, name)) return entry.code;

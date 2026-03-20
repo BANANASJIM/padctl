@@ -1,1 +1,8 @@
-# Default button/axis mapping configuration
+name = "default"
+
+[remap]
+# Back button examples — uncomment to activate:
+# M1 = { type = "key", code = "KEY_F13" }
+# M2 = "mouse_side"
+# M3 = "disabled"
+# M4 = "KEY_F14"
