@@ -1,6 +1,13 @@
 .{
     .name = .padctl,
+    .fingerprint = 0xef30763351dab049,
     .version = "0.1.0",
+    .dependencies = .{
+        .toml = .{
+            .url = "https://github.com/sam701/zig-toml/archive/refs/heads/main.tar.gz",
+            .hash = "toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR",
+        },
+    },
     .minimum_zig_version = "0.15.0",
     .paths = .{""},
 }
