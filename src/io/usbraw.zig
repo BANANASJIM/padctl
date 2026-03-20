@@ -94,8 +94,7 @@ pub const UsbrawDevice = struct {
             return error.ClaimFailed;
         }
 
-        var pipe_fds: [2]std.posix.fd_t = undefined;
-        try std.posix.pipe(&pipe_fds);
+        const pipe_fds = try std.posix.pipe();
 
         const self = try alloc.create(UsbrawDevice);
         self.* = .{

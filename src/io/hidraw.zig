@@ -8,9 +8,26 @@ pub const DeviceIO = io.DeviceIO;
 
 pub const MAX_EVDEV_GRABS = 8;
 
+fn BoundedArray(comptime T: type, comptime cap: usize) type {
+    return struct {
+        buffer: [cap]T = undefined,
+        len: usize = 0,
+
+        pub fn append(self: *@This(), val: T) error{Overflow}!void {
+            if (self.len >= cap) return error.Overflow;
+            self.buffer[self.len] = val;
+            self.len += 1;
+        }
+
+        pub fn constSlice(self: *const @This()) []const T {
+            return self.buffer[0..self.len];
+        }
+    };
+}
+
 pub const HidrawDevice = struct {
     fd: posix.fd_t,
-    evdev_fds: std.BoundedArray(posix.fd_t, MAX_EVDEV_GRABS),
+    evdev_fds: BoundedArray(posix.fd_t, MAX_EVDEV_GRABS),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) HidrawDevice {
@@ -157,7 +174,7 @@ pub const HidrawDevice = struct {
 
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *HidrawDevice = @ptrCast(@alignCast(ptr));
-        posix.write(self.fd, data) catch |err| switch (err) {
+        _ = posix.write(self.fd, data) catch |err| switch (err) {
             error.BrokenPipe, error.ConnectionResetByPeer => return DeviceIO.WriteError.Disconnected,
             else => return DeviceIO.WriteError.Io,
         };
