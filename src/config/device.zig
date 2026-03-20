@@ -131,11 +131,21 @@ fn isValidTransform(t: []const u8) bool {
 }
 
 fn isValidTransformChain(chain: []const u8) bool {
-    var it = std.mem.splitScalar(u8, chain, ',');
-    while (it.next()) |segment| {
-        if (!isValidTransform(segment)) return false;
+    var pos: usize = 0;
+    var depth: usize = 0;
+    var seg_start: usize = 0;
+    while (pos < chain.len) : (pos += 1) {
+        switch (chain[pos]) {
+            '(' => depth += 1,
+            ')' => if (depth > 0) { depth -= 1; },
+            ',' => if (depth == 0) {
+                if (!isValidTransform(chain[seg_start..pos])) return false;
+                seg_start = pos + 1;
+            },
+            else => {},
+        }
     }
-    return true;
+    return isValidTransform(chain[seg_start..]);
 }
 
 fn fieldTypeSize(type_str: []const u8) ?i64 {
@@ -150,16 +160,20 @@ fn fieldTypeSize(type_str: []const u8) ?i64 {
 pub fn validate(cfg: *const DeviceConfig) !void {
     for (cfg.report) |report| {
         if (report.fields) |fields| {
-            var seen = std.BoundedArray([]const u8, 64){};
+            var seen_buf: [64][]const u8 = undefined;
+            var seen_len: usize = 0;
             var it = fields.map.iterator();
             while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
                 const field = entry.value_ptr.*;
 
-                for (seen.constSlice()) |s| {
+                for (seen_buf[0..seen_len]) |s| {
                     if (std.mem.eql(u8, s, name)) return error.InvalidConfig;
                 }
-                seen.appendAssumeCapacity(name);
+                if (seen_len < seen_buf.len) {
+                    seen_buf[seen_len] = name;
+                    seen_len += 1;
+                }
 
                 const sz = fieldTypeSize(field.type) orelse return error.InvalidConfig;
                 if (field.offset < 0 or field.offset + sz > report.size) return error.OffsetOutOfBounds;
@@ -171,7 +185,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
 
         if (report.button_group) |bg| {
-            var it = bg.map.iterator();
+            var it = bg.map.map.iterator();
             while (it.next()) |entry| {
                 const btn_name = entry.key_ptr.*;
                 _ = std.meta.stringToEnum(ButtonId, btn_name) orelse return error.InvalidConfig;
@@ -191,7 +205,10 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
     var parser = toml.Parser(DeviceConfig).init(allocator);
     defer parser.deinit();
     const result = try parser.parseString(content);
-    try validate(&result.value);
+    validate(&result.value) catch |err| {
+        result.deinit();
+        return err;
+    };
     return result;
 }
 
