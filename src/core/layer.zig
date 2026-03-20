@@ -107,7 +107,7 @@ pub const LayerState = struct {
             } else { // toggle
                 if (!pressed and was_pressed) {
                     if (self.toggled.contains(cfg.name)) {
-                        self.toggled.remove(cfg.name);
+                        _ = self.toggled.remove(cfg.name);
                         action.active_changed = true;
                     } else if (self.getActive(configs) == null) {
                         // Clear any stale PENDING tap_hold state.

@@ -70,7 +70,8 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
 pub fn validate(cfg: *const MappingConfig) !void {
     const layers = cfg.layer orelse return;
 
-    var seen = std.BoundedArray([]const u8, 64){};
+    var seen_buf: [64][]const u8 = undefined;
+    var seen_len: usize = 0;
 
     for (layers) |*layer| {
         if (!std.mem.eql(u8, layer.activation, "hold") and
@@ -81,10 +82,12 @@ pub fn validate(cfg: *const MappingConfig) !void {
             if (t < 1 or t > 5000) return error.InvalidConfig;
         }
 
-        for (seen.slice()) |name| {
+        for (seen_buf[0..seen_len]) |name| {
             if (std.mem.eql(u8, name, layer.name)) return error.InvalidConfig;
         }
-        seen.append(layer.name) catch return error.InvalidConfig;
+        if (seen_len >= seen_buf.len) return error.InvalidConfig;
+        seen_buf[seen_len] = layer.name;
+        seen_len += 1;
     }
 }
 

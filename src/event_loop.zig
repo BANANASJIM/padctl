@@ -6,6 +6,7 @@ const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
 const state = @import("core/state.zig");
+const mapper_mod = @import("core/mapper.zig");
 
 // signalfd(0) + stop_pipe(1) + per-interface fds + uinput FF fd + timerfd slot
 pub const MAX_FDS = 10;
@@ -108,7 +109,7 @@ pub const EventLoop = struct {
         devices: []DeviceIO,
         interpreter: *const Interpreter,
         output: OutputDevice,
-        on_timer: ?TimerCallback,
+        mapper: ?*mapper_mod.Mapper,
     ) !void {
         self.running = true;
         var buf: [64]u8 = undefined;
@@ -133,7 +134,7 @@ pub const EventLoop = struct {
             if (self.pollfds[2].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
-                if (on_timer) |cb| cb.call();
+                if (mapper) |m| m.onTimerExpired();
             }
 
             // Check device fds
@@ -156,8 +157,14 @@ pub const EventLoop = struct {
 
                     const interface_id: u8 = @intCast(i);
                     if (interpreter.processReport(interface_id, buf[0..n]) catch null) |delta| {
-                        applyDelta(&self.gamepad_state, delta);
-                        try output.emit(self.gamepad_state);
+                        if (mapper) |m| {
+                            const events = try m.apply(delta);
+                            applyDelta(&self.gamepad_state, delta);
+                            try output.emit(events.gamepad);
+                        } else {
+                            applyDelta(&self.gamepad_state, delta);
+                            try output.emit(self.gamepad_state);
+                        }
                     }
                 }
             }
@@ -287,7 +294,7 @@ test "armTimer: fires after timeout" {
     try testing.expectEqual(@as(usize, 8), n);
 }
 
-test "EventLoop timerfd: callback invoked on timer expiry" {
+test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     const allocator = testing.allocator;
     var loop = try EventLoop.init();
     defer loop.deinit();
@@ -297,18 +304,23 @@ test "EventLoop timerfd: callback invoked on timer expiry" {
     const dev = mock.deviceIO();
     try loop.addDevice(dev);
 
-    var fired: bool = false;
-
-    const Ctx = struct {
-        fn onTimer(ptr: *anyopaque) void {
-            const p: *bool = @ptrCast(@alignCast(ptr));
-            p.* = true;
-        }
-    };
-    const cb = TimerCallback{ .ptr = &fired, .on_expired = Ctx.onTimer };
-
     // Arm for 20ms, then run the loop
     try armTimer(loop.timer_fd, 20);
+
+    const mapping_mod = @import("config/mapping.zig");
+    const mapper_empty = try mapping_mod.parseString(allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+    );
+    defer mapper_empty.deinit();
+
+    var m = try mapper_mod.Mapper.init(&mapper_empty.value, loop.timer_fd, allocator);
+    defer m.deinit();
+
+    // Put layer in PENDING so timer expiry advances it to ACTIVE
+    _ = m.layer.onTriggerPress("aim", 200);
 
     const parsed = try device_mod.parseString(allocator, minimal_toml);
     defer parsed.deinit();
@@ -332,14 +344,14 @@ test "EventLoop timerfd: callback invoked on timer expiry" {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        cb: TimerCallback,
+        mapper: *mapper_mod.Mapper,
     };
     var devs = [_]DeviceIO{dev};
-    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .cb = cb };
+    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .mapper = &m };
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.cb);
+            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.mapper);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -347,7 +359,9 @@ test "EventLoop timerfd: callback invoked on timer expiry" {
     loop.stop();
     thread.join();
 
-    try testing.expect(fired);
+    // Timer expiry should have advanced aim layer from PENDING to ACTIVE
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expect(m.layer.tap_hold.?.layer_activated);
 }
 
 // MockOutput for event loop integration test

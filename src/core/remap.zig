@@ -19,7 +19,24 @@ pub const RemapRule = struct {
 };
 
 pub const AuxEvent = @import("../io/uinput.zig").AuxEvent;
-pub const AuxEventList = std.BoundedArray(AuxEvent, 64);
+pub const AuxEventList = struct {
+    buffer: [64]AuxEvent = undefined,
+    len: usize = 0,
+
+    pub fn append(self: *AuxEventList, val: AuxEvent) error{Overflow}!void {
+        if (self.len >= 64) return error.Overflow;
+        self.buffer[self.len] = val;
+        self.len += 1;
+    }
+
+    pub fn get(self: *const AuxEventList, i: usize) AuxEvent {
+        return self.buffer[i];
+    }
+
+    pub fn slice(self: *const AuxEventList) []const AuxEvent {
+        return self.buffer[0..self.len];
+    }
+};
 
 pub const Remap = struct {
     rules: []const RemapRule,
@@ -28,18 +45,18 @@ pub const Remap = struct {
     pub fn init(cfg: *const mapping.MappingConfig, allocator: std.mem.Allocator) !Remap {
         const remap_map = cfg.remap orelse return Remap{ .rules = &.{}, .allocator = allocator };
 
-        var list = std.ArrayList(RemapRule).init(allocator);
-        errdefer list.deinit();
+        var list = std.ArrayList(RemapRule){};
+        errdefer list.deinit(allocator);
 
         var it = remap_map.map.iterator();
         while (it.next()) |entry| {
             const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse
                 return error.UnknownButton;
             const target = try resolveTarget(entry.value_ptr.*);
-            try list.append(.{ .source = src_id, .target = target });
+            try list.append(allocator, .{ .source = src_id, .target = target });
         }
 
-        return Remap{ .rules = try list.toOwnedSlice(), .allocator = allocator };
+        return Remap{ .rules = try list.toOwnedSlice(allocator), .allocator = allocator };
     }
 
     pub fn deinit(self: *Remap) void {
