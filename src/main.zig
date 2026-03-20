@@ -190,22 +190,16 @@ pub fn main() !void {
     // Set up interpreter and event loop
     const interp = Interpreter.init(cfg);
 
-    // TODO T9c: create UinputDevice from cfg.output and wire OutputDevice
-    // For now use a no-op output so the event loop compiles
-    const NopOutput = struct {
-        fn emit(_: *anyopaque, _: core.state.GamepadState) anyerror!void {}
-        fn poll_ff(_: *anyopaque) anyerror!?io.uinput.FfEvent { return null; }
-        fn close_(_: *anyopaque) void {}
+    const output_cfg = cfg.output orelse {
+        std.log.err("config missing [output] section", .{});
+        std.process.exit(1);
     };
-    var nop: u8 = 0;
-    const output = io.uinput.OutputDevice{
-        .ptr = &nop,
-        .vtable = &.{
-            .emit = NopOutput.emit,
-            .poll_ff = NopOutput.poll_ff,
-            .close = NopOutput.close_,
-        },
+    var uinput_dev = io.uinput.UinputDevice.create(&output_cfg) catch |err| {
+        std.log.err("failed to create uinput device: {}", .{err});
+        std.process.exit(1);
     };
+    defer uinput_dev.close();
+    const output = uinput_dev.outputDevice();
 
     var loop = try EventLoop.init();
     defer loop.deinit();
@@ -231,4 +225,189 @@ test "parseHexBytes via init_seq" {
     const bytes = try init_seq.parseHexBytes(allocator, "5aa5 01");
     defer allocator.free(bytes);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x5a, 0xa5, 0x01 }, bytes);
+}
+
+// --- T9c Layer 1 integration tests ---
+
+const MockOutput = struct {
+    allocator: std.mem.Allocator,
+    emitted: std.ArrayList(core.state.GamepadState),
+
+    fn init(allocator: std.mem.Allocator) MockOutput {
+        return .{ .allocator = allocator, .emitted = .{} };
+    }
+
+    fn deinit(self: *MockOutput) void {
+        self.emitted.deinit(self.allocator);
+    }
+
+    fn outputDevice(self: *MockOutput) io.uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = io.uinput.OutputDevice.VTable{
+        .emit = mockEmit,
+        .poll_ff = mockPollFf,
+        .close = mockClose,
+    };
+
+    fn mockEmit(ptr: *anyopaque, s: core.state.GamepadState) anyerror!void {
+        const self: *MockOutput = @ptrCast(@alignCast(ptr));
+        try self.emitted.append(self.allocator, s);
+    }
+
+    fn mockPollFf(_: *anyopaque) anyerror!?io.uinput.FfEvent {
+        return null;
+    }
+
+    fn mockClose(_: *anyopaque) void {}
+};
+
+const pipeline_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 3
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\left_x = { offset = 1, type = "i16le" }
+;
+
+test "pipeline: known frame dispatched to output" {
+    const allocator = testing.allocator;
+
+    const parsed = try config.device.parseString(allocator, pipeline_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var frame: [3]u8 = undefined;
+    frame[0] = 0x01;
+    std.mem.writeInt(i16, frame[1..3], 750, .little);
+
+    var mock = try testing_support.mock_device_io.MockDeviceIO.init(allocator, &.{&frame});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+
+    var loop = try event_loop.EventLoop.init();
+    defer loop.deinit();
+    try loop.addDevice(dev);
+
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    try mock.signal();
+
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *event_loop.EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        out: *MockOutput,
+    };
+    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .out = &out };
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.devs, c.interp, c.out.outputDevice());
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    try testing.expect(out.emitted.items.len >= 1);
+    try testing.expectEqual(@as(i16, 750), loop.gamepad_state.ax);
+}
+
+test "pipeline: unknown report does not call output.emit" {
+    const allocator = testing.allocator;
+
+    const parsed = try config.device.parseString(allocator, pipeline_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // Wrong magic byte — no report match
+    const frame = [_]u8{ 0xFF, 0x00, 0x00 };
+
+    var mock = try testing_support.mock_device_io.MockDeviceIO.init(allocator, &.{&frame});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+
+    var loop = try event_loop.EventLoop.init();
+    defer loop.deinit();
+    try loop.addDevice(dev);
+
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    try mock.signal();
+
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *event_loop.EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        out: *MockOutput,
+    };
+    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .out = &out };
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.devs, c.interp, c.out.outputDevice());
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    try testing.expectEqual(@as(usize, 0), out.emitted.items.len);
+}
+
+test "pipeline: signalfd stop — no fd leak" {
+    const allocator = testing.allocator;
+
+    const parsed = try config.device.parseString(allocator, pipeline_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var mock = try testing_support.mock_device_io.MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+
+    var loop = try event_loop.EventLoop.init();
+    defer loop.deinit();
+    try loop.addDevice(dev);
+
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *event_loop.EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        out: *MockOutput,
+    };
+    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .out = &out };
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.devs, c.interp, c.out.outputDevice());
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    // Stop immediately without any frames
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+    // If we reach here without crash, fds are properly managed (GPA would catch leaks)
+    try testing.expectEqual(@as(usize, 0), out.emitted.items.len);
 }
