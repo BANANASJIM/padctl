@@ -15,6 +15,7 @@ pub const io = struct {
 pub const config = struct {
     pub const device = @import("config/device.zig");
     pub const toml = @import("config/toml.zig");
+    pub const input_codes = @import("config/input_codes.zig");
 };
 
 pub fn main() !void {

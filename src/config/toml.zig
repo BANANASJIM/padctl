@@ -1,7 +1,6 @@
 const std = @import("std");
 const toml = @import("toml");
-
-// Minimal type definitions for T2. T3 will replace these with the full schema.
+const device = @import("device.zig");
 
 pub const Interface = struct {
     id: i64,
@@ -68,38 +67,11 @@ pub const Command = struct {
     template: []const u8,
 };
 
-pub const AxisConfig = struct {
-    code: []const u8,
-    min: i64,
-    max: i64,
-    fuzz: i64,
-    flat: i64,
-};
-
-pub const DpadConfig = struct {
-    type: []const u8,
-};
-
-pub const ForceFeedback = struct {
-    type: []const u8,
-    max_effects: i64,
-};
-
-pub const Output = struct {
-    name: []const u8,
-    vid: i64,
-    pid: i64,
-    axes: toml.HashMap(AxisConfig),
-    buttons: toml.HashMap([]const u8),
-    dpad: DpadConfig,
-    force_feedback: ForceFeedback,
-};
-
 pub const DeviceConfig = struct {
     device: Device,
     report: []const Report,
     commands: toml.HashMap(Command),
-    output: Output,
+    output: device.OutputConfig,
 };
 
 // ParseResult wraps the toml.Parsed arena so all allocations are freed on deinit.
@@ -196,6 +168,8 @@ const test_toml =
     \\max_effects = 16
 ;
 
+const input_codes = @import("input_codes.zig");
+
 test "parseString: valid config" {
     const allocator = std.testing.allocator;
 
@@ -221,6 +195,53 @@ test "parseString: valid config" {
 
     try std.testing.expect(cfg.commands.map.contains("rumble"));
     try std.testing.expect(cfg.commands.map.contains("led"));
+}
+
+test "OutputConfig: parsed fields" {
+    const allocator = std.testing.allocator;
+
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    const out = result.value.output;
+    try std.testing.expectEqualStrings("Test Output", out.name);
+    try std.testing.expectEqual(@as(?i64, 0x3820), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0001), out.pid);
+
+    try std.testing.expect(out.axes != null);
+    const axis = out.axes.?.map.get("left_x").?;
+    try std.testing.expectEqualStrings("ABS_X", axis.code);
+    try std.testing.expectEqual(@as(i64, -32768), axis.min);
+    try std.testing.expectEqual(@as(i64, 32767), axis.max);
+    try std.testing.expectEqual(@as(?i64, 16), axis.fuzz);
+    try std.testing.expectEqual(@as(?i64, 128), axis.flat);
+
+    try std.testing.expect(out.buttons != null);
+    const btn = out.buttons.?.map.get("A").?;
+    try std.testing.expectEqualStrings("BTN_SOUTH", btn);
+
+    try std.testing.expect(out.dpad != null);
+    try std.testing.expectEqualStrings("hat", out.dpad.?.type);
+
+    try std.testing.expect(out.force_feedback != null);
+    try std.testing.expectEqualStrings("rumble", out.force_feedback.?.type);
+    try std.testing.expectEqual(@as(?i64, 16), out.force_feedback.?.max_effects);
+}
+
+test "OutputConfig: code resolution after parse" {
+    const allocator = std.testing.allocator;
+
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    const out = result.value.output;
+    const axis = out.axes.?.map.get("left_x").?;
+    const code = try input_codes.resolveAbsCode(axis.code);
+    try std.testing.expectEqual(@as(u16, 0x00), code);
+
+    const btn_name = out.buttons.?.map.get("A").?;
+    const btn_code = try input_codes.resolveBtnCode(btn_name);
+    try std.testing.expectEqual(@as(u16, 0x130), btn_code);
 }
 
 test "parseFile: missing file returns error" {
