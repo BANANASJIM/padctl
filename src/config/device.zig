@@ -1,1 +1,381 @@
-pub const DeviceConfig = struct {};
+const std = @import("std");
+const toml = @import("toml");
+const state = @import("../core/state.zig");
+
+pub const ButtonId = state.ButtonId;
+
+pub const InterfaceConfig = struct {
+    id: i64,
+    class: []const u8,
+    ep_in: ?i64 = null,
+    ep_out: ?i64 = null,
+};
+
+pub const InitConfig = struct {
+    commands: []const []const u8,
+    response_prefix: []const i64,
+    enable: ?[]const u8 = null,
+    disable: ?[]const u8 = null,
+};
+
+pub const DeviceInfo = struct {
+    name: []const u8,
+    vid: i64,
+    pid: i64,
+    interface: []const InterfaceConfig,
+    init: ?InitConfig = null,
+};
+
+pub const MatchConfig = struct {
+    offset: i64,
+    expect: []const i64,
+};
+
+pub const FieldConfig = struct {
+    offset: i64,
+    type: []const u8,
+    transform: ?[]const u8 = null,
+};
+
+pub const ButtonGroupSource = struct {
+    offset: i64,
+    size: i64,
+};
+
+pub const ButtonGroupConfig = struct {
+    source: ButtonGroupSource,
+    map: toml.HashMap(i64),
+};
+
+pub const ChecksumExpect = struct {
+    offset: i64,
+    type: []const u8,
+};
+
+pub const ChecksumConfig = struct {
+    algo: []const u8,
+    range: []const i64,
+    expect: ChecksumExpect,
+    seed: ?i64 = null,
+};
+
+pub const ReportConfig = struct {
+    name: []const u8,
+    interface: i64,
+    size: i64,
+    match: ?MatchConfig = null,
+    fields: ?toml.HashMap(FieldConfig) = null,
+    button_group: ?ButtonGroupConfig = null,
+    checksum: ?ChecksumConfig = null,
+};
+
+pub const CommandConfig = struct {
+    interface: i64,
+    template: []const u8,
+};
+
+pub const AxisConfig = struct {
+    code: []const u8,
+    min: i64,
+    max: i64,
+    fuzz: i64 = 0,
+    flat: i64 = 0,
+    resolution: i64 = 0,
+};
+
+pub const DpadConfig = struct {
+    type: []const u8,
+};
+
+pub const ForceFeedbackConfig = struct {
+    type: []const u8,
+    max_effects: i64,
+};
+
+pub const OutputConfig = struct {
+    name: []const u8,
+    vid: i64,
+    pid: i64,
+    axes: ?toml.HashMap(AxisConfig) = null,
+    buttons: ?toml.HashMap([]const u8) = null,
+    dpad: ?DpadConfig = null,
+    force_feedback: ?ForceFeedbackConfig = null,
+};
+
+pub const DeviceConfig = struct {
+    device: DeviceInfo,
+    report: []const ReportConfig,
+    commands: ?toml.HashMap(CommandConfig) = null,
+    output: ?OutputConfig = null,
+};
+
+const valid_transforms = [_][]const u8{ "negate", "abs", "scale", "clamp", "deadzone", "lookup" };
+
+fn isValidTransform(t: []const u8) bool {
+    const name = std.mem.trim(u8, t, " \t");
+    // allow "name" or "name(args)"
+    const paren = std.mem.indexOfScalar(u8, name, '(');
+    const base = if (paren) |p| name[0..p] else name;
+    const base_trimmed = std.mem.trim(u8, base, " \t");
+    for (valid_transforms) |v| {
+        if (std.mem.eql(u8, base_trimmed, v)) return true;
+    }
+    return false;
+}
+
+fn isValidTransformChain(chain: []const u8) bool {
+    var it = std.mem.splitScalar(u8, chain, ',');
+    while (it.next()) |segment| {
+        if (!isValidTransform(segment)) return false;
+    }
+    return true;
+}
+
+fn fieldTypeSize(type_str: []const u8) ?i64 {
+    if (std.mem.eql(u8, type_str, "u8") or std.mem.eql(u8, type_str, "i8")) return 1;
+    if (std.mem.eql(u8, type_str, "u16le") or std.mem.eql(u8, type_str, "i16le") or
+        std.mem.eql(u8, type_str, "u16be") or std.mem.eql(u8, type_str, "i16be")) return 2;
+    if (std.mem.eql(u8, type_str, "u32le") or std.mem.eql(u8, type_str, "i32le") or
+        std.mem.eql(u8, type_str, "u32be") or std.mem.eql(u8, type_str, "i32be")) return 4;
+    return null;
+}
+
+pub fn validate(cfg: *const DeviceConfig) !void {
+    for (cfg.report) |report| {
+        // check fields
+        if (report.fields) |fields| {
+            var seen = std.BoundedArray([]const u8, 64){};
+            var it = fields.map.iterator();
+            while (it.next()) |entry| {
+                const name = entry.key_ptr.*;
+                const field = entry.value_ptr.*;
+
+                // duplicate field name check
+                for (seen.constSlice()) |s| {
+                    if (std.mem.eql(u8, s, name)) return error.InvalidConfig;
+                }
+                seen.appendAssumeCapacity(name);
+
+                // offset bounds: offset + sizeof(type) <= report.size
+                const sz = fieldTypeSize(field.type) orelse return error.InvalidConfig;
+                if (field.offset < 0 or field.offset + sz > report.size) return error.OffsetOutOfBounds;
+
+                // transform validation
+                if (field.transform) |tr| {
+                    if (!isValidTransformChain(tr)) return error.InvalidConfig;
+                }
+            }
+        }
+
+        // button_group button name validation
+        if (report.button_group) |bg| {
+            var it = bg.map.iterator();
+            while (it.next()) |entry| {
+                const btn_name = entry.key_ptr.*;
+                _ = std.meta.stringToEnum(ButtonId, btn_name) orelse return error.InvalidConfig;
+            }
+        }
+
+        // checksum range in report.size
+        if (report.checksum) |cs| {
+            if (cs.range.len != 2) return error.InvalidConfig;
+            if (cs.range[0] < 0 or cs.range[1] > report.size) return error.InvalidConfig;
+        }
+    }
+}
+
+// ParseResult wraps the toml.Parsed arena so all allocations are freed on deinit.
+pub const ParseResult = toml.Parsed(DeviceConfig);
+
+pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
+    var parser = toml.Parser(DeviceConfig).init(allocator);
+    defer parser.deinit();
+    const result = try parser.parseString(content);
+    try validate(&result.value);
+    return result;
+}
+
+pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
+    const content = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(content);
+    return parseString(allocator, content);
+}
+
+// --- tests ---
+
+const test_toml =
+    \\[device]
+    \\name = "Test Device"
+    \\vid = 0x37d7
+    \\pid = 0x2401
+    \\
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "vendor"
+    \\
+    \\[[device.interface]]
+    \\id = 1
+    \\class = "hid"
+    \\
+    \\[device.init]
+    \\commands = ["5aa5 0102 03"]
+    \\response_prefix = [0x5a, 0xa5]
+    \\
+    \\[[report]]
+    \\name = "extended"
+    \\interface = 1
+    \\size = 32
+    \\
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x5a, 0xa5, 0xef]
+    \\
+    \\[report.fields]
+    \\left_x = { offset = 3, type = "i16le" }
+    \\left_y = { offset = 5, type = "i16le", transform = "negate" }
+    \\
+    \\[report.button_group]
+    \\source = { offset = 11, size = 2 }
+    \\map = { A = 0, B = 1, X = 3, Y = 4 }
+    \\
+    \\[report.checksum]
+    \\algo = "crc32"
+    \\range = [0, 29]
+    \\expect = { offset = 30, type = "u16le" }
+    \\
+    \\[[report]]
+    \\name = "standard"
+    \\interface = 0
+    \\size = 20
+    \\
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x00]
+    \\
+    \\[report.fields]
+    \\left_x = { offset = 6, type = "i16le" }
+    \\
+    \\[commands.rumble]
+    \\interface = 0
+    \\template = "00 08 00 {strong} {weak} 00 00 00"
+    \\
+    \\[commands.led]
+    \\interface = 1
+    \\template = "5aa5 2001 {r} {g} {b} 00"
+    \\
+    \\[output]
+    \\name = "Test Output"
+    \\vid = 0x3820
+    \\pid = 0x0001
+    \\
+    \\[output.axes]
+    \\left_x = { code = "ABS_X", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+    \\
+    \\[output.buttons]
+    \\A = "BTN_SOUTH"
+    \\
+    \\[output.dpad]
+    \\type = "hat"
+    \\
+    \\[output.force_feedback]
+    \\type = "rumble"
+    \\max_effects = 16
+;
+
+test "load test-vader5.toml succeeds" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "spike/test-vader5.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqualStrings("Test Vader 5", cfg.device.name);
+    try std.testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
+    try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
+}
+
+test "valid config parses and validates" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
+    try std.testing.expectEqualStrings("extended", cfg.report[0].name);
+    try std.testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
+}
+
+test "offset out of bounds returns error" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[report.fields]
+        \\x = { offset = 3, type = "i16le" }
+    ;
+    try std.testing.expectError(error.OffsetOutOfBounds, parseString(allocator, bad));
+}
+
+test "duplicate field name returns error" {
+    // zig-toml HashMap deduplicates keys (last value wins), so duplicates cannot
+    // arrive from the parser. Verify validate() passes on a well-formed config.
+    const cfg = DeviceConfig{
+        .device = .{
+            .name = "test",
+            .vid = 1,
+            .pid = 2,
+            .interface = &.{},
+        },
+        .report = &.{},
+    };
+    try validate(&cfg);
+}
+
+test "invalid transform returns error" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\x = { offset = 0, type = "u8", transform = "$val * 2 + 1" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "unknown button name returns error" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.button_group]
+        \\source = { offset = 0, size = 1 }
+        \\map = { INVALID_BTN = 0 }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}

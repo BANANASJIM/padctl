@@ -1,121 +1,28 @@
 const std = @import("std");
 const toml = @import("toml");
+const device = @import("device.zig");
 
-// Minimal type definitions for T2. T3 will replace these with the full schema.
+// Re-export all types from device.zig for backward compat.
+pub const InterfaceConfig = device.InterfaceConfig;
+pub const InitConfig = device.InitConfig;
+pub const DeviceInfo = device.DeviceInfo;
+pub const MatchConfig = device.MatchConfig;
+pub const FieldConfig = device.FieldConfig;
+pub const ButtonGroupSource = device.ButtonGroupSource;
+pub const ButtonGroupConfig = device.ButtonGroupConfig;
+pub const ChecksumExpect = device.ChecksumExpect;
+pub const ChecksumConfig = device.ChecksumConfig;
+pub const ReportConfig = device.ReportConfig;
+pub const CommandConfig = device.CommandConfig;
+pub const AxisConfig = device.AxisConfig;
+pub const DpadConfig = device.DpadConfig;
+pub const ForceFeedbackConfig = device.ForceFeedbackConfig;
+pub const OutputConfig = device.OutputConfig;
+pub const DeviceConfig = device.DeviceConfig;
 
-pub const Interface = struct {
-    id: i64,
-    class: []const u8,
-};
-
-pub const DeviceInit = struct {
-    commands: []const []const u8,
-    response_prefix: []const i64,
-};
-
-pub const Device = struct {
-    name: []const u8,
-    vid: i64,
-    pid: i64,
-    interface: []const Interface,
-    init: DeviceInit,
-};
-
-pub const MatchConfig = struct {
-    offset: i64,
-    expect: []const i64,
-};
-
-pub const FieldDef = struct {
-    offset: i64,
-    type: []const u8,
-    transform: ?[]const u8 = null,
-};
-
-pub const ButtonGroupSource = struct {
-    offset: i64,
-    size: i64,
-};
-
-pub const ButtonGroup = struct {
-    source: ButtonGroupSource,
-    map: toml.HashMap(i64),
-};
-
-pub const ChecksumExpect = struct {
-    offset: i64,
-    type: []const u8,
-};
-
-pub const Checksum = struct {
-    algo: []const u8,
-    range: []const i64,
-    expect: ChecksumExpect,
-};
-
-pub const Report = struct {
-    name: []const u8,
-    interface: i64,
-    size: i64,
-    match: ?MatchConfig = null,
-    fields: ?toml.HashMap(FieldDef) = null,
-    button_group: ?ButtonGroup = null,
-    checksum: ?Checksum = null,
-};
-
-pub const Command = struct {
-    interface: i64,
-    template: []const u8,
-};
-
-pub const AxisConfig = struct {
-    code: []const u8,
-    min: i64,
-    max: i64,
-    fuzz: i64,
-    flat: i64,
-};
-
-pub const DpadConfig = struct {
-    type: []const u8,
-};
-
-pub const ForceFeedback = struct {
-    type: []const u8,
-    max_effects: i64,
-};
-
-pub const Output = struct {
-    name: []const u8,
-    vid: i64,
-    pid: i64,
-    axes: toml.HashMap(AxisConfig),
-    buttons: toml.HashMap([]const u8),
-    dpad: DpadConfig,
-    force_feedback: ForceFeedback,
-};
-
-pub const DeviceConfig = struct {
-    device: Device,
-    report: []const Report,
-    commands: toml.HashMap(Command),
-    output: Output,
-};
-
-// ParseResult wraps the toml.Parsed arena so all allocations are freed on deinit.
-pub const ParseResult = toml.Parsed(DeviceConfig);
-
-pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
-    var parser = toml.Parser(DeviceConfig).init(allocator);
-    defer parser.deinit();
-    return parser.parseString(content);
-}
-
-pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
-    const content = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
-    defer allocator.free(content);
-    return parseString(allocator, content);
-}
+pub const ParseResult = device.ParseResult;
+pub const parseString = device.parseString;
+pub const parseFile = device.parseFile;
 
 const test_toml =
     \\[device]
@@ -210,17 +117,19 @@ test "parseString: valid config" {
 
     try std.testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
     try std.testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
-    try std.testing.expectEqual(@as(usize, 2), cfg.device.init.response_prefix.len);
-    try std.testing.expectEqual(@as(i64, 0x5a), cfg.device.init.response_prefix[0]);
-    try std.testing.expectEqual(@as(i64, 0xa5), cfg.device.init.response_prefix[1]);
+    try std.testing.expect(cfg.device.init != null);
+    try std.testing.expectEqual(@as(usize, 2), cfg.device.init.?.response_prefix.len);
+    try std.testing.expectEqual(@as(i64, 0x5a), cfg.device.init.?.response_prefix[0]);
+    try std.testing.expectEqual(@as(i64, 0xa5), cfg.device.init.?.response_prefix[1]);
 
     try std.testing.expect(cfg.report[0].match != null);
     try std.testing.expect(cfg.report[0].fields != null);
     try std.testing.expect(cfg.report[0].checksum != null);
     try std.testing.expect(cfg.report[1].checksum == null);
 
-    try std.testing.expect(cfg.commands.map.contains("rumble"));
-    try std.testing.expect(cfg.commands.map.contains("led"));
+    try std.testing.expect(cfg.commands != null);
+    try std.testing.expect(cfg.commands.?.map.contains("rumble"));
+    try std.testing.expect(cfg.commands.?.map.contains("led"));
 }
 
 test "parseFile: missing file returns error" {
