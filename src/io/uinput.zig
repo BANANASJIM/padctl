@@ -9,7 +9,7 @@ const c = @cImport({
     @cInclude("linux/input-event-codes.h");
 });
 
-const IOCTL = std.os.linux.ioctl;
+const IOCTL = std.os.linux.IOCTL;
 const UI_SET_EVBIT = IOCTL.IOW('U', 100, c_int);
 const UI_SET_KEYBIT = IOCTL.IOW('U', 101, c_int);
 const UI_SET_ABSBIT = IOCTL.IOW('U', 103, c_int);
@@ -447,15 +447,16 @@ pub const AuxDevice = struct {
 // --- tests ---
 
 const MockOutputDevice = struct {
+    allocator: std.mem.Allocator,
     emitted: std.ArrayList(state.GamepadState),
     prev: state.GamepadState = .{},
 
     fn init(allocator: std.mem.Allocator) MockOutputDevice {
-        return .{ .emitted = std.ArrayList(state.GamepadState).init(allocator) };
+        return .{ .allocator = allocator, .emitted = .{} };
     }
 
     fn deinit(self: *MockOutputDevice) void {
-        self.emitted.deinit();
+        self.emitted.deinit(self.allocator);
     }
 
     fn outputDevice(self: *MockOutputDevice) OutputDevice {
@@ -472,7 +473,7 @@ const MockOutputDevice = struct {
         const self: *MockOutputDevice = @ptrCast(@alignCast(ptr));
         // Only record if state changed (simulate differential)
         if (std.meta.eql(s, self.prev)) return;
-        try self.emitted.append(s);
+        try self.emitted.append(self.allocator, s);
         self.prev = s;
     }
 

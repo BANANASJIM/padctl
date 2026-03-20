@@ -10,6 +10,7 @@ const DeviceIO = @import("../io/device_io.zig").DeviceIO;
 pub const MockDeviceIO = struct {
     frames: []const []const u8,
     frame_idx: usize,
+    allocator: std.mem.Allocator,
     write_log: std.ArrayList(u8),
     pipe_r: posix.fd_t,
     pipe_w: posix.fd_t,
@@ -27,14 +28,15 @@ pub const MockDeviceIO = struct {
         return .{
             .frames = frames,
             .frame_idx = 0,
-            .write_log = std.ArrayList(u8).init(allocator),
+            .allocator = allocator,
+            .write_log = .{},
             .pipe_r = fds[0],
             .pipe_w = fds[1],
         };
     }
 
     pub fn deinit(self: *MockDeviceIO) void {
-        self.write_log.deinit();
+        self.write_log.deinit(self.allocator);
         posix.close(self.pipe_r);
         posix.close(self.pipe_w);
     }
@@ -67,7 +69,7 @@ pub const MockDeviceIO = struct {
 
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *MockDeviceIO = @ptrCast(@alignCast(ptr));
-        self.write_log.appendSlice(data) catch return DeviceIO.WriteError.Io;
+        self.write_log.appendSlice(self.allocator, data) catch return DeviceIO.WriteError.Io;
     }
 
     fn pollfd(ptr: *anyopaque) posix.pollfd {
@@ -87,7 +89,7 @@ test "MockDeviceIO read returns frames in order then Again" {
     var mock = try MockDeviceIO.init(allocator, &.{ frame1, frame2 });
     defer mock.deinit();
 
-    var io = mock.deviceIO();
+    const io = mock.deviceIO();
     var buf: [64]u8 = undefined;
 
     const n1 = try io.read(&buf);
@@ -106,7 +108,7 @@ test "MockDeviceIO write logs data" {
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
 
-    var io = mock.deviceIO();
+    const io = mock.deviceIO();
     try io.write(&[_]u8{ 0x01, 0x02, 0x03 });
     try io.write(&[_]u8{0x04});
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x02, 0x03, 0x04 }, mock.write_log.items);
@@ -117,7 +119,7 @@ test "MockDeviceIO pollfd returns pipe_r" {
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
 
-    var io = mock.deviceIO();
+    const io = mock.deviceIO();
     const pfd = io.pollfd();
     try std.testing.expectEqual(mock.pipe_r, pfd.fd);
     try std.testing.expectEqual(posix.POLL.IN, pfd.events);

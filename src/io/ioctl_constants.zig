@@ -4,7 +4,7 @@ const c = @cImport({
     @cInclude("linux/uinput.h");
     @cInclude("linux/input.h");
 });
-const IOCTL = std.os.linux.ioctl;
+const IOCTL = std.os.linux.IOCTL;
 
 // hidraw
 pub const HIDIOCGRAWINFO = IOCTL.IOR('H', 0x03, c.hidraw_devinfo);

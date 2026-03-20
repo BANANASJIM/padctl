@@ -23,8 +23,12 @@ pub const config = struct {
     pub const input_codes = @import("config/input_codes.zig");
 };
 
+pub const event_loop = @import("event_loop.zig");
+
 pub fn main() !void {
     std.log.info("padctl starting...", .{});
+    // T9b: CLI + config loading + device init + handshake
+    // T9c: full pipeline wiring (DeviceIO → Interpreter → OutputDevice)
 }
 
 test {
