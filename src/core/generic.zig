@@ -244,7 +244,78 @@ test "compileGenericState: compiles from config" {
     const parsed = try device.parseString(allocator, toml_str);
     defer parsed.deinit();
 
-    const mapping = parsed.value.output.?.mapping.?;
-    const gs = try compileGenericState(&parsed.value, mapping);
+    const m = parsed.value.output.?.mapping.?;
+    const gs = try compileGenericState(&parsed.value, m);
     try testing.expectEqual(@as(u8, 4), gs.count);
+}
+
+test "generic round-trip: compile, extract, verify (with transform)" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "RT Test"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\mode = "generic"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\axis_x = { offset = 0, type = "i16le", transform = "negate" }
+        \\axis_y = { offset = 2, type = "u8" }
+        \\[report.button_group]
+        \\source = { offset = 4, size = 1 }
+        \\map = { btn_a = 0, btn_b = 1 }
+        \\[output]
+        \\name = "RT Test"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\[output.mapping]
+        \\axis_x = { event = "ABS_X", range = [-32768, 32767] }
+        \\axis_y = { event = "ABS_Y", range = [0, 255] }
+        \\btn_a = { event = "BTN_A" }
+        \\btn_b = { event = "BTN_B" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+
+    const m = parsed.value.output.?.mapping.?;
+    var gs = try compileGenericState(&parsed.value, m);
+    try testing.expectEqual(@as(u8, 4), gs.count);
+
+    // Verify the transform slot exists
+    var has_xform = false;
+    for (gs.slots[0..gs.count]) |slot| {
+        if (slot.has_transform) {
+            has_xform = true;
+            break;
+        }
+    }
+    try testing.expect(has_xform);
+
+    // Build synthetic frame: axis_x=1000 (i16le@0), axis_y=200 (u8@2), buttons byte@4 = 0x03 (btn_a+btn_b)
+    var frame = [_]u8{0} ** 8;
+    std.mem.writeInt(i16, frame[0..2], 1000, .little);
+    frame[2] = 200;
+    frame[4] = 0x03;
+
+    extractGenericFields(&gs, &frame);
+
+    // Find slot values by event_code (order is map-iteration-dependent)
+    for (gs.slots[0..gs.count], gs.values[0..gs.count]) |slot, val| {
+        if (slot.mode == .standard and slot.type_tag == .i16le) {
+            // axis_x with negate transform: 1000 -> -1000
+            try testing.expectEqual(@as(i32, -1000), val);
+        } else if (slot.mode == .standard and slot.type_tag == .u8) {
+            // axis_y: raw 200, clamped to range [0, 255]
+            try testing.expectEqual(@as(i32, 200), val);
+        } else if (slot.is_button) {
+            // both buttons set
+            try testing.expectEqual(@as(i32, 1), val);
+        }
+    }
 }

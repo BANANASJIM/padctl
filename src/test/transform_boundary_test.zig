@@ -87,7 +87,7 @@ test "boundary: deadzone(1000)" {
     const parsed = try device.parseString(allocator, makeToml("deadzone(1000)"));
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
-    const dz_vals = [_]i16{ 0, 999, 1000, 1001, -999, -1000, -1001 };
+    const dz_vals = [_]i16{ 0, 999, 1000, 1001, -999, -1000, -1001, std.math.maxInt(i16), std.math.minInt(i16) };
     inline for (dz_vals) |v| {
         const expected: i16 = if (@abs(@as(i64, v)) < 1000) 0 else v;
         try testing.expectEqual(expected, try runOne(&interp, v));

@@ -43,3 +43,36 @@ pub fn makeMapper(toml_str: []const u8, allocator: std.mem.Allocator) !MapperCon
     const m = try Mapper.init(&parsed.value, timer_fd, allocator);
     return .{ .parsed = parsed, .mapper = m, .timer_fd = timer_fd };
 }
+
+const devices_dir = "devices/";
+
+pub fn collectTomlPaths(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
+    var paths = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (paths.items) |p| allocator.free(p);
+        paths.deinit();
+    }
+
+    var dir = std.fs.cwd().openDir(devices_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return paths,
+        else => return err,
+    };
+    defer dir.close();
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".toml")) continue;
+        const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ devices_dir, entry.path });
+        try paths.append(full);
+    }
+
+    return paths;
+}
+
+pub fn freeTomlPaths(allocator: std.mem.Allocator, paths: *std.ArrayList([]const u8)) void {
+    for (paths.items) |p| allocator.free(p);
+    paths.deinit();
+}

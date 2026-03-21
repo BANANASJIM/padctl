@@ -5,39 +5,9 @@ const device_mod = @import("../config/device.zig");
 const interpreter = @import("../core/interpreter.zig");
 const state = @import("../core/state.zig");
 const ButtonId = state.ButtonId;
-
-const devices_dir = "devices/";
-
-fn collectTomlPaths(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var paths = std.ArrayList([]const u8).init(allocator);
-    errdefer {
-        for (paths.items) |p| allocator.free(p);
-        paths.deinit();
-    }
-
-    var dir = std.fs.cwd().openDir(devices_dir, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return paths,
-        else => return err,
-    };
-    defer dir.close();
-
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".toml")) continue;
-        const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ devices_dir, entry.path });
-        try paths.append(full);
-    }
-
-    return paths;
-}
-
-fn freeTomlPaths(allocator: std.mem.Allocator, paths: *std.ArrayList([]const u8)) void {
-    for (paths.items) |p| allocator.free(p);
-    paths.deinit();
-}
+const helpers = @import("helpers.zig");
+const collectTomlPaths = helpers.collectTomlPaths;
+const freeTomlPaths = helpers.freeTomlPaths;
 
 // Metadata/raw fields that intentionally map to .unknown
 const field_ignore_list = [_][]const u8{
@@ -66,7 +36,7 @@ test "auto: all device configs parse and validate" {
 
     if (paths.items.len == 0) return; // devices/ not found
 
-    try testing.expect(paths.items.len >= 12);
+    try testing.expect(paths.items.len >= 13);
 
     for (paths.items) |path| {
         const parsed = device_mod.parseFile(allocator, path) catch |err| {

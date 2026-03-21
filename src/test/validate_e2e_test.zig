@@ -8,39 +8,9 @@ const testing = std.testing;
 const device_mod = @import("../config/device.zig");
 const validate_mod = @import("../tools/validate.zig");
 const docgen_mod = @import("../tools/docgen.zig");
-
-const devices_dir = "devices/";
-
-fn collectTomlPaths(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var paths = std.ArrayList([]const u8).init(allocator);
-    errdefer {
-        for (paths.items) |p| allocator.free(p);
-        paths.deinit();
-    }
-
-    var dir = std.fs.cwd().openDir(devices_dir, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return paths,
-        else => return err,
-    };
-    defer dir.close();
-
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".toml")) continue;
-        const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ devices_dir, entry.path });
-        try paths.append(full);
-    }
-
-    return paths;
-}
-
-fn freeTomlPaths(allocator: std.mem.Allocator, paths: *std.ArrayList([]const u8)) void {
-    for (paths.items) |p| allocator.free(p);
-    paths.deinit();
-}
+const helpers = @import("helpers.zig");
+const collectTomlPaths = helpers.collectTomlPaths;
+const freeTomlPaths = helpers.freeTomlPaths;
 
 // --- 1. validate: all device configs pass with 0 errors ---
 
@@ -48,7 +18,7 @@ test "E2E validate: all device configs produce 0 errors" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
     defer freeTomlPaths(allocator, &paths);
-    try testing.expect(paths.items.len >= 12);
+    try testing.expect(paths.items.len >= 13);
 
     for (paths.items) |path| {
         const errors = try validate_mod.validateFile(path, allocator);
@@ -246,22 +216,6 @@ test "E2E parseFile: sony/dualsense.toml" {
 }
 
 // --- 5. validate (from phase6): structural checks ---
-
-test "validate: all device TOMLs produce 0 errors" {
-    const allocator = testing.allocator;
-    var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
-    try testing.expect(paths.items.len >= 12);
-
-    for (paths.items) |path| {
-        const errors = try validate_mod.validateFile(path, allocator);
-        defer validate_mod.freeErrors(errors, allocator);
-        if (errors.len > 0) {
-            for (errors) |e| std.debug.print("{s}: {s}\n", .{ path, e.message });
-        }
-        try testing.expectEqual(@as(usize, 0), errors.len);
-    }
-}
 
 test "validate: all device TOMLs have non-empty name" {
     const allocator = testing.allocator;

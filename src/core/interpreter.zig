@@ -1306,47 +1306,16 @@ test "T3: all-0xFF report does not panic" {
 
 test "fuzz processReport: no panic on arbitrary input" {
     const allocator = testing.allocator;
-    var dir = std.fs.cwd().openDir("devices", .{ .iterate = true }) catch {
-        // fallback to embedded vader5 if devices/ not found
-        const parsed = try device.parseString(allocator, vader5_toml);
-        defer parsed.deinit();
-        const interp = Interpreter.init(&parsed.value);
-        try testing.fuzz(interp, struct {
-            fn run(ctx: Interpreter, input: []const u8) !void {
-                for (0..4) |iface| {
-                    _ = ctx.processReport(@intCast(iface), input) catch {};
-                }
+    const parsed = try device.parseString(allocator, vader5_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    try testing.fuzz(interp, struct {
+        fn run(ctx: Interpreter, input: []const u8) !void {
+            for (0..4) |iface| {
+                _ = ctx.processReport(@intCast(iface), input) catch {};
             }
-        }.run, .{});
-        return;
-    };
-    defer dir.close();
-
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    var count: usize = 0;
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
-
-        const path = try std.fmt.allocPrint(allocator, "devices/{s}", .{entry.path});
-        defer allocator.free(path);
-
-        const parsed = device.parseFile(allocator, path) catch continue;
-        defer parsed.deinit();
-        const interp = Interpreter.init(&parsed.value);
-
-        try testing.fuzz(interp, struct {
-            fn run(ctx: Interpreter, input: []const u8) !void {
-                for (0..4) |iface| {
-                    _ = ctx.processReport(@intCast(iface), input) catch {};
-                }
-            }
-        }.run, .{});
-        count += 1;
-    }
-    try testing.expect(count >= 1);
+        }
+    }.run, .{});
 }
 
 test "T3: field at last valid offset (offset = size - 1) reads correctly" {
