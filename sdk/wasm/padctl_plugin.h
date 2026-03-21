@@ -14,7 +14,9 @@ extern int32_t device_write(const void *buf, int32_t len);
 
 // Write a log message. level: 0=debug, 1=error. Truncated at 256 bytes.
 // C name padctl_log; WASM import name is env.log (avoids math.h collision).
+#ifdef __wasm__
 __attribute__((import_module("env"), import_name("log")))
+#endif
 extern void padctl_log(int32_t level, const char *msg, int32_t len);
 
 // Read a device config field value as UTF-8. Returns byte count, <0 on error.
