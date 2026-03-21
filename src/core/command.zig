@@ -18,8 +18,8 @@ pub fn fillTemplate(
     template: []const u8,
     params: []const Param,
 ) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
 
     var it = std.mem.tokenizeScalar(u8, template, ' ');
     while (it.next()) |token| {
@@ -32,23 +32,23 @@ pub fn fillTemplate(
             const pval = findParam(params, name) orelse return error.UnknownParam;
 
             if (std.mem.eql(u8, type_str, "u8")) {
-                try out.append(@intCast(pval >> 8));
+                try out.append(allocator, @intCast(pval >> 8));
             } else if (std.mem.eql(u8, type_str, "u16le")) {
-                try out.append(@intCast(pval & 0xff));
-                try out.append(@intCast(pval >> 8));
+                try out.append(allocator, @intCast(pval & 0xff));
+                try out.append(allocator, @intCast(pval >> 8));
             } else if (std.mem.eql(u8, type_str, "u16be")) {
-                try out.append(@intCast(pval >> 8));
-                try out.append(@intCast(pval & 0xff));
+                try out.append(allocator, @intCast(pval >> 8));
+                try out.append(allocator, @intCast(pval & 0xff));
             } else {
                 return error.UnsupportedParamType;
             }
         } else {
             const byte = std.fmt.parseInt(u8, token, 16) catch return error.InvalidHexByte;
-            try out.append(byte);
+            try out.append(allocator, byte);
         }
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 fn findParam(params: []const Param, name: []const u8) ?u16 {

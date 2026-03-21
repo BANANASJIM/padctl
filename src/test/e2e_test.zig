@@ -242,7 +242,7 @@ test "EventLoop pipeline: A press then release" {
             ip: *const Interpreter,
             op: uinput.OutputDevice,
         ) !void {
-            try el.run(devices, ip, op, null, null);
+            try el.run(devices, ip, op, null, null, null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{ &loop, &devs, &interp, output });

@@ -7,6 +7,9 @@ const Interpreter = @import("core/interpreter.zig").Interpreter;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
 const state = @import("core/state.zig");
 const mapper_mod = @import("core/mapper.zig");
+const DeviceConfig = @import("config/device.zig").DeviceConfig;
+const fillTemplate = @import("core/command.zig").fillTemplate;
+const Param = @import("core/command.zig").Param;
 
 // signalfd(0) + stop_pipe(1) + per-interface fds + uinput FF fd + timerfd slot
 pub const MAX_FDS = 10;
@@ -121,6 +124,8 @@ pub const EventLoop = struct {
         output: OutputDevice,
         mapper: ?*mapper_mod.Mapper,
         aux_output: ?@import("io/uinput.zig").AuxOutputDevice,
+        allocator: ?std.mem.Allocator,
+        device_config: ?*const DeviceConfig,
     ) !void {
         self.running = true;
         var buf: [64]u8 = undefined;
@@ -151,7 +156,27 @@ pub const EventLoop = struct {
             // Check uinput FF fd
             if (self.uinput_ff_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
-                    _ = output.pollFf() catch {};
+                    if (output.pollFf() catch null) |ff| {
+                        if (allocator) |alloc| {
+                            if (device_config) |dcfg| {
+                                if (dcfg.commands) |cmds| {
+                                    if (cmds.map.get("rumble")) |cmd| {
+                                        const iface_idx: usize = @intCast(cmd.interface);
+                                        if (iface_idx < devices.len) {
+                                            const params = [_]Param{
+                                                .{ .name = "strong", .value = ff.strong },
+                                                .{ .name = "weak", .value = ff.weak },
+                                            };
+                                            if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
+                                                defer alloc.free(bytes);
+                                                devices[iface_idx].write(bytes) catch {};
+                                            } else |_| {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -368,7 +393,7 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.mapper, null);
+            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.mapper, null, null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -480,7 +505,7 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devices, c.interp, c.output, null, null);
+            try c.loop.run(c.devices, c.interp, c.output, null, null, null, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -492,4 +517,173 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
     try testing.expectEqual(@as(i16, 500), loop.gamepad_state.ax);
     try testing.expectEqual(@as(usize, 1), out.emitted.items.len);
     try testing.expectEqual(@as(i16, 500), out.emitted.items[0].ax);
+}
+
+// T4: FF routing tests
+
+const ff_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[commands.rumble]
+    \\interface = 0
+    \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+;
+
+const MockFfOutput = struct {
+    allocator: std.mem.Allocator,
+    ff_event: ?uinput.FfEvent,
+    call_count: usize = 0,
+
+    fn outputDevice(self: *MockFfOutput) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = mockEmit,
+        .poll_ff = mockPollFf,
+        .close = mockClose,
+    };
+
+    fn mockEmit(_: *anyopaque, _: state.GamepadState) anyerror!void {}
+
+    fn mockPollFf(ptr: *anyopaque) anyerror!?uinput.FfEvent {
+        const self: *MockFfOutput = @ptrCast(@alignCast(ptr));
+        if (self.call_count == 0) {
+            self.call_count += 1;
+            return self.ff_event;
+        }
+        return null;
+    }
+
+    fn mockClose(_: *anyopaque) void {}
+};
+
+test "T4: FF event routed to DeviceIO.write via fillTemplate" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.init();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    // FF wake pipe: write side signals readiness
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var ff_out = MockFfOutput{
+        .allocator = allocator,
+        .ff_event = .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 },
+    };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutput,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.devs, c.interp, c.ff_out.outputDevice(), null, null, c.alloc, c.cfg);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    // Signal uinput FF fd ready, then stop
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // strong=0x8000 >> 8 = 0x80, weak=0x4000 >> 8 = 0x40
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, mock_dev.write_log.items);
+}
+
+test "T4: no commands.rumble — silent skip" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.init();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    // Config has no [commands] section
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var ff_out = MockFfOutput{
+        .allocator = allocator,
+        .ff_event = .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 },
+    };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutput,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.devs, c.interp, c.ff_out.outputDevice(), null, null, c.alloc, c.cfg);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // No write should have occurred
+    try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
 }
