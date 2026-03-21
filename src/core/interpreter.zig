@@ -1097,3 +1097,66 @@ test "checksum crc32 with seed" {
     var raw = [_]u8{ 0x01, 0x01, 0x02, 0x03, 0xa5, 0x16, 0xa4, 0xba, 0x00 };
     _ = try interp.processReport(0, &raw);
 }
+
+// T3: boundary reports
+
+test "T3: empty report (0 bytes) returns null without panic" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, vader5_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const result = try interp.processReport(1, &[_]u8{});
+    try testing.expectEqual(@as(?GamepadStateDelta, null), result);
+}
+
+test "T3: oversized report parsed without bounds error" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, vader5_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // 128 bytes, magic correct — should match and parse normally
+    var raw = [_]u8{0} ** 128;
+    raw[0] = 0x5a; raw[1] = 0xa5; raw[2] = 0xef;
+    std.mem.writeInt(i16, raw[3..5], 100, .little);
+    const result = try interp.processReport(1, &raw);
+    try testing.expect(result != null);
+}
+
+test "T3: all-0xFF report does not panic" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, vader5_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0xFF} ** 32;
+    // magic won't match (0xFF != 0x5a), so result is null — no crash
+    const result = try interp.processReport(1, &raw);
+    try testing.expectEqual(@as(?GamepadStateDelta, null), result);
+}
+
+test "T3: field at last valid offset (offset = size - 1) reads correctly" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\lt = { offset = 3, type = "u8" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const raw = [_]u8{ 0x01, 0x00, 0x00, 0xAB };
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 0xAB), delta.lt);
+}

@@ -14,6 +14,7 @@ pub const MockDeviceIO = struct {
     write_log: std.ArrayList(u8),
     pipe_r: posix.fd_t,
     pipe_w: posix.fd_t,
+    disconnected: bool,
 
     pub fn init(allocator: std.mem.Allocator, frames: []const []const u8) !MockDeviceIO {
         var fds: [2]posix.fd_t = undefined;
@@ -32,6 +33,7 @@ pub const MockDeviceIO = struct {
             .write_log = .{},
             .pipe_r = fds[0],
             .pipe_w = fds[1],
+            .disconnected = false,
         };
     }
 
@@ -43,6 +45,12 @@ pub const MockDeviceIO = struct {
 
     /// Signal the pipe_r side as readable (triggers ppoll).
     pub fn signal(self: *MockDeviceIO) !void {
+        _ = try posix.write(self.pipe_w, &[_]u8{1});
+    }
+
+    /// Cause the next read to return Disconnected.
+    pub fn injectDisconnect(self: *MockDeviceIO) !void {
+        self.disconnected = true;
         _ = try posix.write(self.pipe_w, &[_]u8{1});
     }
 
@@ -59,6 +67,7 @@ pub const MockDeviceIO = struct {
 
     fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
         const self: *MockDeviceIO = @ptrCast(@alignCast(ptr));
+        if (self.disconnected) return DeviceIO.ReadError.Disconnected;
         if (self.frame_idx >= self.frames.len) return DeviceIO.ReadError.Again;
         const frame = self.frames[self.frame_idx];
         self.frame_idx += 1;
@@ -135,4 +144,19 @@ test "MockDeviceIO signal makes pipe_r readable" {
     var pfd = [1]posix.pollfd{.{ .fd = mock.pipe_r, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 0);
     try std.testing.expectEqual(@as(usize, 1), ready);
+}
+
+test "MockDeviceIO injectDisconnect returns Disconnected" {
+    const allocator = std.testing.allocator;
+    const frame = &[_]u8{0x01};
+    var mock = try MockDeviceIO.init(allocator, &.{frame});
+    defer mock.deinit();
+
+    try mock.injectDisconnect();
+
+    const io = mock.deviceIO();
+    var buf: [64]u8 = undefined;
+    try std.testing.expectError(DeviceIO.ReadError.Disconnected, io.read(&buf));
+    // Stays disconnected on subsequent reads
+    try std.testing.expectError(DeviceIO.ReadError.Disconnected, io.read(&buf));
 }

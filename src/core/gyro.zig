@@ -174,3 +174,40 @@ test "EMA smoothing: consecutive frames converge" {
     // After many frames, ema should be close to input (100)
     try testing.expect(g.ema_x > 90.0);
 }
+
+// T4: extreme parameter values
+
+test "T4: sensitivity=0 produces zero output" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{ .mode = "mouse", .sensitivity_x = 0.0, .sensitivity_y = 0.0, .smoothing = 0.0 };
+    const out = g.process(&cfg, 30000, 30000, 0);
+    try testing.expectEqual(@as(i32, 0), out.rel_x);
+    try testing.expectEqual(@as(i32, 0), out.rel_y);
+    // No NaN/Inf in accumulators
+    try testing.expect(!std.math.isNan(g.accum_x));
+    try testing.expect(!std.math.isInf(g.accum_x));
+}
+
+test "T4: deadzone=32767 absorbs all input, output is zero" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{ .mode = "mouse", .deadzone = 32767, .smoothing = 0.0, .sensitivity_x = 1000.0, .sensitivity_y = 1000.0 };
+    const out = g.process(&cfg, 32766, 32766, 0);
+    try testing.expectEqual(@as(i32, 0), out.rel_x);
+    try testing.expectEqual(@as(i32, 0), out.rel_y);
+}
+
+test "T4: curve=0 pow(x,0)=1 for nonzero input, no NaN" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{ .mode = "mouse", .curve = 0.0, .smoothing = 0.0, .sensitivity_x = 1.0, .sensitivity_y = 1.0 };
+    _ = g.process(&cfg, 100, 100, 0);
+    try testing.expect(!std.math.isNan(g.accum_x));
+    try testing.expect(!std.math.isInf(g.accum_x));
+}
+
+test "T4: sensitivity=0 and deadzone=32767 combination yields zero" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{ .mode = "mouse", .sensitivity_x = 0.0, .sensitivity_y = 0.0, .deadzone = 32767, .smoothing = 0.0 };
+    const out = g.process(&cfg, 30000, 30000, 0);
+    try testing.expectEqual(@as(i32, 0), out.rel_x);
+    try testing.expectEqual(@as(i32, 0), out.rel_y);
+}

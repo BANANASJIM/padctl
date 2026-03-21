@@ -556,3 +556,45 @@ test "emulate preset: unknown preset returns error" {
     ;
     try std.testing.expectError(error.UnknownPreset, parseString(allocator, toml_str));
 }
+
+// T5: config boundary cases
+
+test "T5: VID=0 is a valid config value" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "wildcard"
+        \\vid = 0
+        \\pid = 0
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(i64, 0), result.value.device.vid);
+}
+
+test "T5: empty device name parses and validates without error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = ""
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("", result.value.device.name);
+}

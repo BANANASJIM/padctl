@@ -301,6 +301,58 @@ test "EventLoop.addUinputFf registers fd and increments fd_count" {
     try testing.expectEqual(pfds[0], loop.pollfds[3].fd);
 }
 
+test "EventLoop: Disconnected device causes loop to exit without panic" {
+    const allocator = testing.allocator;
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    const dev = mock.deviceIO();
+    try loop.addDevice(dev);
+
+    // Noop OutputDevice
+    const NoopOutput = struct {
+        fn emit(_: *anyopaque, _: @import("core/state.zig").GamepadState) anyerror!void {}
+        fn pollFf(_: *anyopaque) anyerror!?uinput.FfEvent { return null; }
+        fn close(_: *anyopaque) void {}
+        const vtable = uinput.OutputDevice.VTable{ .emit = emit, .poll_ff = pollFf, .close = close };
+    };
+    var noop_sentinel: u8 = 0;
+    const output = uinput.OutputDevice{ .ptr = &noop_sentinel, .vtable = &NoopOutput.vtable };
+
+    const interp_toml =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+    ;
+    const parsed_dev = try @import("config/device.zig").parseString(allocator, interp_toml);
+    defer parsed_dev.deinit();
+    const interp = Interpreter.init(&parsed_dev.value);
+
+    var devs = [_]@import("io/device_io.zig").DeviceIO{dev};
+    const ctx = EventLoopContext{
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = output,
+    };
+
+    // Inject disconnect before run() — loop should read Disconnected and exit
+    try mock.injectDisconnect();
+
+    try loop.run(ctx);
+    try testing.expect(!loop.running);
+}
+
 test "EventLoop.init creates signalfd and timerfd" {
     var loop = try EventLoop.init();
     defer loop.deinit();

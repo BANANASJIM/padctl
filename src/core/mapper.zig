@@ -853,6 +853,73 @@ test "checkGyroActivate: unknown button name returns false" {
     try testing.expect(!checkGyroActivate("hold_UNKNOWN", 0xFFFFFFFF));
 }
 
+// T1: OOM paths
+
+test "T1: Mapper.apply toggle OOM is silently swallowed" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\activation = "toggle"
+    , allocator);
+    defer parsed.deinit();
+    // Failing allocator: Mapper.init succeeds (no heap alloc), first alloc fails on toggled.put.
+    var fa = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, fa.allocator());
+    defer m.deinit();
+    const sel_idx: u5 = @intCast(@intFromEnum(ButtonId.Select));
+    const sel_mask: u32 = @as(u32, 1) << sel_idx;
+    // Rising edge then release — toggle fires, toggled.put OOMs silently.
+    _ = try m.apply(.{ .buttons = sel_mask }, 16);
+    _ = try m.apply(.{}, 16);
+    // Mapper must stay usable.
+    _ = try m.apply(.{}, 16);
+}
+
+test "T1: TimerQueue.arm OOM returns error" {
+    var fa = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var q = TimerQueue.init(fa.allocator(), -1);
+    defer q.deinit();
+    try testing.expectError(error.OutOfMemory, q.arm(1000, 1));
+}
+
+test "T1: active_macros append OOM is silently ignored" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[macro]]
+        \\name = "boom"
+        \\steps = [{ tap = "KEY_A" }]
+        \\[remap]
+        \\A = "macro:boom"
+    , allocator);
+    defer parsed.deinit();
+    // Use failing allocator starting at index 2 to let Mapper.init succeed,
+    // then fail on the first active_macros.append during apply.
+    var fa = testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
+    var m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, fa.allocator());
+    defer m.deinit();
+    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
+    // Rising edge triggers macro dispatch; append failure must not crash.
+    _ = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
+}
+
+// T5: AuxEventList overflow
+
+test "T5: AuxEventList 64-item fill succeeds, 65th returns Overflow" {
+    var list = AuxEventList{};
+    for (0..64) |_| {
+        try list.append(.{ .rel = .{ .code = 0, .value = 1 } });
+    }
+    try testing.expectEqual(@as(usize, 64), list.len);
+    try testing.expectError(error.Overflow, list.append(.{ .rel = .{ .code = 0, .value = 1 } }));
+}
+
+test "T5: AuxEventList empty slice returns zero length" {
+    const list = AuxEventList{};
+    try testing.expectEqual(@as(usize, 0), list.slice().len);
+}
+
 test "gyro activate: inactive frame no REL events and processor reset" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(

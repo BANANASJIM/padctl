@@ -171,3 +171,38 @@ test "dt=0: mouse delta is zero" {
     try testing.expectEqual(@as(i32, 0), out.rel_x);
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
+
+// T4: extreme parameter values
+
+test "T4: sensitivity=0 produces zero mouse output" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 0.0 };
+    const out = sp.process(&cfg, 32000, 32000, 16);
+    try testing.expectEqual(@as(i32, 0), out.rel_x);
+    try testing.expectEqual(@as(i32, 0), out.rel_y);
+    try testing.expect(!std.math.isNan(sp.mouse_accum_x));
+}
+
+test "T4: deadzone=32767 absorbs all stick input" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "mouse", .deadzone = 32767, .sensitivity = 100.0 };
+    const out = sp.process(&cfg, 32766, 32766, 16);
+    try testing.expectEqual(@as(i32, 0), out.rel_x);
+    try testing.expectEqual(@as(i32, 0), out.rel_y);
+}
+
+test "T4: dt_ms=1 integrates without overflow" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 1.0 };
+    _ = sp.process(&cfg, 32000, 0, 1);
+    try testing.expect(!std.math.isNan(sp.mouse_accum_x));
+    try testing.expect(!std.math.isInf(sp.mouse_accum_x));
+}
+
+test "T4: dt_ms=100 integrates without overflow" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 1.0 };
+    _ = sp.process(&cfg, 32000, 0, 100);
+    try testing.expect(!std.math.isNan(sp.mouse_accum_x));
+    try testing.expect(!std.math.isInf(sp.mouse_accum_x));
+}
