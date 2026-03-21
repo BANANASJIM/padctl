@@ -4,7 +4,8 @@ After=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/padctl --config-dir /etc/padctl/devices.d/
+ExecStart=/usr/bin/padctl --config-dir /usr/share/padctl/devices/ --pid-file /run/padctl.pid
+PIDFile=/run/padctl.pid
 Restart=on-failure
 RestartSec=3
 

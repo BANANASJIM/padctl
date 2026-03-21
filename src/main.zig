@@ -5,6 +5,10 @@ pub const tools = struct {
     pub const docgen = @import("tools/docgen.zig");
 };
 
+pub const cli = struct {
+    pub const install = @import("cli/install.zig");
+};
+
 pub const wasm = struct {
     pub const runtime = @import("wasm/runtime.zig");
     pub const host = @import("wasm/host.zig");
@@ -74,6 +78,7 @@ const Cli = struct {
     validate_files: std.ArrayList([]const u8) = .{},
     doc_gen: bool = false,
     doc_gen_output: []const u8 = "docs/src/devices",
+    install_opts: ?cli.install.InstallOptions = null,
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -85,11 +90,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
     defer args.deinit();
     _ = args.next(); // skip argv[0]
 
-    var cli = Cli{ .allocator = allocator };
+    var parsed_cli = Cli{ .allocator = allocator };
     var in_validate = false;
     while (args.next()) |arg| {
         if (in_validate and !std.mem.startsWith(u8, arg, "--")) {
-            try cli.validate_files.append(allocator, arg);
+            try parsed_cli.validate_files.append(allocator, arg);
             continue;
         }
         in_validate = false;
@@ -99,31 +104,45 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
             _ = std.posix.write(std.posix.STDOUT_FILENO, "padctl " ++ VERSION ++ "\n") catch 0;
             std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "install")) {
+            var opts = cli.install.InstallOptions{};
+            while (args.next()) |iarg| {
+                if (std.mem.eql(u8, iarg, "--prefix")) {
+                    opts.prefix = args.next() orelse return error.MissingArgValue;
+                } else if (std.mem.eql(u8, iarg, "--destdir")) {
+                    opts.destdir = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown install argument: {s}", .{iarg});
+                    return error.UnknownArgument;
+                }
+            }
+            parsed_cli.install_opts = opts;
         } else if (std.mem.eql(u8, arg, "--config")) {
-            cli.config_path = args.next() orelse return error.MissingArgValue;
+            parsed_cli.config_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--config-dir")) {
-            cli.config_dir = args.next() orelse return error.MissingArgValue;
+            parsed_cli.config_dir = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--mapping")) {
-            cli.mapping_path = args.next() orelse return error.MissingArgValue;
+            parsed_cli.mapping_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--validate")) {
             in_validate = true;
             const first = args.next() orelse return error.MissingArgValue;
-            try cli.validate_files.append(allocator, first);
+            try parsed_cli.validate_files.append(allocator, first);
         } else if (std.mem.eql(u8, arg, "--doc-gen")) {
-            cli.doc_gen = true;
+            parsed_cli.doc_gen = true;
         } else if (std.mem.eql(u8, arg, "--output")) {
-            cli.doc_gen_output = args.next() orelse return error.MissingArgValue;
+            parsed_cli.doc_gen_output = args.next() orelse return error.MissingArgValue;
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
         }
     }
-    return cli;
+    return parsed_cli;
 }
 
 fn printHelp() void {
     const help =
         \\Usage: padctl [options]
+        \\       padctl install [--prefix /usr] [--destdir ""]
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
@@ -135,6 +154,11 @@ fn printHelp() void {
         \\  --help, -h          Show this help
         \\  --version, -V       Show version
         \\
+        \\Subcommands:
+        \\  install             Install binary, service, udev rules, and device configs
+        \\    --prefix <dir>    Installation prefix (default: /usr)
+        \\    --destdir <dir>   Staging root for package builds (default: "")
+        \\
     ;
     _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
 }
@@ -144,19 +168,28 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var cli = parseArgs(allocator) catch |err| {
+    var parsed = parseArgs(allocator) catch |err| {
         std.log.err("argument error: {}", .{err});
         printHelp();
         std.process.exit(1);
     };
-    defer cli.deinit();
+    defer parsed.deinit();
+
+    // install subcommand
+    if (parsed.install_opts) |opts| {
+        cli.install.run(allocator, opts) catch |err| {
+            std.log.err("install failed: {}", .{err});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    }
 
     // --validate mode: validate one or more files and exit
     // Exit 0 = all valid, 1 = validation errors, 2 = file not found / parse error
-    if (cli.validate_files.items.len > 0) {
+    if (parsed.validate_files.items.len > 0) {
         var any_error = false;
         var any_parse_fail = false;
-        for (cli.validate_files.items) |path| {
+        for (parsed.validate_files.items) |path| {
             const errors = tools.validate.validateFile(path, allocator) catch |err| {
                 std.log.err("{s}: {}", .{ path, err });
                 any_parse_fail = true;
@@ -182,13 +215,13 @@ pub fn main() !void {
     }
 
     // --doc-gen mode: generate Markdown reference page(s) and exit
-    if (cli.doc_gen) {
-        const path = cli.config_path orelse {
+    if (parsed.doc_gen) {
+        const path = parsed.config_path orelse {
             std.log.err("--doc-gen requires --config <path>", .{});
             std.process.exit(1);
         };
         const inputs = &[_][]const u8{path};
-        tools.docgen.runDocGen(allocator, inputs, cli.doc_gen_output) catch |err| {
+        tools.docgen.runDocGen(allocator, inputs, parsed.doc_gen_output) catch |err| {
             std.log.err("doc-gen failed: {}", .{err});
             std.process.exit(1);
         };
@@ -196,7 +229,7 @@ pub fn main() !void {
     }
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
-    if (cli.config_dir) |dir_path| {
+    if (parsed.config_dir) |dir_path| {
         var sup = Supervisor.init(allocator) catch |err| {
             std.log.err("failed to init supervisor: {}", .{err});
             std.process.exit(1);
@@ -217,19 +250,19 @@ pub fn main() !void {
         return;
     }
 
-    const config_path = cli.config_path orelse {
+    const config_path = parsed.config_path orelse {
         std.log.err("--config <path> or --config-dir <dir> is required", .{});
         printHelp();
         std.process.exit(1);
     };
 
-    const parsed = config.device.parseFile(allocator, config_path) catch |err| {
+    const device_cfg = config.device.parseFile(allocator, config_path) catch |err| {
         std.log.err("failed to load config '{s}': {}", .{ config_path, err });
         std.process.exit(1);
     };
-    defer parsed.deinit();
+    defer device_cfg.deinit();
 
-    var inst = DeviceInstance.init(allocator, &parsed.value) catch |err| {
+    var inst = DeviceInstance.init(allocator, &device_cfg.value) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };

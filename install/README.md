@@ -1,42 +1,32 @@
 # Installation
 
-## Service files
-
-Copy service files to the systemd unit directory and reload:
+## Recommended: `padctl install`
 
 ```sh
-cp padctl.service padctl@.service /etc/systemd/system/
-systemctl daemon-reload
+sudo padctl install
 ```
 
-Enable the daemon mode service (multi-device, uses netlink hotplug):
+Installs binary, systemd service, udev rules, and device configs in one step.
+
+Options:
+
+```sh
+sudo padctl install --prefix /usr --destdir /tmp/staging  # package builds
+```
+
+After installation, enable the daemon:
 
 ```sh
 systemctl enable --now padctl.service
 ```
 
-Or enable the per-device template service (udev-triggered):
+## Manual installation
 
 ```sh
-systemctl enable padctl@flydigi-vader5.service
+cp padctl padctl-capture padctl-debug /usr/bin/
+cp padctl.service /usr/lib/systemd/system/
+cp 99-padctl.rules /usr/lib/udev/rules.d/
+cp -r devices/ /usr/share/padctl/devices/
+systemctl daemon-reload
+udevadm control --reload-rules && udevadm trigger
 ```
-
-## udev rules
-
-Copy the rules file and reload:
-
-```sh
-cp 99-padctl.rules /etc/udev/rules.d/
-udevadm control --reload-rules
-```
-
-On next device plug-in, udev triggers `padctl@<name>.service` automatically.
-
-## Modes
-
-| Mode | Service | Trigger |
-|------|---------|---------|
-| Daemon (multi-device) | `padctl.service` | starts at boot, manages all devices via netlink |
-| Per-device | `padctl@.service` | udev starts one instance per device |
-
-Use one mode at a time — do not run both simultaneously.
