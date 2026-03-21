@@ -34,6 +34,21 @@ pub const DpadConfig = struct {
     suppress_gamepad: ?bool = null,
 };
 
+pub const AdaptiveTriggerParamConfig = struct {
+    position: ?i64 = null,
+    strength: ?i64 = null,
+    start: ?i64 = null,
+    end: ?i64 = null,
+    amplitude: ?i64 = null,
+    frequency: ?i64 = null,
+};
+
+pub const AdaptiveTriggerConfig = struct {
+    mode: []const u8 = "off",
+    left: ?AdaptiveTriggerParamConfig = null,
+    right: ?AdaptiveTriggerParamConfig = null,
+};
+
 pub const LayerConfig = struct {
     name: []const u8,
     trigger: []const u8,
@@ -45,6 +60,7 @@ pub const LayerConfig = struct {
     stick_left: ?StickConfig = null,
     stick_right: ?StickConfig = null,
     dpad: ?DpadConfig = null,
+    adaptive_trigger: ?AdaptiveTriggerConfig = null,
 };
 
 pub const MappingConfig = struct {
@@ -55,6 +71,7 @@ pub const MappingConfig = struct {
     dpad: ?DpadConfig = null,
     layer: ?[]const LayerConfig = null,
     macro: ?[]const Macro = null,
+    adaptive_trigger: ?AdaptiveTriggerConfig = null,
 };
 
 pub const ParseResult = toml.Parsed(MappingConfig);
@@ -90,8 +107,18 @@ fn checkRemapMacros(cfg: *const MappingConfig, map: *const toml.HashMap([]const 
     }
 }
 
+const valid_at_modes = [_][]const u8{ "off", "feedback", "weapon", "vibration" };
+
+fn validateAdaptiveTrigger(at: *const AdaptiveTriggerConfig) !void {
+    for (valid_at_modes) |v| {
+        if (std.mem.eql(u8, at.mode, v)) return;
+    }
+    return error.InvalidConfig;
+}
+
 pub fn validate(cfg: *const MappingConfig) !void {
     if (cfg.remap) |*m| try checkRemapMacros(cfg, m);
+    if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
 
     const layers = cfg.layer orelse return;
 
@@ -115,6 +142,7 @@ pub fn validate(cfg: *const MappingConfig) !void {
         seen_len += 1;
 
         if (layer.remap) |*m| try checkRemapMacros(cfg, m);
+        if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
     }
 }
 
@@ -439,6 +467,81 @@ test "validate: macro:name in layer remap references unknown macro returns error
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectError(error.UnknownMacro, validate(&result.value));
+}
+
+test "adaptive_trigger: valid mode parses and validates" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[adaptive_trigger]
+        \\mode = "feedback"
+        \\
+        \\[adaptive_trigger.left]
+        \\position = 70
+        \\strength = 200
+        \\
+        \\[adaptive_trigger.right]
+        \\position = 40
+        \\strength = 180
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const cfg = result.value;
+    try std.testing.expect(cfg.adaptive_trigger != null);
+    const at = cfg.adaptive_trigger.?;
+    try std.testing.expectEqualStrings("feedback", at.mode);
+    try std.testing.expectEqual(@as(?i64, 70), at.left.?.position);
+    try std.testing.expectEqual(@as(?i64, 200), at.left.?.strength);
+    try std.testing.expectEqual(@as(?i64, 40), at.right.?.position);
+    try validate(&cfg);
+}
+
+test "adaptive_trigger: invalid mode returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[adaptive_trigger]
+        \\mode = "bogus"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "adaptive_trigger: invalid mode in layer returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "fps"
+        \\trigger = "LT"
+        \\
+        \\[layer.adaptive_trigger]
+        \\mode = "unknown"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "adaptive_trigger: per-layer valid mode validates" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "racing"
+        \\trigger = "RB"
+        \\
+        \\[layer.adaptive_trigger]
+        \\mode = "weapon"
+        \\
+        \\[layer.adaptive_trigger.left]
+        \\start = 30
+        \\end = 120
+        \\strength = 200
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try validate(&result.value);
+    const at = result.value.layer.?[0].adaptive_trigger.?;
+    try std.testing.expectEqualStrings("weapon", at.mode);
+    try std.testing.expectEqual(@as(?i64, 30), at.left.?.start);
 }
 
 test "fuzz parseString: no panic on arbitrary input" {

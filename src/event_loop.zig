@@ -10,6 +10,8 @@ const mapper_mod = @import("core/mapper.zig");
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const fillTemplate = @import("core/command.zig").fillTemplate;
 const Param = @import("core/command.zig").Param;
+const AdaptiveTriggerConfig = @import("config/mapping.zig").AdaptiveTriggerConfig;
+const MappingConfig = @import("config/mapping.zig").MappingConfig;
 const wasm_runtime = @import("wasm/runtime.zig");
 pub const WasmPlugin = wasm_runtime.WasmPlugin;
 
@@ -57,8 +59,60 @@ pub const EventLoopContext = struct {
     touchpad_output: ?@import("io/uinput.zig").TouchpadOutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
+    mapping_config: ?*const MappingConfig = null,
     poll_timeout_ms: ?u32 = null,
 };
+
+fn i64ToParamValue(v: ?i64) u16 {
+    const raw = v orelse 0;
+    return @intCast((raw & 0xff) << 8);
+}
+
+fn buildAdaptiveTriggerParams(buf: *[12]Param, at: *const AdaptiveTriggerConfig) []const Param {
+    const r = at.right orelse .{};
+    const l = at.left orelse .{};
+    buf[0] = .{ .name = "r_position", .value = i64ToParamValue(r.position) };
+    buf[1] = .{ .name = "r_strength", .value = i64ToParamValue(r.strength) };
+    buf[2] = .{ .name = "r_start", .value = i64ToParamValue(r.start) };
+    buf[3] = .{ .name = "r_end", .value = i64ToParamValue(r.end) };
+    buf[4] = .{ .name = "r_amplitude", .value = i64ToParamValue(r.amplitude) };
+    buf[5] = .{ .name = "r_frequency", .value = i64ToParamValue(r.frequency) };
+    buf[6] = .{ .name = "l_position", .value = i64ToParamValue(l.position) };
+    buf[7] = .{ .name = "l_strength", .value = i64ToParamValue(l.strength) };
+    buf[8] = .{ .name = "l_start", .value = i64ToParamValue(l.start) };
+    buf[9] = .{ .name = "l_end", .value = i64ToParamValue(l.end) };
+    buf[10] = .{ .name = "l_amplitude", .value = i64ToParamValue(l.amplitude) };
+    buf[11] = .{ .name = "l_frequency", .value = i64ToParamValue(l.frequency) };
+    return buf[0..12];
+}
+
+pub fn applyAdaptiveTrigger(
+    devices: []DeviceIO,
+    alloc: std.mem.Allocator,
+    dcfg: *const DeviceConfig,
+    at_cfg: *const AdaptiveTriggerConfig,
+) void {
+    const cmds = dcfg.commands orelse return;
+
+    var name_buf: [32]u8 = undefined;
+    const prefix = "adaptive_trigger_";
+    if (prefix.len + at_cfg.mode.len > name_buf.len) return;
+    @memcpy(name_buf[0..prefix.len], prefix);
+    @memcpy(name_buf[prefix.len .. prefix.len + at_cfg.mode.len], at_cfg.mode);
+    const cmd_name = name_buf[0 .. prefix.len + at_cfg.mode.len];
+
+    const cmd = cmds.map.get(cmd_name) orelse return;
+    var params_buf: [12]Param = undefined;
+    const params = buildAdaptiveTriggerParams(&params_buf, at_cfg);
+
+    if (fillTemplate(alloc, cmd.template, params)) |bytes| {
+        defer alloc.free(bytes);
+        const iface_idx: usize = @intCast(cmd.interface);
+        if (iface_idx < devices.len) {
+            devices[iface_idx].write(bytes) catch {};
+        }
+    } else |_| {}
+}
 
 pub const EventLoop = struct {
     pollfds: [MAX_FDS]posix.pollfd,
@@ -156,6 +210,17 @@ pub const EventLoop = struct {
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         self.running = true;
         var buf: [64]u8 = undefined;
+
+        // Apply adaptive trigger config at startup (one-shot send)
+        if (ctx.allocator) |alloc| {
+            if (ctx.device_config) |dcfg| {
+                if (ctx.mapping_config) |mcfg| {
+                    if (mcfg.adaptive_trigger) |*at| {
+                        applyAdaptiveTrigger(ctx.devices, alloc, dcfg, at);
+                    }
+                }
+            }
+        }
 
         const timeout: ?posix.timespec = if (ctx.poll_timeout_ms) |ms|
             .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) }
@@ -776,5 +841,149 @@ test "T4: no commands.rumble — silent skip" {
     thread.join();
 
     // No write should have occurred
+    try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
+}
+
+// --- T8/T9: Adaptive trigger tests ---
+
+const command = @import("core/command.zig");
+const mapping_mod = @import("config/mapping.zig");
+
+test "buildAdaptiveTriggerParams: maps left/right values with shift" {
+    const at = mapping_mod.AdaptiveTriggerConfig{
+        .mode = "feedback",
+        .right = .{ .position = 40, .strength = 180 },
+        .left = .{ .position = 70, .strength = 200 },
+    };
+    var buf: [12]Param = undefined;
+    const params = buildAdaptiveTriggerParams(&buf, &at);
+    try testing.expectEqual(@as(usize, 12), params.len);
+    // r_position = 40 << 8
+    try testing.expectEqualStrings("r_position", params[0].name);
+    try testing.expectEqual(@as(u16, 40 << 8), params[0].value);
+    // r_strength = 180 << 8
+    try testing.expectEqualStrings("r_strength", params[1].name);
+    try testing.expectEqual(@as(u16, 180 << 8), params[1].value);
+    // l_position = 70 << 8
+    try testing.expectEqualStrings("l_position", params[6].name);
+    try testing.expectEqual(@as(u16, 70 << 8), params[6].value);
+    // l_strength = 200 << 8
+    try testing.expectEqualStrings("l_strength", params[7].name);
+    try testing.expectEqual(@as(u16, 200 << 8), params[7].value);
+}
+
+test "buildAdaptiveTriggerParams: null params default to 0" {
+    const at = mapping_mod.AdaptiveTriggerConfig{ .mode = "off" };
+    var buf: [12]Param = undefined;
+    const params = buildAdaptiveTriggerParams(&buf, &at);
+    for (params) |p| {
+        try testing.expectEqual(@as(u16, 0), p.value);
+    }
+}
+
+test "fillTemplate: adaptive trigger feedback template produces correct bytes" {
+    const allocator = testing.allocator;
+    const template = "02 0c 00 00 00 00 00 00 00 00 00 01 {r_position:u8} {r_strength:u8} 00 00 00 00 00 00 00 00 01 {l_position:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+    const at = mapping_mod.AdaptiveTriggerConfig{
+        .mode = "feedback",
+        .right = .{ .position = 40, .strength = 180 },
+        .left = .{ .position = 70, .strength = 200 },
+    };
+    var buf: [12]Param = undefined;
+    const params = buildAdaptiveTriggerParams(&buf, &at);
+    const result = try command.fillTemplate(allocator, template, params);
+    defer allocator.free(result);
+
+    try testing.expectEqual(@as(usize, 63), result.len);
+    // byte 0 = report ID 0x02
+    try testing.expectEqual(@as(u8, 0x02), result[0]);
+    // byte 1 = valid_flag0 0x0c
+    try testing.expectEqual(@as(u8, 0x0c), result[1]);
+    // byte 11 = right mode 0x01
+    try testing.expectEqual(@as(u8, 0x01), result[11]);
+    // byte 12 = r_position = 40
+    try testing.expectEqual(@as(u8, 40), result[12]);
+    // byte 13 = r_strength = 180
+    try testing.expectEqual(@as(u8, 180), result[13]);
+    // byte 22 = left mode 0x01
+    try testing.expectEqual(@as(u8, 0x01), result[22]);
+    // byte 23 = l_position = 70
+    try testing.expectEqual(@as(u8, 70), result[23]);
+    // byte 24 = l_strength = 200
+    try testing.expectEqual(@as(u8, 200), result[24]);
+}
+
+test "fillTemplate: adaptive trigger off template is all zeros except report ID and flags" {
+    const allocator = testing.allocator;
+    const template = "02 0c 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+    const result = try command.fillTemplate(allocator, template, &.{});
+    defer allocator.free(result);
+
+    try testing.expectEqual(@as(usize, 63), result.len);
+    try testing.expectEqual(@as(u8, 0x02), result[0]);
+    try testing.expectEqual(@as(u8, 0x0c), result[1]);
+    for (result[2..]) |b| {
+        try testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "applyAdaptiveTrigger: round-trip mapping config to device write" {
+    const allocator = testing.allocator;
+
+    const at_toml =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[commands.adaptive_trigger_feedback]
+        \\interface = 0
+        \\template = "02 0c 00 00 00 00 00 00 00 00 00 01 {r_position:u8} {r_strength:u8} 00 00 00 00 00 00 00 00 01 {l_position:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+    ;
+    const parsed = try device_mod.parseString(allocator, at_toml);
+    defer parsed.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    var devs = [_]DeviceIO{mock_dev.deviceIO()};
+
+    const at_cfg = mapping_mod.AdaptiveTriggerConfig{
+        .mode = "feedback",
+        .right = .{ .position = 50, .strength = 128 },
+        .left = .{ .position = 90, .strength = 255 },
+    };
+
+    applyAdaptiveTrigger(&devs, allocator, &parsed.value, &at_cfg);
+
+    // Should have written 63 bytes
+    try testing.expectEqual(@as(usize, 63), mock_dev.write_log.items.len);
+    // Verify key bytes
+    try testing.expectEqual(@as(u8, 0x02), mock_dev.write_log.items[0]);
+    try testing.expectEqual(@as(u8, 0x0c), mock_dev.write_log.items[1]);
+    try testing.expectEqual(@as(u8, 50), mock_dev.write_log.items[12]); // r_position
+    try testing.expectEqual(@as(u8, 128), mock_dev.write_log.items[13]); // r_strength
+    try testing.expectEqual(@as(u8, 90), mock_dev.write_log.items[23]); // l_position
+    try testing.expectEqual(@as(u8, 255), mock_dev.write_log.items[24]); // l_strength
+}
+
+test "applyAdaptiveTrigger: unknown mode silently skips" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    var devs = [_]DeviceIO{mock_dev.deviceIO()};
+
+    const at_cfg = mapping_mod.AdaptiveTriggerConfig{ .mode = "nonexistent" };
+    applyAdaptiveTrigger(&devs, allocator, &parsed.value, &at_cfg);
+
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
 }

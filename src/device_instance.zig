@@ -77,6 +77,7 @@ pub const DeviceInstance = struct {
     aux_dev: ?AuxDevice,
     touchpad_dev: ?TouchpadDevice,
     device_cfg: *const DeviceConfig,
+    mapping_cfg: ?*const MappingConfig = null,
     pending_mapping: ?*MappingConfig,
     stopped: bool,
     poll_timeout_ms: ?u32 = null,
@@ -174,6 +175,8 @@ pub const DeviceInstance = struct {
             const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
             const mapper_ptr: ?*Mapper = if (self.mapper) |*m| m else null;
 
+            const mcfg: ?*const MappingConfig = if (mapper_ptr) |m| m.config else self.mapping_cfg;
+
             try self.loop.run(.{
                 .devices = self.devices,
                 .interpreter = &self.interp,
@@ -183,6 +186,7 @@ pub const DeviceInstance = struct {
                 .touchpad_output = touchpad_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
+                .mapping_config = mcfg,
                 .poll_timeout_ms = self.poll_timeout_ms,
             });
             if (self.loop.disconnected) break;

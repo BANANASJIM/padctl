@@ -115,6 +115,38 @@ template = "02 01 00 {weak:u8} {strong:u8} 00 00 00 00 00 00 00 00 00 00 00 00 0
 interface = 3
 template = "02 00 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 02 00 00 01 00 00 {r:u8} {g:u8} {b:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
 
+# --- Adaptive trigger output report byte layout ---
+# byte 1 = valid_flag0: bit2=right trigger, bit3=left trigger (0x0c = both)
+# bytes 11-21 = right trigger: [mode, param0, param1, ...]
+# bytes 22-32 = left trigger:  [mode, param0, param1, ...]
+# Modes: 0x00=Off, 0x01=Feedback, 0x02=Weapon, 0x06=Vibration
+
+# Adaptive trigger: Off (both triggers)
+[commands.adaptive_trigger_off]
+interface = 3
+template = "02 0c 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+# Adaptive trigger: Feedback — continuous resistance from position with given strength
+# Right: mode 0x01 at byte 11, position at byte 12, strength at byte 13
+# Left:  mode 0x01 at byte 22, position at byte 23, strength at byte 24
+[commands.adaptive_trigger_feedback]
+interface = 3
+template = "02 0c 00 00 00 00 00 00 00 00 00 01 {r_position:u8} {r_strength:u8} 00 00 00 00 00 00 00 00 01 {l_position:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+# Adaptive trigger: Weapon — click at start position with given strength, releases after end
+# Right: mode 0x02 at byte 11, start at byte 12, end at byte 13, strength at byte 14
+# Left:  mode 0x02 at byte 22, start at byte 23, end at byte 24, strength at byte 25
+[commands.adaptive_trigger_weapon]
+interface = 3
+template = "02 0c 00 00 00 00 00 00 00 00 00 02 {r_start:u8} {r_end:u8} {r_strength:u8} 00 00 00 00 00 00 00 02 {l_start:u8} {l_end:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+# Adaptive trigger: Vibration — motor vibration effect
+# Right: mode 0x06 at byte 11, position at byte 12, amplitude at byte 13, frequency at byte 14
+# Left:  mode 0x06 at byte 22, position at byte 23, amplitude at byte 24, frequency at byte 25
+[commands.adaptive_trigger_vibration]
+interface = 3
+template = "02 0c 00 00 00 00 00 00 00 00 00 06 {r_position:u8} {r_amplitude:u8} {r_frequency:u8} 00 00 00 00 00 00 00 06 {l_position:u8} {l_amplitude:u8} {l_frequency:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
 # --- Output device ---
 [output]
 name = "Sony DualSense"

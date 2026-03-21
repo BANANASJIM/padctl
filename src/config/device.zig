@@ -496,8 +496,8 @@ test "dualsense.toml commands count" {
 
     const cfg = result.value;
     const cmds = cfg.commands orelse return error.NoCommands;
-    // rumble + led = 2
-    try std.testing.expectEqual(@as(usize, 2), cmds.map.count());
+    // rumble + led + 4 adaptive trigger = 6
+    try std.testing.expectEqual(@as(usize, 6), cmds.map.count());
 }
 
 test "dualsense.toml output axes and buttons count" {
