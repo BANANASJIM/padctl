@@ -66,7 +66,7 @@ pub fn signExtend(val: u32, bit_count: u6) i32 {
 
 // --- compile-time field name catalogue ---
 
-const FieldTag = enum {
+pub const FieldTag = enum {
     ax,
     ay,
     rx,
@@ -89,7 +89,7 @@ const FieldTag = enum {
     unknown,
 };
 
-fn parseFieldTag(name: []const u8) FieldTag {
+pub fn parseFieldTag(name: []const u8) FieldTag {
     if (std.mem.eql(u8, name, "left_x") or std.mem.eql(u8, name, "ax")) return .ax;
     if (std.mem.eql(u8, name, "left_y") or std.mem.eql(u8, name, "ay")) return .ay;
     if (std.mem.eql(u8, name, "right_x") or std.mem.eql(u8, name, "rx")) return .rx;
