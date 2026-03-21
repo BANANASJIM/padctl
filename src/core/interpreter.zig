@@ -1074,7 +1074,7 @@ test "DualSense battery_level: bits DSL extracts 4-bit nibble" {
     raw[53] = 0x18;
     raw[33] = 0x05;
     raw[37] = 0x80;
-    const delta = try interp.processReport(3, &raw);
+    const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
     try testing.expectEqual(@as(?u8, 8), delta.battery_level);
 }
 
