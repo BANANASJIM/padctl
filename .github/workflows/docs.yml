@@ -1,0 +1,50 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.0
+
+      - name: Install mdbook
+        run: |
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C /usr/local/bin
+
+      - name: Build padctl
+        run: zig build
+
+      - name: Validate all device configs
+        run: |
+          for f in devices/**/*.toml devices/*.toml; do
+            [ -f "$f" ] || continue
+            zig-out/bin/padctl --validate "$f"
+          done
+
+      - name: Generate device reference pages
+        run: |
+          mkdir -p docs/src/devices
+          for f in devices/**/*.toml devices/*.toml; do
+            [ -f "$f" ] || continue
+            zig-out/bin/padctl --doc-gen --config "$f" --output docs/src/devices
+          done
+
+      - name: Build mdbook
+        run: mdbook build docs/
+
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/book
+          publish_branch: gh-pages

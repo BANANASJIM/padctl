@@ -1,0 +1,10 @@
+[book]
+title = "padctl"
+src = "src"
+language = "en"
+multilingual = false
+
+[output.html]
+site-url = "/padctl/"
+git-repository-url = "https://github.com/jim-z/padctl"
+git-repository-icon = "fa-github"

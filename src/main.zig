@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const tools = struct {
     pub const validate = @import("tools/validate.zig");
+    pub const docgen = @import("tools/docgen.zig");
 };
 
 pub const core = struct {
@@ -65,6 +66,8 @@ const Cli = struct {
     config_dir: ?[]const u8 = null,
     mapping_path: ?[]const u8 = null,
     validate_files: std.ArrayList([]const u8) = .{},
+    doc_gen: bool = false,
+    doc_gen_output: []const u8 = "docs/src/devices",
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -100,6 +103,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             in_validate = true;
             const first = args.next() orelse return error.MissingArgValue;
             try cli.validate_files.append(allocator, first);
+        } else if (std.mem.eql(u8, arg, "--doc-gen")) {
+            cli.doc_gen = true;
+        } else if (std.mem.eql(u8, arg, "--output")) {
+            cli.doc_gen_output = args.next() orelse return error.MissingArgValue;
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -117,6 +124,8 @@ fn printHelp() void {
         \\  --config-dir <dir>  Glob *.toml in dir; discover all matching devices
         \\  --mapping <path>    Mapping config TOML file (optional)
         \\  --validate <path>   Validate device config and exit (returns 0/1)
+        \\  --doc-gen           Generate Markdown device reference from --config path(s)
+        \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
         \\  --help, -h          Show this help
         \\  --version, -V       Show version
         \\
@@ -163,6 +172,20 @@ pub fn main() !void {
         }
         if (any_parse_fail) std.process.exit(2);
         if (any_error) std.process.exit(1);
+        std.process.exit(0);
+    }
+
+    // --doc-gen mode: generate Markdown reference page(s) and exit
+    if (cli.doc_gen) {
+        const path = cli.config_path orelse {
+            std.log.err("--doc-gen requires --config <path>", .{});
+            std.process.exit(1);
+        };
+        const inputs = &[_][]const u8{path};
+        tools.docgen.runDocGen(allocator, inputs, cli.doc_gen_output) catch |err| {
+            std.log.err("doc-gen failed: {}", .{err});
+            std.process.exit(1);
+        };
         std.process.exit(0);
     }
 
