@@ -1,6 +1,9 @@
 # Contributing a Device Config
 
-Three steps:
+Adding a new device requires only **one file**: `devices/<vendor>/<device>.toml`.
+No source code changes needed — no test files, no registration, no build system edits.
+
+## Steps
 
 1. **Capture**: Run `padctl-capture` against the target device to produce a TOML skeleton.
 
@@ -11,20 +14,31 @@ Three steps:
 2. **Complete**: Fill in field names, button names, transform chains, and the `[output]` section.
    See existing configs in `devices/` for reference.
 
-3. **Submit**: Open a pull request. CI runs `padctl --validate` automatically. Once the validator
-   reports zero errors and a maintainer approves, the config is merged.
+3. **Validate**: Run locally before submitting:
 
-## Validator
+   ```
+   zig build && ./zig-out/bin/padctl --validate devices/<vendor>/<model>.toml
+   ```
 
-Run locally before submitting:
+   Exit 0 = valid. Exit 1 = validation errors (fix them). Exit 2 = file not found or parse failure.
 
-```
-zig build && ./zig-out/bin/padctl --validate devices/<vendor>/<model>.toml
-```
+4. **Test**: Run `zig build test` to confirm all tests pass. The test framework uses
+   `Dir.walk("devices/")` to auto-discover all `.toml` files — your new config is
+   automatically included without any manual registration.
 
-Exit 0 = valid. Exit 1 = validation errors (fix them). Exit 2 = file not found or parse failure.
+5. **Submit**: Open a pull request. CI runs the same auto-discovery tests automatically.
+   Once the validator reports zero errors and a maintainer approves, the config is merged.
 
-## Directory layout
+## CI Auto-Validation
+
+`zig build test` automatically validates every device TOML in the repository:
+
+- **TOML parse + semantic validation**: syntax correctness, field value legality
+- **FieldTag coverage**: all field names map to known FieldTag values
+- **ButtonId coverage**: all button_group keys are valid ButtonId enum values
+- **VID/PID validity**: all device configs contain valid VID/PID
+
+## Directory Layout
 
 ```
 devices/
