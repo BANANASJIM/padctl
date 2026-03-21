@@ -159,13 +159,7 @@ pub const Supervisor = struct {
         if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
         if (self.config_dir) |dir| self.allocator.free(dir);
-        for (self.managed.items) |*m| {
-            m.instance.deinit();
-            self.allocator.destroy(m.instance);
-            m.mapping_arena.deinit();
-            self.allocator.free(m.phys_key);
-            if (m.devname) |dn| self.allocator.free(dn);
-        }
+        for (self.managed.items) |*m| self.teardownManaged(m);
         self.managed.deinit(self.allocator);
         for (self.configs.items) |c| {
             c.deinit();
@@ -189,6 +183,7 @@ pub const Supervisor = struct {
         const phys_copy = try self.allocator.dupe(u8, phys_key);
         errdefer self.allocator.free(phys_copy);
         try self.devname_map.put(dev_copy, phys_copy);
+        errdefer _ = self.devname_map.fetchRemove(dev_copy);
         try self.spawnInstance(phys_key, instance);
     }
 
@@ -203,10 +198,7 @@ pub const Supervisor = struct {
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
                 m.instance.stop();
                 m.thread.join();
-                m.instance.deinit();
-                self.allocator.destroy(m.instance);
-                m.mapping_arena.deinit();
-                self.allocator.free(m.phys_key);
+                self.teardownManaged(m);
                 _ = self.managed.swapRemove(i);
                 return;
             }
@@ -226,16 +218,34 @@ pub const Supervisor = struct {
         });
     }
 
+    fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {
+        m.instance.deinit();
+        self.allocator.destroy(m.instance);
+        m.mapping_arena.deinit();
+        self.allocator.free(m.phys_key);
+        if (m.devname) |dn| self.allocator.free(dn);
+    }
+
+    fn doReload(
+        self: *Supervisor,
+        reloadFn: *const fn (allocator: std.mem.Allocator) anyerror![]ConfigEntry,
+        reload_allocator: std.mem.Allocator,
+        initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
+    ) void {
+        const new_configs = reloadFn(reload_allocator) catch |err| {
+            std.log.err("reload failed: {}", .{err});
+            return;
+        };
+        defer reload_allocator.free(new_configs);
+        self.reload(new_configs, initFn) catch |err| {
+            std.log.err("hot-reload diff failed: {}", .{err});
+        };
+    }
+
     pub fn stopAll(self: *Supervisor) void {
         for (self.managed.items) |*m| m.instance.stop();
         for (self.managed.items) |*m| m.thread.join();
-        for (self.managed.items) |*m| {
-            m.instance.deinit();
-            self.allocator.destroy(m.instance);
-            m.mapping_arena.deinit();
-            self.allocator.free(m.phys_key);
-            if (m.devname) |dn| self.allocator.free(dn);
-        }
+        for (self.managed.items) |*m| self.teardownManaged(m);
         self.managed.clearRetainingCapacity();
     }
 
@@ -262,11 +272,7 @@ pub const Supervisor = struct {
             const m = &self.managed.items[idx];
             m.instance.stop();
             m.thread.join();
-            m.instance.deinit();
-            self.allocator.destroy(m.instance);
-            m.mapping_arena.deinit();
-            self.allocator.free(m.phys_key);
-            if (m.devname) |dn| self.allocator.free(dn);
+            self.teardownManaged(m);
             _ = self.managed.swapRemove(idx);
         }
 
@@ -363,17 +369,7 @@ pub const Supervisor = struct {
             if (pollfds[1].revents & posix.POLL.IN != 0) {
                 var buf: [128]u8 = undefined;
                 _ = posix.read(self.hup_fd, &buf) catch {};
-
-                const new_configs = reloadFn(reload_allocator) catch |err| {
-                    std.log.err("reload failed: {}", .{err});
-                    continue;
-                };
-                defer reload_allocator.free(new_configs);
-
-                self.reload(new_configs, initFn) catch |err| {
-                    std.log.err("hot-reload diff failed: {}", .{err});
-                };
-
+                self.doReload(reloadFn, reload_allocator, initFn);
                 pollfds[1].revents = 0;
             }
 
@@ -388,20 +384,9 @@ pub const Supervisor = struct {
             }
 
             if (pollfds[4].revents & posix.POLL.IN != 0) {
-                // Debounce timer fired — trigger reload (same path as SIGHUP)
                 var tbuf: [8]u8 = undefined;
                 _ = posix.read(self.debounce_fd, &tbuf) catch {};
-
-                const new_configs = reloadFn(reload_allocator) catch |err| {
-                    std.log.err("reload failed: {}", .{err});
-                    continue;
-                };
-                defer reload_allocator.free(new_configs);
-
-                self.reload(new_configs, initFn) catch |err| {
-                    std.log.err("hot-reload diff failed: {}", .{err});
-                };
-
+                self.doReload(reloadFn, reload_allocator, initFn);
                 pollfds[4].revents = 0;
             }
         }
