@@ -78,7 +78,7 @@ pub const Mapper = struct {
         self.layer.deinit();
     }
 
-    pub fn apply(self: *Mapper, delta: GamepadStateDelta) !OutputEvents {
+    pub fn apply(self: *Mapper, delta: GamepadStateDelta, dt_ms: u32) !OutputEvents {
         // flush pending tap release from previous frame
         var aux = AuxEventList{};
         if (self.pending_tap_release) |mask| {
@@ -136,7 +136,7 @@ pub const Mapper = struct {
             }
 
             const left_cfg = self.effectiveStickConfig(.left);
-            const left_out = self.stick_left.process(&left_cfg, self.state.ax, self.state.ay, 16);
+            const left_out = self.stick_left.process(&left_cfg, self.state.ax, self.state.ay, dt_ms);
             if (std.mem.eql(u8, left_cfg.mode, "mouse")) {
                 if (left_out.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = left_out.rel_x } }) catch {};
                 if (left_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = left_out.rel_y } }) catch {};
@@ -145,7 +145,7 @@ pub const Mapper = struct {
             }
 
             const right_cfg = self.effectiveStickConfig(.right);
-            const right_out = self.stick_right.process(&right_cfg, self.state.rx, self.state.ry, 16);
+            const right_out = self.stick_right.process(&right_cfg, self.state.rx, self.state.ry, dt_ms);
             if (std.mem.eql(u8, right_cfg.mode, "mouse")) {
                 if (right_out.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = right_out.rel_x } }) catch {};
                 if (right_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = right_out.rel_y } }) catch {};
@@ -383,7 +383,7 @@ test "no layer no remap: apply passes through unchanged" {
     defer m.deinit();
 
     const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
     try testing.expect((events.gamepad.buttons & (@as(u32, 1) << a_idx)) != 0);
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
@@ -400,7 +400,7 @@ test "base remap disabled: source button suppressed" {
     defer m.deinit();
 
     const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
@@ -417,7 +417,7 @@ test "base remap key: source -> KEY_F13 aux event" {
     defer m.deinit();
 
     const m1_idx: u5 = @intCast(@intFromEnum(ButtonId.M1));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << m1_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << m1_idx }, 16);
 
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << m1_idx));
     try testing.expectEqual(@as(usize, 1), events.aux.len);
@@ -443,7 +443,7 @@ test "base remap gamepad_button: A -> B" {
 
     const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
     const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
 
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
     try testing.expect((events.gamepad.buttons & (@as(u32, 1) << b_idx)) != 0);
@@ -478,7 +478,7 @@ test "layer remap overrides base: base A->B, layer A->C" {
     const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
     const x_idx: u5 = @intCast(@intFromEnum(ButtonId.X));
 
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
 
     // A suppressed
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
@@ -514,7 +514,7 @@ test "suppress accumulates: base suppress A + layer suppress B" {
     const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
     const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
     const both = (@as(u32, 1) << a_idx) | (@as(u32, 1) << b_idx);
-    const events = try m.apply(.{ .buttons = both });
+    const events = try m.apply(.{ .buttons = both }, 16);
 
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << b_idx));
@@ -548,7 +548,7 @@ test "inject last-write wins: layer inject overrides base inject for same button
     const x_idx: u5 = @intCast(@intFromEnum(ButtonId.X));
     const y_idx: u5 = @intCast(@intFromEnum(ButtonId.Y));
 
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
 
     try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << x_idx));
     try testing.expect((events.gamepad.buttons & (@as(u32, 1) << y_idx)) != 0);
@@ -569,12 +569,12 @@ test "prev frame masking: suppress produces correct diff" {
     const a_mask: u32 = @as(u32, 1) << a_idx;
 
     // Frame N-1: A pressed, remap disabled
-    const ev1 = try m.apply(.{ .buttons = a_mask });
+    const ev1 = try m.apply(.{ .buttons = a_mask }, 16);
     // A is suppressed in output, prev is now raw a_mask
     try testing.expectEqual(@as(u32, 0), ev1.gamepad.buttons & a_mask);
 
     // Frame N: A still pressed — should produce no change (both masked_prev and gamepad have A=0)
-    const ev2 = try m.apply(.{ .buttons = a_mask });
+    const ev2 = try m.apply(.{ .buttons = a_mask }, 16);
     try testing.expectEqual(@as(u32, 0), ev2.gamepad.buttons & a_mask);
     // masked_prev should also have A=0 (same suppress applied)
     try testing.expectEqual(@as(u32, 0), ev2.prev.buttons & a_mask);
@@ -609,7 +609,7 @@ test "onTimerExpired: PENDING -> ACTIVE activates layer" {
     // Now layer remap should be active
     const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
     const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx });
+    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
     try testing.expect((events.gamepad.buttons & (@as(u32, 1) << b_idx)) != 0);
 }
 
@@ -692,17 +692,56 @@ test "gamepad_button tap: injected this frame, released next frame" {
     const a_mask: u32 = @as(u32, 1) << a_idx;
 
     // Press LT -> PENDING
-    _ = try m.apply(.{ .buttons = lt_mask });
+    _ = try m.apply(.{ .buttons = lt_mask }, 16);
     // Release LT -> tap fires (PENDING->IDLE with tap)
-    const ev_tap = try m.apply(.{ .buttons = 0 });
+    const ev_tap = try m.apply(.{ .buttons = 0 }, 16);
     // A should be injected this frame
     try testing.expect((ev_tap.gamepad.buttons & a_mask) != 0);
     try testing.expect(m.pending_tap_release != null);
 
     // Next frame: pending_tap_release should clear A
-    const ev_release = try m.apply(.{});
+    const ev_release = try m.apply(.{}, 16);
     try testing.expectEqual(@as(u32, 0), ev_release.gamepad.buttons & a_mask);
     try testing.expect(m.pending_tap_release == null);
+}
+
+test "dt_ms propagation: stick mouse output scales with dt" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[stick.right]
+        \\mode = "mouse"
+        \\deadzone = 0
+        \\sensitivity = 100.0
+    , allocator);
+    defer parsed.deinit();
+
+    // m4: 4 frames at dt=4ms (total elapsed = 16ms)
+    // m16: 1 frame at dt=16ms (total elapsed = 16ms)
+    // Both should produce the same total REL displacement.
+    var m4 = try makeMapper(&parsed.value, allocator);
+    defer m4.deinit();
+    var m16 = try makeMapper(&parsed.value, allocator);
+    defer m16.deinit();
+
+    var total4: i32 = 0;
+    for (0..4) |_| {
+        const ev = try m4.apply(.{ .rx = 10000 }, 4);
+        for (ev.aux.slice()) |e| switch (e) {
+            .rel => |r| if (r.code == 0) { total4 += r.value; },
+            else => {},
+        };
+    }
+
+    var total16: i32 = 0;
+    const ev16 = try m16.apply(.{ .rx = 10000 }, 16);
+    for (ev16.aux.slice()) |e| switch (e) {
+        .rel => |r| if (r.code == 0) { total16 += r.value; },
+        else => {},
+    };
+
+    // 4 frames × dt=4 ≡ 1 frame × dt=16 in total motion budget
+    const diff = @abs(total4 - total16);
+    try testing.expect(diff <= 2);
 }
 
 test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
@@ -718,11 +757,11 @@ test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     defer m.deinit();
 
     // Frame 1: dpad up
-    const ev1 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 });
+    const ev1 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16);
     try testing.expectEqual(@as(i8, 0), ev1.gamepad.dpad_y);
 
     // Frame 2: same dpad — masked_prev should also have dpad_y = 0
-    const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 });
+    const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16);
     try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
 }
 

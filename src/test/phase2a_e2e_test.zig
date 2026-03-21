@@ -69,7 +69,7 @@ test "e2e: layer hold — PENDING → ACTIVE, layer remap activates" {
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 
     // Frame 2: A press while layer active → mouse_left aux event
-    const ev = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
 
     var found_mouse_left = false;
@@ -86,7 +86,7 @@ test "e2e: layer hold — PENDING → ACTIVE, layer remap activates" {
     // Frame 3: LT release → layer IDLE, A restores
     _ = m.layer.onTriggerRelease(null);
     try testing.expect(m.layer.tap_hold == null);
-    const ev2 = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev2 = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     try testing.expect((ev2.gamepad.buttons & btnMask(.A)) != 0);
     try testing.expectEqual(@as(usize, 0), ev2.aux.len);
 }
@@ -160,7 +160,7 @@ test "e2e: suppress/inject — no layer: A→KEY_F13, mouse_side unaffected" {
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     // A suppressed in gamepad
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
     // KEY_F13 in aux
@@ -197,7 +197,7 @@ test "e2e: suppress/inject — layer ACTIVE: A→mouse_left overrides base A→K
     _ = m.layer.onTriggerPress(configs[0].name, 200);
     _ = m.layer.onTimerExpired();
 
-    const ev = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
 
     var found_mouse_left = false;
@@ -228,7 +228,7 @@ test "e2e: gyro mouse mode — non-zero gyro produces REL_X/REL_Y aux events" {
     var m = &ctx.mapper;
 
     // Large gyro value to ensure accumulation crosses integer threshold
-    const ev = try m.apply(.{ .gyro_x = 10, .gyro_y = 10 });
+    const ev = try m.apply(.{ .gyro_x = 10, .gyro_y = 10 }, 16);
 
     var found_rel_x = false;
     var found_rel_y = false;
@@ -253,7 +253,7 @@ test "e2e: gyro off mode — no REL events" {
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000 });
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000 }, 16);
     for (ev.aux.slice()) |e| {
         switch (e) {
             .rel => return error.UnexpectedRelEvent,
@@ -274,7 +274,7 @@ test "e2e: dual uinput routing — gamepad_button remap stays on main device, no
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     // A suppressed, B injected in gamepad (main device)
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expect((ev.gamepad.buttons & btnMask(.B)) != 0);
@@ -292,7 +292,7 @@ test "e2e: dual uinput routing — key remap goes to aux, not main device" {
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expectEqual(@as(usize, 1), ev.aux.len);
     switch (ev.aux.get(0)) {
@@ -314,7 +314,7 @@ test "e2e: dual uinput routing — mouse_button remap goes to aux" {
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .buttons = btnMask(.RB) });
+    const ev = try m.apply(.{ .buttons = btnMask(.RB) }, 16);
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.RB));
     try testing.expectEqual(@as(usize, 1), ev.aux.len);
     switch (ev.aux.get(0)) {
@@ -338,7 +338,7 @@ test "e2e: dual uinput routing — same frame: gamepad remap + key remap both ro
     var m = &ctx.mapper;
 
     const buttons = btnMask(.A) | btnMask(.RB);
-    const ev = try m.apply(.{ .buttons = buttons });
+    const ev = try m.apply(.{ .buttons = buttons }, 16);
 
     // A→B on main device
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
@@ -368,7 +368,7 @@ test "e2e: dpad arrows — dpad_y=-1 (first press) → KEY_UP press" {
     var m = &ctx.mapper;
 
     // prev dpad_y = 0 (default), current = -1
-    const ev = try m.apply(.{ .dpad_y = -1 });
+    const ev = try m.apply(.{ .dpad_y = -1 }, 16);
     var found_key_up_press = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
@@ -390,10 +390,10 @@ test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
     var m = &ctx.mapper;
 
     // Set prev to dpad_y = -1 by applying that state first
-    _ = try m.apply(.{ .dpad_y = -1 });
+    _ = try m.apply(.{ .dpad_y = -1 }, 16);
 
     // Now dpad_y returns to 0 → KEY_UP release
-    const ev = try m.apply(.{ .dpad_y = 0 });
+    const ev = try m.apply(.{ .dpad_y = 0 }, 16);
     var found_key_up_release = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
@@ -412,7 +412,7 @@ test "e2e: dpad gamepad mode — dpad passes through unchanged, no aux KEY event
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .dpad_y = -1 });
+    const ev = try m.apply(.{ .dpad_y = -1 }, 16);
     for (ev.aux.slice()) |e| {
         switch (e) {
             .key => return error.UnexpectedKeyEvent,
@@ -433,7 +433,7 @@ test "e2e: dpad arrows suppress_gamepad — dpad_x/y zeroed in emit_state" {
     defer ctx.mapper.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .dpad_y = -1 });
+    const ev = try m.apply(.{ .dpad_y = -1 }, 16);
     try testing.expectEqual(@as(i8, 0), ev.gamepad.dpad_y);
     try testing.expectEqual(@as(i8, 0), ev.gamepad.dpad_x);
 }
@@ -457,7 +457,7 @@ test "e2e: prev-frame mask — layer activates mid-stream, no spurious release f
     const configs = ctx.parsed.value.layer.?;
 
     // Frame N-1: B pressed, no layer → B passes through
-    const ev1 = try m.apply(.{ .buttons = btnMask(.B) });
+    const ev1 = try m.apply(.{ .buttons = btnMask(.B) }, 16);
     try testing.expect((ev1.gamepad.buttons & btnMask(.B)) != 0);
 
     // Layer activates (simulate timer)
@@ -465,7 +465,7 @@ test "e2e: prev-frame mask — layer activates mid-stream, no spurious release f
     _ = m.layer.onTimerExpired();
 
     // Frame N: B still held + layer ACTIVE → B suppressed in both current and masked_prev
-    const ev2 = try m.apply(.{ .buttons = btnMask(.B) });
+    const ev2 = try m.apply(.{ .buttons = btnMask(.B) }, 16);
     // B suppressed in emit output
     try testing.expectEqual(@as(u32, 0), ev2.gamepad.buttons & btnMask(.B));
     // B also suppressed in masked_prev (no spurious release diff)
@@ -498,7 +498,7 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
     try testing.expect(m.layer.toggled.contains("fn"));
 
     // A press → KEY_F1 in aux
-    const ev1 = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev1 = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     var found_f1 = false;
     for (ev1.aux.slice()) |e| {
         switch (e) {
@@ -515,7 +515,7 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
     try testing.expect(!m.layer.toggled.contains("fn"));
 
     // A press now → A passes through on main device
-    const ev2 = try m.apply(.{ .buttons = btnMask(.A) });
+    const ev2 = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     try testing.expect((ev2.gamepad.buttons & btnMask(.A)) != 0);
     var no_f1 = true;
     for (ev2.aux.slice()) |e| {
@@ -552,7 +552,7 @@ test "e2e: layer remap fall-through — button not in layer remap uses base rema
     _ = m.layer.onTimerExpired();
 
     // X pressed — not in layer remap, should fall through to base (KEY_F13)
-    const ev = try m.apply(.{ .buttons = btnMask(.X) });
+    const ev = try m.apply(.{ .buttons = btnMask(.X) }, 16);
     try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.X));
     var found_f13 = false;
     for (ev.aux.slice()) |e| {

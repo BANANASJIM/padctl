@@ -58,6 +58,7 @@ pub const EventLoop = struct {
     uinput_ff_slot: ?usize,
     running: bool,
     gamepad_state: state.GamepadState,
+    last_ts: i128,
 
     pub fn init() !EventLoop {
         var mask = posix.sigemptyset();
@@ -90,6 +91,7 @@ pub const EventLoop = struct {
             .uinput_ff_slot = null,
             .running = false,
             .gamepad_state = .{},
+            .last_ts = std.time.nanoTimestamp(),
         };
 
         // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = timerfd
@@ -135,6 +137,11 @@ pub const EventLoop = struct {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
+
+            const now = std.time.nanoTimestamp();
+            const dt_ns = now - self.last_ts;
+            const dt_ms: u32 = @intCast(@min(100, @max(1, @divFloor(dt_ns, 1_000_000))));
+            self.last_ts = now;
 
             // Check signalfd (slot 0)
             if (self.pollfds[0].revents & posix.POLL.IN != 0) {
@@ -201,7 +208,7 @@ pub const EventLoop = struct {
                     const interface_id: u8 = @intCast(i);
                     if (interpreter.processReport(interface_id, buf[0..n]) catch null) |delta| {
                         if (mapper) |m| {
-                            const events = try m.apply(delta);
+                            const events = try m.apply(delta, dt_ms);
                             self.gamepad_state.applyDelta(delta);
                             try output.emit(events.gamepad);
                             if (aux_output) |ao| {
