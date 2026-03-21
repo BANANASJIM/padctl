@@ -988,6 +988,71 @@ test "DualSense battery and touchpad fields parse without error" {
     _ = try interp.processReport(3, &raw);
 }
 
+fn makeDualSenseBtSample() [78]u8 {
+    var raw = [_]u8{0} ** 78;
+    raw[0] = 0x31; // Report ID
+    raw[2] = 0x00; // left_x = 0 → scale → -32768
+    raw[3] = 0xFF; // left_y = 255 → scale → 32767 → negate → -32767
+    raw[4] = 0xFF; // right_x = 255 → scale → 32767
+    raw[5] = 0x00; // right_y = 0 → scale → wraps to -32768
+    raw[6] = 0xC0; // lt = 192
+    raw[7] = 0x80; // rt = 128
+    // byte 9: bit4=Square(X), bit5=Cross(A)
+    raw[9] = 0x30;
+    // gyro at BT offset 17-22
+    std.mem.writeInt(i16, raw[17..19], 512, .little);
+    std.mem.writeInt(i16, raw[19..21], -512, .little);
+    std.mem.writeInt(i16, raw[21..23], 256, .little);
+    // accel at BT offset 23-28
+    std.mem.writeInt(i16, raw[23..25], 8192, .little);
+    std.mem.writeInt(i16, raw[25..27], 0, .little);
+    std.mem.writeInt(i16, raw[27..29], -8192, .little);
+    // CRC32(seed=0xa1, raw[0..74]) = 0x02662fd2
+    raw[74] = 0xd2;
+    raw[75] = 0x2f;
+    raw[76] = 0x66;
+    raw[77] = 0x02;
+    return raw;
+}
+
+test "DualSense BT report: axes, triggers, IMU, buttons, CRC32" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const raw = makeDualSenseBtSample();
+    const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+
+    try testing.expectEqual(@as(?i16, -32768), delta.ax);
+    try testing.expectEqual(@as(?i16, -32767), delta.ay);
+    try testing.expectEqual(@as(?i16, 32767), delta.rx);
+    try testing.expectEqual(@as(?u8, 0xC0), delta.lt);
+    try testing.expectEqual(@as(?u8, 0x80), delta.rt);
+    try testing.expectEqual(@as(?i16, 512), delta.gyro_x);
+    try testing.expectEqual(@as(?i16, -512), delta.gyro_y);
+    try testing.expectEqual(@as(?i16, 256), delta.gyro_z);
+    try testing.expectEqual(@as(?i16, 8192), delta.accel_x);
+    try testing.expectEqual(@as(?i16, 0), delta.accel_y);
+    try testing.expectEqual(@as(?i16, -8192), delta.accel_z);
+
+    const btns = delta.buttons orelse return error.NoBtns;
+    const x_bit: u5 = @intCast(@intFromEnum(ButtonId.X));
+    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
+    try testing.expect(btns & (@as(u32, 1) << x_bit) != 0);
+    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0);
+}
+
+test "DualSense BT report: CRC32 mismatch returns error" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = makeDualSenseBtSample();
+    // Corrupt CRC
+    raw[74] = 0x00;
+    try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(3, &raw));
+}
+
 test "button_group batch extraction" {
     const allocator = testing.allocator;
     const toml_str =
