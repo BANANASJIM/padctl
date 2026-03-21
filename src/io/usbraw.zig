@@ -256,18 +256,16 @@ test "RingBuffer wraps around correctly" {
 
 test "RingBuffer concurrent push/pop" {
     var ring = RingBuffer{};
-    var push_count: usize = 0;
 
     const producer = try std.Thread.spawn(.{}, struct {
-        fn run(r: *RingBuffer, count: *usize) void {
+        fn run(r: *RingBuffer) void {
             var buf: [32]u8 = undefined;
             for (0..1000) |i| {
                 std.mem.writeInt(u32, buf[0..4], @intCast(i), .little);
                 r.push(buf[0..32]);
-                count.* += 1;
             }
         }
-    }.run, .{ &ring, &push_count });
+    }.run, .{&ring});
 
     var last_seen: u32 = 0;
     var pop_count: usize = 0;

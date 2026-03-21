@@ -134,8 +134,7 @@ test "T5: attach duplicate devname — no-op, still one instance" {
     const inst_b = try makeInstance(allocator, &mock_b, &parsed.value);
     // inst_b is not attached; we must clean it up ourselves.
     defer {
-        inst_b.loop.deinit();
-        allocator.free(inst_b.devices);
+        inst_b.deinit();
         allocator.destroy(inst_b);
     }
     try sup.attachWithInstance("hidraw3", "usb-1-1b", inst_b);

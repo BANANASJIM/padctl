@@ -270,8 +270,7 @@ test "T7: layer switch while macro active — held keys released, macros cleared
         \\[remap]
         \\M1 = "macro:shift_hold"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // Press M1 to start macro — down LSHIFT emitted, delay armed.
@@ -416,8 +415,7 @@ test "T7: mapper macro trigger — M1=macro:dodge_roll press starts player" {
         \\[remap]
         \\M1 = "macro:dodge_roll"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // Rising edge: M1 press → macro player added.
@@ -441,8 +439,7 @@ test "T7: mapper macro trigger — no second player on held button (no re-trigge
         \\[remap]
         \\M1 = "macro:dodge_roll"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const m1_mask = btnMask(.M1);

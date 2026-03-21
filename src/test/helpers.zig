@@ -27,10 +27,19 @@ pub fn btnMask(id: ButtonId) u32 {
 pub const MapperContext = struct {
     parsed: mapping.ParseResult,
     mapper: Mapper,
+    timer_fd: std.posix.fd_t,
+
+    pub fn deinit(self: *MapperContext) void {
+        self.mapper.deinit();
+        std.posix.close(self.timer_fd);
+        self.parsed.deinit();
+    }
 };
 
 pub fn makeMapper(toml_str: []const u8, allocator: std.mem.Allocator) !MapperContext {
     const parsed = try mapping.parseString(allocator, toml_str);
-    const m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, allocator);
-    return .{ .parsed = parsed, .mapper = m };
+    const timer_fd = try std.posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+    errdefer std.posix.close(timer_fd);
+    const m = try Mapper.init(&parsed.value, timer_fd, allocator);
+    return .{ .parsed = parsed, .mapper = m, .timer_fd = timer_fd };
 }

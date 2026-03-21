@@ -43,8 +43,7 @@ test "e2e: layer hold — PENDING → ACTIVE, layer remap activates" {
         \\[layer.remap]
         \\A = "mouse_left"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
@@ -91,8 +90,7 @@ test "e2e: layer tap — quick release emits tap event" {
         \\activation = "hold"
         \\tap = "mouse_left"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
@@ -122,8 +120,7 @@ test "e2e: layer tap — no tap after timeout (ACTIVE release)" {
         \\activation = "hold"
         \\tap = "mouse_left"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
@@ -145,8 +142,7 @@ test "e2e: suppress/inject — no layer: A→KEY_F13, mouse_side unaffected" {
         \\[remap]
         \\A = "KEY_F13"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
@@ -177,8 +173,7 @@ test "e2e: suppress/inject — layer ACTIVE: A→mouse_left overrides base A→K
         \\[layer.remap]
         \\A = "mouse_left"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
@@ -216,8 +211,7 @@ test "e2e: gyro mouse mode — non-zero gyro produces REL_X/REL_Y aux events" {
         \\smoothing = 0.0
         \\sensitivity = 1000.0
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // Large gyro value to ensure accumulation crosses integer threshold
@@ -242,8 +236,7 @@ test "e2e: gyro off mode — no REL events" {
     const allocator = testing.allocator;
     // Default gyro mode is "off"
     var ctx = try makeMapper("", allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000 }, 16);
@@ -263,8 +256,7 @@ test "e2e: dual uinput routing — gamepad_button remap stays on main device, no
         \\[remap]
         \\A = "B"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
@@ -281,8 +273,7 @@ test "e2e: dual uinput routing — key remap goes to aux, not main device" {
         \\[remap]
         \\A = "KEY_F1"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
@@ -303,8 +294,7 @@ test "e2e: dual uinput routing — mouse_button remap goes to aux" {
         \\[remap]
         \\RB = "mouse_left"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .buttons = btnMask(.RB) }, 16);
@@ -326,8 +316,7 @@ test "e2e: dual uinput routing — same frame: gamepad remap + key remap both ro
         \\A = "B"
         \\RB = "KEY_F1"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const buttons = btnMask(.A) | btnMask(.RB);
@@ -358,8 +347,7 @@ test "e2e: dpad arrows — dpad_y=-1 (first press) → KEY_UP press" {
         \\[dpad]
         \\mode = "arrows"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // prev dpad_y = 0 (default), current = -1
@@ -382,8 +370,7 @@ test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
         \\[dpad]
         \\mode = "arrows"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // Set prev to dpad_y = -1 by applying that state first
@@ -407,8 +394,7 @@ test "e2e: dpad gamepad mode — dpad passes through unchanged, no aux KEY event
     const allocator = testing.allocator;
     // Default mode is "gamepad"
     var ctx = try makeMapper("", allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .dpad_y = -1 }, 16);
@@ -428,8 +414,7 @@ test "e2e: dpad arrows suppress_gamepad — dpad_x/y zeroed in emit_state" {
         \\mode = "arrows"
         \\suppress_gamepad = true
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .dpad_y = -1 }, 16);
@@ -450,8 +435,7 @@ test "e2e: prev-frame mask — layer activates mid-stream, no spurious release f
         \\[layer.remap]
         \\B = "disabled"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
@@ -484,8 +468,7 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
         \\[layer.remap]
         \\A = "KEY_F1"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
@@ -546,8 +529,7 @@ test "e2e: layer remap fall-through — button not in layer remap uses base rema
         \\[layer.remap]
         \\RB = "mouse_left"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 

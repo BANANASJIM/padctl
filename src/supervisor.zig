@@ -714,8 +714,7 @@ test "Supervisor: duplicate attach devname — only one instance created" {
 
     const inst2 = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
     defer {
-        inst2.loop.deinit();
-        allocator.free(inst2.devices);
+        inst2.deinit();
         allocator.destroy(inst2);
     }
     try sup.attachWithInstance("hidraw3", "usb-1-1b", inst2);

@@ -131,8 +131,7 @@ test "e2e: gyro activate hold_RB — RB held produces REL, released produces non
         \\smoothing = 0.0
         \\activate = "hold_RB"
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     const rb = btnMask(.RB);
@@ -166,8 +165,7 @@ test "e2e: gyro joystick — gyro overrides emit_state.rx/ry, no REL events" {
         \\sensitivity_y = 1000.0
         \\smoothing = 0.0
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // Large gyro with original rx/ry set to known value
@@ -194,8 +192,7 @@ test "e2e: gyro joystick — zero gyro leaves rx/ry at zero (deadzone)" {
         \\smoothing = 0.0
         \\deadzone = 200
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // gyro within deadzone → joy_x/y = 0
@@ -219,8 +216,7 @@ test "e2e: layer switch resets gyro EMA — no jump after activation" {
         \\sensitivity = 100.0
         \\smoothing = 0.5
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // Dirty EMA state
@@ -247,8 +243,7 @@ test "e2e: layer switch resets gyro EMA — no jump after activation" {
 test "e2e: no layer switch — EMA preserved across frames" {
     const allocator = testing.allocator;
     var ctx = try makeMapper("", allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     m.gyro_proc.ema_x = 55.0;
@@ -270,11 +265,15 @@ test "e2e: dt_ms scaling — 4 frames@4ms == 1 frame@16ms (right stick mouse)" {
         \\deadzone = 0
         \\sensitivity = 100.0
     , allocator);
-    defer ctx.parsed.deinit();
+    defer ctx.deinit();
 
-    var m4 = try Mapper.init(&ctx.parsed.value, std.posix.STDIN_FILENO, allocator);
+    const tfd4 = try std.posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(tfd4);
+    var m4 = try Mapper.init(&ctx.parsed.value, tfd4, allocator);
     defer m4.deinit();
-    var m16 = try Mapper.init(&ctx.parsed.value, std.posix.STDIN_FILENO, allocator);
+    const tfd16 = try std.posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(tfd16);
+    var m16 = try Mapper.init(&ctx.parsed.value, tfd16, allocator);
     defer m16.deinit();
 
     var total4: i32 = 0;
@@ -309,8 +308,7 @@ test "e2e: dt_ms=1 clamp — stick still produces output (no divide-by-zero)" {
         \\deadzone = 0
         \\sensitivity = 200.0
     , allocator);
-    defer ctx.parsed.deinit();
-    defer ctx.mapper.deinit();
+    defer ctx.deinit();
     var m = &ctx.mapper;
 
     // dt=1 is minimum; should not crash or return zero unexpectedly for large input
