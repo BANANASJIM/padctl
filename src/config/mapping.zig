@@ -440,3 +440,14 @@ test "validate: macro:name in layer remap references unknown macro returns error
     defer result.deinit();
     try std.testing.expectError(error.UnknownMacro, validate(&result.value));
 }
+
+test "fuzz parseString" {
+    var rng = std.Random.DefaultPrng.init(0xDEADBEEF);
+    var buf: [512]u8 = undefined;
+    for (0..5000) |_| {
+        const len = rng.random().intRangeAtMost(usize, 0, 512);
+        rng.random().bytes(buf[0..len]);
+        const result = parseString(std.testing.allocator, buf[0..len]);
+        if (result) |r| r.deinit() else |_| {}
+    }
+}
