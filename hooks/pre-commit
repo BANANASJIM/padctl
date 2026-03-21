@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if ! zig fmt --check src/ tools/ 2>/dev/null; then
+    echo "ERROR: zig fmt check failed. Run 'zig fmt src/ tools/' to fix."
+    exit 1
+fi
+
+if ! zig build 2>/dev/null; then
+    echo "ERROR: zig build failed."
+    exit 1
+fi

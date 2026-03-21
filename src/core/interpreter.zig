@@ -46,9 +46,18 @@ fn readFieldByTag(raw: []const u8, off: usize, t: FieldType) i64 {
 // --- compile-time field name catalogue ---
 
 const FieldTag = enum {
-    ax, ay, rx, ry, lt, rt,
-    gyro_x, gyro_y, gyro_z,
-    accel_x, accel_y, accel_z,
+    ax,
+    ay,
+    rx,
+    ry,
+    lt,
+    rt,
+    gyro_x,
+    gyro_y,
+    gyro_z,
+    accel_x,
+    accel_y,
+    accel_z,
     unknown,
 };
 
@@ -112,7 +121,9 @@ fn compileTransformChain(chain: []const u8, type_tag: FieldType) CompiledTransfo
     while (pos < chain.len) : (pos += 1) {
         switch (chain[pos]) {
             '(' => depth += 1,
-            ')' => if (depth > 0) { depth -= 1; },
+            ')' => if (depth > 0) {
+                depth -= 1;
+            },
             ',' => if (depth == 0) {
                 if (result.len < MAX_TRANSFORMS)
                     result.items[result.len] = compileTransformSeg(std.mem.trim(u8, chain[seg_start..pos], " \t"));
@@ -1042,7 +1053,7 @@ test "checksum crc32 correct passes" {
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     // CRC32-IsoHdlc([0xAA,0x01,0x02,0x03]) = 0xa96f7f72
-    var raw = [_]u8{0xAA, 0x01, 0x02, 0x03, 0x72, 0x7f, 0x6f, 0xa9, 0x00};
+    var raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0x72, 0x7f, 0x6f, 0xa9, 0x00 };
     _ = try interp.processReport(0, &raw);
 }
 
@@ -1052,7 +1063,7 @@ test "checksum crc32 mismatch returns error" {
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     // Store wrong crc
-    var raw = [_]u8{0xAA, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00};
+    var raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00 };
     try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
 }
 
@@ -1083,6 +1094,6 @@ test "checksum crc32 with seed" {
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     // seed=66=0x42 → CRC32(seed_byte=0x42, data=[0x01,0x02,0x03]) = 0xbaa416a5
-    var raw = [_]u8{0x01, 0x01, 0x02, 0x03, 0xa5, 0x16, 0xa4, 0xba, 0x00};
+    var raw = [_]u8{ 0x01, 0x01, 0x02, 0x03, 0xa5, 0x16, 0xa4, 0xba, 0x00 };
     _ = try interp.processReport(0, &raw);
 }
