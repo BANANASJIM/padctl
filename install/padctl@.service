@@ -1,0 +1,10 @@
+[Unit]
+Description=padctl for %I
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/padctl --config /etc/padctl/devices.d/%I.toml
+Restart=on-failure
+RestartSec=1

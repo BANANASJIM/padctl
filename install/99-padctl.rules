@@ -1,0 +1,4 @@
+# Flydigi Vader 5 Pro
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2401", TAG+="systemd", ENV{SYSTEMD_WANTS}="padctl@flydigi-vader5.service"
+# Sony DualSense
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", TAG+="systemd", ENV{SYSTEMD_WANTS}="padctl@dualsense.service"

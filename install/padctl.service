@@ -1,0 +1,12 @@
+[Unit]
+Description=padctl gamepad compatibility daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/padctl --config-dir /etc/padctl/devices.d/
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
