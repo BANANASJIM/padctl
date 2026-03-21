@@ -5,6 +5,10 @@ pub const tools = struct {
     pub const docgen = @import("tools/docgen.zig");
 };
 
+pub const subcommands = struct {
+    pub const reload = @import("cli/reload.zig");
+};
+
 pub const wasm = struct {
     pub const runtime = @import("wasm/runtime.zig");
     pub const host = @import("wasm/host.zig");
@@ -63,6 +67,7 @@ const DeviceInstance = device_instance.DeviceInstance;
 const Supervisor = supervisor.Supervisor;
 const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
+const reload_cmd = @import("cli/reload.zig");
 
 const VERSION = "0.1.0";
 
@@ -74,6 +79,8 @@ const Cli = struct {
     validate_files: std.ArrayList([]const u8) = .{},
     doc_gen: bool = false,
     doc_gen_output: []const u8 = "docs/src/devices",
+    reload: bool = false,
+    reload_pid: ?[]const u8 = null,
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -113,6 +120,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             cli.doc_gen = true;
         } else if (std.mem.eql(u8, arg, "--output")) {
             cli.doc_gen_output = args.next() orelse return error.MissingArgValue;
+        } else if (std.mem.eql(u8, arg, "reload")) {
+            cli.reload = true;
+        } else if (std.mem.eql(u8, arg, "--pid")) {
+            cli.reload_pid = args.next() orelse return error.MissingArgValue;
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -135,6 +146,9 @@ fn printHelp() void {
         \\  --help, -h          Show this help
         \\  --version, -V       Show version
         \\
+        \\Subcommands:
+        \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
+        \\
     ;
     _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
 }
@@ -150,6 +164,12 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer cli.deinit();
+
+    // reload subcommand
+    if (cli.reload) {
+        try reload_cmd.run(allocator, cli.reload_pid);
+        return;
+    }
 
     // --validate mode: validate one or more files and exit
     // Exit 0 = all valid, 1 = validation errors, 2 = file not found / parse error
