@@ -205,6 +205,10 @@ pub const Supervisor = struct {
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance) !void {
         const thread = try std.Thread.spawn(.{}, threadEntry, .{instance});
+        errdefer {
+            instance.stop();
+            thread.join();
+        }
         const key_copy = try self.allocator.dupe(u8, phys_key);
         errdefer self.allocator.free(key_copy);
         try self.managed.append(self.allocator, .{

@@ -16,8 +16,10 @@ const output_offset: u32 = 4096;
 const stack_size: u32 = 1024 * 1024;
 
 comptime {
-    // If this fails, deltaFromBytes @bitCast may be invalid — review padding.
-    std.debug.assert(@sizeOf(GamepadStateDelta) == @bitSizeOf(GamepadStateDelta) / 8);
+    const fields = @typeInfo(GamepadStateDelta).@"struct".fields;
+    var bit_sum: usize = 0;
+    for (fields) |f| bit_sum += @bitSizeOf(f.type);
+    std.debug.assert(bit_sum == @bitSizeOf(GamepadStateDelta));
 }
 
 pub const Wasm3Plugin = struct {
