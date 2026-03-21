@@ -46,6 +46,26 @@ pub const GamepadState = struct {
     accel_y: i16 = 0,
     accel_z: i16 = 0,
 
+    pub fn diff(self: GamepadState, prev: GamepadState) GamepadStateDelta {
+        var d = GamepadStateDelta{};
+        if (self.ax != prev.ax) d.ax = self.ax;
+        if (self.ay != prev.ay) d.ay = self.ay;
+        if (self.rx != prev.rx) d.rx = self.rx;
+        if (self.ry != prev.ry) d.ry = self.ry;
+        if (self.lt != prev.lt) d.lt = self.lt;
+        if (self.rt != prev.rt) d.rt = self.rt;
+        if (self.dpad_x != prev.dpad_x) d.dpad_x = self.dpad_x;
+        if (self.dpad_y != prev.dpad_y) d.dpad_y = self.dpad_y;
+        if (self.buttons != prev.buttons) d.buttons = self.buttons;
+        if (self.gyro_x != prev.gyro_x) d.gyro_x = self.gyro_x;
+        if (self.gyro_y != prev.gyro_y) d.gyro_y = self.gyro_y;
+        if (self.gyro_z != prev.gyro_z) d.gyro_z = self.gyro_z;
+        if (self.accel_x != prev.accel_x) d.accel_x = self.accel_x;
+        if (self.accel_y != prev.accel_y) d.accel_y = self.accel_y;
+        if (self.accel_z != prev.accel_z) d.accel_z = self.accel_z;
+        return d;
+    }
+
     pub fn applyDelta(self: *GamepadState, delta: GamepadStateDelta) void {
         if (delta.ax) |v| self.ax = v;
         if (delta.ay) |v| self.ay = v;
@@ -134,4 +154,20 @@ test "applyDelta: partial overwrite leaves other fields unchanged" {
     try std.testing.expectEqual(@as(i16, 6), s.ay); // unchanged
     try std.testing.expectEqual(@as(i16, 7), s.rx); // unchanged
     try std.testing.expectEqual(@as(u32, 0x0F), s.buttons);
+}
+
+test "diff: identical states produce empty delta" {
+    const s = GamepadState{ .ax = 10, .buttons = 0xFF };
+    const d = s.diff(s);
+    try std.testing.expectEqual(@as(?i16, null), d.ax);
+    try std.testing.expectEqual(@as(?u32, null), d.buttons);
+}
+
+test "diff: changed fields appear in delta" {
+    const prev = GamepadState{ .ax = 10, .ay = 20 };
+    const curr = GamepadState{ .ax = 50, .ay = 20, .lt = 128 };
+    const d = curr.diff(prev);
+    try std.testing.expectEqual(@as(?i16, 50), d.ax);
+    try std.testing.expectEqual(@as(?i16, null), d.ay); // unchanged
+    try std.testing.expectEqual(@as(?u8, 128), d.lt);
 }

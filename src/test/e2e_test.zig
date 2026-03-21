@@ -165,16 +165,21 @@ const pipeline_toml =
     \\map = { A = 0, B = 1 }
 ;
 
+const GamepadStateDelta = state_mod.GamepadStateDelta;
+
 const MockOutput = struct {
     allocator: std.mem.Allocator,
     emitted: std.ArrayList(GamepadState),
+    diffs: std.ArrayList(GamepadStateDelta),
+    prev: GamepadState = .{},
 
     fn init(allocator: std.mem.Allocator) MockOutput {
-        return .{ .allocator = allocator, .emitted = .{} };
+        return .{ .allocator = allocator, .emitted = .{}, .diffs = .{} };
     }
 
     fn deinit(self: *MockOutput) void {
         self.emitted.deinit(self.allocator);
+        self.diffs.deinit(self.allocator);
     }
 
     fn outputDevice(self: *MockOutput) uinput.OutputDevice {
@@ -189,7 +194,9 @@ const MockOutput = struct {
 
     fn mockEmit(ptr: *anyopaque, s: GamepadState) anyerror!void {
         const self: *MockOutput = @ptrCast(@alignCast(ptr));
+        try self.diffs.append(self.allocator, s.diff(self.prev));
         try self.emitted.append(self.allocator, s);
+        self.prev = s;
     }
 
     fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
@@ -255,15 +262,17 @@ test "EventLoop pipeline: A press then release" {
     loop.stop();
     thread.join();
 
-    try testing.expect(out.emitted.items.len >= 2);
+    try testing.expect(out.diffs.items.len >= 2);
 
     const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
     const a_mask: u32 = @as(u32, 1) << a_bit;
 
-    // First emit: A pressed
-    try testing.expect(out.emitted.items[0].buttons & a_mask != 0);
-    // Second emit: A released
-    try testing.expect(out.emitted.items[1].buttons & a_mask == 0);
+    // First diff: buttons changed, A pressed
+    const d0_btns = out.diffs.items[0].buttons orelse return error.NoDiff;
+    try testing.expect(d0_btns & a_mask != 0);
+    // Second diff: buttons changed, A released
+    const d1_btns = out.diffs.items[1].buttons orelse return error.NoDiff;
+    try testing.expect(d1_btns & a_mask == 0);
 }
 
 // --- Layer 2 (manual) ---

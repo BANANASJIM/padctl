@@ -450,13 +450,16 @@ test "parseHexBytes via init_seq" {
 const MockOutput = struct {
     allocator: std.mem.Allocator,
     emitted: std.ArrayList(core.state.GamepadState),
+    diffs: std.ArrayList(core.state.GamepadStateDelta),
+    prev: core.state.GamepadState = .{},
 
     fn init(allocator: std.mem.Allocator) MockOutput {
-        return .{ .allocator = allocator, .emitted = .{} };
+        return .{ .allocator = allocator, .emitted = .{}, .diffs = .{} };
     }
 
     fn deinit(self: *MockOutput) void {
         self.emitted.deinit(self.allocator);
+        self.diffs.deinit(self.allocator);
     }
 
     fn outputDevice(self: *MockOutput) io.uinput.OutputDevice {
@@ -471,7 +474,9 @@ const MockOutput = struct {
 
     fn mockEmit(ptr: *anyopaque, s: core.state.GamepadState) anyerror!void {
         const self: *MockOutput = @ptrCast(@alignCast(ptr));
+        try self.diffs.append(self.allocator, s.diff(self.prev));
         try self.emitted.append(self.allocator, s);
+        self.prev = s;
     }
 
     fn mockPollFf(_: *anyopaque) anyerror!?io.uinput.FfEvent {
@@ -542,8 +547,8 @@ test "pipeline: known frame dispatched to output" {
     loop.stop();
     thread.join();
 
-    try testing.expect(out.emitted.items.len >= 1);
-    try testing.expectEqual(@as(i16, 750), loop.gamepad_state.ax);
+    try testing.expect(out.diffs.items.len >= 1);
+    try testing.expectEqual(@as(?i16, 750), out.diffs.items[0].ax);
 }
 
 test "pipeline: unknown report does not call output.emit" {
@@ -587,7 +592,7 @@ test "pipeline: unknown report does not call output.emit" {
     loop.stop();
     thread.join();
 
-    try testing.expectEqual(@as(usize, 0), out.emitted.items.len);
+    try testing.expectEqual(@as(usize, 0), out.diffs.items.len);
 }
 
 test "pipeline: signalfd stop — no fd leak" {
@@ -627,5 +632,5 @@ test "pipeline: signalfd stop — no fd leak" {
     loop.stop();
     thread.join();
     // If we reach here without crash, fds are properly managed (GPA would catch leaks)
-    try testing.expectEqual(@as(usize, 0), out.emitted.items.len);
+    try testing.expectEqual(@as(usize, 0), out.diffs.items.len);
 }

@@ -69,6 +69,7 @@ pub const EventLoop = struct {
     device_base: usize,
     timer_fd: posix.fd_t,
     uinput_ff_slot: ?usize,
+    disconnected: bool,
     running: bool,
     gamepad_state: state.GamepadState,
     last_ts: i128,
@@ -120,6 +121,7 @@ pub const EventLoop = struct {
             .device_base = 0,
             .timer_fd = timer_fd,
             .uinput_ff_slot = null,
+            .disconnected = false,
             .running = false,
             .gamepad_state = .{},
             .last_ts = std.time.nanoTimestamp(),
@@ -226,6 +228,7 @@ pub const EventLoop = struct {
 
                 // POLLHUP/POLLERR means the peer closed — treat as disconnect.
                 if (self.pollfds[slot].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                    self.disconnected = true;
                     self.running = false;
                     break;
                 }
@@ -528,17 +531,20 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 }
 
-// MockOutput for event loop integration test
+// MockOutput for event loop integration test — records diffs between consecutive emits
 const MockOutput = struct {
     allocator: std.mem.Allocator,
     emitted: std.ArrayList(state.GamepadState),
+    diffs: std.ArrayList(state.GamepadStateDelta),
+    prev: state.GamepadState = .{},
 
     fn init(allocator: std.mem.Allocator) MockOutput {
-        return .{ .allocator = allocator, .emitted = .{} };
+        return .{ .allocator = allocator, .emitted = .{}, .diffs = .{} };
     }
 
     fn deinit(self: *MockOutput) void {
         self.emitted.deinit(self.allocator);
+        self.diffs.deinit(self.allocator);
     }
 
     fn outputDevice(self: *MockOutput) uinput.OutputDevice {
@@ -553,7 +559,9 @@ const MockOutput = struct {
 
     fn mockEmit(ptr: *anyopaque, s: state.GamepadState) anyerror!void {
         const self: *MockOutput = @ptrCast(@alignCast(ptr));
+        try self.diffs.append(self.allocator, s.diff(self.prev));
         try self.emitted.append(self.allocator, s);
+        self.prev = s;
     }
 
     fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
@@ -633,8 +641,8 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
     thread.join();
 
     try testing.expectEqual(@as(i16, 500), loop.gamepad_state.ax);
-    try testing.expectEqual(@as(usize, 1), out.emitted.items.len);
-    try testing.expectEqual(@as(i16, 500), out.emitted.items[0].ax);
+    try testing.expectEqual(@as(usize, 1), out.diffs.items.len);
+    try testing.expectEqual(@as(?i16, 500), out.diffs.items[0].ax);
 }
 
 // T4: FF routing tests
