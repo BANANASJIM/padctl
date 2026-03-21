@@ -10,6 +10,8 @@ pub const cli = struct {
     pub const scan = @import("cli/scan.zig");
     pub const reload = @import("cli/reload.zig");
     pub const config = struct {
+        pub const list = @import("cli/config/list.zig");
+        pub const init = @import("cli/config/init.zig");
         pub const edit = @import("cli/config/edit.zig");
         pub const @"test" = @import("cli/config/test.zig");
     };
@@ -90,10 +92,18 @@ const Cli = struct {
     scan_config_dir: []const u8 = "/usr/share/padctl/devices",
     reload: bool = false,
     reload_pid: ?[]const u8 = null,
+    config_cmd: ?ConfigCmd = null,
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
     }
+};
+
+const ConfigCmd = union(enum) {
+    list,
+    init: struct { device: ?[]const u8, preset: ?[]const u8 },
+    edit: ?[]const u8,
+    @"test": struct { config: ?[]const u8, mapping: ?[]const u8 },
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
@@ -156,6 +166,48 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             parsed_cli.reload = true;
         } else if (std.mem.eql(u8, arg, "--pid")) {
             parsed_cli.reload_pid = args.next() orelse return error.MissingArgValue;
+        } else if (std.mem.eql(u8, arg, "config")) {
+            const sub = args.next() orelse {
+                std.log.err("config: missing subcommand (list|init|edit|test)", .{});
+                return error.MissingArgValue;
+            };
+            if (std.mem.eql(u8, sub, "list")) {
+                parsed_cli.config_cmd = .list;
+            } else if (std.mem.eql(u8, sub, "init")) {
+                var device: ?[]const u8 = null;
+                var preset: ?[]const u8 = null;
+                while (args.next()) |iarg| {
+                    if (std.mem.eql(u8, iarg, "--device")) {
+                        device = args.next() orelse return error.MissingArgValue;
+                    } else if (std.mem.eql(u8, iarg, "--preset")) {
+                        preset = args.next() orelse return error.MissingArgValue;
+                    } else {
+                        std.log.err("unknown config init argument: {s}", .{iarg});
+                        return error.UnknownArgument;
+                    }
+                }
+                parsed_cli.config_cmd = .{ .init = .{ .device = device, .preset = preset } };
+            } else if (std.mem.eql(u8, sub, "edit")) {
+                const mapping_name = args.next();
+                parsed_cli.config_cmd = .{ .edit = mapping_name };
+            } else if (std.mem.eql(u8, sub, "test")) {
+                var test_config: ?[]const u8 = null;
+                var test_mapping: ?[]const u8 = null;
+                while (args.next()) |targ| {
+                    if (std.mem.eql(u8, targ, "--config")) {
+                        test_config = args.next() orelse return error.MissingArgValue;
+                    } else if (std.mem.eql(u8, targ, "--mapping")) {
+                        test_mapping = args.next() orelse return error.MissingArgValue;
+                    } else {
+                        std.log.err("unknown config test argument: {s}", .{targ});
+                        return error.UnknownArgument;
+                    }
+                }
+                parsed_cli.config_cmd = .{ .@"test" = .{ .config = test_config, .mapping = test_mapping } };
+            } else {
+                std.log.err("unknown config subcommand: {s}", .{sub});
+                return error.UnknownArgument;
+            }
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -178,6 +230,14 @@ fn printHelp() void {
         \\  scan                  List connected HID devices and config match status
         \\    --config-dir <dir>  Search for device configs here (default: /usr/share/padctl/devices)
         \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
+        \\  config list           List XDG-layer device and mapping configs
+        \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
+        \\    --device <name>     Skip device selection prompt
+        \\    --preset <name>     Skip output preset prompt (xbox-360/xbox-elite2/dualsense/switch-pro)
+        \\  config edit [name]    Open mapping in $VISUAL/$EDITOR; validate on exit
+        \\  config test           Live input preview (Ctrl-C to exit)
+        \\    --config <path>     Device config to identify input
+        \\    --mapping <path>    Mapping to apply for display
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
@@ -249,6 +309,37 @@ pub fn main() !void {
             std.log.err("reload failed: {}", .{err});
             std.process.exit(1);
         };
+        std.process.exit(0);
+    }
+
+    // config subcommand group
+    if (parsed.config_cmd) |cmd| {
+        switch (cmd) {
+            .list => {
+                cli.config.list.run(allocator) catch |err| {
+                    std.log.err("config list failed: {}", .{err});
+                    std.process.exit(1);
+                };
+            },
+            .init => |opts| {
+                cli.config.init.run(allocator, opts.device, opts.preset) catch |err| {
+                    std.log.err("config init failed: {}", .{err});
+                    std.process.exit(1);
+                };
+            },
+            .edit => |name| {
+                cli.config.edit.run(allocator, name) catch |err| {
+                    std.log.err("config edit failed: {}", .{err});
+                    std.process.exit(1);
+                };
+            },
+            .@"test" => |opts| {
+                cli.config.@"test".run(allocator, opts.config, opts.mapping) catch |err| {
+                    std.log.err("config test failed: {}", .{err});
+                    std.process.exit(1);
+                };
+            },
+        }
         std.process.exit(0);
     }
 
