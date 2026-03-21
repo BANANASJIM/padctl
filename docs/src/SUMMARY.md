@@ -6,3 +6,4 @@
 - [Device Config Reference](device-config.md)
 - [Mapping Config Reference](mapping-config.md)
 - [Device Reference](devices/README.md)
+- [Contributing](contributing/device-toml-from-inputplumber.md)

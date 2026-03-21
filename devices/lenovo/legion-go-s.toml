@@ -1,0 +1,81 @@
+[device]
+name = "Lenovo Legion Go S"
+vid = 0x1a86
+pid = 0xe310   # XInput mode; DInput mode = 0xe311
+
+[[device.interface]]
+id = 6
+class = "hid"   # gamepad report_id=0x06 (32B input) + rumble output report_id=0x04
+
+# --- Gamepad input (Report ID 0x06, 32 bytes) ---
+[[report]]
+name = "gamepad"
+interface = 6
+size = 32
+
+[report.match]
+offset = 0
+expect = [0x06]
+
+[report.fields]
+# Sticks: i8, center = 0; scale to ±32767
+left_x  = { offset = 4, type = "i8", transform = "scale(-32768, 32767)" }
+left_y  = { offset = 5, type = "i8", transform = "scale(-32768, 32767), negate" }
+right_x = { offset = 6, type = "i8", transform = "scale(-32768, 32767)" }
+right_y = { offset = 7, type = "i8", transform = "scale(-32768, 32767), negate" }
+# Triggers: u8, 0 = released
+lt = { offset = 12, type = "u8" }
+rt = { offset = 13, type = "u8" }
+
+# Buttons: bytes 0–3 (32 bits), MSB0 → LSB0 converted
+# Formula: lsb = (msb/8)*8 + (7 - msb%8)
+# byte 0 bits: Legion=0, QuickAccess=1, R3=2, L3=3, DPadUp=4, DPadDown=5, DPadLeft=6, DPadRight=7
+# byte 1 bits: RT_dig=8, LT_dig=9, RB=10, LB=11, Y=12, X=13, B=14, A=15
+# byte 2 bits: Y1=20, Y2=21, Menu=22, View=23
+# QuickAccess → M1; Y1 → M2; Y2 → M3 (ButtonId has no device-specific names)
+[report.button_group]
+source = { offset = 0, size = 4 }
+map = { Home = 0, M1 = 1, RS = 2, LS = 3, DPadUp = 4, DPadDown = 5, DPadLeft = 6, DPadRight = 7, RT = 8, LT = 9, RB = 10, LB = 11, Y = 12, X = 13, B = 14, A = 15, M2 = 20, M3 = 21, Start = 22, Select = 23 }
+
+# --- Rumble output (Report ID 0x04, 9 bytes) ---
+[commands.rumble]
+interface = 6
+template = "04 00 08 00 {strong:u8} {weak:u8} 00 00 00"
+
+# --- Output device ---
+# Emulate Xbox Elite Series 2 for broad game compatibility
+[output]
+name = "Xbox Elite Series 2"
+vid = 0x045e
+pid = 0x0b00
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.buttons]
+A            = "BTN_SOUTH"
+B            = "BTN_EAST"
+X            = "BTN_NORTH"
+Y            = "BTN_WEST"
+LB           = "BTN_TL"
+RB           = "BTN_TR"
+Select       = "BTN_SELECT"
+Start        = "BTN_START"
+Home         = "BTN_MODE"
+LS           = "BTN_THUMBL"
+RS           = "BTN_THUMBR"
+M1           = "BTN_TRIGGER_HAPPY1"
+M2           = "BTN_TRIGGER_HAPPY2"
+M3           = "BTN_TRIGGER_HAPPY3"
+
+[output.dpad]
+type = "hat"
+
+[output.force_feedback]
+type = "rumble"
+max_effects = 16
