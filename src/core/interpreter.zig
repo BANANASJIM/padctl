@@ -1135,6 +1135,22 @@ test "T3: all-0xFF report does not panic" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
+test "pseudo-fuzz processReport" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, vader5_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var rng = std.Random.DefaultPrng.init(0x12345678);
+    var buf: [256]u8 = undefined;
+    for (0..10000) |_| {
+        const len = rng.random().intRangeAtMost(usize, 0, 256);
+        rng.random().bytes(buf[0..len]);
+        _ = interp.processReport(0, buf[0..len]) catch {};
+        _ = interp.processReport(1, buf[0..len]) catch {};
+    }
+}
+
 test "T3: field at last valid offset (offset = size - 1) reads correctly" {
     const allocator = testing.allocator;
     const toml_str =
