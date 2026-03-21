@@ -203,12 +203,14 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                 if (field.bits) |bits| {
                     // bits mode: mutual exclusivity
                     if (field.offset != null) return error.InvalidConfig;
+                    if (field.transform != null) return error.InvalidConfig;
                     if (bits.len != 3) return error.InvalidConfig;
                     if (bits[1] < 0 or bits[1] > 7) return error.InvalidConfig;
                     if (bits[2] < 1 or bits[2] > 32) return error.InvalidConfig;
                     if (bits[0] < 0) return error.InvalidConfig;
                     // bounds check: byte_offset + ceil((start_bit + bit_count) / 8) <= report.size
                     const span = @divTrunc(bits[1] + bits[2] + 7, 8);
+                    if (span > 4) return error.InvalidConfig;
                     if (bits[0] + span > report.size) return error.OffsetOutOfBounds;
                     // type must be null, "unsigned", or "signed"
                     if (field.type) |t| {
@@ -756,6 +758,46 @@ test "T4: missing both offset and bits returns error" {
         \\size = 16
         \\[report.fields]
         \\left_x = { type = "u8" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "T4: bits with transform returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { bits = [2, 0, 12], transform = "negate" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "T4: bits span > 4 bytes returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 64
+        \\[report.fields]
+        \\left_x = { bits = [0, 1, 32] }
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }

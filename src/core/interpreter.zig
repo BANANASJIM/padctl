@@ -1467,3 +1467,45 @@ test "T4: bits field unsigned default" {
     const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
     try testing.expectEqual(@as(?u8, 255), delta.lt);
 }
+
+test "extractBits: start_bit=7 single bit" {
+    try testing.expectEqual(@as(u32, 1), extractBits(&[_]u8{0x80}, 0, 7, 1));
+    try testing.expectEqual(@as(u32, 0), extractBits(&[_]u8{0x7F}, 0, 7, 1));
+}
+
+test "T4: touch0_active bits round-trip" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\touch0_active = { bits = [4, 3, 1] }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // bit 3 set → touch0_active = true
+    var raw = [_]u8{0} ** 8;
+    raw[0] = 0x01;
+    raw[4] = 0x08;
+    const d1 = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?bool, true), d1.touch0_active);
+
+    // bit 3 clear → touch0_active = false
+    raw[4] = 0x00;
+    const d2 = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?bool, false), d2.touch0_active);
+}
