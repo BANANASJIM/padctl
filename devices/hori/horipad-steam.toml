@@ -38,13 +38,13 @@ accel_x = { offset = 22, type = "i16le" }
 accel_y = { offset = 20, type = "i16le" }
 accel_z = { offset = 18, type = "i16le" }
 
-# buttons[0] byte 5: bit0=X bit1=M3(quick) bit2=B bit3=A  (DPad in bits 4-7, handled by hat output)
+# buttons[0] byte 5: bit0=X bit1=Quick bit2=B bit3=A  (DPad in bits 4-7, handled by hat output)
 # buttons[1] byte 6: bit0=Start(menu) bit1=Select(view) bit2=RT bit3=LT bit4=RB bit5=LB bit6=M1 bit7=Y
-# buttons[2] byte 7: bit0=M4 bit1=M2 bit2=TouchPad(RS_touch) bit3=LS bit4=M3 bit5=RS bit6=LS_dig bit7=Home(Steam)
+# buttons[2] byte 7: bit0=M4 bit1=M3 bit2=RS_touch bit3=LS_touch bit4=M2 bit5=RS bit6=LS bit7=Steam(Home)
 # Use 3-byte group covering bytes 5-7
 [report.button_group]
 source = { offset = 5, size = 3 }
-map = { X = 0, B = 2, A = 3, Start = 8, Select = 9, RT = 10, LT = 11, RB = 12, LB = 13, M1 = 14, Y = 15, M4 = 16, M2 = 17, RS = 21, LS = 22, Home = 23 }
+map = { X = 0, B = 2, A = 3, Start = 8, Select = 9, RT = 10, LT = 11, RB = 12, LB = 13, M1 = 14, Y = 15, M4 = 16, M3 = 17, M2 = 20, RS = 21, LS = 22, Home = 23 }
 
 # --- Output device ---
 [output]
@@ -76,6 +76,7 @@ LS     = "BTN_THUMBL"
 RS     = "BTN_THUMBR"
 M1     = "BTN_TRIGGER_HAPPY1"
 M2     = "BTN_TRIGGER_HAPPY2"
+M3     = "BTN_TRIGGER_HAPPY3"
 M4     = "BTN_TRIGGER_HAPPY4"
 
 [output.dpad]

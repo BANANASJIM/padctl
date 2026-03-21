@@ -40,6 +40,15 @@ gyro_z        = { offset = 34, type = "i16le" }
 accel_x       = { offset = 24, type = "i16le" }
 accel_y       = { offset = 26, type = "i16le" }
 accel_z       = { offset = 28, type = "i16le" }
+# Trackpad X/Y coordinates (i16le); touch status via L3_touch/R3_touch buttons
+# NOTE: interpreter does not yet map trackpad fields to GamepadState (deferred)
+left_pad_x    = { offset = 16, type = "i16le" }
+left_pad_y    = { offset = 18, type = "i16le" }
+right_pad_x   = { offset = 20, type = "i16le" }
+right_pad_y   = { offset = 22, type = "i16le" }
+# Trackpad force sensors (u16le) — deferred: requires WASM plugin for pressure zones
+# left_pad_force  = { offset = 56, type = "u16le" }
+# right_pad_force = { offset = 58, type = "u16le" }
 
 # Buttons layout (bytes 8-15, 64 bits total):
 # byte 8:  bit0=RT_dig bit1=LT_dig bit2=RS bit3=LS bit4=Y bit5=B bit6=X bit7=A
