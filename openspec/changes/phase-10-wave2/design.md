@@ -37,7 +37,10 @@ fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {
 
 Call sites:
 - `deinit`: loop body becomes `self.teardownManaged(m)`
-- `detach`: replace 5-line block after `m.thread.join()` with `self.teardownManaged(m)`
+- `detach`: replace 4-line block after `m.thread.join()` with `self.teardownManaged(m)`.
+  **Note**: current `detach` has only 4 teardown lines — it is missing
+  `if (m.devname) |dn| self.allocator.free(dn)`, a latent memory leak when
+  `m.devname != null`. Extracting `teardownManaged` implicitly fixes this.
 - `reload` removal loop: replace 5-line block after `m.thread.join()` with `self.teardownManaged(m)`
 - `stopAll`: replace 5-line block in final loop with `self.teardownManaged(m)`
 

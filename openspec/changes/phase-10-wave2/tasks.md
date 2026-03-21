@@ -118,7 +118,12 @@ Within each task, sub-steps are sequential.
 - [ ] Change `AuxOutputDevice.VTable.emit_aux` return type from `anyerror!void` to
   `EmitError!void` (reuse same error set — same I/O semantics)
 
-### T9e: Update all mock implementations
+### T9e: Update TouchpadOutputDevice VTable (if anyerror)
+
+- [ ] Change `TouchpadOutputDevice.VTable.emit_touch` return type from `anyerror!void` to
+  `EmitError!void` (reuse same error set — same I/O semantics)
+
+### T9f: Update all mock implementations
 
 - [ ] Update `NoopOutput` in `event_loop.zig` test section: match new return types
 - [ ] Update any mock in `test/mock_output.zig` if present: match new return types

@@ -11,6 +11,11 @@ All tasks are refactors/cleanups — no new functionality. Primary goal: verify 
 - [ ] TP2: **Existing detach test passes** — attach then detach by devname. Instance is
   stopped, joined, and freed. devname_map entry removed.
 
+- [ ] TP2a: **Detach frees devname** — attach an instance with a non-null devname, then
+  detach. After detach, the testing allocator reports zero outstanding allocations (no
+  devname memory leak). Verifies that `teardownManaged` fixes the latent leak where
+  `detach` previously omitted `if (m.devname) |dn| self.allocator.free(dn)`.
+
 - [ ] TP3: **Existing reload test passes** — attach instances, call `reload()` with a
   config set that removes one instance. Removed instance is torn down via `teardownManaged`.
 
@@ -58,6 +63,9 @@ All tasks are refactors/cleanups — no new functionality. Primary goal: verify 
 
 - [ ] TP15: **AuxOutputDevice vtable updated** — if `emit_aux` used `anyerror`, it now
   uses `EmitError` (or equivalent). Existing tests compile and pass.
+
+- [ ] TP15a: **TouchpadOutputDevice vtable updated** — if `emit_touch` used `anyerror`,
+  it now uses `EmitError` (or equivalent). Existing tests compile and pass.
 
 ## T10: EFD Constants + Inline @import + Dead moveTo
 
