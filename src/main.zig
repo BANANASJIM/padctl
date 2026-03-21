@@ -29,6 +29,7 @@ pub const testing_support = struct {
     pub const phase2a_e2e_test = @import("test/phase2a_e2e_test.zig");
     pub const phase2b_e2e_test = @import("test/phase2b_e2e_test.zig");
     pub const phase2c_e2e_test = @import("test/phase2c_e2e_test.zig");
+    pub const phase3_e2e_test = @import("test/phase3_e2e_test.zig");
 };
 
 pub const config = struct {

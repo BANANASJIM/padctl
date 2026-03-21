@@ -3,17 +3,9 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 pub fn openNetlinkUevent() !posix.fd_t {
-    const fd = try posix.socket(
-        linux.AF.NETLINK,
-        linux.SOCK.DGRAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
-        linux.NETLINK.KOBJECT_UEVENT,
-    );
+    const fd = try posix.socket(linux.AF.NETLINK, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, linux.NETLINK.KOBJECT_UEVENT);
     errdefer posix.close(fd);
-
-    const addr = linux.sockaddr.nl{
-        .pid = 0,
-        .groups = 1,
-    };
+    const addr = linux.sockaddr.nl{ .pid = 0, .groups = 1 };
     try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl));
     return fd;
 }
@@ -26,22 +18,24 @@ pub const Uevent = struct {
     subsystem: ?[]const u8,
 };
 
-/// Parse a NUL-separated uevent message. Slices reference buf memory.
+/// Parse a null-delimited uevent message buffer.
+/// Buffer format: "action@path\0KEY=val\0KEY=val\0..."
 pub fn parseUevent(buf: []const u8) Uevent {
-    var iter = std.mem.splitScalar(u8, buf, 0);
-
-    const first = iter.next() orelse return .{ .action = .other, .devname = null, .subsystem = null };
-    const action: UeventAction = if (std.mem.startsWith(u8, first, "add@"))
-        .add
-    else if (std.mem.startsWith(u8, first, "remove@"))
-        .remove
-    else
-        .other;
-
+    var action: UeventAction = .other;
     var devname: ?[]const u8 = null;
     var subsystem: ?[]const u8 = null;
 
-    while (iter.next()) |kv| {
+    var it = std.mem.splitScalar(u8, buf, 0);
+
+    if (it.next()) |header| {
+        if (std.mem.startsWith(u8, header, "add@")) {
+            action = .add;
+        } else if (std.mem.startsWith(u8, header, "remove@")) {
+            action = .remove;
+        }
+    }
+
+    while (it.next()) |kv| {
         if (kv.len == 0) continue;
         if (std.mem.startsWith(u8, kv, "DEVNAME=")) {
             devname = kv["DEVNAME=".len..];
