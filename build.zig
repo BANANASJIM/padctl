@@ -6,7 +6,10 @@ pub fn build(b: *std.Build) void {
 
     // -Dlibusb=false disables libusb linkage for musl cross-compile
     const use_libusb = b.option(bool, "libusb", "Link libusb-1.0 (default: true)") orelse true;
+    const use_wasm = b.option(bool, "wasm", "Link wasm3 runtime (default: true)") orelse true;
     const coverage = b.option(bool, "test-coverage", "Run tests with kcov coverage") orelse false;
+
+    const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0" };
 
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
@@ -17,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("toml", toml_mod);
+    if (use_wasm) addWasm3(b, exe_mod, wasm3_c_flags);
 
     const exe = b.addExecutable(.{ .name = "padctl", .root_module = exe_mod });
     if (use_libusb) {
@@ -34,6 +38,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     src_mod.addImport("toml", toml_mod);
+    if (use_wasm) addWasm3(b, src_mod, wasm3_c_flags);
 
     const debug_mod = b.createModule(.{
         .root_source_file = b.path("tools/padctl-debug.zig"),
@@ -91,6 +96,7 @@ pub fn build(b: *std.Build) void {
     unit_mod.addImport("toml", toml_mod);
     unit_mod.addImport("analyse", capture_analyse_mod);
     unit_mod.addImport("toml_gen", capture_toml_gen_mod);
+    if (use_wasm) addWasm3(b, unit_mod, wasm3_c_flags);
     const unit_tests = b.addTest(.{ .root_module = unit_mod });
     if (use_libusb) {
         unit_tests.linkSystemLibrary("usb-1.0");
@@ -112,6 +118,7 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addImport("toml", toml_mod);
     tsan_mod.addImport("analyse", capture_analyse_mod);
     tsan_mod.addImport("toml_gen", capture_toml_gen_mod);
+    if (use_wasm) addWasm3(b, tsan_mod, wasm3_c_flags);
     const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
     if (use_libusb) {
         tsan_tests.linkSystemLibrary("usb-1.0");
@@ -145,4 +152,27 @@ pub fn build(b: *std.Build) void {
     const spike_exe = b.addExecutable(.{ .name = "toml-spike", .root_module = spike_mod });
     const spike_step = b.step("spike", "Run TOML spike");
     spike_step.dependOn(&b.addRunArtifact(spike_exe).step);
+}
+
+fn addWasm3(b: *std.Build, mod: *std.Build.Module, c_flags: []const []const u8) void {
+    mod.addCSourceFiles(.{
+        .root = b.path("third_party/wasm3/source"),
+        .files = &.{
+            "m3_api_libc.c",
+            "m3_api_meta_wasi.c",
+            "m3_api_tracer.c",
+            "m3_bind.c",
+            "m3_code.c",
+            "m3_compile.c",
+            "m3_core.c",
+            "m3_env.c",
+            "m3_exec.c",
+            "m3_function.c",
+            "m3_info.c",
+            "m3_module.c",
+            "m3_parse.c",
+        },
+        .flags = c_flags,
+    });
+    mod.addIncludePath(b.path("third_party/wasm3/source"));
 }
