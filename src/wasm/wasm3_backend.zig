@@ -15,6 +15,11 @@ const input_offset: u32 = 0;
 const output_offset: u32 = 4096;
 const stack_size: u32 = 1024 * 1024;
 
+comptime {
+    // If this fails, deltaFromBytes @bitCast may be invalid — review padding.
+    std.debug.assert(@sizeOf(GamepadStateDelta) == @bitSizeOf(GamepadStateDelta) / 8);
+}
+
 pub const Wasm3Plugin = struct {
     env: c.IM3Environment = null,
     rt: c.IM3Runtime = null,
@@ -328,6 +333,9 @@ pub const Wasm3Plugin = struct {
         var d = GamepadStateDelta{};
         if (buf.len < @sizeOf(GamepadStateDelta)) return d;
         const bytes: *const [@sizeOf(GamepadStateDelta)]u8 = buf[0..@sizeOf(GamepadStateDelta)];
+        // SAFETY: GamepadStateDelta is a flat struct of optional numeric primitives.
+        // @bitCast is valid because the WASM plugin writes matching layout.
+        // If GamepadStateDelta gains padding-sensitive fields, replace with field-by-field copy.
         d = @bitCast(bytes.*);
         return d;
     }
