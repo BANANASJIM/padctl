@@ -373,12 +373,12 @@ test "EventLoop: Disconnected device causes loop to exit without panic" {
     try testing.expect(!loop.running);
 }
 
-test "EventLoop.init creates signalfd and timerfd" {
-    var loop = try EventLoop.init();
+test "EventLoop.initManaged creates eventfd and timerfd" {
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
     try testing.expect(loop.signal_fd >= 0);
     try testing.expect(loop.timer_fd >= 0);
-    // slot 0 = signalfd, slot 1 = stop_pipe, slot 2 = timerfd
+    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = timerfd
     try testing.expectEqual(@as(usize, 3), loop.fd_count);
 }
 
