@@ -152,7 +152,7 @@ pub const UinputDevice = struct {
                 try ioctlInt(fd, UI_SET_ABSBIT, @intCast(code));
                 if (axis_count < 16) {
                     axis_codes[axis_count] = code;
-                    axis_state_offsets[axis_count] = stateFieldForAxis(entry.key_ptr.*);
+                    axis_state_offsets[axis_count] = stateFieldForAxis(entry.key_ptr.*) catch return error.UnknownAxis;
                     axis_count += 1;
                 }
             }
@@ -233,7 +233,7 @@ pub const UinputDevice = struct {
         };
     }
 
-    fn stateFieldForAxis(name: []const u8) AxisStateField {
+    fn stateFieldForAxis(name: []const u8) error{UnknownAxis}!AxisStateField {
         if (std.mem.eql(u8, name, "left_x")) return .ax;
         if (std.mem.eql(u8, name, "left_y")) return .ay;
         if (std.mem.eql(u8, name, "right_x")) return .rx;
@@ -242,7 +242,7 @@ pub const UinputDevice = struct {
         if (std.mem.eql(u8, name, "rt")) return .rt;
         if (std.mem.eql(u8, name, "dpad_x")) return .dpad_x;
         if (std.mem.eql(u8, name, "dpad_y")) return .dpad_y;
-        return .ax;
+        return error.UnknownAxis;
     }
 
     fn getAxisValue(s: state.GamepadState, field: AxisStateField) i32 {
@@ -1024,4 +1024,21 @@ test "ff_effects: upload stores strong and weak" {
     try std.testing.expectEqual(@as(u16, 0x5678), dev.ff_effects[5].weak);
     // Other slots unaffected
     try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[0].strong);
+}
+
+test "stateFieldForAxis: known axes return correct fields" {
+    try std.testing.expectEqual(UinputDevice.AxisStateField.ax, try UinputDevice.stateFieldForAxis("left_x"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.ay, try UinputDevice.stateFieldForAxis("left_y"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.rx, try UinputDevice.stateFieldForAxis("right_x"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.ry, try UinputDevice.stateFieldForAxis("right_y"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.lt, try UinputDevice.stateFieldForAxis("lt"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.rt, try UinputDevice.stateFieldForAxis("rt"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.dpad_x, try UinputDevice.stateFieldForAxis("dpad_x"));
+    try std.testing.expectEqual(UinputDevice.AxisStateField.dpad_y, try UinputDevice.stateFieldForAxis("dpad_y"));
+}
+
+test "stateFieldForAxis: unknown axis returns error" {
+    try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis("nonexistent"));
+    try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis(""));
+    try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis("LEFT_X"));
 }

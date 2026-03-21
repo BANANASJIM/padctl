@@ -45,6 +45,7 @@ pub const AdaptiveTriggerParamConfig = struct {
 
 pub const AdaptiveTriggerConfig = struct {
     mode: []const u8 = "off",
+    command_prefix: []const u8 = "adaptive_trigger_",
     left: ?AdaptiveTriggerParamConfig = null,
     right: ?AdaptiveTriggerParamConfig = null,
 };

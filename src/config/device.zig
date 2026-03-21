@@ -140,7 +140,7 @@ pub const DeviceConfig = struct {
     wasm: ?WasmConfig = null,
 };
 
-const valid_transforms = [_][]const u8{ "negate", "abs", "scale", "clamp", "deadzone", "lookup" };
+const valid_transforms = [_][]const u8{ "negate", "abs", "scale", "clamp", "deadzone" };
 
 fn isValidTransform(t: []const u8) bool {
     const name = std.mem.trim(u8, t, " \t");
@@ -800,6 +800,26 @@ test "T4: bits span > 4 bytes returns error" {
         \\left_x = { bits = [0, 1, 32] }
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "lookup transform is rejected" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\x = { offset = 0, type = "u8", transform = "lookup" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
 test "fuzz parseString: no panic on arbitrary input" {

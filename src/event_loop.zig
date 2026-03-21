@@ -61,6 +61,8 @@ pub const EventLoopContext = struct {
     device_config: ?*const DeviceConfig = null,
     mapping_config: ?*const MappingConfig = null,
     poll_timeout_ms: ?u32 = null,
+    wasm_plugin: ?WasmPlugin = null,
+    wasm_override_report: bool = false,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {
@@ -97,8 +99,8 @@ pub fn applyAdaptiveTrigger(
 ) void {
     const cmds = dcfg.commands orelse return;
 
-    var name_buf: [32]u8 = undefined;
-    const prefix = "adaptive_trigger_";
+    var name_buf: [64]u8 = undefined;
+    const prefix = at_cfg.command_prefix;
     if (prefix.len + at_cfg.mode.len > name_buf.len) return;
     @memcpy(name_buf[0..prefix.len], prefix);
     @memcpy(name_buf[prefix.len .. prefix.len + at_cfg.mode.len], at_cfg.mode);
@@ -131,10 +133,6 @@ pub const EventLoop = struct {
     running: bool,
     gamepad_state: state.GamepadState,
     last_ts: i128,
-    // optional WASM plugin: set after init when config declares [wasm]
-    wasm_plugin: ?WasmPlugin = null,
-    // whether process_report override is active (wasm.overrides.process_report = true)
-    wasm_override_report: bool = false,
 
     pub fn init() !EventLoop {
         var mask = posix.sigemptyset();
@@ -266,16 +264,17 @@ pub const EventLoop = struct {
             // Check uinput FF fd
             if (self.uinput_ff_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
-                    if (ctx.output.pollFf() catch null) |ff| {
+                    if (ctx.output.pollFf() catch null) |ff_ev| {
                         if (ctx.allocator) |alloc| {
                             if (ctx.device_config) |dcfg| {
                                 if (dcfg.commands) |cmds| {
-                                    if (cmds.map.get("rumble")) |cmd| {
+                                    const ff_type = if (dcfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
+                                    if (cmds.map.get(ff_type)) |cmd| {
                                         const iface_idx: usize = @intCast(cmd.interface);
                                         if (iface_idx < ctx.devices.len) {
                                             const params = [_]Param{
-                                                .{ .name = "strong", .value = ff.strong },
-                                                .{ .name = "weak", .value = ff.weak },
+                                                .{ .name = "strong", .value = ff_ev.strong },
+                                                .{ .name = "weak", .value = ff_ev.weak },
                                             };
                                             if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
                                                 defer alloc.free(bytes);
@@ -318,8 +317,8 @@ pub const EventLoop = struct {
 
                     const interface_id: u8 = @intCast(i);
                     const maybe_delta: ?@import("core/interpreter.zig").GamepadStateDelta = blk: {
-                        if (self.wasm_plugin) |wp| {
-                            if (self.wasm_override_report) {
+                        if (ctx.wasm_plugin) |wp| {
+                            if (ctx.wasm_override_report) {
                                 var out_buf: [64]u8 = undefined;
                                 switch (wp.processReport(buf[0..n], &out_buf)) {
                                     .override => |d| break :blk d,
@@ -988,4 +987,44 @@ test "applyAdaptiveTrigger: unknown mode silently skips" {
     applyAdaptiveTrigger(&devs, allocator, &parsed.value, &at_cfg);
 
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
+}
+
+test "applyAdaptiveTrigger: custom command_prefix routes correctly" {
+    const allocator = testing.allocator;
+
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[commands.my_at_feedback]
+        \\interface = 0
+        \\template = "aa {r_position:u8} {l_position:u8}"
+    ;
+    const parsed = try device_mod.parseString(allocator, toml_str);
+    defer parsed.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    var devs = [_]DeviceIO{mock_dev.deviceIO()};
+
+    const at_cfg = mapping_mod.AdaptiveTriggerConfig{
+        .mode = "feedback",
+        .command_prefix = "my_at_",
+        .right = .{ .position = 10 },
+        .left = .{ .position = 20 },
+    };
+    applyAdaptiveTrigger(&devs, allocator, &parsed.value, &at_cfg);
+
+    try testing.expectEqual(@as(usize, 3), mock_dev.write_log.items.len);
+    try testing.expectEqual(@as(u8, 0xaa), mock_dev.write_log.items[0]);
+    try testing.expectEqual(@as(u8, 10), mock_dev.write_log.items[1]);
+    try testing.expectEqual(@as(u8, 20), mock_dev.write_log.items[2]);
 }
