@@ -417,7 +417,7 @@ test "e2e: FF rumble pipeline — EventLoop routes FfEvent → DeviceIO.write co
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.ff_out.outputDevice(), null, null, c.alloc, c.cfg);
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -478,7 +478,7 @@ test "e2e: FF stop (value=0) — EventLoop routes zero FfEvent → all-zero byte
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.ff_out.outputDevice(), null, null, c.alloc, c.cfg);
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});

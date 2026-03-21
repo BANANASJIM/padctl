@@ -161,15 +161,15 @@ pub const DeviceInstance = struct {
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
             const mapper_ptr: ?*Mapper = if (self.mapper) |*m| m else null;
 
-            try self.loop.run(
-                self.devices,
-                &self.interp,
-                output,
-                mapper_ptr,
-                aux_output,
-                self.allocator,
-                self.device_cfg,
-            );
+            try self.loop.run(.{
+                .devices = self.devices,
+                .interpreter = &self.interp,
+                .output = output,
+                .mapper = mapper_ptr,
+                .aux_output = aux_output,
+                .allocator = self.allocator,
+                .device_config = self.device_cfg,
+            });
         }
     }
 

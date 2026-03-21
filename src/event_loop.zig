@@ -48,6 +48,16 @@ pub fn disarmTimer(fd: posix.fd_t) void {
     _ = linux.timerfd_settime(fd, .{}, &spec, null);
 }
 
+pub const EventLoopContext = struct {
+    devices: []DeviceIO,
+    interpreter: *const Interpreter,
+    output: @import("io/uinput.zig").OutputDevice,
+    mapper: ?*mapper_mod.Mapper = null,
+    aux_output: ?@import("io/uinput.zig").AuxOutputDevice = null,
+    allocator: ?std.mem.Allocator = null,
+    device_config: ?*const DeviceConfig = null,
+};
+
 pub const EventLoop = struct {
     pollfds: [MAX_FDS]posix.pollfd,
     fd_count: usize,
@@ -139,16 +149,7 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
-    pub fn run(
-        self: *EventLoop,
-        devices: []DeviceIO,
-        interpreter: *const Interpreter,
-        output: OutputDevice,
-        mapper: ?*mapper_mod.Mapper,
-        aux_output: ?@import("io/uinput.zig").AuxOutputDevice,
-        allocator: ?std.mem.Allocator,
-        device_config: ?*const DeviceConfig,
-    ) !void {
+    pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         self.running = true;
         var buf: [64]u8 = undefined;
 
@@ -177,10 +178,10 @@ pub const EventLoop = struct {
             if (self.pollfds[2].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
-                if (mapper) |m| {
+                if (ctx.mapper) |m| {
                     const macro_aux = m.onTimerExpired();
                     if (macro_aux.len > 0) {
-                        if (aux_output) |ao| ao.emitAux(macro_aux.slice()) catch {};
+                        if (ctx.aux_output) |ao| ao.emitAux(macro_aux.slice()) catch {};
                     }
                 }
             }
@@ -188,20 +189,20 @@ pub const EventLoop = struct {
             // Check uinput FF fd
             if (self.uinput_ff_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
-                    if (output.pollFf() catch null) |ff| {
-                        if (allocator) |alloc| {
-                            if (device_config) |dcfg| {
+                    if (ctx.output.pollFf() catch null) |ff| {
+                        if (ctx.allocator) |alloc| {
+                            if (ctx.device_config) |dcfg| {
                                 if (dcfg.commands) |cmds| {
                                     if (cmds.map.get("rumble")) |cmd| {
                                         const iface_idx: usize = @intCast(cmd.interface);
-                                        if (iface_idx < devices.len) {
+                                        if (iface_idx < ctx.devices.len) {
                                             const params = [_]Param{
                                                 .{ .name = "strong", .value = ff.strong },
                                                 .{ .name = "weak", .value = ff.weak },
                                             };
                                             if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
                                                 defer alloc.free(bytes);
-                                                devices[iface_idx].write(bytes) catch {};
+                                                ctx.devices[iface_idx].write(bytes) catch {};
                                             } else |_| {}
                                         }
                                     }
@@ -213,7 +214,7 @@ pub const EventLoop = struct {
             }
 
             // Check device fds
-            for (devices, 0..) |dev, i| {
+            for (ctx.devices, 0..) |dev, i| {
                 const slot = self.device_base + i;
                 if (slot >= self.fd_count) break;
                 if (self.pollfds[slot].revents & posix.POLL.IN == 0) continue;
@@ -242,19 +243,19 @@ pub const EventLoop = struct {
                                 }
                             }
                         }
-                        break :blk interpreter.processReport(interface_id, buf[0..n]) catch null;
+                        break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
                     };
                     if (maybe_delta) |delta| {
-                        if (mapper) |m| {
+                        if (ctx.mapper) |m| {
                             const events = try m.apply(delta, dt_ms);
                             self.gamepad_state.applyDelta(delta);
-                            try output.emit(events.gamepad);
-                            if (aux_output) |ao| {
+                            try ctx.output.emit(events.gamepad);
+                            if (ctx.aux_output) |ao| {
                                 if (events.aux.len > 0) try ao.emitAux(events.aux.slice());
                             }
                         } else {
                             self.gamepad_state.applyDelta(delta);
-                            try output.emit(self.gamepad_state);
+                            try ctx.output.emit(self.gamepad_state);
                         }
                     }
                 }
@@ -431,16 +432,17 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
 
     const RunCtx = struct {
         loop: *EventLoop,
-        devs: []DeviceIO,
-        interp: *const Interpreter,
-        mapper: *mapper_mod.Mapper,
+        elc: EventLoopContext,
     };
     var devs = [_]DeviceIO{dev};
-    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .mapper = &m };
+    var ctx = RunCtx{
+        .loop = &loop,
+        .elc = .{ .devices = &devs, .interpreter = &interp, .output = MockOut.outputDevice(), .mapper = &m },
+    };
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.mapper, null, null, null);
+            try c.loop.run(c.elc);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -538,21 +540,17 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
 
     const RunCtx = struct {
         loop: *EventLoop,
-        devices: []DeviceIO,
-        interp: *const Interpreter,
-        output: uinput.OutputDevice,
+        elc: EventLoopContext,
     };
     var devs = [_]DeviceIO{dev};
     var ctx = RunCtx{
         .loop = &loop,
-        .devices = &devs,
-        .interp = &interp,
-        .output = output,
+        .elc = .{ .devices = &devs, .interpreter = &interp, .output = output },
     };
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devices, c.interp, c.output, null, null, null, null);
+            try c.loop.run(c.elc);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -660,7 +658,7 @@ test "T4: FF event routed to DeviceIO.write via fillTemplate" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.ff_out.outputDevice(), null, null, c.alloc, c.cfg);
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -721,7 +719,7 @@ test "T4: no commands.rumble — silent skip" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devs, c.interp, c.ff_out.outputDevice(), null, null, c.alloc, c.cfg);
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
