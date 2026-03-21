@@ -1,0 +1,39 @@
+[device]
+name = "Example Racing Wheel"
+vid = 0x044f
+pid = 0xb66e
+mode = "generic"
+
+[[device.interface]]
+id = 0
+class = "hid"
+
+[[report]]
+name = "main"
+interface = 0
+size = 12
+
+[report.fields]
+wheel_angle = { offset = 0, type = "i16le" }
+gas_pedal   = { offset = 2, type = "u8", transform = "negate" }
+brake_pedal = { offset = 3, type = "u8" }
+clutch      = { offset = 4, type = "u8" }
+
+[report.button_group]
+source = { offset = 5, size = 1 }
+map = { gear_up = 0, gear_down = 1, paddle_left = 2, paddle_right = 3 }
+
+[output]
+name = "Example Racing Wheel"
+vid = 0x044f
+pid = 0xb66e
+
+[output.mapping]
+wheel_angle  = { event = "ABS_WHEEL",      range = [-32768, 32767] }
+gas_pedal    = { event = "ABS_GAS",         range = [0, 255] }
+brake_pedal  = { event = "ABS_BRAKE",       range = [0, 255] }
+clutch       = { event = "ABS_RZ",          range = [0, 255] }
+gear_up      = { event = "BTN_GEAR_UP" }
+gear_down    = { event = "BTN_GEAR_DOWN" }
+paddle_left  = { event = "BTN_0" }
+paddle_right = { event = "BTN_1" }
