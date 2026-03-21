@@ -44,6 +44,8 @@ fn ioctlPtr(fd: std.posix.fd_t, request: u32, ptr: usize) !void {
     };
 }
 
+pub const FfEffect = struct { strong: u16 = 0, weak: u16 = 0 };
+
 pub const FfEvent = struct {
     effect_type: u16,
     strong: u16,
@@ -110,6 +112,7 @@ pub const UinputDevice = struct {
     axis_state_offsets: [16]AxisStateField = undefined,
     axis_count: usize = 0,
     has_dpad_hat: bool = false,
+    ff_effects: [16]FfEffect = [_]FfEffect{.{}} ** 16,
 
     const AxisStateField = enum { ax, ay, rx, ry, lt, rt, dpad_x, dpad_y };
 
@@ -357,17 +360,32 @@ pub const UinputDevice = struct {
                     var upload = std.mem.zeroes(c.uinput_ff_upload);
                     upload.request_id = @intCast(ev.value);
                     _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    if (upload.effect.type == c.FF_RUMBLE and upload.effect.id < 16) {
+                        self.ff_effects[@intCast(upload.effect.id)] = .{
+                            .strong = upload.effect.u.rumble.strong_magnitude,
+                            .weak = upload.effect.u.rumble.weak_magnitude,
+                        };
+                    }
                     upload.retval = 0;
                     _ = std.os.linux.ioctl(self.fd, UI_END_FF_UPLOAD, @intFromPtr(&upload));
                 } else if (ev.code == c.UI_FF_ERASE) {
                     var erase = std.mem.zeroes(c.uinput_ff_erase);
                     erase.request_id = @intCast(ev.value);
                     _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    if (erase.effect_id < 16) {
+                        self.ff_effects[@intCast(erase.effect_id)] = .{};
+                    }
                     erase.retval = 0;
                     _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
                 }
             } else if (ev.type == c.EV_FF) {
-                result = FfEvent{ .effect_type = c.FF_RUMBLE, .strong = 0, .weak = 0 };
+                const id: usize = @intCast(ev.code);
+                if (ev.value == 0 or id >= 16) {
+                    result = FfEvent{ .effect_type = c.FF_RUMBLE, .strong = 0, .weak = 0 };
+                } else {
+                    const eff = self.ff_effects[id];
+                    result = FfEvent{ .effect_type = c.FF_RUMBLE, .strong = eff.strong, .weak = eff.weak };
+                }
             }
         }
         return result;
@@ -727,4 +745,113 @@ test "pollFfFd returns the fd" {
         .button_codes = [_]u16{0} ** BUTTON_COUNT,
     };
     try std.testing.expectEqual(pfds[0], dev.pollFfFd());
+}
+
+test "ff_effects: initial state all zeros" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    const dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    for (dev.ff_effects) |eff| {
+        try std.testing.expectEqual(@as(u16, 0), eff.strong);
+        try std.testing.expectEqual(@as(u16, 0), eff.weak);
+    }
+}
+
+test "pollFf play: returns stored ff_effects values" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    // Simulate upload by writing directly to ff_effects[2]
+    dev.ff_effects[2] = .{ .strong = 0xffff, .weak = 0x8000 };
+
+    const ev = c.input_event{ .type = c.EV_FF, .code = 2, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+
+    const result = try dev.pollFf();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.?.effect_type);
+    try std.testing.expectEqual(@as(u16, 0xffff), result.?.strong);
+    try std.testing.expectEqual(@as(u16, 0x8000), result.?.weak);
+}
+
+test "pollFf play stop (value=0): returns zeros" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[2] = .{ .strong = 0xffff, .weak = 0x8000 };
+
+    const ev = c.input_event{ .type = c.EV_FF, .code = 2, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+
+    const result = try dev.pollFf();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u16, 0), result.?.strong);
+    try std.testing.expectEqual(@as(u16, 0), result.?.weak);
+}
+
+test "pollFf play: id >= 16 returns zeros (no panic)" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+
+    const ev = c.input_event{ .type = c.EV_FF, .code = 16, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+
+    const result = try dev.pollFf();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u16, 0), result.?.strong);
+    try std.testing.expectEqual(@as(u16, 0), result.?.weak);
+}
+
+test "ff_effects: erase clears slot" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[2] = .{ .strong = 0xffff, .weak = 0x8000 };
+    // Simulate erase
+    dev.ff_effects[2] = .{};
+    try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[2].strong);
+    try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[2].weak);
+}
+
+test "ff_effects: upload stores strong and weak" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    // Simulate the storage side of upload
+    dev.ff_effects[5] = .{ .strong = 0x1234, .weak = 0x5678 };
+    try std.testing.expectEqual(@as(u16, 0x1234), dev.ff_effects[5].strong);
+    try std.testing.expectEqual(@as(u16, 0x5678), dev.ff_effects[5].weak);
+    // Other slots unaffected
+    try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[0].strong);
 }
