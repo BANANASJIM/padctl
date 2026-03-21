@@ -805,10 +805,10 @@ test "gyro activate: inactive frame no REL events and processor reset" {
     // Seed EMA with large gyro input while RB is held
     const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
     const rb_mask: u32 = @as(u32, 1) << rb_idx;
-    _ = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 });
+    _ = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
 
     // Release RB — gyro should be deactivated, processor reset, no REL events
-    const ev = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 });
+    const ev = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16);
     try testing.expectEqual(@as(usize, 0), ev.aux.len);
     // After reset, EMA should be zero
     try testing.expectApproxEqAbs(@as(f32, 0.0), m.gyro_proc.ema_x, 1e-5);
@@ -833,11 +833,11 @@ test "gyro activate: active when RB held, inactive when released" {
     const rb_mask: u32 = @as(u32, 1) << rb_idx;
 
     // RB held, large gyro — should produce REL events
-    const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 });
+    const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
     try testing.expect(ev_active.aux.len > 0);
 
     // RB released — no REL events
-    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 });
+    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16);
     try testing.expectEqual(@as(usize, 0), ev_inactive.aux.len);
 }
 
@@ -856,7 +856,7 @@ test "gyro joystick mode: overrides emit_state.rx/ry, suppresses original axes" 
     defer m.deinit();
 
     // Feed large gyro input so joy_x/joy_y are non-zero
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 });
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 }, 16);
 
     // rx/ry must be gyro-derived (not the raw 5000)
     try testing.expect(ev.gamepad.rx != 5000);
@@ -882,7 +882,7 @@ test "gyro joystick mode: null joy_x does not touch rx" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const ev = try m.apply(.{ .rx = 1234, .ry = -1234 });
+    const ev = try m.apply(.{ .rx = 1234, .ry = -1234 }, 16);
     // mode=off: no override, axes pass through unchanged
     try testing.expectEqual(@as(i16, 1234), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, -1234), ev.gamepad.ry);
@@ -902,7 +902,7 @@ test "gyro mouse mode: joy_x/y do not affect emit_state axes" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 999, .ry = 888 });
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 999, .ry = 888 }, 16);
     // mouse mode: rx/ry must be untouched (suppress_right_stick_gyro stays false)
     try testing.expectEqual(@as(i16, 999), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, 888), ev.gamepad.ry);
@@ -936,7 +936,7 @@ test "T7: layer switch resets gyro EMA and accumulators" {
     // Trigger layer activation: LT press → PENDING
     const lt_idx: u5 = @intCast(@intFromEnum(ButtonId.LT));
     const lt_mask: u32 = @as(u32, 1) << lt_idx;
-    _ = try m.apply(.{ .buttons = lt_mask });
+    _ = try m.apply(.{ .buttons = lt_mask }, 16);
 
     // Timer fires → ACTIVE (active_changed = true inside onTimerExpired, but processLayerTriggers
     // sets active_changed on press too — here we drive it through the full path)
@@ -950,7 +950,7 @@ test "T7: layer switch resets gyro EMA and accumulators" {
     m.stick_right.scroll_accum = 0.9;
 
     // LT release → layer deactivates → active_changed = true → reset fires
-    _ = try m.apply(.{ .buttons = 0 });
+    _ = try m.apply(.{ .buttons = 0 }, 16);
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_x);
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.accum_x);
@@ -969,7 +969,7 @@ test "T7: no layer switch — processor state preserved" {
     m.gyro_proc.ema_x = 42.0;
     m.stick_left.mouse_accum_x = 0.6;
 
-    _ = try m.apply(.{});
+    _ = try m.apply(.{}, 16);
 
     // No layer change: state must not be reset
     try testing.expectEqual(@as(f32, 42.0), m.gyro_proc.ema_x);
@@ -993,14 +993,14 @@ test "T7: toggle layer switch resets processors" {
     const sel_mask: u32 = @as(u32, 1) << sel_idx;
 
     // Frame 1: Select pressed (rising edge only, toggle fires on release)
-    _ = try m.apply(.{ .buttons = sel_mask });
+    _ = try m.apply(.{ .buttons = sel_mask }, 16);
 
     // Dirty processor state to simulate residual accumulation
     m.gyro_proc.ema_y = -200.0;
     m.stick_right.mouse_accum_y = 0.8;
 
     // Frame 2: Select released → toggle fires → active_changed = true → reset
-    _ = try m.apply(.{ .buttons = 0 });
+    _ = try m.apply(.{ .buttons = 0 }, 16);
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_y);
     try testing.expectEqual(@as(f32, 0), m.stick_right.mouse_accum_y);
