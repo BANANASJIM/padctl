@@ -8,6 +8,7 @@ pub const core = struct {
     pub const mapper = @import("core/mapper.zig");
     pub const stick = @import("core/stick.zig");
     pub const dpad = @import("core/dpad.zig");
+    pub const command = @import("core/command.zig");
 };
 
 pub const io = struct {
