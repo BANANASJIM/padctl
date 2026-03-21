@@ -37,6 +37,10 @@ pub const config = struct {
     pub const mapping = @import("config/mapping.zig");
 };
 
+pub const debug = struct {
+    pub const render = @import("debug/render.zig");
+};
+
 pub const event_loop = @import("event_loop.zig");
 pub const init_seq = @import("init.zig");
 pub const device_instance = @import("device_instance.zig");

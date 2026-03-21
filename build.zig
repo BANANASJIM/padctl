@@ -19,12 +19,24 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
     b.installArtifact(exe);
 
+    // src library module: shared by padctl-debug binary and tests
+    const src_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    src_mod.addImport("toml", toml_mod);
+
     const debug_mod = b.createModule(.{
         .root_source_file = b.path("tools/padctl-debug.zig"),
         .target = target,
         .optimize = optimize,
     });
+    debug_mod.addImport("src", src_mod);
+
     const debug_exe = b.addExecutable(.{ .name = "padctl-debug", .root_module = debug_mod });
+    debug_exe.linkSystemLibrary("usb-1.0");
+    debug_exe.linkLibC();
     b.installArtifact(debug_exe);
 
     const capture_mod = b.createModule(.{
@@ -35,7 +47,7 @@ pub fn build(b: *std.Build) void {
     const capture_exe = b.addExecutable(.{ .name = "padctl-capture", .root_module = capture_mod });
     b.installArtifact(capture_exe);
 
-    // test: Layer 0 + Layer 1 (CI)
+    // test: Layer 0 + Layer 1 (CI); refAllDecls in main.zig pulls in debug/render.zig tests
     const unit_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
