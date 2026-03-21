@@ -100,6 +100,25 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run Layer 0 + Layer 1 tests (CI)");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
+    // test-tsan: ThreadSanitizer-enabled test run (local dev)
+    const tsan_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = true,
+    });
+    tsan_mod.addImport("toml", toml_mod);
+    tsan_mod.addImport("analyse", capture_analyse_mod);
+    tsan_mod.addImport("toml_gen", capture_toml_gen_mod);
+    const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
+    if (use_libusb) {
+        tsan_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        tsan_tests.addIncludePath(b.path("compat"));
+    }
+    tsan_tests.linkLibC();
+    const tsan_step = b.step("test-tsan", "Run tests with ThreadSanitizer");
+    tsan_step.dependOn(&b.addRunArtifact(tsan_tests).step);
 
     // capture L0 tests (analyse pure functions)
     const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod });
