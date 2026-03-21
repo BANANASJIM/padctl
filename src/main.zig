@@ -5,6 +5,10 @@ pub const tools = struct {
     pub const docgen = @import("tools/docgen.zig");
 };
 
+pub const subcommands = struct {
+    pub const scan = @import("cli/scan.zig");
+};
+
 pub const wasm = struct {
     pub const runtime = @import("wasm/runtime.zig");
     pub const host = @import("wasm/host.zig");
@@ -63,6 +67,7 @@ const DeviceInstance = device_instance.DeviceInstance;
 const Supervisor = supervisor.Supervisor;
 const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
+const cli_scan = subcommands.scan;
 
 const VERSION = "0.1.0";
 
@@ -74,6 +79,8 @@ const Cli = struct {
     validate_files: std.ArrayList([]const u8) = .{},
     doc_gen: bool = false,
     doc_gen_output: []const u8 = "docs/src/devices",
+    scan: bool = false,
+    scan_config_dir: []const u8 = "/usr/share/padctl/devices",
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -99,6 +106,16 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
             _ = std.posix.write(std.posix.STDOUT_FILENO, "padctl " ++ VERSION ++ "\n") catch 0;
             std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "scan")) {
+            cli.scan = true;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--config-dir")) {
+                    cli.scan_config_dir = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown scan argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--config")) {
             cli.config_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--config-dir")) {
@@ -124,6 +141,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
 fn printHelp() void {
     const help =
         \\Usage: padctl [options]
+        \\       padctl scan [--config-dir <dir>]
+        \\
+        \\Subcommands:
+        \\  scan                List connected HID devices and config match status
+        \\    --config-dir <d>  Search for device configs here (default: /usr/share/padctl/devices)
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
@@ -150,6 +172,15 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer cli.deinit();
+
+    // scan subcommand
+    if (cli.scan) {
+        cli_scan.run(allocator, cli.scan_config_dir) catch |err| {
+            std.log.err("scan failed: {}", .{err});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    }
 
     // --validate mode: validate one or more files and exit
     // Exit 0 = all valid, 1 = validation errors, 2 = file not found / parse error
