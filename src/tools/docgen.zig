@@ -106,7 +106,7 @@ pub fn generateDevicePage(
     // Output
     if (cfg.output) |out| {
         try writer.writeAll("## Output Capabilities\n\n");
-        try writer.print("uinput device name: **{s}**", .{out.name});
+        try writer.print("uinput device name: **{s}**", .{out.name orelse ""});
         if (out.vid) |v| try writer.print(" | VID `0x{x:0>4}`", .{@as(u64, @intCast(v))});
         if (out.pid) |p| try writer.print(" | PID `0x{x:0>4}`", .{@as(u64, @intCast(p))});
         try writer.writeAll("\n\n");

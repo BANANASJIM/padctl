@@ -142,7 +142,7 @@ test "OutputConfig: parsed fields" {
     defer result.deinit();
 
     const out = result.value.output.?;
-    try std.testing.expectEqualStrings("Test Output", out.name);
+    try std.testing.expectEqualStrings("Test Output", out.name.?);
     try std.testing.expectEqual(@as(?i64, 0x3820), out.vid);
     try std.testing.expectEqual(@as(?i64, 0x0001), out.pid);
 

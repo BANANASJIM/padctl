@@ -47,6 +47,7 @@ pub const config = struct {
     pub const toml = @import("config/toml.zig");
     pub const input_codes = @import("config/input_codes.zig");
     pub const mapping = @import("config/mapping.zig");
+    pub const presets = @import("config/presets.zig");
 };
 
 pub const debug = struct {

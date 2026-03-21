@@ -1,6 +1,7 @@
 const std = @import("std");
 const toml = @import("toml");
 const state = @import("../core/state.zig");
+const presets = @import("presets.zig");
 
 pub const ButtonId = state.ButtonId;
 
@@ -100,7 +101,8 @@ pub const AuxConfig = struct {
 };
 
 pub const OutputConfig = struct {
-    name: []const u8,
+    emulate: ?[]const u8 = null,
+    name: ?[]const u8 = null,
     vid: ?i64 = null,
     pid: ?i64 = null,
     axes: ?toml.HashMap(AxisConfig) = null,
@@ -214,7 +216,15 @@ pub const ParseResult = toml.Parsed(DeviceConfig);
 pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
     var parser = toml.Parser(DeviceConfig).init(allocator);
     defer parser.deinit();
-    const result = try parser.parseString(content);
+    var result = try parser.parseString(content);
+    if (result.value.output) |*out| {
+        if (out.emulate) |preset_name| {
+            presets.applyPreset(result.arena.allocator(), out, preset_name) catch |err| {
+                result.deinit();
+                return err;
+            };
+        }
+    }
     validate(&result.value) catch |err| {
         result.deinit();
         return err;
@@ -468,4 +478,79 @@ test "dualsense.toml output axes and buttons count" {
     try std.testing.expectEqual(@as(usize, 6), axes.map.count());
     // A, B, X, Y, LB, RB, Select, Start, Home, LS, RS, TouchPad, Mic = 13
     try std.testing.expectEqual(@as(usize, 13), buttons.map.count());
+}
+
+const emulate_toml =
+    \\[device]
+    \\name = "My Device"
+    \\vid = 0x1234
+    \\pid = 0x5678
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 4
+    \\[output]
+    \\emulate = "xbox-360"
+;
+
+test "emulate preset resolves vid/pid/name and axes/buttons" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, emulate_toml);
+    defer result.deinit();
+
+    const out = result.value.output.?;
+    try std.testing.expectEqual(@as(?i64, 0x045e), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x028e), out.pid);
+    try std.testing.expectEqualStrings("Xbox 360 Controller", out.name.?);
+    try std.testing.expect(out.axes != null);
+    try std.testing.expect(out.buttons != null);
+}
+
+test "emulate preset: explicit vid overrides preset" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "My Device"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\emulate = "dualsense"
+        \\vid = 0xdead
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+
+    const out = result.value.output.?;
+    try std.testing.expectEqual(@as(?i64, 0xdead), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0ce6), out.pid);
+}
+
+test "emulate preset: unknown preset returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "My Device"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\emulate = "no-such-preset"
+    ;
+    try std.testing.expectError(error.UnknownPreset, parseString(allocator, toml_str));
 }

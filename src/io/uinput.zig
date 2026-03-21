@@ -187,7 +187,7 @@ pub const UinputDevice = struct {
 
         // Step 4: uinput_setup (name/vid/pid/bustype/ff_effects_max)
         var setup = std.mem.zeroes(c.uinput_setup);
-        const name = cfg.name;
+        const name = cfg.name orelse "";
         const copy_len = @min(name.len, setup.name.len - 1);
         @memcpy(setup.name[0..copy_len], name[0..copy_len]);
         setup.id.bustype = c.BUS_VIRTUAL;
