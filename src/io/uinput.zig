@@ -75,11 +75,7 @@ pub const OutputDevice = struct {
     }
 };
 
-pub const AuxEvent = union(enum) {
-    key: struct { code: u16, pressed: bool },
-    mouse_button: struct { code: u16, pressed: bool },
-    rel: struct { code: u16, value: i32 },
-};
+pub const AuxEvent = @import("../core/aux_event.zig").AuxEvent;
 
 pub const AuxOutputDevice = struct {
     ptr: *anyopaque,

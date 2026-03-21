@@ -248,6 +248,10 @@ pub const EventLoop = struct {
                     if (maybe_delta) |delta| {
                         if (ctx.mapper) |m| {
                             const events = try m.apply(delta, dt_ms);
+                            if (events.timer_request) |tr| switch (tr) {
+                                .arm => |ms| try armTimer(self.timer_fd, ms),
+                                .disarm => disarmTimer(self.timer_fd),
+                            };
                             self.gamepad_state.applyDelta(delta);
                             try ctx.output.emit(events.gamepad);
                             if (ctx.aux_output) |ao| {

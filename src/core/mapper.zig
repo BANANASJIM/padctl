@@ -5,35 +5,18 @@ const state = @import("state.zig");
 const layer = @import("layer.zig");
 const gyro = @import("gyro.zig");
 const stick = @import("stick.zig");
-const event_loop = @import("../event_loop.zig");
 const macro_player_mod = @import("macro_player.zig");
 const timer_queue_mod = @import("timer_queue.zig");
+const aux_event_mod = @import("aux_event.zig");
 
 pub const RemapTargetResolved = @import("remap.zig").RemapTargetResolved;
 pub const resolveTarget = @import("remap.zig").resolveTarget;
-pub const AuxEvent = @import("../io/uinput.zig").AuxEvent;
+pub const AuxEvent = aux_event_mod.AuxEvent;
+pub const AuxEventList = aux_event_mod.AuxEventList;
+pub const TimerRequest = @import("timer_request.zig").TimerRequest;
 
 const MacroPlayer = macro_player_mod.MacroPlayer;
 const TimerQueue = timer_queue_mod.TimerQueue;
-
-pub const AuxEventList = struct {
-    buffer: [64]AuxEvent = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *AuxEventList, val: AuxEvent) error{Overflow}!void {
-        if (self.len >= 64) return error.Overflow;
-        self.buffer[self.len] = val;
-        self.len += 1;
-    }
-
-    pub fn get(self: *const AuxEventList, i: usize) AuxEvent {
-        return self.buffer[i];
-    }
-
-    pub fn slice(self: *const AuxEventList) []const AuxEvent {
-        return self.buffer[0..self.len];
-    }
-};
 
 const GamepadState = state.GamepadState;
 const GamepadStateDelta = state.GamepadStateDelta;
@@ -46,6 +29,7 @@ pub const OutputEvents = struct {
     gamepad: GamepadState,
     prev: GamepadState,
     aux: AuxEventList,
+    timer_request: ?TimerRequest = null,
 };
 
 pub const Mapper = struct {
@@ -106,8 +90,12 @@ pub const Mapper = struct {
         // [2] layer trigger processing
         const configs = self.config.layer orelse &.{};
         const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons);
-        if (action.arm_timer_ms) |ms| try event_loop.armTimer(self.timer_fd, @intCast(ms));
-        if (action.disarm_timer) event_loop.disarmTimer(self.timer_fd);
+        var timer_request: ?TimerRequest = null;
+        if (action.arm_timer_ms) |ms| {
+            timer_request = .{ .arm = @intCast(ms) };
+        } else if (action.disarm_timer) {
+            timer_request = .{ .disarm = {} };
+        }
         if (action.active_changed) {
             self.gyro_proc.reset();
             self.stick_left.reset();
@@ -282,7 +270,7 @@ pub const Mapper = struct {
 
         self.prev = self.state;
 
-        return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux };
+        return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux, .timer_request = timer_request };
     }
 
     pub fn onTimerExpired(self: *Mapper) AuxEventList {

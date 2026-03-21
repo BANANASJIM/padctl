@@ -1,14 +1,14 @@
 const std = @import("std");
 const macro_mod = @import("macro.zig");
-const mapper_mod = @import("mapper.zig");
 const remap = @import("remap.zig");
 const timer_queue_mod = @import("timer_queue.zig");
 
 const Macro = macro_mod.Macro;
 const MacroStep = macro_mod.MacroStep;
-const AuxEventList = mapper_mod.AuxEventList;
+const aux_event_mod = @import("aux_event.zig");
+const AuxEventList = aux_event_mod.AuxEventList;
+const AuxEvent = aux_event_mod.AuxEvent;
 const TimerQueue = timer_queue_mod.TimerQueue;
-const AuxEvent = @import("../io/uinput.zig").AuxEvent;
 
 pub const MacroPlayer = struct {
     macro: *const Macro,

@@ -6,8 +6,9 @@ const c = @cImport({
     @cInclude("linux/input-event-codes.h");
 });
 
-const AuxEvent = @import("../io/uinput.zig").AuxEvent;
-const AuxEventList = @import("mapper.zig").AuxEventList;
+const aux_event_mod = @import("aux_event.zig");
+const AuxEvent = aux_event_mod.AuxEvent;
+const AuxEventList = aux_event_mod.AuxEventList;
 const ButtonId = state.ButtonId;
 const DpadConfig = mapping.DpadConfig;
 
