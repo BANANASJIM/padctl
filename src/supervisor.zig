@@ -498,6 +498,7 @@ fn makeTestInstance(
         .mapper = null,
         .uinput_dev = null,
         .aux_dev = null,
+        .touchpad_dev = null,
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
