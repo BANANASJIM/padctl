@@ -146,6 +146,10 @@ pub const OutputConfig = struct {
 
 #### T20c: Add resolveEventCode to input_codes.zig
 
+**Prerequisite**: Add `BTN_GEAR_UP` (0x151) and `BTN_GEAR_DOWN` (0x150) to
+`btn_table` in `input_codes.zig`. These are valid Linux kernel codes used by the
+example TOML but currently absent from the lookup table.
+
 A unified resolver that dispatches by event name prefix:
 
 ```zig

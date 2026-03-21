@@ -75,6 +75,7 @@ Recommended order: T19 -> T20 -> T21 + T22 (parallel) -> T23.
 
 ### T20c: Add resolveEventCode to input_codes.zig
 
+- [ ] Add `BTN_GEAR_UP` and `BTN_GEAR_DOWN` to `btn_table` (missing from current table)
 - [ ] Define `ResolvedEvent` struct: `event_type: u16`, `event_code: u16`
 - [ ] Implement `resolveEventCode(name)`: dispatch by `ABS_`/`BTN_`/`KEY_` prefix
   to existing `resolveAbsCode`/`resolveBtnCode`
