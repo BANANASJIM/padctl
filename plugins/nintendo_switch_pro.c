@@ -104,20 +104,20 @@ static int32_t send_subcmd(uint8_t subcmd_id,
     return -1;
 }
 
-// Parse user calibration data from SPI read response.
-// SPI user calibration (22 bytes at 0x8010):
-//   bytes 0-10:  left stick (max above, max below, center, min below, min above, dead zone)
-//   bytes 11-21: right stick (same layout)
+// Parse stick calibration data from SPI read response.
+// User calibration (22 bytes at 0x8010) and factory calibration (18 bytes at
+// 0x603D) share the same 12-bit triplet layout for the first 18 bytes.
+// Factory cal uses a compact 18-byte format without dead-zone bytes.
 // Each axis is 12 bits packed in 3 bytes per pair.
 static void parse_user_cal(const uint8_t *data, int32_t len, stick_cal_t *cal) {
-    if (len < 22) {
+    if (len < 18) {
         *cal = DEFAULT_CAL;
         return;
     }
 
     // Check if user calibration is empty (all 0xFF = not set)
     int all_ff = 1;
-    for (int32_t i = 0; i < 22; i++) {
+    for (int32_t i = 0; i < len; i++) {
         if (data[i] != 0xFF) { all_ff = 0; break; }
     }
     if (all_ff) {
@@ -263,7 +263,6 @@ int32_t process_report(const void *raw, int32_t raw_len,
 
     // Only process standard input reports (0x30)
     if (src[0] != 0x30) return 0;
-    if (raw_len < 12) return 0;
 
     // Retrieve calibration state
     stick_cal_t cal;

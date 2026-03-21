@@ -345,7 +345,7 @@ pub const Supervisor = struct {
             .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 },
         };
-        // ppoll ignores entries with fd < 0, so fixed slot positions work
+        // nfds caps the slice to exclude fd=-1 slots; ppoll returns POLLNVAL for negative fds
         const nfds: usize = if (self.inotify_fd >= 0) 5 else if (self.netlink_fd >= 0) 3 else 2;
 
         while (true) {
@@ -908,7 +908,6 @@ test "Supervisor: inotify debounce coalescing with real timerfd" {
 
     // Create a real timerfd to test armDebounce logic
     sup.debounce_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch {
-        sup.deinit();
         return;
     };
     defer sup.deinit();
