@@ -85,6 +85,7 @@ const FieldTag = enum {
     touch1_y,
     touch0_active,
     touch1_active,
+    battery_level,
     unknown,
 };
 
@@ -107,6 +108,7 @@ fn parseFieldTag(name: []const u8) FieldTag {
     if (std.mem.eql(u8, name, "touch1_y")) return .touch1_y;
     if (std.mem.eql(u8, name, "touch0_active")) return .touch0_active;
     if (std.mem.eql(u8, name, "touch1_active")) return .touch1_active;
+    if (std.mem.eql(u8, name, "battery_level")) return .battery_level;
     return .unknown;
 }
 
@@ -130,6 +132,7 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .touch1_y => delta.touch1_y = @truncate(val),
         .touch0_active => delta.touch0_active = val != 0,
         .touch1_active => delta.touch1_active = val != 0,
+        .battery_level => delta.battery_level = @intCast(val & 0xff),
         .unknown => {},
     }
 }
@@ -1060,21 +1063,33 @@ test "DualSense all buttons released" {
     try testing.expectEqual(@as(u32, 0), btns);
 }
 
-test "DualSense battery and touchpad fields parse without error" {
+test "DualSense battery_level: bits DSL extracts 4-bit nibble" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     var raw = [_]u8{0} ** 64;
     raw[0] = 0x01;
-    // battery_raw at offset 53: level=8 (80%), charging state=1 (charging) → 0x18
+    // byte 53: bits[3:0]=level(8), bits[7:4]=charging(1) → 0x18
     raw[53] = 0x18;
-    // touch0_contact at offset 33: finger_id=5, active (bit7=0) → 0x05
     raw[33] = 0x05;
-    // touch1_contact at offset 37: inactive (bit7=1) → 0x80
     raw[37] = 0x80;
-    // processReport must succeed; battery/touch fields silently pass through
-    _ = try interp.processReport(3, &raw);
+    const delta = try interp.processReport(3, &raw);
+    try testing.expectEqual(@as(?u8, 8), delta.battery_level);
+}
+
+test "battery_level FieldTag: parseFieldTag and applyFieldTag" {
+    try testing.expectEqual(FieldTag.battery_level, parseFieldTag("battery_level"));
+    try testing.expectEqual(FieldTag.unknown, parseFieldTag("battery_raw"));
+
+    var delta = GamepadStateDelta{};
+    applyFieldTag(&delta, .battery_level, 10);
+    try testing.expectEqual(@as(?u8, 10), delta.battery_level);
+
+    // large value is masked to u8 range
+    var delta2 = GamepadStateDelta{};
+    applyFieldTag(&delta2, .battery_level, 0x1ff);
+    try testing.expectEqual(@as(?u8, 0xff), delta2.battery_level);
 }
 
 fn makeDualSenseBtSample() [78]u8 {

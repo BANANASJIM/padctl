@@ -47,8 +47,8 @@ sensor_timestamp = { offset = 28, type = "u32le" }
 # Sub-byte extraction (bits DSL) is Phase 2; raw contact bytes declared here
 touch0_contact = { offset = 33, type = "u8" }
 touch1_contact = { offset = 37, type = "u8" }
-# Battery status byte 53: bits[3:0]=level(0-10), bits[7:4]=charging state
-battery_raw    = { offset = 53, type = "u8" }
+# Battery: bits[3:0]=level(0-10), bits[7:4]=charging state (ignored)
+battery_level  = { bits = [53, 0, 4] }
 
 # Button bit layout across bytes 8-10:
 # byte 8 bits 4-7: Square=4, Cross=5, Circle=6, Triangle=7
@@ -87,7 +87,7 @@ accel_z = { offset = 27, type = "i16le" }
 sensor_timestamp = { offset = 29, type = "u32le" }
 touch0_contact = { offset = 34, type = "u8" }
 touch1_contact = { offset = 38, type = "u8" }
-battery_raw    = { offset = 54, type = "u8" }
+battery_level  = { bits = [54, 0, 4] }
 
 # Button bit layout: same as USB but at bytes 9-11 (+1 offset)
 [report.button_group]

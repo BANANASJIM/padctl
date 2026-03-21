@@ -485,7 +485,7 @@ test "dualsense.toml report field count" {
     const fields = cfg.report[0].fields orelse return error.NoFields;
     // left_x, left_y, right_x, right_y, lt, rt,
     // gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z,
-    // sensor_timestamp, touch0_contact, touch1_contact, battery_raw = 16
+    // sensor_timestamp, touch0_contact, touch1_contact, battery_level = 16
     try std.testing.expectEqual(@as(usize, 16), fields.map.count());
 }
 

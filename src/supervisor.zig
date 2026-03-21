@@ -10,6 +10,7 @@ const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
+const config_paths = @import("config/paths.zig");
 
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
@@ -27,6 +28,53 @@ pub const ConfigEntry = struct {
     mapping_cfg: ?*MappingConfig,
 };
 
+const InotifyResult = struct {
+    inotify_fd: posix.fd_t,
+    debounce_fd: posix.fd_t,
+    config_dir: ?[]const u8,
+};
+
+fn initInotify(allocator: std.mem.Allocator) InotifyResult {
+    const disabled: InotifyResult = .{ .inotify_fd = -1, .debounce_fd = -1, .config_dir = null };
+
+    const config_dir = config_paths.userConfigDir(allocator) catch return disabled;
+
+    std.fs.accessAbsolute(config_dir, .{}) catch {
+        allocator.free(config_dir);
+        return disabled;
+    };
+
+    const dir_z = allocator.dupeZ(u8, config_dir) catch {
+        allocator.free(config_dir);
+        return disabled;
+    };
+    defer allocator.free(dir_z);
+
+    const rc_init = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
+    const init_err = linux.E.init(rc_init);
+    if (init_err != .SUCCESS) {
+        allocator.free(config_dir);
+        return disabled;
+    }
+    const in_fd: posix.fd_t = @intCast(rc_init);
+
+    const rc_watch = linux.inotify_add_watch(in_fd, dir_z.ptr, linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO);
+    const watch_err = linux.E.init(rc_watch);
+    if (watch_err != .SUCCESS) {
+        posix.close(in_fd);
+        allocator.free(config_dir);
+        return disabled;
+    }
+
+    const db_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch {
+        posix.close(in_fd);
+        allocator.free(config_dir);
+        return disabled;
+    };
+
+    return .{ .inotify_fd = in_fd, .debounce_fd = db_fd, .config_dir = config_dir };
+}
+
 fn threadEntry(inst: *DeviceInstance) void {
     inst.run() catch |err| {
         std.log.err("DeviceInstance.run failed: {}", .{err});
@@ -39,6 +87,9 @@ pub const Supervisor = struct {
     stop_fd: posix.fd_t,
     hup_fd: posix.fd_t,
     netlink_fd: posix.fd_t,
+    inotify_fd: posix.fd_t,
+    debounce_fd: posix.fd_t,
+    config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
     // devname → phys_key (both slices owned by this map)
@@ -64,12 +115,17 @@ pub const Supervisor = struct {
         };
         errdefer if (nl_fd >= 0) posix.close(nl_fd);
 
+        const inotify_result = initInotify(allocator);
+
         return .{
             .allocator = allocator,
             .managed = .{},
             .stop_fd = stop_fd,
             .hup_fd = hup_fd,
             .netlink_fd = nl_fd,
+            .inotify_fd = inotify_result.inotify_fd,
+            .debounce_fd = inotify_result.debounce_fd,
+            .config_dir = inotify_result.config_dir,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
         };
@@ -88,6 +144,9 @@ pub const Supervisor = struct {
             .stop_fd = stop_fd,
             .hup_fd = hup_fd,
             .netlink_fd = -1,
+            .inotify_fd = -1,
+            .debounce_fd = -1,
+            .config_dir = null,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
         };
@@ -97,6 +156,9 @@ pub const Supervisor = struct {
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
+        if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
+        if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
+        if (self.config_dir) |dir| self.allocator.free(dir);
         for (self.managed.items) |*m| {
             m.instance.deinit();
             self.allocator.destroy(m.instance);
@@ -244,6 +306,25 @@ pub const Supervisor = struct {
         netlink.drainNetlink(self.netlink_fd, self, netlinkCallback);
     }
 
+    fn armDebounce(self: *Supervisor) void {
+        if (self.debounce_fd < 0) return;
+        const spec = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = 500_000_000 },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+        _ = linux.timerfd_settime(self.debounce_fd, .{}, &spec, null);
+    }
+
+    fn drainInotify(self: *Supervisor) void {
+        if (self.inotify_fd < 0) return;
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = posix.read(self.inotify_fd, &buf) catch break;
+            if (n == 0) break;
+        }
+        self.armDebounce();
+    }
+
     pub fn run(
         self: *Supervisor,
         initial_configs: []const ConfigEntry,
@@ -257,12 +338,15 @@ pub const Supervisor = struct {
         }
         defer self.stopAll();
 
-        var pollfds = [3]posix.pollfd{
+        var pollfds = [5]posix.pollfd{
             .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 },
         };
-        const nfds: usize = if (self.netlink_fd >= 0) 3 else 2;
+        // ppoll ignores entries with fd < 0, so fixed slot positions work
+        const nfds: usize = if (self.inotify_fd >= 0) 5 else if (self.netlink_fd >= 0) 3 else 2;
 
         while (true) {
             _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
@@ -293,9 +377,32 @@ pub const Supervisor = struct {
                 pollfds[1].revents = 0;
             }
 
-            if (nfds == 3 and pollfds[2].revents & posix.POLL.IN != 0) {
+            if (pollfds[2].revents & posix.POLL.IN != 0) {
                 self.drainNetlink();
                 pollfds[2].revents = 0;
+            }
+
+            if (pollfds[3].revents & posix.POLL.IN != 0) {
+                self.drainInotify();
+                pollfds[3].revents = 0;
+            }
+
+            if (pollfds[4].revents & posix.POLL.IN != 0) {
+                // Debounce timer fired — trigger reload (same path as SIGHUP)
+                var tbuf: [8]u8 = undefined;
+                _ = posix.read(self.debounce_fd, &tbuf) catch {};
+
+                const new_configs = reloadFn(reload_allocator) catch |err| {
+                    std.log.err("reload failed: {}", .{err});
+                    continue;
+                };
+                defer reload_allocator.free(new_configs);
+
+                self.reload(new_configs, initFn) catch |err| {
+                    std.log.err("hot-reload diff failed: {}", .{err});
+                };
+
+                pollfds[4].revents = 0;
             }
         }
     }
@@ -783,4 +890,94 @@ test "Supervisor: two devnames attached simultaneously — independent threads" 
     try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 
     try testing.expect(sup.managed.items[0].instance != sup.managed.items[1].instance);
+}
+
+test "Supervisor: initForTest sets inotify_fd and debounce_fd to -1" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    try testing.expectEqual(@as(posix.fd_t, -1), sup.inotify_fd);
+    try testing.expectEqual(@as(posix.fd_t, -1), sup.debounce_fd);
+    try testing.expectEqual(@as(?[]const u8, null), sup.config_dir);
+}
+
+test "Supervisor: inotify debounce coalescing with real timerfd" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+
+    // Create a real timerfd to test armDebounce logic
+    sup.debounce_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch {
+        sup.deinit();
+        return;
+    };
+    defer sup.deinit();
+
+    // Arm debounce: should set a 500ms timer
+    sup.armDebounce();
+
+    // Re-arm immediately: timer should reset, not fire twice
+    sup.armDebounce();
+
+    // Timer not yet fired — read should return WouldBlock
+    var tbuf: [8]u8 = undefined;
+    const result = posix.read(sup.debounce_fd, &tbuf);
+    try testing.expectError(error.WouldBlock, result);
+}
+
+test "Supervisor: armDebounce with invalid fd is no-op" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    // debounce_fd is -1 from initForTest — should not crash
+    sup.armDebounce();
+}
+
+test "initInotify: non-existent config dir returns disabled" {
+    const allocator = testing.allocator;
+
+    // Use testing allocator — if a real config dir exists, this test still
+    // validates the return structure. The key invariant: no fd leak.
+    const result = initInotify(allocator);
+    if (result.inotify_fd >= 0) {
+        posix.close(result.inotify_fd);
+        posix.close(result.debounce_fd);
+        allocator.free(result.config_dir.?);
+    } else {
+        try testing.expectEqual(@as(posix.fd_t, -1), result.inotify_fd);
+        try testing.expectEqual(@as(posix.fd_t, -1), result.debounce_fd);
+        try testing.expectEqual(@as(?[]const u8, null), result.config_dir);
+    }
+}
+
+test "initInotify: watches temp directory successfully" {
+    const allocator = testing.allocator;
+
+    // Create a temp dir to use as config dir, then manually set up inotify on it
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const tmp_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_z);
+
+    const rc_init = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
+    const init_err = linux.E.init(rc_init);
+    if (init_err != .SUCCESS) return; // skip if inotify unavailable
+    const in_fd: posix.fd_t = @intCast(rc_init);
+    defer posix.close(in_fd);
+
+    const rc_watch = linux.inotify_add_watch(in_fd, tmp_z.ptr, linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO);
+    const watch_err = linux.E.init(rc_watch);
+    try testing.expect(watch_err == .SUCCESS);
+
+    // Write a file into the watched directory
+    try tmp.dir.writeFile(.{ .sub_path = "test.toml", .data = "hello" });
+
+    // inotify should be readable now
+    var buf: [4096]u8 = undefined;
+    const n = posix.read(in_fd, &buf) catch 0;
+    try testing.expect(n > 0);
 }

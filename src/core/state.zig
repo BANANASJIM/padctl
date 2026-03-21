@@ -51,6 +51,7 @@ pub const GamepadState = struct {
     touch1_y: i16 = 0,
     touch0_active: bool = false,
     touch1_active: bool = false,
+    battery_level: u8 = 0,
 
     pub fn diff(self: GamepadState, prev: GamepadState) GamepadStateDelta {
         var d = GamepadStateDelta{};
@@ -75,6 +76,7 @@ pub const GamepadState = struct {
         if (self.touch1_y != prev.touch1_y) d.touch1_y = self.touch1_y;
         if (self.touch0_active != prev.touch0_active) d.touch0_active = self.touch0_active;
         if (self.touch1_active != prev.touch1_active) d.touch1_active = self.touch1_active;
+        if (self.battery_level != prev.battery_level) d.battery_level = self.battery_level;
         return d;
     }
 
@@ -100,6 +102,7 @@ pub const GamepadState = struct {
         if (delta.touch1_y) |v| self.touch1_y = v;
         if (delta.touch0_active) |v| self.touch0_active = v;
         if (delta.touch1_active) |v| self.touch1_active = v;
+        if (delta.battery_level) |v| self.battery_level = v;
     }
 };
 
@@ -127,6 +130,7 @@ pub const GamepadStateDelta = struct {
     touch1_y: ?i16 = null,
     touch0_active: ?bool = null,
     touch1_active: ?bool = null,
+    battery_level: ?u8 = null,
 };
 
 // --- tests ---
@@ -214,4 +218,23 @@ test "diff: touchpad fields appear in delta" {
     try std.testing.expectEqual(@as(?bool, true), d.touch1_active);
     try std.testing.expectEqual(@as(?i16, null), d.touch0_y);
     try std.testing.expectEqual(@as(?bool, null), d.touch0_active);
+}
+
+test "applyDelta: battery_level field" {
+    var s = GamepadState{};
+    try std.testing.expectEqual(@as(u8, 0), s.battery_level);
+    s.applyDelta(.{ .battery_level = 7 });
+    try std.testing.expectEqual(@as(u8, 7), s.battery_level);
+    s.applyDelta(.{}); // null leaves unchanged
+    try std.testing.expectEqual(@as(u8, 7), s.battery_level);
+}
+
+test "diff: battery_level appears in delta when changed" {
+    const prev = GamepadState{};
+    const curr = GamepadState{ .battery_level = 10 };
+    const d = curr.diff(prev);
+    try std.testing.expectEqual(@as(?u8, 10), d.battery_level);
+
+    const same = curr.diff(curr);
+    try std.testing.expectEqual(@as(?u8, null), same.battery_level);
 }
