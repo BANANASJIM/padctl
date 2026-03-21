@@ -95,6 +95,11 @@ pub const Mapper = struct {
         const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons);
         if (action.arm_timer_ms) |ms| try event_loop.armTimer(self.timer_fd, @intCast(ms));
         if (action.disarm_timer) event_loop.disarmTimer(self.timer_fd);
+        if (action.active_changed) {
+            self.gyro_proc.reset();
+            self.stick_left.reset();
+            self.stick_right.reset();
+        }
 
         // reset accumulators
         self.suppressed_buttons = 0;
@@ -862,4 +867,102 @@ test "gyro mouse mode: joy_x/y do not affect emit_state axes" {
     // mouse mode: rx/ry must be untouched (suppress_right_stick_gyro stays false)
     try testing.expectEqual(@as(i16, 999), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, 888), ev.gamepad.ry);
+}
+
+test "T7: layer switch resets gyro EMA and accumulators" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.gyro]
+        \\mode = "mouse"
+        \\sensitivity = 100.0
+        \\smoothing = 0.5
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Accumulate EMA state via gyro input frames (base layer, mode=off → no output but EMA still runs if mode matched)
+    // Directly set dirty processor state to simulate residual EMA
+    m.gyro_proc.ema_x = 500.0;
+    m.gyro_proc.ema_y = -300.0;
+    m.gyro_proc.accum_x = 0.7;
+    m.gyro_proc.accum_y = -0.4;
+
+    // Trigger layer activation: LT press → PENDING
+    const lt_idx: u5 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u32 = @as(u32, 1) << lt_idx;
+    _ = try m.apply(.{ .buttons = lt_mask });
+
+    // Timer fires → ACTIVE (active_changed = true inside onTimerExpired, but processLayerTriggers
+    // sets active_changed on press too — here we drive it through the full path)
+    m.onTimerExpired();
+    // Manually trigger a frame that will see active_changed via release
+    // Instead: drive through processLayerTriggers which sets active_changed on ACTIVE→IDLE release
+    // For simplicity: re-dirty the processor and then release LT to deactivate
+    m.gyro_proc.ema_x = 500.0;
+    m.gyro_proc.accum_x = 0.7;
+    m.stick_left.mouse_accum_x = 1.5;
+    m.stick_right.scroll_accum = 0.9;
+
+    // LT release → layer deactivates → active_changed = true → reset fires
+    _ = try m.apply(.{ .buttons = 0 });
+
+    try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_x);
+    try testing.expectEqual(@as(f32, 0), m.gyro_proc.accum_x);
+    try testing.expectEqual(@as(f32, 0), m.stick_left.mouse_accum_x);
+    try testing.expectEqual(@as(f32, 0), m.stick_right.scroll_accum);
+}
+
+test "T7: no layer switch — processor state preserved" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping("", allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    m.gyro_proc.ema_x = 42.0;
+    m.stick_left.mouse_accum_x = 0.6;
+
+    _ = try m.apply(.{});
+
+    // No layer change: state must not be reset
+    try testing.expectEqual(@as(f32, 42.0), m.gyro_proc.ema_x);
+    try testing.expectEqual(@as(f32, 0.6), m.stick_left.mouse_accum_x);
+}
+
+test "T7: toggle layer switch resets processors" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\activation = "toggle"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const sel_idx: u5 = @intCast(@intFromEnum(ButtonId.Select));
+    const sel_mask: u32 = @as(u32, 1) << sel_idx;
+
+    // Frame 1: Select pressed (rising edge only, toggle fires on release)
+    _ = try m.apply(.{ .buttons = sel_mask });
+
+    // Dirty processor state to simulate residual accumulation
+    m.gyro_proc.ema_y = -200.0;
+    m.stick_right.mouse_accum_y = 0.8;
+
+    // Frame 2: Select released → toggle fires → active_changed = true → reset
+    _ = try m.apply(.{ .buttons = 0 });
+
+    try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_y);
+    try testing.expectEqual(@as(f32, 0), m.stick_right.mouse_accum_y);
 }
