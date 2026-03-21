@@ -25,14 +25,13 @@ right_x = { offset = 5, type = "i16le" }
 right_y = { offset = 7, type = "i16le", transform = "negate" }
 lt      = { offset = 9,  type = "u16le", transform = "scale(0, 255)" }
 rt      = { offset = 11, type = "u16le", transform = "scale(0, 255)" }
-# Paddles: byte 13 bits 0-3 (Paddle1-4 mapped as M1-M4)
-paddle_raw = { offset = 13, type = "u8" }
 
 [report.button_group]
-# bytes 14-15: standard + elite button layout
-# bit 0=A 1=B 2=X 3=Y 4=LB 5=RB 6=Select/View 7=Start/Menu 8=LS 9=RS 10=Home
-source = { offset = 14, size = 2 }
-map = { A = 0, B = 1, X = 2, Y = 3, LB = 4, RB = 5, Select = 6, Start = 7, LS = 8, RS = 9, Home = 10 }
+# byte 13: bits 0-3 = Paddle P1-P4 (mapped as M1-M4)
+# bytes 14-15: standard button layout
+# TODO: paddle bit positions (byte 13 bits 0-3) need verification with real hardware capture
+source = { offset = 13, size = 3 }
+map = { M1 = 0, M2 = 1, M3 = 2, M4 = 3, A = 8, B = 9, X = 10, Y = 11, LB = 12, RB = 13, Select = 14, Start = 15, LS = 16, RS = 17, Home = 18 }
 
 # --- Commands ---
 [commands.rumble]
@@ -65,6 +64,10 @@ Start  = "BTN_START"
 Home   = "BTN_MODE"
 LS     = "BTN_THUMBL"
 RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY1"
+M2     = "BTN_TRIGGER_HAPPY2"
+M3     = "BTN_TRIGGER_HAPPY3"
+M4     = "BTN_TRIGGER_HAPPY4"
 
 [output.dpad]
 type = "hat"
