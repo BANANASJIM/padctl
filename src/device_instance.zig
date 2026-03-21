@@ -153,9 +153,11 @@ pub const DeviceInstance = struct {
                 @atomicStore(?*MappingConfig, &self.pending_mapping, null, .release);
             }
 
-            // Drain any stop_pipe wake signal left from a prior updateMapping call
+            // Drain any stop_pipe wake signal left from a prior updateMapping call,
+            // then re-check stopped — stop() may have written this byte.
             var dummy: [1]u8 = undefined;
             _ = posix.read(self.loop.stop_r, &dummy) catch {};
+            if (@atomicLoad(bool, &self.stopped, .acquire)) break;
 
             const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
