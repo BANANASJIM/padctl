@@ -152,6 +152,7 @@ pub const Mapper = struct {
                 if (left_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = left_out.rel_y } }) catch {};
             } else if (std.mem.eql(u8, left_cfg.mode, "scroll")) {
                 if (left_out.wheel != 0) aux.append(.{ .rel = .{ .code = 8, .value = left_out.wheel } }) catch {};
+                if (left_out.hwheel != 0) aux.append(.{ .rel = .{ .code = 6, .value = left_out.hwheel } }) catch {};
             }
 
             const right_cfg = self.effectiveStickConfig(.right);
@@ -161,6 +162,7 @@ pub const Mapper = struct {
                 if (right_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = right_out.rel_y } }) catch {};
             } else if (std.mem.eql(u8, right_cfg.mode, "scroll")) {
                 if (right_out.wheel != 0) aux.append(.{ .rel = .{ .code = 8, .value = right_out.wheel } }) catch {};
+                if (right_out.hwheel != 0) aux.append(.{ .rel = .{ .code = 6, .value = right_out.hwheel } }) catch {};
             }
 
             const dpad_cfg = self.effectiveDpadConfig();
@@ -354,6 +356,7 @@ fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
         .deadzone = if (mc.deadzone) |v| @intCast(v) else 0,
         .smoothing = if (mc.smoothing) |v| @floatCast(v) else 0.3,
         .curve = if (mc.curve) |v| @floatCast(v) else 1.0,
+        .max_val = if (mc.max_val) |v| @floatCast(v) else 32767.0,
         .invert_x = mc.invert_x orelse false,
         .invert_y = mc.invert_y orelse false,
     };

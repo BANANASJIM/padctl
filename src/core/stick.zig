@@ -18,6 +18,7 @@ pub const StickProcessor = struct {
     mouse_accum_x: f32 = 0,
     mouse_accum_y: f32 = 0,
     scroll_accum: f32 = 0,
+    hscroll_accum: f32 = 0,
 
     pub fn process(
         self: *StickProcessor,
@@ -29,8 +30,7 @@ pub const StickProcessor = struct {
         if (std.mem.eql(u8, cfg.mode, "mouse")) {
             return self.processMouseMode(axis_x, axis_y, cfg, @floatFromInt(dt_ms));
         } else if (std.mem.eql(u8, cfg.mode, "scroll")) {
-            const steps = self.processScrollMode(axis_y, cfg, @floatFromInt(dt_ms));
-            return .{ .wheel = steps };
+            return self.processScrollMode(axis_x, axis_y, cfg, @floatFromInt(dt_ms));
         }
         // gamepad: pass-through (caller uses raw axis values)
         return .{};
@@ -40,6 +40,7 @@ pub const StickProcessor = struct {
         self.mouse_accum_x = 0;
         self.mouse_accum_y = 0;
         self.scroll_accum = 0;
+        self.hscroll_accum = 0;
     }
 
     fn processMouseMode(self: *StickProcessor, x: i16, y: i16, cfg: *const StickConfig, dt_ms: f32) StickOutput {
@@ -60,15 +61,18 @@ pub const StickProcessor = struct {
         return .{ .rel_x = dx, .rel_y = dy };
     }
 
-    fn processScrollMode(self: *StickProcessor, y: i16, cfg: *const StickConfig, dt_ms: f32) i32 {
+    fn processScrollMode(self: *StickProcessor, x: i16, y: i16, cfg: *const StickConfig, dt_ms: f32) StickOutput {
         const fy = applyDeadzone(y, cfg.deadzone);
-        const ny = fy / 32768.0;
+        self.scroll_accum += (fy / 32768.0) * cfg.sensitivity * dt_ms / 100.0;
+        const wheel: i32 = @intFromFloat(@trunc(self.scroll_accum));
+        self.scroll_accum -= @floatFromInt(wheel);
 
-        self.scroll_accum += ny * cfg.sensitivity * dt_ms / 100.0;
+        const fx = applyDeadzone(x, cfg.deadzone);
+        self.hscroll_accum += (fx / 32768.0) * cfg.sensitivity * dt_ms / 100.0;
+        const hwheel: i32 = @intFromFloat(@trunc(self.hscroll_accum));
+        self.hscroll_accum -= @floatFromInt(hwheel);
 
-        const steps: i32 = @intFromFloat(@trunc(self.scroll_accum));
-        self.scroll_accum -= @floatFromInt(steps);
-        return steps;
+        return .{ .wheel = wheel, .hwheel = hwheel };
     }
 };
 
@@ -205,4 +209,51 @@ test "T4: dt_ms=100 integrates without overflow" {
     _ = sp.process(&cfg, 32000, 0, 100);
     try testing.expect(!std.math.isNan(sp.mouse_accum_x));
     try testing.expect(!std.math.isInf(sp.mouse_accum_x));
+}
+
+// T10: REL_HWHEEL tests
+
+test "T10: scroll mode X axis produces hwheel" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
+    var hsteps: i32 = 0;
+    for (0..20) |_| {
+        const out = sp.process(&cfg, 32767, 0, 16);
+        hsteps += out.hwheel;
+        try testing.expectEqual(@as(i32, 0), out.wheel);
+    }
+    try testing.expect(hsteps > 0);
+}
+
+test "T10: scroll mode Y axis produces wheel, not hwheel" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
+    var vsteps: i32 = 0;
+    for (0..20) |_| {
+        const out = sp.process(&cfg, 0, 32767, 16);
+        vsteps += out.wheel;
+        try testing.expectEqual(@as(i32, 0), out.hwheel);
+    }
+    try testing.expect(vsteps > 0);
+}
+
+test "T10: scroll mode both axes produce independent outputs" {
+    var sp = StickProcessor{};
+    const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
+    var total_wheel: i32 = 0;
+    var total_hwheel: i32 = 0;
+    for (0..20) |_| {
+        const out = sp.process(&cfg, 32767, 32767, 16);
+        total_wheel += out.wheel;
+        total_hwheel += out.hwheel;
+    }
+    try testing.expect(total_wheel > 0);
+    try testing.expect(total_hwheel > 0);
+}
+
+test "T10: hscroll_accum resets on reset()" {
+    var sp = StickProcessor{};
+    sp.hscroll_accum = 0.5;
+    sp.reset();
+    try testing.expectEqual(@as(f32, 0), sp.hscroll_accum);
 }

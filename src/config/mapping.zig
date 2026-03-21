@@ -12,6 +12,7 @@ pub const GyroConfig = struct {
     deadzone: ?i64 = null,
     smoothing: ?f64 = null,
     curve: ?f64 = null,
+    max_val: ?f64 = null,
     invert_x: ?bool = null,
     invert_y: ?bool = null,
 };
