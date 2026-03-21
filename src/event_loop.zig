@@ -10,7 +10,7 @@ const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
 const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
 const generic = @import("core/generic.zig");
 const GenericDeviceState = generic.GenericDeviceState;
-const GenericUinputDevice = @import("io/uinput.zig").GenericUinputDevice;
+const GenericOutputDevice = @import("io/uinput.zig").GenericOutputDevice;
 const state = @import("core/state.zig");
 const GamepadStateDelta = state.GamepadStateDelta;
 const mapper_mod = @import("core/mapper.zig");
@@ -71,7 +71,7 @@ pub const EventLoopContext = struct {
     wasm_plugin: ?WasmPlugin = null,
     wasm_override_report: bool = false,
     generic_state: ?*GenericDeviceState = null,
-    generic_output: ?*GenericUinputDevice = null,
+    generic_output: ?GenericOutputDevice = null,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {

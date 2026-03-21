@@ -653,11 +653,28 @@ pub const TouchpadDevice = struct {
 
 const generic = @import("../core/generic.zig");
 
+pub const GenericOutputDevice = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        emit_generic: *const fn (ptr: *anyopaque, gs: *generic.GenericDeviceState) EmitError!void,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn emitGeneric(self: GenericOutputDevice, gs: *generic.GenericDeviceState) EmitError!void {
+        return self.vtable.emit_generic(self.ptr, gs);
+    }
+
+    pub fn close(self: GenericOutputDevice) void {
+        self.vtable.close(self.ptr);
+    }
+};
+
 pub const GenericUinputDevice = struct {
     fd: std.posix.fd_t,
 
-    pub fn create(cfg: *const device.OutputConfig, gs: *generic.GenericDeviceState) !GenericUinputDevice {
-        const mapping = cfg.mapping orelse return error.NoMapping;
+    pub fn create(cfg: *const device.OutputConfig, gs: *const generic.GenericDeviceState) !GenericUinputDevice {
         const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
         const fd = try std.posix.open("/dev/uinput", flags, 0);
         errdefer std.posix.close(fd);
@@ -665,36 +682,20 @@ pub const GenericUinputDevice = struct {
         var has_abs = false;
         var has_key = false;
 
-        var it = mapping.map.iterator();
-        while (it.next()) |entry| {
-            if (gs.count >= generic.MAX_GENERIC_FIELDS) break;
-            const me = entry.value_ptr.*;
-            const resolved = input_codes.resolveEventCode(me.event) catch return error.InvalidConfig;
-
-            if (resolved.event_type == c.EV_ABS) {
+        for (gs.slots[0..gs.count]) |slot| {
+            if (slot.event_type == c.EV_ABS) {
                 if (!has_abs) {
                     try ioctlInt(fd, UI_SET_EVBIT, c.EV_ABS);
                     has_abs = true;
                 }
-                try ioctlInt(fd, UI_SET_ABSBIT, @intCast(resolved.event_code));
-            } else {
+                try ioctlInt(fd, UI_SET_ABSBIT, @intCast(slot.event_code));
+            } else if (slot.event_type == c.EV_KEY) {
                 if (!has_key) {
                     try ioctlInt(fd, UI_SET_EVBIT, c.EV_KEY);
                     has_key = true;
                 }
-                try ioctlInt(fd, UI_SET_KEYBIT, @intCast(resolved.event_code));
+                try ioctlInt(fd, UI_SET_KEYBIT, @intCast(slot.event_code));
             }
-
-            gs.slots[gs.count].event_type = resolved.event_type;
-            gs.slots[gs.count].event_code = resolved.event_code;
-            gs.slots[gs.count].is_button = (resolved.event_type == c.EV_KEY);
-            if (me.range) |r| {
-                if (r.len >= 2) {
-                    gs.slots[gs.count].range_min = @intCast(r[0]);
-                    gs.slots[gs.count].range_max = @intCast(r[1]);
-                }
-            }
-            gs.count += 1;
         }
 
         var setup = std.mem.zeroes(c.uinput_setup);
@@ -706,7 +707,6 @@ pub const GenericUinputDevice = struct {
         setup.id.product = if (cfg.pid) |p| @intCast(p) else 0;
         try ioctlPtr(fd, UI_DEV_SETUP, @intFromPtr(&setup));
 
-        // UI_ABS_SETUP for each ABS slot
         for (gs.slots[0..gs.count]) |slot| {
             if (slot.event_type != c.EV_ABS) continue;
             var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
@@ -742,6 +742,25 @@ pub const GenericUinputDevice = struct {
             _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
         }
         gs.prev_values = gs.values;
+    }
+
+    pub fn genericOutputDevice(self: *GenericUinputDevice) GenericOutputDevice {
+        return .{ .ptr = self, .vtable = &generic_vtable };
+    }
+
+    const generic_vtable = GenericOutputDevice.VTable{
+        .emit_generic = emitGenericVtable,
+        .close = closeGenericVtable,
+    };
+
+    fn emitGenericVtable(ptr: *anyopaque, gs: *generic.GenericDeviceState) EmitError!void {
+        const self: *GenericUinputDevice = @ptrCast(@alignCast(ptr));
+        self.emitGeneric(gs) catch return error.WriteFailed;
+    }
+
+    fn closeGenericVtable(ptr: *anyopaque) void {
+        const self: *GenericUinputDevice = @ptrCast(@alignCast(ptr));
+        self.close();
     }
 
     pub fn close(self: *GenericUinputDevice) void {

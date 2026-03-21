@@ -11,6 +11,9 @@ const TouchpadDevice = uinput.TouchpadDevice;
 const OutputDevice = uinput.OutputDevice;
 const AuxOutputDevice = uinput.AuxOutputDevice;
 const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
+const GenericUinputDevice = uinput.GenericUinputDevice;
+const GenericOutputDevice = uinput.GenericOutputDevice;
+const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
 const Mapper = @import("core/mapper.zig").Mapper;
@@ -77,6 +80,8 @@ pub const DeviceInstance = struct {
     uinput_dev: ?UinputDevice,
     aux_dev: ?AuxDevice,
     touchpad_dev: ?TouchpadDevice,
+    generic_state: ?generic.GenericDeviceState,
+    generic_uinput: ?GenericUinputDevice,
     device_cfg: *const DeviceConfig,
     mapping_cfg: ?*const MappingConfig = null,
     pending_mapping: ?*MappingConfig,
@@ -112,11 +117,20 @@ pub const DeviceInstance = struct {
 
         const interp = Interpreter.init(cfg);
 
+        const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
+
         var uinput_dev: ?UinputDevice = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
+        var generic_state: ?generic.GenericDeviceState = null;
+        var generic_uinput: ?GenericUinputDevice = null;
 
-        if (cfg.output) |*out_cfg| {
+        if (is_generic) {
+            generic_state = try generic.compileGenericState(cfg);
+            if (cfg.output) |*out_cfg| {
+                generic_uinput = try GenericUinputDevice.create(out_cfg, &generic_state.?);
+            }
+        } else if (cfg.output) |*out_cfg| {
             uinput_dev = try UinputDevice.create(out_cfg);
             if (out_cfg.force_feedback != null) {
                 errdefer uinput_dev.?.close();
@@ -139,6 +153,8 @@ pub const DeviceInstance = struct {
             .uinput_dev = uinput_dev,
             .aux_dev = aux_dev,
             .touchpad_dev = touchpad_dev,
+            .generic_state = generic_state,
+            .generic_uinput = generic_uinput,
             .device_cfg = cfg,
             .pending_mapping = null,
             .stopped = false,
@@ -150,6 +166,7 @@ pub const DeviceInstance = struct {
         if (self.uinput_dev) |*u| u.close();
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
+        if (self.generic_uinput) |*gu| gu.close();
         for (self.devices) |dev| dev.close();
         self.allocator.free(self.devices);
         self.loop.deinit();
@@ -174,6 +191,7 @@ pub const DeviceInstance = struct {
             const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
             const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
+            const generic_output: ?GenericOutputDevice = if (self.generic_uinput) |*gu| gu.genericOutputDevice() else null;
             const mapper_ptr: ?*Mapper = if (self.mapper) |*m| m else null;
 
             const mcfg: ?*const MappingConfig = if (mapper_ptr) |m| m.config else self.mapping_cfg;
@@ -189,6 +207,8 @@ pub const DeviceInstance = struct {
                 .device_config = self.device_cfg,
                 .mapping_config = mcfg,
                 .poll_timeout_ms = self.poll_timeout_ms,
+                .generic_state = if (self.generic_state) |*gs| gs else null,
+                .generic_output = generic_output,
             });
             if (self.loop.disconnected) break;
         }
@@ -255,6 +275,8 @@ fn testInstance(
         .uinput_dev = null,
         .aux_dev = null,
         .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
@@ -337,6 +359,8 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
         .uinput_dev = null,
         .aux_dev = null,
         .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
         .device_cfg = &parsed.value,
         .pending_mapping = null,
         .stopped = false,

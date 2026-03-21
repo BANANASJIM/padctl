@@ -29,8 +29,22 @@ pub const GenericDeviceState = struct {
     count: u8 = 0,
 };
 
+fn fieldTypeSize(t: interpreter.FieldType) usize {
+    return switch (t) {
+        .u8, .i8 => 1,
+        .u16le, .i16le, .u16be, .i16be => 2,
+        .u32le, .i32le, .u32be, .i32be => 4,
+    };
+}
+
 pub fn extractGenericFields(state: *GenericDeviceState, raw: []const u8) void {
     for (state.slots[0..state.count], 0..state.count) |*slot, i| {
+        const needed: usize = switch (slot.mode) {
+            .standard => slot.offset + fieldTypeSize(slot.type_tag),
+            .bits => @as(usize, slot.byte_offset) + (@as(usize, slot.start_bit) + @as(usize, slot.bit_count) + 7) / 8,
+        };
+        if (needed > raw.len) continue;
+
         var val: i64 = switch (slot.mode) {
             .standard => interpreter.readFieldByTag(raw, slot.offset, slot.type_tag),
             .bits => blk: {
@@ -46,10 +60,8 @@ pub fn extractGenericFields(state: *GenericDeviceState, raw: []const u8) void {
     }
 }
 
-pub fn compileGenericState(
-    cfg: *const device.DeviceConfig,
-    mapping: anytype,
-) !GenericDeviceState {
+pub fn compileGenericState(cfg: *const device.DeviceConfig) !GenericDeviceState {
+    const mapping = cfg.output.?.mapping orelse return error.InvalidConfig;
     var state = GenericDeviceState{};
     var it = mapping.map.iterator();
     while (it.next()) |entry| {
@@ -244,7 +256,6 @@ test "compileGenericState: compiles from config" {
     const parsed = try device.parseString(allocator, toml_str);
     defer parsed.deinit();
 
-    const mapping = parsed.value.output.?.mapping.?;
-    const gs = try compileGenericState(&parsed.value, mapping);
+    const gs = try compileGenericState(&parsed.value);
     try testing.expectEqual(@as(u8, 4), gs.count);
 }
