@@ -37,6 +37,7 @@ pub const config = struct {
 pub const event_loop = @import("event_loop.zig");
 pub const init_seq = @import("init.zig");
 pub const device_instance = @import("device_instance.zig");
+pub const supervisor = @import("supervisor.zig");
 
 const DeviceInstance = device_instance.DeviceInstance;
 const Interpreter = core.interpreter.Interpreter;
