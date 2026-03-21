@@ -113,6 +113,7 @@ test "auto: all field names map to known FieldTag" {
     const ignored = [_][]const u8{
         "sensor_timestamp",
         "touch0_contact", "touch1_contact",
+        "left_x_raw", "left_y_raw", "right_x_raw", "right_y_raw",
     };
     for (paths.items) |path| {
         const parsed = try device.parseFile(allocator, path);
@@ -133,9 +134,11 @@ test "auto: all field names map to known FieldTag" {
 ```
 
 The ignore list contains field names that intentionally map to `.unknown` because they
-carry metadata (sensor_timestamp) or are handled by button_group (touch*_contact).
-The ignore list is maintained in the test file — adding a new `.unknown` field to a
-device TOML requires either adding it to `parseFieldTag` or to this ignore list.
+carry metadata (sensor_timestamp), are handled by button_group (touch*_contact), or
+represent raw values before calibration (left_x_raw, left_y_raw, right_x_raw, right_y_raw
+in switch-pro.toml). The ignore list is maintained in the test file — adding a new
+`.unknown` field to a device TOML requires either adding it to `parseFieldTag` or to
+this ignore list.
 
 ---
 
@@ -346,4 +349,4 @@ panic for any device config.
 | D4 | Transform boundary test in separate file | `interpreter.zig` already has ~500 lines of tests. Separate file keeps it manageable. |
 | D5 | Fixed PRNG seed (42/99) for state round-trip | Deterministic CI — same random pairs every run. Seed value is arbitrary. |
 | D6 | `paths.items.len >= 12` minimum guard | Prevents silent pass when CWD is wrong and Dir.walk finds 0 files. 12 matches current device count. |
-| D7 | FieldTag ignore list maintained in test file | Ignore-listed names (sensor_timestamp, touch*_contact) are metadata fields that intentionally map to `.unknown`. Adding new ignored fields is explicit and reviewable. |
+| D7 | FieldTag ignore list maintained in test file | Ignore-listed names (sensor_timestamp, touch*_contact, *_raw) are metadata/raw fields that intentionally map to `.unknown`. Adding new ignored fields is explicit and reviewable. |

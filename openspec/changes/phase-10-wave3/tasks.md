@@ -82,7 +82,8 @@ Recommended order: T13 -> T12 -> T14 + T15 (parallel) -> T16.
 ### T13b: Add FieldTag coverage test in auto_device_test.zig
 
 - [ ] Add test `"auto: all field names map to known FieldTag"`:
-  - Define ignore list: `sensor_timestamp`, `touch0_contact`, `touch1_contact`
+  - Define ignore list: `sensor_timestamp`, `touch0_contact`, `touch1_contact`,
+    `left_x_raw`, `left_y_raw`, `right_x_raw`, `right_y_raw`
   - For each device path -> each report -> each field name:
     - Skip if name is in ignore list
     - Assert `interpreter.parseFieldTag(name) != .unknown`
