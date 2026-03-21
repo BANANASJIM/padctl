@@ -29,8 +29,8 @@ package() {
 
     install -Dm755 "${_src}/bin/padctl" "${pkgdir}/usr/bin/padctl"
 
-    install -Dm644 "${_src}/install/padctl@.service" \
-        "${pkgdir}/usr/lib/systemd/system/padctl@.service"
+    install -Dm644 "${_src}/install/padctl.service" \
+        "${pkgdir}/usr/lib/systemd/system/padctl.service"
 
     install -Dm644 "${_src}/install/99-padctl.rules" \
         "${pkgdir}/usr/lib/udev/rules.d/99-padctl.rules"
