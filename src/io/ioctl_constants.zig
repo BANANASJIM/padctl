@@ -23,6 +23,7 @@ pub const UI_DEV_SETUP = IOCTL.IOW('U', 3, c.uinput_setup);
 pub const UI_ABS_SETUP = IOCTL.IOW('U', 4, c.uinput_abs_setup);
 pub const UI_SET_EVBIT = IOCTL.IOW('U', 100, c_int);
 pub const UI_SET_KEYBIT = IOCTL.IOW('U', 101, c_int);
+pub const UI_SET_RELBIT = IOCTL.IOW('U', 102, c_int);
 pub const UI_SET_ABSBIT = IOCTL.IOW('U', 103, c_int);
 pub const UI_SET_FFBIT = IOCTL.IOW('U', 107, c_int);
 pub const UI_BEGIN_FF_UPLOAD = IOCTL.IOWR('U', 200, c.uinput_ff_upload);

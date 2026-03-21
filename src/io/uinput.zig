@@ -9,20 +9,20 @@ const c = @cImport({
     @cInclude("linux/input-event-codes.h");
 });
 
-const IOCTL = std.os.linux.IOCTL;
-const UI_SET_EVBIT = IOCTL.IOW('U', 100, c_int);
-const UI_SET_KEYBIT = IOCTL.IOW('U', 101, c_int);
-const UI_SET_RELBIT = IOCTL.IOW('U', 102, c_int);
-const UI_SET_ABSBIT = IOCTL.IOW('U', 103, c_int);
-const UI_SET_FFBIT = IOCTL.IOW('U', 107, c_int);
-const UI_DEV_SETUP = IOCTL.IOW('U', 3, c.uinput_setup);
-const UI_ABS_SETUP = IOCTL.IOW('U', 4, c.uinput_abs_setup);
-const UI_DEV_CREATE = IOCTL.IO('U', 1);
-const UI_DEV_DESTROY = IOCTL.IO('U', 2);
-const UI_BEGIN_FF_UPLOAD = IOCTL.IOWR('U', 200, c.uinput_ff_upload);
-const UI_END_FF_UPLOAD = IOCTL.IOW('U', 201, c.uinput_ff_upload);
-const UI_BEGIN_FF_ERASE = IOCTL.IOWR('U', 202, c.uinput_ff_erase);
-const UI_END_FF_ERASE = IOCTL.IOW('U', 203, c.uinput_ff_erase);
+const ioctl_constants = @import("ioctl_constants.zig");
+const UI_SET_EVBIT = ioctl_constants.UI_SET_EVBIT;
+const UI_SET_KEYBIT = ioctl_constants.UI_SET_KEYBIT;
+const UI_SET_RELBIT = ioctl_constants.UI_SET_RELBIT;
+const UI_SET_ABSBIT = ioctl_constants.UI_SET_ABSBIT;
+const UI_SET_FFBIT = ioctl_constants.UI_SET_FFBIT;
+const UI_DEV_SETUP = ioctl_constants.UI_DEV_SETUP;
+const UI_ABS_SETUP = ioctl_constants.UI_ABS_SETUP;
+const UI_DEV_CREATE = ioctl_constants.UI_DEV_CREATE;
+const UI_DEV_DESTROY = ioctl_constants.UI_DEV_DESTROY;
+const UI_BEGIN_FF_UPLOAD = ioctl_constants.UI_BEGIN_FF_UPLOAD;
+const UI_END_FF_UPLOAD = ioctl_constants.UI_END_FF_UPLOAD;
+const UI_BEGIN_FF_ERASE = ioctl_constants.UI_BEGIN_FF_ERASE;
+const UI_END_FF_ERASE = ioctl_constants.UI_END_FF_ERASE;
 
 const MAX_EVENTS = 64;
 

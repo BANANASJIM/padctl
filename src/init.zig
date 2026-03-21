@@ -22,6 +22,24 @@ pub fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, retries: u8) !void {
+    try device.write(bytes);
+    var read_buf: [64]u8 = undefined;
+    var attempt: u8 = 0;
+    while (attempt < retries) : (attempt += 1) {
+        const n = device.read(&read_buf) catch |err| switch (err) {
+            error.Again => {
+                std.Thread.sleep(5 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        if (std.mem.startsWith(u8, read_buf[0..n], prefix)) return;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    return error.InitFailed;
+}
+
 /// Run device init handshake for a single DeviceIO.
 /// For each command hex string: write bytes, then retry up to 10 times (5ms apart)
 /// waiting for a response whose prefix matches response_prefix.
@@ -41,53 +59,13 @@ pub fn runInitSequence(
     for (init_config.commands) |cmd| {
         const bytes = try parseHexBytes(allocator, cmd);
         defer allocator.free(bytes);
-
-        try device.write(bytes);
-
-        var read_buf: [64]u8 = undefined;
-        var ok = false;
-        var attempt: u8 = 0;
-        while (attempt < 10) : (attempt += 1) {
-            const n = device.read(&read_buf) catch |err| switch (err) {
-                error.Again => {
-                    std.Thread.sleep(5 * std.time.ns_per_ms);
-                    continue;
-                },
-                else => return err,
-            };
-            if (std.mem.startsWith(u8, read_buf[0..n], prefix)) {
-                ok = true;
-                break;
-            }
-            std.Thread.sleep(5 * std.time.ns_per_ms);
-        }
-        if (!ok) return error.InitFailed;
+        try sendAndWaitPrefix(device, bytes, prefix, 10);
     }
 
     if (init_config.enable) |enable_cmd| {
         const bytes = try parseHexBytes(allocator, enable_cmd);
         defer allocator.free(bytes);
-
-        try device.write(bytes);
-
-        var read_buf: [64]u8 = undefined;
-        var ok = false;
-        var attempt: u8 = 0;
-        while (attempt < 10) : (attempt += 1) {
-            const n = device.read(&read_buf) catch |err| switch (err) {
-                error.Again => {
-                    std.Thread.sleep(5 * std.time.ns_per_ms);
-                    continue;
-                },
-                else => return err,
-            };
-            if (std.mem.startsWith(u8, read_buf[0..n], prefix)) {
-                ok = true;
-                break;
-            }
-            std.Thread.sleep(5 * std.time.ns_per_ms);
-        }
-        if (!ok) return error.InitFailed;
+        try sendAndWaitPrefix(device, bytes, prefix, 10);
     }
 }
 
