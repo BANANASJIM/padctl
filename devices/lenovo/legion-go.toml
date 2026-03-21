@@ -1,0 +1,76 @@
+[device]
+name = "Lenovo Legion Go"
+vid = 0x17ef
+pid = 0x6182
+
+[[device.interface]]
+id = 0
+class = "hid"
+
+# --- XInput report (Report ID 0x04, 60 bytes) ---
+# offset 0: report_id 0x04
+# offset 1: report_size
+# offset 14-17: sticks L_X/L_Y/R_X/R_Y (u8, center=128)
+# offset 18: buttons[0] legion/quick/L3/R3/up/down/left/right
+# offset 19: buttons[1] A/B/X/Y/LB/RB/LT_dig/RT_dig
+# offset 20: buttons[2] Y1/Y2/Y3/M2/M3/View/Menu
+# offset 22-23: analog triggers L/R (u8)
+[[report]]
+name = "xinput"
+interface = 0
+size = 60
+
+[report.match]
+offset = 0
+expect = [0x04]
+
+[report.fields]
+left_x  = { offset = 14, type = "u8", transform = "scale(-32768, 32767)" }
+left_y  = { offset = 15, type = "u8", transform = "scale(-32768, 32767), negate" }
+right_x = { offset = 16, type = "u8", transform = "scale(-32768, 32767)" }
+right_y = { offset = 17, type = "u8", transform = "scale(-32768, 32767), negate" }
+lt      = { offset = 22, type = "u8" }
+rt      = { offset = 23, type = "u8" }
+
+# buttons[0] byte 18: bit0=Home(legion) bit1=Select(quick) bit2=LS bit3=RS bit4=DPadUp bit5=DPadDown bit6=DPadLeft bit7=DPadRight
+# buttons[1] byte 19: bit0=A bit1=B bit2=X bit3=Y bit4=LB bit5=RB bit6=LT bit7=RT
+# buttons[2] byte 20: bit5=Select(view) bit6=Start(menu)
+# Use 3-byte group covering bytes 18-20
+[report.button_group]
+source = { offset = 18, size = 3 }
+map = { Home = 0, M1 = 1, LS = 2, RS = 3, DPadUp = 4, DPadDown = 5, DPadLeft = 6, DPadRight = 7, A = 8, B = 9, X = 10, Y = 11, LB = 12, RB = 13, LT = 14, RT = 15, M2 = 20, M3 = 21, Select = 22, Start = 23 }
+
+# --- Output device ---
+[output]
+name = "Lenovo Legion Go"
+vid = 0x17ef
+pid = 0x6182
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_WEST"
+Y      = "BTN_NORTH"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+LT     = "BTN_TL2"
+RT     = "BTN_TR2"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY1"
+M2     = "BTN_TRIGGER_HAPPY2"
+M3     = "BTN_TRIGGER_HAPPY3"
+
+[output.dpad]
+type = "hat"
