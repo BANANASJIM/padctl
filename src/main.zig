@@ -10,6 +10,8 @@ pub const core = struct {
     pub const dpad = @import("core/dpad.zig");
     pub const command = @import("core/command.zig");
     pub const macro = @import("core/macro.zig");
+    pub const timer_queue = @import("core/timer_queue.zig");
+    pub const macro_player = @import("core/macro_player.zig");
 };
 
 pub const io = struct {
