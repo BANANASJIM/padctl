@@ -51,11 +51,15 @@ pub const Wasm3Plugin = struct {
     fn load(ptr: *anyopaque, wasm_bytes: []const u8, host_ctx: *HostContext) LoadError!void {
         const s = getSelf(ptr);
         s.env = c.m3_NewEnvironment() orelse return error.PluginLoadFailed;
-        s.rt = c.m3_NewRuntime(s.env, stack_size, null) orelse {
-            c.m3_FreeEnvironment(s.env);
+        errdefer {
+            if (s.env) |env| c.m3_FreeEnvironment(env);
             s.env = null;
-            return error.PluginLoadFailed;
-        };
+        }
+        s.rt = c.m3_NewRuntime(s.env, stack_size, null) orelse return error.PluginLoadFailed;
+        errdefer {
+            if (s.rt) |rt| c.m3_FreeRuntime(rt);
+            s.rt = null;
+        }
         s.ctx = host_ctx;
 
         var mod: c.IM3Module = null;
@@ -114,16 +118,11 @@ pub const Wasm3Plugin = struct {
         var ret: i32 = -1;
         if (getResultI32(f, &ret)) return .drop;
 
-        switch (ret) {
-            0 => {
-                memcpyFromWasm(out, mem, output_offset) orelse return .drop;
-                return .passthrough;
-            },
-            1 => {
-                memcpyFromWasm(out, mem, output_offset) orelse return .drop;
-                return .{ .override = deltaFromBytes(out) };
-            },
-            else => return .drop,
+        if (ret >= 0) {
+            memcpyFromWasm(out, mem, output_offset) orelse return .drop;
+            return .{ .override = deltaFromBytes(out) };
+        } else {
+            return .drop;
         }
     }
 
@@ -364,7 +363,7 @@ test "wasm3: initDevice returns true" {
     try testing.expect(plugin.initDevice());
 }
 
-test "wasm3: processReport echo round-trip" {
+test "wasm3: processReport echo round-trip returns override" {
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -374,7 +373,10 @@ test "wasm3: processReport echo round-trip" {
     const input = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
     var out: [4]u8 = undefined;
     const result = plugin.processReport(&input, &out);
-    try testing.expectEqual(ProcessResult.passthrough, result);
+    switch (result) {
+        .override => {},
+        else => return error.ExpectedOverride,
+    }
     try testing.expectEqualSlices(u8, &input, &out);
 }
 
@@ -435,4 +437,27 @@ test "wasm3: trap in processReport returns drop" {
     const result = plugin.processReport(&[_]u8{ 0x01, 0x02, 0x03, 0x04 }, &out);
     try testing.expectEqual(ProcessResult.drop, result);
     try testing.expectEqual(@as(u32, 1), self.trap_count);
+}
+
+test "wasm3: trap rate-limiting auto-unloads plugin" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    const self = t.self;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/trap_plugin.wasm"), &ctx);
+    var out: [4]u8 = undefined;
+    const input = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    // First call: resets trap_count to 1 (last_trap_ts was 0).
+    // Subsequent rapid calls: accumulate within 1s window.
+    // At trap_count >= 10, handleTrap auto-unloads.
+    for (0..10) |_| {
+        _ = plugin.processReport(&input, &out);
+    }
+    try testing.expect(self.env == null);
+    try testing.expect(self.rt == null);
+    // After unload, fn_proc is null so processReport returns passthrough.
+    const result = plugin.processReport(&input, &out);
+    try testing.expectEqual(ProcessResult.passthrough, result);
 }
