@@ -33,8 +33,9 @@ pub const MatchConfig = struct {
 };
 
 pub const FieldConfig = struct {
-    offset: i64,
-    type: []const u8,
+    offset: ?i64 = null,
+    type: ?[]const u8 = null,
+    bits: ?[]const i64 = null,
     transform: ?[]const u8 = null,
 };
 
@@ -189,8 +190,28 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                     seen_len += 1;
                 }
 
-                const sz = fieldTypeSize(field.type) orelse return error.InvalidConfig;
-                if (field.offset < 0 or field.offset + sz > report.size) return error.OffsetOutOfBounds;
+                if (field.bits) |bits| {
+                    // bits mode: mutual exclusivity
+                    if (field.offset != null) return error.InvalidConfig;
+                    if (bits.len != 3) return error.InvalidConfig;
+                    if (bits[1] < 0 or bits[1] > 7) return error.InvalidConfig;
+                    if (bits[2] < 1 or bits[2] > 32) return error.InvalidConfig;
+                    if (bits[0] < 0) return error.InvalidConfig;
+                    // bounds check: byte_offset + ceil((start_bit + bit_count) / 8) <= report.size
+                    const span = @divTrunc(bits[1] + bits[2] + 7, 8);
+                    if (bits[0] + span > report.size) return error.OffsetOutOfBounds;
+                    // type must be null, "unsigned", or "signed"
+                    if (field.type) |t| {
+                        if (!std.mem.eql(u8, t, "unsigned") and !std.mem.eql(u8, t, "signed"))
+                            return error.InvalidConfig;
+                    }
+                } else {
+                    // standard mode: both offset and type required
+                    const offset = field.offset orelse return error.InvalidConfig;
+                    const type_str = field.type orelse return error.InvalidConfig;
+                    const sz = fieldTypeSize(type_str) orelse return error.InvalidConfig;
+                    if (offset < 0 or offset + sz > report.size) return error.OffsetOutOfBounds;
+                }
 
                 if (field.transform) |tr| {
                     if (!isValidTransformChain(tr)) return error.InvalidConfig;
@@ -597,6 +618,136 @@ test "T5: empty device name parses and validates without error" {
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectEqualStrings("", result.value.device.name);
+}
+
+// T4: bits DSL config validation tests
+
+test "T4: bits field parses and validates" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { bits = [2, 0, 12] }
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const fields = result.value.report[0].fields orelse return error.NoFields;
+    var it = fields.map.iterator();
+    const entry = it.next() orelse return error.Empty;
+    const fc = entry.value_ptr.*;
+    try std.testing.expect(fc.bits != null);
+    try std.testing.expect(fc.offset == null);
+}
+
+test "T4: bits field with signed type" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { bits = [2, 4, 12], type = "signed" }
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+}
+
+test "T4: bits field with invalid type returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { bits = [2, 0, 12], type = "i16le" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "T4: bits out of bounds returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[report.fields]
+        \\left_x = { bits = [3, 0, 12] }
+    ;
+    try std.testing.expectError(error.OffsetOutOfBounds, parseString(allocator, toml_str));
+}
+
+test "T4: bits with offset present returns error (mutual exclusivity)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { bits = [2, 0, 12], offset = 2 }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "T4: missing both offset and bits returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { type = "u8" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
 test "fuzz parseString: no panic on arbitrary input" {

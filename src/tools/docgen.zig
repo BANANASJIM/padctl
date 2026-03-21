@@ -59,12 +59,23 @@ pub fn generateDevicePage(
             var it = fields.map.iterator();
             while (it.next()) |entry| {
                 const f = entry.value_ptr.*;
-                try writer.print("| `{s}` | {d} | `{s}` | {s} |\n", .{
-                    entry.key_ptr.*,
-                    f.offset,
-                    f.type,
-                    f.transform orelse "—",
-                });
+                if (f.bits) |bits| {
+                    try writer.print("| `{s}` | bits[{d},{d},{d}] | `{s}` | {s} |\n", .{
+                        entry.key_ptr.*,
+                        bits[0],
+                        bits[1],
+                        bits[2],
+                        f.type orelse "unsigned",
+                        f.transform orelse "—",
+                    });
+                } else {
+                    try writer.print("| `{s}` | {d} | `{s}` | {s} |\n", .{
+                        entry.key_ptr.*,
+                        f.offset orelse 0,
+                        f.type orelse "?",
+                        f.transform orelse "—",
+                    });
+                }
             }
             try writer.writeByte('\n');
         }

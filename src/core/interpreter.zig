@@ -43,6 +43,27 @@ fn readFieldByTag(raw: []const u8, off: usize, t: FieldType) i64 {
     };
 }
 
+// --- bits DSL: sub-byte / cross-byte field extraction ---
+
+pub fn extractBits(raw: []const u8, byte_offset: u16, start_bit: u3, bit_count: u6) u32 {
+    const needed: u8 = (@as(u8, start_bit) + @as(u8, bit_count) + 7) / 8;
+    var val: u32 = 0;
+    for (0..needed) |i| {
+        val |= @as(u32, raw[byte_offset + i]) << @intCast(i * 8);
+    }
+    val >>= start_bit;
+    if (bit_count == 0) return 0;
+    if (bit_count >= 32) return val;
+    const shift: u5 = @intCast(bit_count);
+    return val & ((@as(u32, 1) << shift) - 1);
+}
+
+pub fn signExtend(val: u32, bit_count: u6) i32 {
+    if (bit_count == 0 or bit_count >= 32) return @bitCast(val);
+    const shift: u5 = @intCast(32 - @as(u8, bit_count));
+    return @as(i32, @bitCast(val << shift)) >> shift;
+}
+
 // --- compile-time field name catalogue ---
 
 const FieldTag = enum {
@@ -201,8 +222,16 @@ const MAX_REPORTS = 8;
 
 const CompiledField = struct {
     tag: FieldTag,
+    mode: enum { standard, bits },
+    // standard mode
     type_tag: FieldType,
     offset: usize,
+    // bits mode
+    byte_offset: u16,
+    start_bit: u3,
+    bit_count: u6,
+    is_signed: bool,
+    // common
     transforms: CompiledTransformChain,
     has_transform: bool,
 };
@@ -254,20 +283,53 @@ fn compileReport(report: *const ReportConfig) CompiledReport {
             if (cr.field_count >= MAX_FIELDS) break;
             const name = entry.key_ptr.*;
             const fc = entry.value_ptr.*;
-            const type_tag = parseFieldType(fc.type) orelse continue;
-            var cf = CompiledField{
-                .tag = parseFieldTag(name),
-                .type_tag = type_tag,
-                .offset = @intCast(fc.offset),
-                .transforms = undefined,
-                .has_transform = false,
-            };
-            if (fc.transform) |tr| {
-                cf.transforms = compileTransformChain(tr, type_tag);
-                cf.has_transform = true;
+
+            if (fc.bits) |bits| {
+                // bits mode
+                if (bits.len != 3) continue;
+                const is_signed = if (fc.type) |t| std.mem.eql(u8, t, "signed") else false;
+                var cf = CompiledField{
+                    .tag = parseFieldTag(name),
+                    .mode = .bits,
+                    .type_tag = .u8,
+                    .offset = 0,
+                    .byte_offset = @intCast(bits[0]),
+                    .start_bit = @intCast(bits[1]),
+                    .bit_count = @intCast(bits[2]),
+                    .is_signed = is_signed,
+                    .transforms = undefined,
+                    .has_transform = false,
+                };
+                if (fc.transform) |tr| {
+                    cf.transforms = compileTransformChain(tr, .u8);
+                    cf.has_transform = true;
+                }
+                cr.fields[cr.field_count] = cf;
+                cr.field_count += 1;
+            } else {
+                // standard mode
+                const type_str = fc.type orelse continue;
+                const type_tag = parseFieldType(type_str) orelse continue;
+                const offset = fc.offset orelse continue;
+                var cf = CompiledField{
+                    .tag = parseFieldTag(name),
+                    .mode = .standard,
+                    .type_tag = type_tag,
+                    .offset = @intCast(offset),
+                    .byte_offset = 0,
+                    .start_bit = 0,
+                    .bit_count = 0,
+                    .is_signed = false,
+                    .transforms = undefined,
+                    .has_transform = false,
+                };
+                if (fc.transform) |tr| {
+                    cf.transforms = compileTransformChain(tr, type_tag);
+                    cf.has_transform = true;
+                }
+                cr.fields[cr.field_count] = cf;
+                cr.field_count += 1;
             }
-            cr.fields[cr.field_count] = cf;
-            cr.field_count += 1;
         }
     }
 
@@ -377,7 +439,16 @@ fn verifyChecksumCompiled(cr: *const CompiledReport, raw: []const u8) ProcessErr
 
 fn extractAndFillCompiled(cr: *const CompiledReport, raw: []const u8, delta: *GamepadStateDelta) void {
     for (cr.fields[0..cr.field_count]) |*cf| {
-        var val = readFieldByTag(raw, cf.offset, cf.type_tag);
+        var val: i64 = switch (cf.mode) {
+            .standard => readFieldByTag(raw, cf.offset, cf.type_tag),
+            .bits => blk: {
+                const raw_val = extractBits(raw, cf.byte_offset, cf.start_bit, cf.bit_count);
+                break :blk if (cf.is_signed)
+                    @as(i64, signExtend(raw_val, cf.bit_count))
+                else
+                    @as(i64, raw_val);
+            },
+        };
         if (cf.has_transform) val = runTransformChain(val, &cf.transforms);
         applyFieldTag(delta, cf.tag, val);
     }
@@ -1239,4 +1310,142 @@ test "T3: field at last valid offset (offset = size - 1) reads correctly" {
     const raw = [_]u8{ 0x01, 0x00, 0x00, 0xAB };
     const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
     try testing.expectEqual(@as(?u8, 0xAB), delta.lt);
+}
+
+// T4: extractBits unit tests
+
+test "T4: extractBits single byte, low nibble" {
+    const raw = [_]u8{0xAB}; // 0b10101011
+    // byte_offset=0, start_bit=0, bit_count=4 → low nibble = 0xB = 11
+    try testing.expectEqual(@as(u32, 0x0B), extractBits(&raw, 0, 0, 4));
+}
+
+test "T4: extractBits single byte, high nibble" {
+    const raw = [_]u8{0xAB}; // 0b10101011
+    // byte_offset=0, start_bit=4, bit_count=4 → high nibble = 0xA = 10
+    try testing.expectEqual(@as(u32, 0x0A), extractBits(&raw, 0, 4, 4));
+}
+
+test "T4: extractBits single bit" {
+    const raw = [_]u8{ 0x00, 0x08 }; // byte1 = 0b00001000
+    // byte_offset=1, start_bit=3, bit_count=1 → bit3 = 1
+    try testing.expectEqual(@as(u32, 1), extractBits(&raw, 1, 3, 1));
+    // byte_offset=1, start_bit=2, bit_count=1 → bit2 = 0
+    try testing.expectEqual(@as(u32, 0), extractBits(&raw, 1, 2, 1));
+}
+
+test "T4: extractBits cross-byte 12-bit (DualSense touchpad X)" {
+    // touch0_x: bits = [34, 0, 12]
+    // Simulate: byte[0]=0x34, byte[1]=0x12 → LE u16 = 0x1234
+    // start_bit=0, bit_count=12 → 0x1234 & 0xFFF = 0x234
+    const raw = [_]u8{ 0x34, 0x12 };
+    try testing.expectEqual(@as(u32, 0x234), extractBits(&raw, 0, 0, 12));
+}
+
+test "T4: extractBits cross-byte 12-bit with start_bit=4 (DualSense touchpad Y)" {
+    // touch0_y: bits = [35, 4, 12]
+    // byte[0]=0xAB, byte[1]=0xCD → LE = 0xCDAB
+    // shift right by 4 → 0x0CDA, mask 12 bits → 0xCDA
+    const raw = [_]u8{ 0xAB, 0xCD };
+    try testing.expectEqual(@as(u32, 0xCDA), extractBits(&raw, 0, 4, 12));
+}
+
+test "T4: extractBits full 32-bit" {
+    var raw: [4]u8 = undefined;
+    std.mem.writeInt(u32, &raw, 0xDEADBEEF, .little);
+    try testing.expectEqual(@as(u32, 0xDEADBEEF), extractBits(&raw, 0, 0, 32));
+}
+
+test "T4: extractBits full 8-bit" {
+    const raw = [_]u8{0xFF};
+    try testing.expectEqual(@as(u32, 0xFF), extractBits(&raw, 0, 0, 8));
+}
+
+test "T4: extractBits with byte_offset" {
+    const raw = [_]u8{ 0x00, 0x00, 0xAB, 0xCD };
+    // byte_offset=2, start_bit=0, bit_count=16 → LE u16 from bytes[2..4] = 0xCDAB
+    try testing.expectEqual(@as(u32, 0xCDAB), extractBits(&raw, 2, 0, 16));
+}
+
+test "T4: signExtend positive value" {
+    // 12-bit value 0x7FF (2047), sign bit (bit11) = 0 → positive
+    try testing.expectEqual(@as(i32, 2047), signExtend(0x7FF, 12));
+}
+
+test "T4: signExtend negative value" {
+    // 12-bit value 0x800 (bit11 = 1) → sign extend to -2048
+    try testing.expectEqual(@as(i32, -2048), signExtend(0x800, 12));
+}
+
+test "T4: signExtend 1-bit" {
+    try testing.expectEqual(@as(i32, 0), signExtend(0, 1));
+    try testing.expectEqual(@as(i32, -1), signExtend(1, 1));
+}
+
+// T4: interpreter round-trip with bits DSL
+
+const bits_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 8
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\lt = { bits = [1, 0, 8] }
+    \\left_x = { bits = [2, 0, 12], type = "signed" }
+;
+
+test "T4: bits field round-trip through interpreter" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, bits_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 8;
+    raw[0] = 0x01; // match
+    raw[1] = 200; // lt = 200 (unsigned 8-bit)
+    // left_x: 12-bit signed = -100 → two's complement 12-bit: 0xF9C
+    // byte[2] = 0x9C, byte[3] low nibble = 0x0F
+    std.mem.writeInt(u16, raw[2..4], @as(u16, @bitCast(@as(i16, -100))), .little);
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 200), delta.lt);
+    try testing.expectEqual(@as(?i16, -100), delta.ax);
+}
+
+test "T4: bits field unsigned default" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\lt = { bits = [1, 0, 8] }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 4;
+    raw[0] = 0x01;
+    raw[1] = 0xFF; // 255 unsigned
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 255), delta.lt);
 }
