@@ -6,10 +6,15 @@ const layer = @import("layer.zig");
 const gyro = @import("gyro.zig");
 const stick = @import("stick.zig");
 const event_loop = @import("../event_loop.zig");
+const macro_player_mod = @import("macro_player.zig");
+const timer_queue_mod = @import("timer_queue.zig");
 
 pub const RemapTargetResolved = @import("remap.zig").RemapTargetResolved;
 pub const resolveTarget = @import("remap.zig").resolveTarget;
 pub const AuxEvent = @import("../io/uinput.zig").AuxEvent;
+
+const MacroPlayer = macro_player_mod.MacroPlayer;
+const TimerQueue = timer_queue_mod.TimerQueue;
 
 pub const AuxEventList = struct {
     buffer: [64]AuxEvent = undefined,
@@ -56,6 +61,9 @@ pub const Mapper = struct {
     pending_tap_release: ?u32,
     timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
+    active_macros: std.ArrayList(MacroPlayer),
+    timer_queue: TimerQueue,
+    next_token: u32,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
         return .{
@@ -71,11 +79,16 @@ pub const Mapper = struct {
             .pending_tap_release = null,
             .timer_fd = timer_fd,
             .allocator = allocator,
+            .active_macros = .{},
+            .timer_queue = TimerQueue.init(allocator, timer_fd),
+            .next_token = 1,
         };
     }
 
     pub fn deinit(self: *Mapper) void {
         self.layer.deinit();
+        self.active_macros.deinit(self.allocator);
+        self.timer_queue.deinit();
     }
 
     pub fn apply(self: *Mapper, delta: GamepadStateDelta, dt_ms: u32) !OutputEvents {
@@ -99,6 +112,9 @@ pub const Mapper = struct {
             self.gyro_proc.reset();
             self.stick_left.reset();
             self.stick_right.reset();
+            // Cancel in-flight macros; emit releases for any held keys.
+            for (self.active_macros.items) |*p| p.emitPendingReleases(&aux);
+            self.active_macros.clearRetainingCapacity();
         }
 
         // reset accumulators
@@ -183,6 +199,7 @@ pub const Mapper = struct {
             const target = per_src_inject[i] orelse continue;
             const src_mask: u32 = @as(u32, 1) << @as(u5, @intCast(i));
             const pressed = (self.state.buttons & src_mask) != 0;
+            const prev_pressed = (self.prev.buttons & src_mask) != 0;
             switch (target) {
                 .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {},
                 .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {},
@@ -192,13 +209,35 @@ pub const Mapper = struct {
                         self.injected_buttons |= @as(u32, 1) << dst_idx;
                     }
                 },
-                .disabled, .macro => {},
+                .disabled => {},
+                .macro => |name| {
+                    // Trigger macro on rising edge only.
+                    if (pressed and !prev_pressed) {
+                        if (self.findMacro(name)) |m| {
+                            const token = self.next_token;
+                            self.next_token +%= 1;
+                            const player = MacroPlayer.init(m, token);
+                            self.active_macros.append(self.allocator, player) catch {};
+                        }
+                    }
+                },
             }
         }
 
         // emit tap event if any
         if (action.tap_event) |tap| {
             emitTapEvent(tap, &aux, &self.injected_buttons, &self.pending_tap_release);
+        }
+
+        // [8] resume all active macro players; remove finished ones
+        var i: usize = 0;
+        while (i < self.active_macros.items.len) {
+            const done = self.active_macros.items[i].step(&aux, &self.timer_queue) catch false;
+            if (done) {
+                _ = self.active_macros.swapRemove(i);
+            } else {
+                i += 1;
+            }
         }
 
         // assemble emit state
@@ -240,8 +279,36 @@ pub const Mapper = struct {
         return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux };
     }
 
-    pub fn onTimerExpired(self: *Mapper) void {
+    pub fn onTimerExpired(self: *Mapper) AuxEventList {
         _ = self.layer.onTimerExpired();
+
+        var aux = AuxEventList{};
+        var buf: [16]timer_queue_mod.Deadline = undefined;
+        const expired = self.timer_queue.drainExpired(std.time.nanoTimestamp(), &buf);
+        for (expired) |d| {
+            var idx: usize = 0;
+            while (idx < self.active_macros.items.len) {
+                if (self.active_macros.items[idx].timer_token == d.token) {
+                    const done = self.active_macros.items[idx].step(&aux, &self.timer_queue) catch false;
+                    if (done) {
+                        _ = self.active_macros.swapRemove(idx);
+                    } else {
+                        idx += 1;
+                    }
+                    break;
+                }
+                idx += 1;
+            }
+        }
+        return aux;
+    }
+
+    fn findMacro(self: *const Mapper, name: []const u8) ?*const mapping.Macro {
+        const macros = self.config.macro orelse return null;
+        for (macros) |*m| {
+            if (std.mem.eql(u8, m.name, name)) return m;
+        }
+        return null;
     }
 
     fn effectiveGyroConfig(self: *const Mapper) gyro.GyroConfig {
@@ -603,7 +670,7 @@ test "onTimerExpired: PENDING -> ACTIVE activates layer" {
     try testing.expect(!m.layer.tap_hold.?.layer_activated);
 
     // Timer fires — goes ACTIVE
-    m.onTimerExpired();
+    _ = m.onTimerExpired();
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 
     // Now layer remap should be active
@@ -940,7 +1007,7 @@ test "T7: layer switch resets gyro EMA and accumulators" {
 
     // Timer fires → ACTIVE (active_changed = true inside onTimerExpired, but processLayerTriggers
     // sets active_changed on press too — here we drive it through the full path)
-    m.onTimerExpired();
+    _ = m.onTimerExpired();
     // Manually trigger a frame that will see active_changed via release
     // Instead: drive through processLayerTriggers which sets active_changed on ACTIVE→IDLE release
     // For simplicity: re-dirty the processor and then release LT to deactivate

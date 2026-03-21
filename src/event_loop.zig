@@ -171,7 +171,12 @@ pub const EventLoop = struct {
             if (self.pollfds[2].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
-                if (mapper) |m| m.onTimerExpired();
+                if (mapper) |m| {
+                    const macro_aux = m.onTimerExpired();
+                    if (macro_aux.len > 0) {
+                        if (aux_output) |ao| ao.emitAux(macro_aux.slice()) catch {};
+                    }
+                }
             }
 
             // Check uinput FF fd

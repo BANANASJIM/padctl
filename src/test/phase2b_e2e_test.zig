@@ -241,7 +241,7 @@ test "e2e: layer switch resets gyro EMA — no jump after activation" {
     const lt = btnMask(.LT);
     _ = try m.apply(.{ .buttons = lt }, 16);
     // Timer → ACTIVE (active_changed fires inside onTimerExpired → reset)
-    m.onTimerExpired();
+    _ = m.onTimerExpired();
 
     // LT release → IDLE (active_changed again → reset)
     _ = try m.apply(.{ .buttons = 0 }, 16);
