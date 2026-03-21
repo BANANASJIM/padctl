@@ -84,6 +84,46 @@ pub const HidrawDevice = struct {
         return error.NotFound;
     }
 
+    /// Return all `/dev/hidrawN` paths whose VID/PID match.
+    /// Caller owns the returned slice and each element (allocated with allocator).
+    pub fn discoverAll(allocator: std.mem.Allocator, vid: u16, pid: u16) ![][]const u8 {
+        return discoverAllWithRoot(allocator, vid, pid, "/dev");
+    }
+
+    pub fn discoverAllWithRoot(
+        allocator: std.mem.Allocator,
+        vid: u16,
+        pid: u16,
+        dev_root: []const u8,
+    ) ![][]const u8 {
+        var paths = std.ArrayList([]const u8){};
+        errdefer {
+            for (paths.items) |p| allocator.free(p);
+            paths.deinit(allocator);
+        }
+
+        var i: u8 = 0;
+        while (i < 64) : (i += 1) {
+            var path_buf: [128]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/hidraw{d}", .{ dev_root, i }) catch continue;
+
+            const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
+            defer posix.close(fd);
+
+            var info: ioctl.HidrawDevinfo = undefined;
+            if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) continue;
+
+            const dev_vid: u16 = @bitCast(info.vendor);
+            const dev_pid: u16 = @bitCast(info.product);
+            if (dev_vid != vid or dev_pid != pid) continue;
+
+            const owned = try allocator.dupe(u8, path);
+            try paths.append(allocator, owned);
+        }
+
+        return paths.toOwnedSlice(allocator);
+    }
+
     /// Open the hidraw node at path.
     pub fn open(self: *HidrawDevice, path: []const u8) !void {
         self.fd = try posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0);
@@ -196,6 +236,16 @@ pub const HidrawDevice = struct {
     }
 };
 
+/// Read the HIDIOCGRAWPHYS string for the given hidraw path; caller owns the returned slice.
+pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const fd = try posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0);
+    defer posix.close(fd);
+    var buf: [256]u8 = std.mem.zeroes([256]u8);
+    _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&buf));
+    const phys = std.mem.sliceTo(&buf, 0);
+    return allocator.dupe(u8, phys);
+}
+
 /// Parse interface number from HIDIOCGRAWPHYS string.
 /// Looks for the last "/inputN" component and extracts N.
 /// Returns null if no "input" segment is found.
@@ -232,6 +282,16 @@ test "parseInterfaceId Vader5 format" {
     // Typical USB phys string: "usb-xhci_hcd.0.auto-1/input1"
     try std.testing.expectEqual(@as(?u8, 1), parseInterfaceId("usb-xhci_hcd.0.auto-1/input1"));
     try std.testing.expectEqual(@as(?u8, 0), parseInterfaceId("usb-xhci_hcd.0.auto-1/input0"));
+}
+
+test "discoverAllWithRoot: nonexistent dev_root returns empty" {
+    const allocator = std.testing.allocator;
+    const paths: [][]const u8 = try HidrawDevice.discoverAllWithRoot(allocator, 0x1234, 0x5678, "/nonexistent_hidraw_root_xyz");
+    defer {
+        for (paths) |p| allocator.free(p);
+        allocator.free(paths);
+    }
+    try std.testing.expectEqual(@as(usize, 0), paths.len);
 }
 
 test "grabAssociatedEvdev sysfs path parsing" {

@@ -50,6 +50,7 @@ const VERSION = "0.1.0";
 
 const Cli = struct {
     config_path: ?[]const u8 = null,
+    config_dir: ?[]const u8 = null,
     mapping_path: ?[]const u8 = null,
     validate_path: ?[]const u8 = null,
 };
@@ -69,6 +70,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "--config")) {
             cli.config_path = args.next() orelse return error.MissingArgValue;
+        } else if (std.mem.eql(u8, arg, "--config-dir")) {
+            cli.config_dir = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--mapping")) {
             cli.mapping_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--validate")) {
@@ -87,6 +90,7 @@ fn printHelp() void {
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
+        \\  --config-dir <dir>  Glob *.toml in dir; discover all matching devices
         \\  --mapping <path>    Mapping config TOML file (optional)
         \\  --validate <path>   Validate device config and exit (returns 0/1)
         \\  --help, -h          Show this help
@@ -117,8 +121,30 @@ pub fn main() !void {
         std.process.exit(0);
     }
 
+    // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
+    if (cli.config_dir) |dir_path| {
+        var sup = Supervisor.init(allocator) catch |err| {
+            std.log.err("failed to init supervisor: {}", .{err});
+            std.process.exit(1);
+        };
+        defer sup.deinit();
+
+        sup.startFromDir(dir_path) catch |err| {
+            std.log.err("failed to scan config dir '{s}': {}", .{ dir_path, err });
+            std.process.exit(1);
+        };
+
+        if (sup.managed.items.len == 0) {
+            std.log.info("no devices found in '{s}', exiting", .{dir_path});
+            return;
+        }
+
+        sup.joinAll();
+        return;
+    }
+
     const config_path = cli.config_path orelse {
-        std.log.err("--config <path> is required", .{});
+        std.log.err("--config <path> or --config-dir <dir> is required", .{});
         printHelp();
         std.process.exit(1);
     };
@@ -129,23 +155,13 @@ pub fn main() !void {
     };
     defer parsed.deinit();
 
-    const inst = DeviceInstance.init(allocator, &parsed.value) catch |err| {
+    var inst = DeviceInstance.init(allocator, &parsed.value) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };
+    defer inst.deinit();
 
-    var sv = Supervisor.init(allocator) catch |err| {
-        std.log.err("failed to init supervisor: {}", .{err});
-        std.process.exit(1);
-    };
-    defer sv.deinit();
-
-    sv.addInstance(inst, &parsed.value) catch |err| {
-        std.log.err("failed to add instance: {}", .{err});
-        std.process.exit(1);
-    };
-
-    try sv.run();
+    try inst.run();
 }
 
 test {

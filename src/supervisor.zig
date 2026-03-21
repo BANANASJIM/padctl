@@ -3,179 +3,321 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 const DeviceInstance = @import("device_instance.zig").DeviceInstance;
+const MappingConfig = @import("config/mapping.zig").MappingConfig;
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
+const config_device = @import("config/device.zig");
+const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
+const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 
-const MAX_INSTANCES = 16;
-const BACKOFF_CAP_S: u64 = 30;
-
-const Entry = struct {
-    allocator: std.mem.Allocator,
-    instance: DeviceInstance,
-    thread: ?std.Thread,
-    done_r: posix.fd_t,
-    done_w: posix.fd_t,
-    backoff_s: u64,
-    cfg: *const DeviceConfig,
+/// One running device under Supervisor management.
+pub const ManagedInstance = struct {
+    phys_key: []const u8,
+    instance: *DeviceInstance,
+    thread: std.Thread,
+    mapping_arena: std.heap.ArenaAllocator,
 };
+
+/// Config snapshot used for hot-reload diffing.
+pub const ConfigEntry = struct {
+    phys_key: []const u8,
+    device_cfg: *const DeviceConfig,
+    mapping_cfg: ?*MappingConfig,
+};
+
+fn threadEntry(inst: *DeviceInstance) void {
+    inst.run() catch |err| {
+        std.log.err("DeviceInstance.run failed: {}", .{err});
+    };
+}
 
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
-    entries: std.ArrayList(Entry),
+    managed: std.ArrayList(ManagedInstance),
     stop_fd: posix.fd_t,
     hup_fd: posix.fd_t,
-    // ns per backoff second; overridden in tests for fast execution
-    backoff_unit_ns: u64 = std.time.ns_per_s,
+    // ParseResults whose DeviceConfig is referenced by at least one managed instance.
+    configs: std.ArrayList(*config_device.ParseResult),
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
-        var mask = posix.sigemptyset();
-        posix.sigaddset(&mask, linux.SIG.TERM);
-        posix.sigaddset(&mask, linux.SIG.INT);
-        posix.sigaddset(&mask, linux.SIG.HUP);
-        posix.sigprocmask(linux.SIG.BLOCK, &mask, null);
-
         var stop_mask = posix.sigemptyset();
         posix.sigaddset(&stop_mask, linux.SIG.TERM);
         posix.sigaddset(&stop_mask, linux.SIG.INT);
+        posix.sigprocmask(linux.SIG.BLOCK, &stop_mask, null);
         const stop_fd = try posix.signalfd(-1, &stop_mask, 0);
         errdefer posix.close(stop_fd);
 
         var hup_mask = posix.sigemptyset();
         posix.sigaddset(&hup_mask, linux.SIG.HUP);
+        posix.sigprocmask(linux.SIG.BLOCK, &hup_mask, null);
         const hup_fd = try posix.signalfd(-1, &hup_mask, 0);
         errdefer posix.close(hup_fd);
 
         return .{
             .allocator = allocator,
-            .entries = .{},
+            .managed = .{},
             .stop_fd = stop_fd,
             .hup_fd = hup_fd,
+            .configs = .{},
         };
     }
 
     pub fn deinit(self: *Supervisor) void {
-        for (self.entries.items) |*e| {
-            posix.close(e.done_r);
-            posix.close(e.done_w);
-            e.instance.deinit();
-        }
-        self.entries.deinit(self.allocator);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
+        for (self.managed.items) |*m| {
+            m.instance.deinit();
+            self.allocator.destroy(m.instance);
+            m.mapping_arena.deinit();
+            self.allocator.free(m.phys_key);
+        }
+        self.managed.deinit(self.allocator);
+        for (self.configs.items) |c| {
+            c.deinit();
+            self.allocator.destroy(c);
+        }
+        self.configs.deinit(self.allocator);
     }
 
-    pub fn addInstance(self: *Supervisor, instance: DeviceInstance, cfg: *const DeviceConfig) !void {
-        const pipes = try posix.pipe2(.{ .NONBLOCK = true });
-        errdefer {
-            posix.close(pipes[0]);
-            posix.close(pipes[1]);
-        }
-        try self.entries.append(self.allocator, .{
-            .allocator = self.allocator,
+    fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance) !void {
+        const thread = try std.Thread.spawn(.{}, threadEntry, .{instance});
+        const key_copy = try self.allocator.dupe(u8, phys_key);
+        errdefer self.allocator.free(key_copy);
+        try self.managed.append(self.allocator, .{
+            .phys_key = key_copy,
             .instance = instance,
-            .thread = null,
-            .done_r = pipes[0],
-            .done_w = pipes[1],
-            .backoff_s = 1,
-            .cfg = cfg,
+            .thread = thread,
+            .mapping_arena = std.heap.ArenaAllocator.init(self.allocator),
         });
     }
 
-    pub fn run(self: *Supervisor) !void {
-        for (self.entries.items) |*e| {
-            e.thread = try spawnEntry(e);
+    pub fn stopAll(self: *Supervisor) void {
+        for (self.managed.items) |*m| m.instance.stop();
+        for (self.managed.items) |*m| m.thread.join();
+        for (self.managed.items) |*m| {
+            m.instance.deinit();
+            self.allocator.destroy(m.instance);
+            m.mapping_arena.deinit();
+            self.allocator.free(m.phys_key);
         }
-        try self.loop();
+        self.managed.clearRetainingCapacity();
     }
 
-    fn loop(self: *Supervisor) !void {
-        while (true) {
-            var pollfds: [2 + MAX_INSTANCES]posix.pollfd = undefined;
-            pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
-            pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
-            const n_entries = self.entries.items.len;
-            for (self.entries.items, 0..) |*e, i| {
-                pollfds[2 + i] = .{ .fd = e.done_r, .events = posix.POLL.IN, .revents = 0 };
-            }
-            const n_fds: usize = 2 + n_entries;
+    /// Hot-reload: diff new_configs against running instances by phys_key.
+    pub fn reload(
+        self: *Supervisor,
+        new_configs: []const ConfigEntry,
+        initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
+    ) !void {
+        var to_remove = std.ArrayList(usize){};
+        defer to_remove.deinit(self.allocator);
 
-            _ = posix.ppoll(pollfds[0..n_fds], null, null) catch |err| switch (err) {
+        outer: for (self.managed.items, 0..) |*m, i| {
+            for (new_configs) |nc| {
+                if (std.mem.eql(u8, m.phys_key, nc.phys_key)) continue :outer;
+            }
+            try to_remove.append(self.allocator, i);
+        }
+
+        var r = to_remove.items.len;
+        while (r > 0) {
+            r -= 1;
+            const idx = to_remove.items[r];
+            const m = &self.managed.items[idx];
+            m.instance.stop();
+            m.thread.join();
+            m.instance.deinit();
+            self.allocator.destroy(m.instance);
+            m.mapping_arena.deinit();
+            self.allocator.free(m.phys_key);
+            _ = self.managed.swapRemove(idx);
+        }
+
+        for (new_configs) |nc| {
+            var found: ?*ManagedInstance = null;
+            for (self.managed.items) |*m| {
+                if (std.mem.eql(u8, m.phys_key, nc.phys_key)) {
+                    found = m;
+                    break;
+                }
+            }
+
+            if (found == null) {
+                const instance = try initFn(self.allocator, nc);
+                try self.spawnInstance(nc.phys_key, instance);
+            } else if (nc.mapping_cfg) |new_map| {
+                const m = found.?;
+                _ = m.mapping_arena.reset(.retain_capacity);
+                const arena_alloc = m.mapping_arena.allocator();
+                const map_copy = try arena_alloc.create(MappingConfig);
+                map_copy.* = new_map.*;
+                m.instance.updateMapping(map_copy);
+            }
+        }
+    }
+
+    pub fn run(
+        self: *Supervisor,
+        initial_configs: []const ConfigEntry,
+        initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
+        reloadFn: *const fn (allocator: std.mem.Allocator) anyerror![]ConfigEntry,
+        reload_allocator: std.mem.Allocator,
+    ) !void {
+        for (initial_configs) |nc| {
+            const instance = try initFn(self.allocator, nc);
+            try self.spawnInstance(nc.phys_key, instance);
+        }
+        defer self.stopAll();
+
+        var pollfds = [2]posix.pollfd{
+            .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+
+        while (true) {
+            _ = posix.ppoll(&pollfds, null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
 
             if (pollfds[0].revents & posix.POLL.IN != 0) {
-                var siginfo: [128]u8 = undefined;
-                _ = posix.read(self.stop_fd, &siginfo) catch {};
-                for (self.entries.items) |*e| e.instance.stop();
-                for (self.entries.items) |*e| {
-                    if (e.thread) |t| t.join();
-                    e.thread = null;
-                }
-                return;
+                var buf: [128]u8 = undefined;
+                _ = posix.read(self.stop_fd, &buf) catch {};
+                break;
             }
 
             if (pollfds[1].revents & posix.POLL.IN != 0) {
-                var siginfo: [128]u8 = undefined;
-                _ = posix.read(self.hup_fd, &siginfo) catch {};
-                // T6: hot-reload
-            }
+                var buf: [128]u8 = undefined;
+                _ = posix.read(self.hup_fd, &buf) catch {};
 
-            for (self.entries.items, 0..) |*e, i| {
-                if (pollfds[2 + i].revents & posix.POLL.IN == 0) continue;
-                var dummy: [1]u8 = undefined;
-                _ = posix.read(e.done_r, &dummy) catch {};
-                if (e.thread) |t| t.join();
-                e.thread = null;
-
-                std.log.info("device thread exited; respawning in {}s", .{e.backoff_s});
-                std.Thread.sleep(e.backoff_s * self.backoff_unit_ns);
-                e.backoff_s = @min(e.backoff_s * 2, BACKOFF_CAP_S);
-
-                const new_inst = DeviceInstance.init(e.allocator, e.cfg) catch |err| {
-                    std.log.err("respawn failed: {}", .{err});
+                const new_configs = reloadFn(reload_allocator) catch |err| {
+                    std.log.err("reload failed: {}", .{err});
                     continue;
                 };
-                e.instance.deinit();
-                e.instance = new_inst;
-                e.thread = spawnEntry(e) catch |err| {
-                    std.log.err("spawn failed after respawn: {}", .{err});
-                    continue;
+                defer reload_allocator.free(new_configs);
+
+                self.reload(new_configs, initFn) catch |err| {
+                    std.log.err("hot-reload diff failed: {}", .{err});
                 };
+
+                pollfds[1].revents = 0;
             }
         }
     }
+
+    /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
+    pub fn startFromDir(self: *Supervisor, dir_path: []const u8) !void {
+        return self.startFromDirWithRoot(dir_path, "/dev");
+    }
+
+    pub fn startFromDirWithRoot(self: *Supervisor, dir_path: []const u8, dev_root: []const u8) !void {
+        var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
+        defer dir.close();
+
+        // seen deduplicates by physical path across all TOML files; owns the key bytes.
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var kit = seen.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            seen.deinit();
+        }
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
+
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const toml_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
+
+            const parsed = config_device.parseFile(self.allocator, toml_path) catch |err| {
+                std.log.warn("skip {s}: {}", .{ entry.name, err });
+                continue;
+            };
+            const cfg_ptr = try self.allocator.create(config_device.ParseResult);
+            cfg_ptr.* = parsed;
+
+            const vid: u16 = @intCast(cfg_ptr.value.device.vid);
+            const pid: u16 = @intCast(cfg_ptr.value.device.pid);
+
+            const paths = HidrawDevice.discoverAllWithRoot(self.allocator, vid, pid, dev_root) catch |err| {
+                std.log.warn("discoverAll for {s}: {}", .{ entry.name, err });
+                cfg_ptr.deinit();
+                self.allocator.destroy(cfg_ptr);
+                continue;
+            };
+            defer {
+                for (paths) |p| self.allocator.free(p);
+                self.allocator.free(paths);
+            }
+
+            if (paths.len == 0) {
+                cfg_ptr.deinit();
+                self.allocator.destroy(cfg_ptr);
+                continue;
+            }
+
+            var spawned: usize = 0;
+            for (paths) |hidraw_path| {
+                const phys = readPhysicalPath(self.allocator, hidraw_path) catch |err| {
+                    std.log.warn("readPhysicalPath {s}: {}", .{ hidraw_path, err });
+                    continue;
+                };
+
+                const gop = try seen.getOrPut(phys);
+                if (gop.found_existing) {
+                    self.allocator.free(phys);
+                    continue;
+                }
+                // seen now owns phys bytes via the key slot
+
+                const inst_ptr = try self.allocator.create(DeviceInstance);
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value) catch |err| {
+                    std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
+                    self.allocator.destroy(inst_ptr);
+                    // reclaim phys from seen
+                    _ = seen.remove(phys);
+                    self.allocator.free(phys);
+                    continue;
+                };
+
+                self.spawnInstance(phys, inst_ptr) catch |err| {
+                    std.log.warn("spawnInstance for {s}: {}", .{ hidraw_path, err });
+                    inst_ptr.deinit();
+                    self.allocator.destroy(inst_ptr);
+                    _ = seen.remove(phys);
+                    self.allocator.free(phys);
+                    continue;
+                };
+                // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
+                spawned += 1;
+            }
+
+            if (spawned > 0) {
+                try self.configs.append(self.allocator, cfg_ptr);
+            } else {
+                cfg_ptr.deinit();
+                self.allocator.destroy(cfg_ptr);
+            }
+        }
+    }
+
+    pub fn joinAll(self: *Supervisor) void {
+        for (self.managed.items) |*m| m.thread.join();
+    }
 };
-
-fn spawnEntry(e: *Entry) !std.Thread {
-    return std.Thread.spawn(.{}, threadFn, .{e});
-}
-
-fn threadFn(e: *Entry) void {
-    blockAllSignals();
-    e.instance.run() catch |err| {
-        std.log.err("device instance error: {}", .{err});
-    };
-    _ = posix.write(e.done_w, &[_]u8{1}) catch {};
-}
-
-fn blockAllSignals() void {
-    var mask = posix.sigemptyset();
-    posix.sigaddset(&mask, linux.SIG.TERM);
-    posix.sigaddset(&mask, linux.SIG.INT);
-    posix.sigaddset(&mask, linux.SIG.HUP);
-    posix.sigprocmask(linux.SIG.BLOCK, &mask, null);
-}
 
 // --- tests ---
 
 const testing = std.testing;
-const EventLoop = @import("event_loop.zig").EventLoop;
-const Interpreter = @import("core/interpreter.zig").Interpreter;
-const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
+const mapping_mod = @import("config/mapping.zig");
 const device_mod = @import("config/device.zig");
+const EventLoop = @import("event_loop.zig").EventLoop;
+const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
+const uinput = @import("io/uinput.zig");
+const state_mod = @import("core/state.zig");
 
-const minimal_toml =
+const minimal_device_toml =
     \\[device]
     \\name = "T"
     \\vid = 1
@@ -194,24 +336,24 @@ const minimal_toml =
     \\left_x = { offset = 1, type = "i16le" }
 ;
 
-fn testDeviceInstance(
-    allocator: std.mem.Allocator,
+fn makeTestInstance(
+    inst_alloc: std.mem.Allocator,
     mock: *MockDeviceIO,
     cfg: *const device_mod.DeviceConfig,
-) !DeviceInstance {
-    const devices = try allocator.alloc(DeviceIO, 1);
-    errdefer allocator.free(devices);
+) !*DeviceInstance {
+    const devices = try inst_alloc.alloc(DeviceIO, 1);
     devices[0] = mock.deviceIO();
 
     var loop = try EventLoop.init();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
 
-    return DeviceInstance{
-        .allocator = allocator,
+    const inst = try inst_alloc.create(DeviceInstance);
+    inst.* = .{
+        .allocator = inst_alloc,
         .devices = devices,
         .loop = loop,
-        .interp = Interpreter.init(cfg),
+        .interp = @import("core/interpreter.zig").Interpreter.init(cfg),
         .mapper = null,
         .uinput_dev = null,
         .aux_dev = null,
@@ -219,139 +361,184 @@ fn testDeviceInstance(
         .pending_mapping = null,
         .stopped = false,
     };
+    return inst;
 }
 
-const TestSv = struct { sv: Supervisor, stop_w: posix.fd_t, hup_w: posix.fd_t };
+threadlocal var g_mock_slot: ?*MockDeviceIO = null;
 
-fn testSupervisor(allocator: std.mem.Allocator) !TestSv {
-    const stop_p = try posix.pipe2(.{ .NONBLOCK = true });
-    const hup_p = try posix.pipe2(.{ .NONBLOCK = true });
-    return .{
-        .sv = Supervisor{
-            .allocator = allocator,
-            .entries = .{},
-            .stop_fd = stop_p[0],
-            .hup_fd = hup_p[0],
-            .backoff_unit_ns = 0,
-        },
-        .stop_w = stop_p[1],
-        .hup_w = hup_p[1],
+fn testInitFn(allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance {
+    const mock = g_mock_slot orelse return error.NoMockSlot;
+    g_mock_slot = null;
+    return makeTestInstance(allocator, mock, entry.device_cfg);
+}
+
+test "Supervisor: SIGHUP updates mapping without restarting instance" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    const parsed_map = try mapping_mod.parseString(allocator, "");
+    defer parsed_map.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    var sup = try Supervisor.init(allocator);
+
+    const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst);
+
+    var new_map = parsed_map.value;
+    const entry = ConfigEntry{
+        .phys_key = "usb-1-1",
+        .device_cfg = &parsed_dev.value,
+        .mapping_cfg = &new_map,
     };
+
+    try sup.reload(&.{entry}, testInitFn);
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);
+
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
 }
 
-fn runSupervisor(sv: *Supervisor) !void {
-    try sv.run();
-}
-
-test "Supervisor: two instances run concurrently without interference" {
+test "Supervisor: SIGHUP with new phys_key spawns new instance" {
     const allocator = testing.allocator;
 
-    const parsed = try device_mod.parseString(allocator, minimal_toml);
-    defer parsed.deinit();
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
-    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
-    defer mock_b.deinit();
+    var sup = try Supervisor.init(allocator);
 
-    var t = try testSupervisor(allocator);
-    defer posix.close(t.stop_w);
-    defer posix.close(t.hup_w);
+    const entry_a = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
+    const entry_b = ConfigEntry{ .phys_key = "usb-1-2", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
 
-    try t.sv.addInstance(
-        try testDeviceInstance(allocator, &mock_a, &parsed.value),
-        &parsed.value,
-    );
-    try t.sv.addInstance(
-        try testDeviceInstance(allocator, &mock_b, &parsed.value),
-        &parsed.value,
-    );
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst_a);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
-    const sv_thread = try std.Thread.spawn(.{}, runSupervisor, .{&t.sv});
-    std.Thread.sleep(10 * std.time.ns_per_ms);
-    _ = try posix.write(t.stop_w, &[_]u8{1});
-    sv_thread.join();
+    g_mock_slot = &mock_b;
+    try sup.reload(&.{ entry_a, entry_b }, testInitFn);
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 
-    try testing.expect(t.sv.entries.items[0].instance.stopped);
-    try testing.expect(t.sv.entries.items[1].instance.stopped);
-
-    t.sv.deinit();
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
+    mock_b.deinit();
 }
 
-test "Supervisor: stop one instance, other continues running" {
+test "Supervisor: SIGHUP with removed phys_key stops instance" {
     const allocator = testing.allocator;
 
-    const parsed = try device_mod.parseString(allocator, minimal_toml);
-    defer parsed.deinit();
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
-    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
-    defer mock_b.deinit();
+    var sup = try Supervisor.init(allocator);
 
-    var t = try testSupervisor(allocator);
-    defer posix.close(t.stop_w);
-    defer posix.close(t.hup_w);
+    const entry_a = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
 
-    try t.sv.addInstance(
-        try testDeviceInstance(allocator, &mock_a, &parsed.value),
-        &parsed.value,
-    );
-    try t.sv.addInstance(
-        try testDeviceInstance(allocator, &mock_b, &parsed.value),
-        &parsed.value,
-    );
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst_a);
+    try sup.spawnInstance("usb-1-2", inst_b);
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 
-    const sv_thread = try std.Thread.spawn(.{}, runSupervisor, .{&t.sv});
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try sup.reload(&.{entry_a}, testInitFn);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);
 
-    // Verify B is running before we stop A.
-    try testing.expect(!t.sv.entries.items[1].instance.stopped);
-
-    // Stop A and immediately send stop signal to supervisor.
-    // stop_fd (index 0 in pollfds) is checked before done_fds, so supervisor
-    // exits cleanly without attempting respawn.
-    t.sv.entries.items[0].instance.stop();
-    _ = try posix.write(t.stop_w, &[_]u8{1});
-    sv_thread.join();
-
-    t.sv.deinit();
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
+    mock_b.deinit();
 }
 
-test "Supervisor: stop_fd triggers stop-all and join" {
+test "Supervisor: two rapid reloads serialize — no race condition" {
     const allocator = testing.allocator;
 
-    const parsed = try device_mod.parseString(allocator, minimal_toml);
-    defer parsed.deinit();
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
 
-    var mock = try MockDeviceIO.init(allocator, &.{});
-    defer mock.deinit();
+    const parsed_map1 = try mapping_mod.parseString(allocator, "");
+    defer parsed_map1.deinit();
+    const parsed_map2 = try mapping_mod.parseString(allocator, "name = \"v2\"");
+    defer parsed_map2.deinit();
 
-    var t = try testSupervisor(allocator);
-    defer posix.close(t.stop_w);
-    defer posix.close(t.hup_w);
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    var sup = try Supervisor.init(allocator);
 
-    try t.sv.addInstance(
-        try testDeviceInstance(allocator, &mock, &parsed.value),
-        &parsed.value,
-    );
+    const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst);
 
-    const sv_thread = try std.Thread.spawn(.{}, runSupervisor, .{&t.sv});
-    std.Thread.sleep(5 * std.time.ns_per_ms);
-    _ = try posix.write(t.stop_w, &[_]u8{1});
-    sv_thread.join();
+    var map1 = parsed_map1.value;
+    var map2 = parsed_map2.value;
 
-    try testing.expect(t.sv.entries.items[0].instance.stopped);
-    try testing.expectEqual(@as(?std.Thread, null), t.sv.entries.items[0].thread);
+    const entry1 = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = &map1 };
+    const entry2 = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = &map2 };
 
-    t.sv.deinit();
+    try sup.reload(&.{entry1}, testInitFn);
+    try sup.reload(&.{entry2}, testInitFn);
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
 }
 
-test "Supervisor: backoff doubles up to cap" {
-    var backoff: u64 = 1;
-    const sequence = [_]u64{ 2, 4, 8, 16, 30, 30 };
-    for (sequence) |expected| {
-        backoff = @min(backoff * 2, BACKOFF_CAP_S);
-        try testing.expectEqual(expected, backoff);
-    }
+test "Supervisor: empty config dir → zero instances" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var sup = try Supervisor.init(allocator);
+    defer sup.deinit();
+
+    try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "Supervisor: dir with no toml files → zero instances" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "readme.txt", .data = "hello" });
+
+    var sup = try Supervisor.init(allocator);
+    defer sup.deinit();
+
+    try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "Supervisor: two toml files, no matching hidraw → zero instances" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "a.toml", .data = minimal_device_toml });
+    try tmp.dir.writeFile(.{ .sub_path = "b.toml", .data = minimal_device_toml });
+
+    var sup = try Supervisor.init(allocator);
+    defer sup.deinit();
+
+    try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
