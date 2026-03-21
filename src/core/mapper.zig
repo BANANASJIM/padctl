@@ -108,10 +108,20 @@ pub const Mapper = struct {
         var suppress_dpad_hat: bool = false;
         {
             const gcfg = self.effectiveGyroConfig();
-            const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
-            if (std.mem.eql(u8, gcfg.mode, "mouse")) {
-                if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
-                if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
+            const activate_spec = blk: {
+                if (self.layer.getActive(self.config.layer orelse &.{})) |active| {
+                    if (active.gyro) |g| break :blk g.activate;
+                }
+                break :blk if (self.config.gyro) |g| g.activate else null;
+            };
+            if (checkGyroActivate(activate_spec, self.state.buttons)) {
+                const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
+                if (std.mem.eql(u8, gcfg.mode, "mouse")) {
+                    if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
+                    if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
+                }
+            } else {
+                self.gyro_proc.reset();
             }
 
             const left_cfg = self.effectiveStickConfig(.left);
@@ -318,6 +328,20 @@ fn emitTapEvent(
         },
         .disabled => {},
     }
+}
+
+fn buttonBit(name: []const u8) u32 {
+    const id = std.meta.stringToEnum(ButtonId, name) orelse return 0;
+    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(id)));
+}
+
+fn checkGyroActivate(activate: ?[]const u8, buttons: u32) bool {
+    const spec = activate orelse return true;
+    if (std.mem.startsWith(u8, spec, "hold_")) {
+        const btn_name = spec["hold_".len..];
+        return buttons & buttonBit(btn_name) != 0;
+    }
+    return true; // "always" or unrecognized
 }
 
 // --- tests ---
@@ -683,4 +707,80 @@ test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     // Frame 2: same dpad — masked_prev should also have dpad_y = 0
     const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 });
     try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
+}
+
+test "checkGyroActivate: null always true" {
+    try testing.expect(checkGyroActivate(null, 0));
+    try testing.expect(checkGyroActivate(null, 0xFFFFFFFF));
+}
+
+test "checkGyroActivate: always always true" {
+    try testing.expect(checkGyroActivate("always", 0));
+}
+
+test "checkGyroActivate: hold_RB pressed" {
+    const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
+    const rb_mask: u32 = @as(u32, 1) << rb_idx;
+    try testing.expect(checkGyroActivate("hold_RB", rb_mask));
+}
+
+test "checkGyroActivate: hold_RB not pressed" {
+    try testing.expect(!checkGyroActivate("hold_RB", 0));
+}
+
+test "checkGyroActivate: unknown button name returns false" {
+    try testing.expect(!checkGyroActivate("hold_UNKNOWN", 0xFFFFFFFF));
+}
+
+test "gyro activate: inactive frame no REL events and processor reset" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity = 1000.0
+        \\smoothing = 0.0
+        \\activate = "hold_RB"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Seed EMA with large gyro input while RB is held
+    const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
+    const rb_mask: u32 = @as(u32, 1) << rb_idx;
+    _ = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 });
+
+    // Release RB — gyro should be deactivated, processor reset, no REL events
+    const ev = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 });
+    try testing.expectEqual(@as(usize, 0), ev.aux.len);
+    // After reset, EMA should be zero
+    try testing.expectApproxEqAbs(@as(f32, 0.0), m.gyro_proc.ema_x, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0.0), m.gyro_proc.ema_y, 1e-5);
+}
+
+test "gyro activate: active when RB held, inactive when released" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity = 1000.0
+        \\smoothing = 0.0
+        \\activate = "hold_RB"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
+    const rb_mask: u32 = @as(u32, 1) << rb_idx;
+
+    // RB held, large gyro — should produce REL events
+    const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 });
+    try testing.expect(ev_active.aux.len > 0);
+
+    // RB released — no REL events
+    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 });
+    try testing.expectEqual(@as(usize, 0), ev_inactive.aux.len);
 }
