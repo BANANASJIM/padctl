@@ -7,6 +7,14 @@ pid = 0x0ce6
 id = 3
 class = "hid"   # EP3 OUT + EP4 IN Interrupt 64B; IF0-IF2 are audio, skipped
 
+# BT mode activation: sending any output report switches from simple mode
+# (Report ID 0x01, 10 bytes) to extended mode (Report ID 0x31, 78 bytes).
+# USB-format output report is accepted over BT and avoids CRC32 requirement.
+[device.init]
+commands = []
+response_prefix = [0x31]
+enable = "02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
 # --- USB input (Report ID 0x01, 64 bytes) ---
 [[report]]
 name = "usb"

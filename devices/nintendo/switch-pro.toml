@@ -41,17 +41,25 @@ right_y_raw = { offset = 10, type = "u8" }
 source = { offset = 3, size = 3 }
 map = { Y = 0, X = 1, B = 2, A = 3, RB = 6, RT = 7, Select = 8, Start = 9, RS = 10, LS = 11, Home = 12, Capture = 13, DPadDown = 16, DPadUp = 17, DPadRight = 18, DPadLeft = 19, LB = 22, LT = 23 }
 
+# --- WASM plugin: sub-command init, SPI calibration, stick processing ---
+[wasm]
+plugin = "plugins/nintendo_switch_pro.wasm"
+
+[wasm.overrides]
+process_report = true
+
 # --- Output device ---
+# WASM plugin provides calibrated 12-bit->16-bit stick values.
 [output]
 name = "Nintendo Switch Pro Controller"
 vid = 0x057e
 pid = 0x2009
 
 [output.axes]
-left_x_raw  = { code = "ABS_X",  min = 0, max = 255 }
-left_y_raw  = { code = "ABS_Y",  min = 0, max = 255 }
-right_x_raw = { code = "ABS_RX", min = 0, max = 255 }
-right_y_raw = { code = "ABS_RY", min = 0, max = 255 }
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
 
 [output.buttons]
 A        = "BTN_EAST"
