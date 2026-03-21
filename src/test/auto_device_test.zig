@@ -96,6 +96,11 @@ test "auto: all field names map to known FieldTag" {
         const parsed = device_mod.parseFile(allocator, path) catch continue;
         defer parsed.deinit();
 
+        // Skip generic-mode devices — field names are arbitrary
+        if (parsed.value.device.mode) |m| {
+            if (std.mem.eql(u8, m, "generic")) continue;
+        }
+
         for (parsed.value.report) |report| {
             if (report.fields) |fields| {
                 var it = fields.map.iterator();
@@ -123,6 +128,11 @@ test "auto: all button_group keys are valid ButtonId" {
     for (paths.items) |path| {
         const parsed = device_mod.parseFile(allocator, path) catch continue;
         defer parsed.deinit();
+
+        // Skip generic-mode devices — button names are arbitrary
+        if (parsed.value.device.mode) |m| {
+            if (std.mem.eql(u8, m, "generic")) continue;
+        }
 
         for (parsed.value.report) |report| {
             if (report.button_group) |bg| {

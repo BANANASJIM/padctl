@@ -11,9 +11,9 @@ pub const ProcessError = error{ ChecksumMismatch, MalformedConfig };
 
 // --- compile-time type catalogue ---
 
-const FieldType = enum { u8, i8, u16le, i16le, u16be, i16be, u32le, i32le, u32be, i32be };
+pub const FieldType = enum { u8, i8, u16le, i16le, u16be, i16be, u32le, i32le, u32be, i32be };
 
-fn parseFieldType(s: []const u8) ?FieldType {
+pub fn parseFieldType(s: []const u8) ?FieldType {
     return std.meta.stringToEnum(FieldType, s);
 }
 
@@ -28,7 +28,7 @@ fn typeMaxByTag(t: FieldType) i64 {
     };
 }
 
-fn readFieldByTag(raw: []const u8, off: usize, t: FieldType) i64 {
+pub fn readFieldByTag(raw: []const u8, off: usize, t: FieldType) i64 {
     return switch (t) {
         .u8 => raw[off],
         .i8 => @as(i8, @bitCast(raw[off])),
@@ -139,23 +139,23 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
 
 // --- pre-compiled transform chain ---
 
-const TransformOp = enum { negate, abs, scale, clamp, deadzone };
+pub const TransformOp = enum { negate, abs, scale, clamp, deadzone };
 
-const CompiledTransform = struct {
+pub const CompiledTransform = struct {
     op: TransformOp,
     a: i64 = 0,
     b: i64 = 0,
 };
 
-const MAX_TRANSFORMS = 8;
+pub const MAX_TRANSFORMS = 8;
 
-const CompiledTransformChain = struct {
+pub const CompiledTransformChain = struct {
     items: [MAX_TRANSFORMS]CompiledTransform = undefined,
     len: u8 = 0,
     type_tag: FieldType,
 };
 
-fn compileTransformChain(chain: []const u8, type_tag: FieldType) CompiledTransformChain {
+pub fn compileTransformChain(chain: []const u8, type_tag: FieldType) CompiledTransformChain {
     var result = CompiledTransformChain{ .type_tag = type_tag };
     var pos: usize = 0;
     var depth: usize = 0;
@@ -198,7 +198,7 @@ fn compileTransformSeg(seg: []const u8) CompiledTransform {
     return .{ .op = .deadzone, .a = 0 };
 }
 
-fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64 {
+pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64 {
     var val = initial;
     const t_max = typeMaxByTag(chain.type_tag);
     for (chain.items[0..chain.len]) |tr| {
@@ -225,9 +225,9 @@ fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64 {
 
 // --- pre-compiled checksum algo ---
 
-const ChecksumAlgo = enum { sum8, xor, crc32 };
+pub const ChecksumAlgo = enum { sum8, xor, crc32 };
 
-const CompiledChecksum = struct {
+pub const CompiledChecksum = struct {
     algo: ChecksumAlgo,
     range_start: usize,
     range_end: usize,
@@ -241,7 +241,7 @@ const MAX_FIELDS = 32;
 const MAX_BUTTONS = 32;
 const MAX_REPORTS = 8;
 
-const CompiledField = struct {
+pub const CompiledField = struct {
     tag: FieldTag,
     mode: enum { standard, bits },
     // standard mode
@@ -257,19 +257,19 @@ const CompiledField = struct {
     has_transform: bool,
 };
 
-const CompiledButtonEntry = struct {
+pub const CompiledButtonEntry = struct {
     btn_id: ButtonId,
     bit_idx: u5,
 };
 
-const CompiledButtonGroup = struct {
+pub const CompiledButtonGroup = struct {
     src_off: usize,
     src_size: usize,
     entries: [MAX_BUTTONS]CompiledButtonEntry,
     count: u8,
 };
 
-const CompiledReport = struct {
+pub const CompiledReport = struct {
     src: *const ReportConfig,
     checksum: ?CompiledChecksum,
     fields: [MAX_FIELDS]CompiledField,
@@ -401,7 +401,7 @@ pub const Interpreter = struct {
         interface_id: u8,
         raw: []const u8,
     ) ProcessError!?GamepadStateDelta {
-        const cr = self.matchCompiled(interface_id, raw) orelse return null;
+        const cr = self.matchReport(interface_id, raw) orelse return null;
         if (raw.len < @as(usize, @intCast(cr.src.size))) return null;
         try verifyChecksumCompiled(cr, raw);
         var delta = GamepadStateDelta{};
@@ -409,7 +409,7 @@ pub const Interpreter = struct {
         return delta;
     }
 
-    fn matchCompiled(self: *const Interpreter, interface_id: u8, raw: []const u8) ?*const CompiledReport {
+    pub fn matchReport(self: *const Interpreter, interface_id: u8, raw: []const u8) ?*const CompiledReport {
         for (self.compiled[0..self.report_count]) |*cr| {
             if (cr.src.interface != @as(i64, interface_id)) continue;
             if (cr.src.match) |m| {
@@ -430,7 +430,7 @@ fn checkMatch(m: device.MatchConfig, raw: []const u8) bool {
     return true;
 }
 
-fn verifyChecksumCompiled(cr: *const CompiledReport, raw: []const u8) ProcessError!void {
+pub fn verifyChecksumCompiled(cr: *const CompiledReport, raw: []const u8) ProcessError!void {
     const cs = cr.checksum orelse return;
     const data = raw[cs.range_start..cs.range_end];
     switch (cs.algo) {

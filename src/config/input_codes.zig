@@ -85,6 +85,8 @@ const btn_table = [_]CodeEntry{
     .{ .name = "BTN_BASE5", .code = c.BTN_BASE5 },
     .{ .name = "BTN_BASE6", .code = c.BTN_BASE6 },
     .{ .name = "BTN_DEAD", .code = c.BTN_DEAD },
+    .{ .name = "BTN_GEAR_DOWN", .code = c.BTN_GEAR_DOWN },
+    .{ .name = "BTN_GEAR_UP", .code = c.BTN_GEAR_UP },
     .{ .name = "BTN_GAMEPAD", .code = c.BTN_GAMEPAD },
     .{ .name = "BTN_SOUTH", .code = c.BTN_SOUTH },
     .{ .name = "BTN_A", .code = c.BTN_SOUTH },
@@ -277,6 +279,22 @@ pub fn resolveMouseCode(name: []const u8) error{UnknownMouseCode}!u16 {
     return error.UnknownMouseCode;
 }
 
+pub const ResolvedEvent = struct {
+    event_type: u16,
+    event_code: u16,
+};
+
+pub fn resolveEventCode(name: []const u8) error{UnknownEventCode}!ResolvedEvent {
+    if (std.mem.startsWith(u8, name, "ABS_")) {
+        return .{ .event_type = c.EV_ABS, .event_code = resolveAbsCode(name) catch return error.UnknownEventCode };
+    }
+    if (std.mem.startsWith(u8, name, "BTN_") or std.mem.startsWith(u8, name, "KEY_")) {
+        const code = resolveBtnCode(name) catch resolveKeyCode(name) catch return error.UnknownEventCode;
+        return .{ .event_type = c.EV_KEY, .event_code = code };
+    }
+    return error.UnknownEventCode;
+}
+
 pub fn resolveAbsCode(name: []const u8) error{UnknownAbsCode}!u16 {
     for (abs_table) |entry| {
         if (std.mem.eql(u8, entry.name, name)) return entry.code;
@@ -353,4 +371,26 @@ test "resolveMouseCode: unknown returns error" {
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode(""));
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("BTN_LEFT"));
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("MOUSE_LEFT"));
+}
+
+test "resolveEventCode: ABS_WHEEL returns EV_ABS" {
+    const r = try resolveEventCode("ABS_WHEEL");
+    try std.testing.expectEqual(@as(u16, c.EV_ABS), r.event_type);
+    try std.testing.expectEqual(@as(u16, c.ABS_WHEEL), r.event_code);
+}
+
+test "resolveEventCode: BTN_GEAR_UP returns EV_KEY" {
+    const r = try resolveEventCode("BTN_GEAR_UP");
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), r.event_type);
+    try std.testing.expectEqual(@as(u16, c.BTN_GEAR_UP), r.event_code);
+}
+
+test "resolveEventCode: KEY_A returns EV_KEY" {
+    const r = try resolveEventCode("KEY_A");
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), r.event_type);
+    try std.testing.expectEqual(@as(u16, c.KEY_A), r.event_code);
+}
+
+test "resolveEventCode: INVALID returns error" {
+    try std.testing.expectError(error.UnknownEventCode, resolveEventCode("INVALID"));
 }

@@ -3,10 +3,14 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
-const Interpreter = @import("core/interpreter.zig").Interpreter;
+const interpreter_mod = @import("core/interpreter.zig");
+const Interpreter = interpreter_mod.Interpreter;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
 const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
 const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
+const generic = @import("core/generic.zig");
+const GenericDeviceState = generic.GenericDeviceState;
+const GenericUinputDevice = @import("io/uinput.zig").GenericUinputDevice;
 const state = @import("core/state.zig");
 const GamepadStateDelta = state.GamepadStateDelta;
 const mapper_mod = @import("core/mapper.zig");
@@ -66,6 +70,8 @@ pub const EventLoopContext = struct {
     poll_timeout_ms: ?u32 = null,
     wasm_plugin: ?WasmPlugin = null,
     wasm_override_report: bool = false,
+    generic_state: ?*GenericDeviceState = null,
+    generic_output: ?*GenericUinputDevice = null,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {
@@ -318,36 +324,49 @@ pub const EventLoop = struct {
                     if (n == 0) break;
 
                     const interface_id: u8 = @intCast(i);
-                    const maybe_delta: ?GamepadStateDelta = blk: {
-                        if (ctx.wasm_plugin) |wp| {
-                            if (ctx.wasm_override_report) {
-                                var out_buf: [64]u8 = undefined;
-                                switch (wp.processReport(buf[0..n], &out_buf)) {
-                                    .override => |d| break :blk d,
-                                    .drop => break :blk null,
-                                    .passthrough => {},
-                                }
+
+                    if (ctx.generic_state) |gs| {
+                        // Generic path: match report, extract fields, emit directly
+                        if (ctx.interpreter.matchReport(interface_id, buf[0..n])) |cr| {
+                            if (buf[0..n].len >= @as(usize, @intCast(cr.src.size))) {
+                                interpreter_mod.verifyChecksumCompiled(cr, buf[0..n]) catch continue;
+                                generic.extractGenericFields(gs, buf[0..n]);
+                                if (ctx.generic_output) |go| go.emitGeneric(gs) catch {};
                             }
                         }
-                        break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
-                    };
-                    if (maybe_delta) |delta| {
-                        if (ctx.mapper) |m| {
-                            const events = try m.apply(delta, dt_ms);
-                            if (events.timer_request) |tr| switch (tr) {
-                                .arm => |ms| try armTimer(self.timer_fd, ms),
-                                .disarm => disarmTimer(self.timer_fd),
-                            };
-                            self.gamepad_state.applyDelta(delta);
-                            try ctx.output.emit(events.gamepad);
-                            if (ctx.touchpad_output) |tp| try tp.emitTouch(events.gamepad);
-                            if (ctx.aux_output) |ao| {
-                                if (events.aux.len > 0) try ao.emitAux(events.aux.slice());
+                    } else {
+                        // Gamepad path
+                        const maybe_delta: ?GamepadStateDelta = blk: {
+                            if (ctx.wasm_plugin) |wp| {
+                                if (ctx.wasm_override_report) {
+                                    var out_buf: [64]u8 = undefined;
+                                    switch (wp.processReport(buf[0..n], &out_buf)) {
+                                        .override => |d| break :blk d,
+                                        .drop => break :blk null,
+                                        .passthrough => {},
+                                    }
+                                }
                             }
-                        } else {
-                            self.gamepad_state.applyDelta(delta);
-                            try ctx.output.emit(self.gamepad_state);
-                            if (ctx.touchpad_output) |tp| try tp.emitTouch(self.gamepad_state);
+                            break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
+                        };
+                        if (maybe_delta) |delta| {
+                            if (ctx.mapper) |m| {
+                                const events = try m.apply(delta, dt_ms);
+                                if (events.timer_request) |tr| switch (tr) {
+                                    .arm => |ms| try armTimer(self.timer_fd, ms),
+                                    .disarm => disarmTimer(self.timer_fd),
+                                };
+                                self.gamepad_state.applyDelta(delta);
+                                try ctx.output.emit(events.gamepad);
+                                if (ctx.touchpad_output) |tp| try tp.emitTouch(events.gamepad);
+                                if (ctx.aux_output) |ao| {
+                                    if (events.aux.len > 0) try ao.emitAux(events.aux.slice());
+                                }
+                            } else {
+                                self.gamepad_state.applyDelta(delta);
+                                try ctx.output.emit(self.gamepad_state);
+                                if (ctx.touchpad_output) |tp| try tp.emitTouch(self.gamepad_state);
+                            }
                         }
                     }
                 }

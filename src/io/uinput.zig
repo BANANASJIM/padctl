@@ -651,6 +651,105 @@ pub const TouchpadDevice = struct {
     }
 };
 
+const generic = @import("../core/generic.zig");
+
+pub const GenericUinputDevice = struct {
+    fd: std.posix.fd_t,
+
+    pub fn create(cfg: *const device.OutputConfig, gs: *generic.GenericDeviceState) !GenericUinputDevice {
+        const mapping = cfg.mapping orelse return error.NoMapping;
+        const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
+        const fd = try std.posix.open("/dev/uinput", flags, 0);
+        errdefer std.posix.close(fd);
+
+        var has_abs = false;
+        var has_key = false;
+
+        var it = mapping.map.iterator();
+        while (it.next()) |entry| {
+            if (gs.count >= generic.MAX_GENERIC_FIELDS) break;
+            const me = entry.value_ptr.*;
+            const resolved = input_codes.resolveEventCode(me.event) catch return error.InvalidConfig;
+
+            if (resolved.event_type == c.EV_ABS) {
+                if (!has_abs) {
+                    try ioctlInt(fd, UI_SET_EVBIT, c.EV_ABS);
+                    has_abs = true;
+                }
+                try ioctlInt(fd, UI_SET_ABSBIT, @intCast(resolved.event_code));
+            } else {
+                if (!has_key) {
+                    try ioctlInt(fd, UI_SET_EVBIT, c.EV_KEY);
+                    has_key = true;
+                }
+                try ioctlInt(fd, UI_SET_KEYBIT, @intCast(resolved.event_code));
+            }
+
+            gs.slots[gs.count].event_type = resolved.event_type;
+            gs.slots[gs.count].event_code = resolved.event_code;
+            gs.slots[gs.count].is_button = (resolved.event_type == c.EV_KEY);
+            if (me.range) |r| {
+                if (r.len >= 2) {
+                    gs.slots[gs.count].range_min = @intCast(r[0]);
+                    gs.slots[gs.count].range_max = @intCast(r[1]);
+                }
+            }
+            gs.count += 1;
+        }
+
+        var setup = std.mem.zeroes(c.uinput_setup);
+        const name = cfg.name orelse "";
+        const copy_len = @min(name.len, setup.name.len - 1);
+        @memcpy(setup.name[0..copy_len], name[0..copy_len]);
+        setup.id.bustype = c.BUS_VIRTUAL;
+        setup.id.vendor = if (cfg.vid) |v| @intCast(v) else 0;
+        setup.id.product = if (cfg.pid) |p| @intCast(p) else 0;
+        try ioctlPtr(fd, UI_DEV_SETUP, @intFromPtr(&setup));
+
+        // UI_ABS_SETUP for each ABS slot
+        for (gs.slots[0..gs.count]) |slot| {
+            if (slot.event_type != c.EV_ABS) continue;
+            var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+            abs_setup.code = slot.event_code;
+            abs_setup.absinfo.minimum = slot.range_min;
+            abs_setup.absinfo.maximum = slot.range_max;
+            try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+        }
+
+        try ioctlPtr(fd, UI_DEV_CREATE, 0);
+        return .{ .fd = fd };
+    }
+
+    pub fn emitGeneric(self: *GenericUinputDevice, gs: *generic.GenericDeviceState) !void {
+        var events: [generic.MAX_GENERIC_FIELDS + 1]c.input_event = undefined;
+        var n: usize = 0;
+
+        for (0..gs.count) |i| {
+            if (gs.values[i] != gs.prev_values[i]) {
+                events[n] = .{
+                    .type = gs.slots[i].event_type,
+                    .code = gs.slots[i].event_code,
+                    .value = gs.values[i],
+                    .time = std.mem.zeroes(c.timeval),
+                };
+                n += 1;
+            }
+        }
+
+        if (n > 0) {
+            events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+        }
+        gs.prev_values = gs.values;
+    }
+
+    pub fn close(self: *GenericUinputDevice) void {
+        _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
+        std.posix.close(self.fd);
+    }
+};
+
 // --- tests ---
 
 const MockOutputDevice = struct {

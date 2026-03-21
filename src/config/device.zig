@@ -2,6 +2,7 @@ const std = @import("std");
 const toml = @import("toml");
 const state = @import("../core/state.zig");
 const presets = @import("presets.zig");
+const input_codes = @import("input_codes.zig");
 
 pub const ButtonId = state.ButtonId;
 
@@ -25,6 +26,7 @@ pub const DeviceInfo = struct {
     pid: i64,
     interface: []const InterfaceConfig,
     init: ?InitConfig = null,
+    mode: ?[]const u8 = null,
 };
 
 pub const MatchConfig = struct {
@@ -110,6 +112,14 @@ pub const TouchpadConfig = struct {
     max_slots: ?i64 = null,
 };
 
+pub const MappingEntry = struct {
+    event: []const u8,
+    range: ?[]const i64 = null,
+    fuzz: ?i64 = null,
+    flat: ?i64 = null,
+    res: ?i64 = null,
+};
+
 pub const OutputConfig = struct {
     emulate: ?[]const u8 = null,
     name: ?[]const u8 = null,
@@ -121,6 +131,7 @@ pub const OutputConfig = struct {
     force_feedback: ?FfConfig = null,
     aux: ?AuxConfig = null,
     touchpad: ?TouchpadConfig = null,
+    mapping: ?toml.HashMap(MappingEntry) = null,
 };
 
 pub const WasmOverridesConfig = struct {
@@ -232,16 +243,37 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
 
         if (report.button_group) |bg| {
-            var it = bg.map.map.iterator();
-            while (it.next()) |entry| {
-                const btn_name = entry.key_ptr.*;
-                _ = std.meta.stringToEnum(ButtonId, btn_name) orelse return error.InvalidConfig;
+            const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
+            if (!is_generic) {
+                var it = bg.map.map.iterator();
+                while (it.next()) |entry| {
+                    const btn_name = entry.key_ptr.*;
+                    _ = std.meta.stringToEnum(ButtonId, btn_name) orelse return error.InvalidConfig;
+                }
             }
         }
 
         if (report.checksum) |cs| {
             if (cs.range.len != 2) return error.InvalidConfig;
             if (cs.range[0] < 0 or cs.range[1] > report.size) return error.InvalidConfig;
+        }
+    }
+
+    // Generic mode validation
+    if (cfg.device.mode) |m| {
+        if (std.mem.eql(u8, m, "generic")) {
+            const out = cfg.output orelse return error.InvalidConfig;
+            const mapping = out.mapping orelse return error.InvalidConfig;
+            var it = mapping.map.iterator();
+            while (it.next()) |entry| {
+                const me = entry.value_ptr.*;
+                _ = input_codes.resolveEventCode(me.event) catch return error.InvalidConfig;
+                // ABS events require range
+                if (std.mem.startsWith(u8, me.event, "ABS_")) {
+                    const range = me.range orelse return error.InvalidConfig;
+                    if (range.len != 2) return error.InvalidConfig;
+                }
+            }
         }
     }
 }
@@ -820,6 +852,110 @@ test "lookup transform is rejected" {
         \\x = { offset = 0, type = "u8", transform = "lookup" }
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "generic mode: valid config parses" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Wheel"
+        \\vid = 1
+        \\pid = 2
+        \\mode = "generic"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\wheel = { offset = 0, type = "i16le" }
+        \\[report.button_group]
+        \\source = { offset = 4, size = 1 }
+        \\map = { gear_up = 0 }
+        \\[output]
+        \\name = "Wheel"
+        \\vid = 1
+        \\pid = 2
+        \\[output.mapping]
+        \\wheel = { event = "ABS_WHEEL", range = [-32768, 32767] }
+        \\gear_up = { event = "BTN_GEAR_UP" }
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("generic", result.value.device.mode.?);
+}
+
+test "generic mode: missing output.mapping returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Wheel"
+        \\vid = 1
+        \\pid = 2
+        \\mode = "generic"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[output]
+        \\name = "Wheel"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "generic mode: unknown event code returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Wheel"
+        \\vid = 1
+        \\pid = 2
+        \\mode = "generic"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\wheel = { offset = 0, type = "i16le" }
+        \\[output]
+        \\name = "Wheel"
+        \\[output.mapping]
+        \\wheel = { event = "INVALID_CODE", range = [-100, 100] }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "generic mode: ABS event missing range returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Wheel"
+        \\vid = 1
+        \\pid = 2
+        \\mode = "generic"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\wheel = { offset = 0, type = "i16le" }
+        \\[output]
+        \\name = "Wheel"
+        \\[output.mapping]
+        \\wheel = { event = "ABS_WHEEL" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
 test "fuzz parseString: no panic on arbitrary input" {
