@@ -438,8 +438,9 @@ test "load devices/sony/dualsense.toml succeeds" {
     try std.testing.expectEqualStrings("Sony DualSense", cfg.device.name);
     try std.testing.expectEqual(@as(i64, 0x054c), cfg.device.vid);
     try std.testing.expectEqual(@as(i64, 0x0ce6), cfg.device.pid);
-    try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
+    try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
     try std.testing.expectEqualStrings("usb", cfg.report[0].name);
+    try std.testing.expectEqualStrings("bt", cfg.report[1].name);
 }
 
 test "dualsense.toml report field count" {
