@@ -1,5 +1,7 @@
 const std = @import("std");
 const toml = @import("toml");
+pub const MacroStep = @import("../core/macro.zig").MacroStep;
+pub const Macro = @import("../core/macro.zig").Macro;
 
 pub const GyroConfig = struct {
     mode: []const u8 = "off",
@@ -51,6 +53,7 @@ pub const MappingConfig = struct {
     stick: ?StickPairConfig = null,
     dpad: ?DpadConfig = null,
     layer: ?[]const LayerConfig = null,
+    macro: ?[]const Macro = null,
 };
 
 pub const ParseResult = toml.Parsed(MappingConfig);
@@ -67,7 +70,28 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     return parseString(allocator, content);
 }
 
+fn macroExists(cfg: *const MappingConfig, name: []const u8) bool {
+    const macros = cfg.macro orelse return false;
+    for (macros) |*m| {
+        if (std.mem.eql(u8, m.name, name)) return true;
+    }
+    return false;
+}
+
+fn checkRemapMacros(cfg: *const MappingConfig, map: *const toml.HashMap([]const u8)) !void {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        const val = entry.value_ptr.*;
+        if (std.mem.startsWith(u8, val, "macro:")) {
+            const macro_name = val["macro:".len..];
+            if (!macroExists(cfg, macro_name)) return error.UnknownMacro;
+        }
+    }
+}
+
 pub fn validate(cfg: *const MappingConfig) !void {
+    if (cfg.remap) |*m| try checkRemapMacros(cfg, m);
+
     const layers = cfg.layer orelse return;
 
     var seen_buf: [64][]const u8 = undefined;
@@ -88,6 +112,8 @@ pub fn validate(cfg: *const MappingConfig) !void {
         if (seen_len >= seen_buf.len) return error.InvalidConfig;
         seen_buf[seen_len] = layer.name;
         seen_len += 1;
+
+        if (layer.remap) |*m| try checkRemapMacros(cfg, m);
     }
 }
 
@@ -329,4 +355,87 @@ test "validate: hold_timeout out of range returns error" {
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+const test_toml_macro =
+    \\[[macro]]
+    \\name = "dodge_roll"
+    \\steps = [
+    \\    { tap = "B" },
+    \\    { delay = 50 },
+    \\    { tap = "LEFT" },
+    \\]
+    \\
+    \\[[macro]]
+    \\name = "shift_hold"
+    \\steps = [
+    \\    { down = "KEY_LEFTSHIFT" },
+    \\    "pause_for_release",
+    \\    { up = "KEY_LEFTSHIFT" },
+    \\]
+    \\
+    \\[[macro]]
+    \\name = "noop"
+    \\steps = []
+    \\
+    \\[remap]
+    \\M1 = "macro:dodge_roll"
+;
+
+test "[[macro]] multi-entry parse: all step primitives correct" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, test_toml_macro);
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expect(cfg.macro != null);
+    const macros = cfg.macro.?;
+    try std.testing.expectEqual(@as(usize, 3), macros.len);
+
+    const dodge = macros[0];
+    try std.testing.expectEqualStrings("dodge_roll", dodge.name);
+    try std.testing.expectEqual(@as(usize, 3), dodge.steps.len);
+    try std.testing.expectEqualStrings("B", dodge.steps[0].tap);
+    try std.testing.expectEqual(@as(u32, 50), dodge.steps[1].delay);
+    try std.testing.expectEqualStrings("LEFT", dodge.steps[2].tap);
+
+    const shift = macros[1];
+    try std.testing.expectEqualStrings("shift_hold", shift.name);
+    try std.testing.expectEqual(@as(usize, 3), shift.steps.len);
+    try std.testing.expectEqualStrings("KEY_LEFTSHIFT", shift.steps[0].down);
+    _ = shift.steps[1].pause_for_release;
+    try std.testing.expectEqualStrings("KEY_LEFTSHIFT", shift.steps[2].up);
+
+    const noop = macros[2];
+    try std.testing.expectEqualStrings("noop", noop.name);
+    try std.testing.expectEqual(@as(usize, 0), noop.steps.len);
+
+    try std.testing.expectEqualStrings("macro:dodge_roll", cfg.remap.?.map.get("M1").?);
+    try validate(&cfg);
+}
+
+test "validate: macro:name remap target references unknown macro returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[remap]
+        \\M1 = "macro:nonexistent"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.UnknownMacro, validate(&result.value));
+}
+
+test "validate: macro:name in layer remap references unknown macro returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\M1 = "macro:ghost"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.UnknownMacro, validate(&result.value));
 }

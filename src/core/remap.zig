@@ -11,6 +11,7 @@ pub const RemapTargetResolved = union(enum) {
     mouse_button: u16,
     gamepad_button: ButtonId,
     disabled: void,
+    macro: []const u8,
 };
 
 pub const RemapRule = struct {
@@ -50,8 +51,7 @@ pub const Remap = struct {
     pub fn collectAuxCodes(self: *const Remap, out: *std.ArrayList(u16)) !void {
         for (self.rules) |rule| {
             switch (rule.target) {
-                .key => |code| try out.append(code),
-                .mouse_button => |code| try out.append(code),
+                .key, .mouse_button => |code| try out.append(code),
                 else => {},
             }
         }
@@ -77,6 +77,7 @@ pub const Remap = struct {
                     // released: target bit stays cleared (suppressed above, not re-set)
                 },
                 .disabled => {},
+                .macro => {},  // handled by MacroPlayer (T4)
             }
         }
     }
@@ -84,6 +85,10 @@ pub const Remap = struct {
 
 pub fn resolveTarget(raw: []const u8) !RemapTargetResolved {
     if (std.mem.eql(u8, raw, "disabled")) return .disabled;
+
+    if (std.mem.startsWith(u8, raw, "macro:")) {
+        return .{ .macro = raw["macro:".len..] };
+    }
 
     // mouse_* shorthand
     if (std.mem.startsWith(u8, raw, "mouse_")) {
@@ -216,5 +221,39 @@ test "no remap: state unchanged" {
     remap.apply(&gs, &aux);
 
     try testing.expectEqual(@as(u32, 0b1010), gs.buttons);
+    try testing.expectEqual(@as(usize, 0), aux.len);
+}
+
+test "resolveTarget: macro:dodge_roll -> RemapTargetResolved.macro" {
+    const target = try resolveTarget("macro:dodge_roll");
+    try testing.expectEqualStrings("dodge_roll", target.macro);
+}
+
+test "remap macro:name: source suppressed, no aux event" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[macro]]
+        \\name = "dodge_roll"
+        \\steps = []
+        \\
+        \\[remap]
+        \\M1 = "macro:dodge_roll"
+    , allocator);
+    defer parsed.deinit();
+
+    var remap_inst = try Remap.init(&parsed.value, allocator);
+    defer remap_inst.deinit();
+
+    try testing.expectEqual(@as(usize, 1), remap_inst.rules.len);
+    try testing.expectEqualStrings("dodge_roll", remap_inst.rules[0].target.macro);
+
+    var gs = state.GamepadState{};
+    const m1_idx: u5 = @intCast(@intFromEnum(ButtonId.M1));
+    gs.buttons |= @as(u32, 1) << m1_idx;
+
+    var aux = AuxEventList{};
+    remap_inst.apply(&gs, &aux);
+
+    try testing.expectEqual(@as(u32, 0), gs.buttons & (@as(u32, 1) << m1_idx));
     try testing.expectEqual(@as(usize, 0), aux.len);
 }

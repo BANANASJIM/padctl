@@ -192,7 +192,7 @@ pub const Mapper = struct {
                         self.injected_buttons |= @as(u32, 1) << dst_idx;
                     }
                 },
-                .disabled => {},
+                .disabled, .macro => {},
             }
         }
 
@@ -343,7 +343,7 @@ fn emitTapEvent(
             injected_buttons.* |= mask;
             pending_tap_release.* = mask;
         },
-        .disabled => {},
+        .disabled, .macro => {},
     }
 }
 
