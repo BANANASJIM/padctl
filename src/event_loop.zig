@@ -283,6 +283,7 @@ pub const EventLoop = struct {
 
     /// Interrupt a blocking ppoll in run() from another thread.
     pub fn stop(self: *EventLoop) void {
+        self.running = false;
         _ = posix.write(self.stop_w, &[_]u8{1}) catch {};
     }
 
@@ -301,7 +302,7 @@ const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const uinput = @import("io/uinput.zig");
 
 test "EventLoop.addUinputFf registers fd and increments fd_count" {
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     const pfds = try posix.pipe2(.{ .NONBLOCK = true });
@@ -379,7 +380,7 @@ test "EventLoop.init creates signalfd and timerfd" {
 }
 
 test "EventLoop.stop wakes ppoll" {
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
     loop.stop();
     var pfd = [1]posix.pollfd{.{ .fd = loop.stop_r, .events = posix.POLL.IN, .revents = 0 }};
@@ -389,7 +390,7 @@ test "EventLoop.stop wakes ppoll" {
 
 test "EventLoop.addDevice registers fd" {
     const allocator = testing.allocator;
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     var mock = try MockDeviceIO.init(allocator, &.{});
@@ -404,7 +405,7 @@ test "EventLoop.addDevice registers fd" {
 
 test "EventLoop.addDevice rejects overflow" {
     const allocator = testing.allocator;
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     // Fill remaining slots (already have 3: signalfd + stop_pipe + timerfd)
@@ -425,7 +426,7 @@ test "EventLoop.addDevice rejects overflow" {
 }
 
 test "armTimer / disarmTimer: arm then disarm does not leave fd readable" {
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     try armTimer(loop.timer_fd, 5000); // 5 seconds — will not fire during test
@@ -438,7 +439,7 @@ test "armTimer / disarmTimer: arm then disarm does not leave fd readable" {
 }
 
 test "armTimer: fires after timeout" {
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     try armTimer(loop.timer_fd, 20); // 20ms
@@ -456,7 +457,7 @@ test "armTimer: fires after timeout" {
 
 test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     const allocator = testing.allocator;
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     var mock = try MockDeviceIO.init(allocator, &.{});
@@ -587,7 +588,7 @@ const minimal_toml =
 test "EventLoop mini: device frame dispatched to interpreter and output" {
     const allocator = testing.allocator;
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     // frame: match byte 0x01, left_x = 500 (i16le)
@@ -687,7 +688,7 @@ const MockFfOutput = struct {
 test "T4: FF event routed to DeviceIO.write via fillTemplate" {
     const allocator = testing.allocator;
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
@@ -748,7 +749,7 @@ test "T4: FF event routed to DeviceIO.write via fillTemplate" {
 test "T4: no commands.rumble — silent skip" {
     const allocator = testing.allocator;
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});

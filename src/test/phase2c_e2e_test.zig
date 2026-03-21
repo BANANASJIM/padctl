@@ -69,7 +69,7 @@ fn testInstance(
     errdefer allocator.free(devices);
     devices[0] = mock.deviceIO();
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
 
@@ -345,7 +345,7 @@ test "T7: hot-reload — updateMapping swaps config; next apply uses new mapping
     const devices = try allocator.alloc(@import("../io/device_io.zig").DeviceIO, 1);
     devices[0] = mock.deviceIO();
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
 

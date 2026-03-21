@@ -378,7 +378,7 @@ const MockFfOutput = struct {
 test "e2e: FF rumble pipeline — EventLoop routes FfEvent → DeviceIO.write correct bytes" {
     const allocator = testing.allocator;
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
@@ -438,7 +438,7 @@ test "e2e: FF rumble pipeline — EventLoop routes FfEvent → DeviceIO.write co
 test "e2e: FF stop (value=0) — EventLoop routes zero FfEvent → all-zero bytes written" {
     const allocator = testing.allocator;
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});

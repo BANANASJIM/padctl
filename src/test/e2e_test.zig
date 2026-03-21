@@ -220,7 +220,7 @@ test "EventLoop pipeline: A press then release" {
     var mock = try MockDeviceIO.init(allocator, &.{ &frame1, &frame2 });
     defer mock.deinit();
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
     const dev = mock.deviceIO();

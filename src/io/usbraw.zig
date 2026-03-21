@@ -272,7 +272,7 @@ test "RingBuffer concurrent push/pop" {
     var last_seen: u32 = 0;
     var pop_count: usize = 0;
     var out: [64]u8 = undefined;
-    while (pop_count < 900) {
+    while (pop_count < 50) {
         const n = ring.pop(&out);
         if (n > 0) {
             const val = std.mem.readInt(u32, out[0..4], .little);

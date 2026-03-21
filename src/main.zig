@@ -515,7 +515,7 @@ test "pipeline: known frame dispatched to output" {
     defer mock.deinit();
     const dev = mock.deviceIO();
 
-    var loop = try event_loop.EventLoop.init();
+    var loop = try event_loop.EventLoop.initManaged();
     defer loop.deinit();
     try loop.addDevice(dev);
 
@@ -560,7 +560,7 @@ test "pipeline: unknown report does not call output.emit" {
     defer mock.deinit();
     const dev = mock.deviceIO();
 
-    var loop = try event_loop.EventLoop.init();
+    var loop = try event_loop.EventLoop.initManaged();
     defer loop.deinit();
     try loop.addDevice(dev);
 
@@ -601,7 +601,7 @@ test "pipeline: signalfd stop — no fd leak" {
     defer mock.deinit();
     const dev = mock.deviceIO();
 
-    var loop = try event_loop.EventLoop.init();
+    var loop = try event_loop.EventLoop.initManaged();
     defer loop.deinit();
     try loop.addDevice(dev);
 

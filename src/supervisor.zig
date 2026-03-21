@@ -467,7 +467,7 @@ fn makeTestInstance(
     const devices = try inst_alloc.alloc(DeviceIO, 1);
     devices[0] = mock.deviceIO();
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
 
@@ -506,10 +506,15 @@ test "Supervisor: SIGHUP updates mapping without restarting instance" {
     defer parsed_map.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var sup = try Supervisor.init(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.spawnInstance("usb-1-1", inst);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
 
     var new_map = parsed_map.value;
     const entry = ConfigEntry{
@@ -523,10 +528,6 @@ test "Supervisor: SIGHUP updates mapping without restarting instance" {
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);
-
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
 }
 
 test "Supervisor: SIGHUP with new phys_key spawns new instance" {
@@ -536,7 +537,9 @@ test "Supervisor: SIGHUP with new phys_key spawns new instance" {
     defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
     var sup = try Supervisor.init(allocator);
 
     const entry_a = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
@@ -548,12 +551,12 @@ test "Supervisor: SIGHUP with new phys_key spawns new instance" {
 
     g_mock_slot = &mock_b;
     try sup.reload(&.{ entry_a, entry_b }, testInitFn);
-    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
 
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
-    mock_b.deinit();
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 }
 
 test "Supervisor: SIGHUP with removed phys_key stops instance" {
@@ -563,7 +566,9 @@ test "Supervisor: SIGHUP with removed phys_key stops instance" {
     defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
     var sup = try Supervisor.init(allocator);
 
     const entry_a = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
@@ -572,16 +577,16 @@ test "Supervisor: SIGHUP with removed phys_key stops instance" {
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
     try sup.spawnInstance("usb-1-1", inst_a);
     try sup.spawnInstance("usb-1-2", inst_b);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
     try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 
     try sup.reload(&.{entry_a}, testInitFn);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);
-
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
-    mock_b.deinit();
 }
 
 test "Supervisor: two rapid reloads serialize — no race condition" {
@@ -596,6 +601,7 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     defer parsed_map2.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var sup = try Supervisor.init(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
@@ -609,12 +615,12 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
 
     try sup.reload(&.{entry1}, testInitFn);
     try sup.reload(&.{entry2}, testInitFn);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
-
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
 }
 
 test "Supervisor: empty config dir → zero instances" {
@@ -674,11 +680,18 @@ test "Supervisor: duplicate attach devname — only one instance created" {
     defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
     var sup = try Supervisor.init(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     const inst2 = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
@@ -689,11 +702,6 @@ test "Supervisor: duplicate attach devname — only one instance created" {
     }
     try sup.attachWithInstance("hidraw3", "usb-1-1b", inst2);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
-
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
-    mock_b.deinit();
 }
 
 test "Supervisor: detach unknown devname — no panic" {
@@ -713,7 +721,9 @@ test "Supervisor: attach-detach-attach same devname — new instance after re-at
     defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
     var sup = try Supervisor.init(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
@@ -725,12 +735,11 @@ test "Supervisor: attach-detach-attach same devname — new instance after re-at
 
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
-
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
-    mock_b.deinit();
 }
 
 test "Supervisor: two devnames attached simultaneously — independent threads" {
@@ -740,19 +749,20 @@ test "Supervisor: two devnames attached simultaneously — independent threads" 
     defer parsed_dev.deinit();
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
     var sup = try Supervisor.init(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
     try sup.attachWithInstance("hidraw4", "usb-1-2", inst_b);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
     try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 
     try testing.expect(sup.managed.items[0].instance != sup.managed.items[1].instance);
-
-    sup.stopAll();
-    sup.deinit();
-    mock_a.deinit();
-    mock_b.deinit();
 }

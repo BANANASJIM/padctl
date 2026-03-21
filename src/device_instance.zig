@@ -226,7 +226,7 @@ fn testInstance(
     errdefer allocator.free(devices);
     devices[0] = mock.deviceIO();
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
 
@@ -307,7 +307,7 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
     const devices = try allocator.alloc(DeviceIO, 1);
     devices[0] = mock.deviceIO();
 
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
 

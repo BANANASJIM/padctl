@@ -281,7 +281,7 @@ const minimal_device_toml =
 fn makeInstance(allocator: std.mem.Allocator, mock: *MockDeviceIO, cfg: *const device_mod.DeviceConfig) !*DeviceInstance {
     const devices = try allocator.alloc(DeviceIO, 1);
     devices[0] = mock.deviceIO();
-    var loop = try EventLoop.init();
+    var loop = try EventLoop.initManaged();
     errdefer loop.deinit();
     try loop.addDevice(devices[0]);
     const inst = try allocator.create(DeviceInstance);
