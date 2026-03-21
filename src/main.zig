@@ -59,6 +59,7 @@ pub const config = struct {
     pub const input_codes = @import("config/input_codes.zig");
     pub const mapping = @import("config/mapping.zig");
     pub const presets = @import("config/presets.zig");
+    pub const paths = @import("config/paths.zig");
 };
 
 pub const debug = struct {
@@ -192,6 +193,26 @@ fn printHelp() void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
 }
 
+fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
+    var sup = Supervisor.init(allocator) catch |err| {
+        std.log.err("failed to init supervisor: {}", .{err});
+        std.process.exit(1);
+    };
+    defer sup.deinit();
+
+    sup.startFromDir(dir_path) catch |err| {
+        std.log.err("failed to scan config dir '{s}': {}", .{ dir_path, err });
+        std.process.exit(1);
+    };
+
+    if (sup.managed.items.len == 0) {
+        std.log.info("no devices found in '{s}', exiting", .{dir_path});
+        return;
+    }
+
+    sup.joinAll();
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -277,31 +298,30 @@ pub fn main() !void {
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
     if (parsed.config_dir) |dir_path| {
-        var sup = Supervisor.init(allocator) catch |err| {
-            std.log.err("failed to init supervisor: {}", .{err});
-            std.process.exit(1);
-        };
-        defer sup.deinit();
-
-        sup.startFromDir(dir_path) catch |err| {
-            std.log.err("failed to scan config dir '{s}': {}", .{ dir_path, err });
-            std.process.exit(1);
-        };
-
-        if (sup.managed.items.len == 0) {
-            std.log.info("no devices found in '{s}', exiting", .{dir_path});
-            return;
-        }
-
-        sup.joinAll();
+        runFromDir(allocator, dir_path);
         return;
     }
 
-    const config_path = parsed.config_path orelse {
-        std.log.err("--config <path> or --config-dir <dir> is required", .{});
+    // Bare invocation: XDG three-layer search
+    if (parsed.config_path == null) {
+        const dirs = config.paths.resolveDeviceConfigDirs(allocator) catch |err| {
+            std.log.err("failed to resolve XDG config dirs: {}", .{err});
+            std.process.exit(1);
+        };
+        defer config.paths.freeConfigDirs(allocator, dirs);
+
+        for (dirs) |dir| {
+            std.fs.accessAbsolute(dir, .{}) catch continue;
+            runFromDir(allocator, dir);
+            return;
+        }
+
+        std.log.err("no device configs found in XDG paths; use --config or --config-dir", .{});
         printHelp();
         std.process.exit(1);
-    };
+    }
+
+    const config_path = parsed.config_path.?;
 
     const device_cfg = config.device.parseFile(allocator, config_path) catch |err| {
         std.log.err("failed to load config '{s}': {}", .{ config_path, err });
