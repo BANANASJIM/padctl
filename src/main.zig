@@ -9,6 +9,10 @@ pub const cli = struct {
     pub const install = @import("cli/install.zig");
     pub const scan = @import("cli/scan.zig");
     pub const reload = @import("cli/reload.zig");
+    pub const config = struct {
+        pub const edit = @import("cli/config/edit.zig");
+        pub const @"test" = @import("cli/config/test.zig");
+    };
 };
 
 pub const wasm = struct {
@@ -47,6 +51,7 @@ pub const testing_support = struct {
     pub const phase2c_e2e_test = @import("test/phase2c_e2e_test.zig");
     pub const phase3_e2e_test = @import("test/phase3_e2e_test.zig");
     pub const phase4_e2e_test = @import("test/phase4_e2e_test.zig");
+    pub const phase6_e2e_test = @import("test/phase6_e2e_test.zig");
 };
 
 pub const config = struct {

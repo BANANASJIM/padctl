@@ -106,7 +106,8 @@ Wave 1, T9 after T4; T13 after all.
 ### T8: COPR packaging
 
 - [ ] Create `contrib/copr/padctl.spec`
-  - `BuildRequires: zig >= 0.15` (or precompiled binary strategy per D5)
+  - `BuildRequires: zig >= 0.15`  <!-- primary strategy: build from source -->
+  - Fallback (when zig unavailable in COPR buildroot): precompiled binary copy per D5; add comment `# fallback: copy precompiled binary` above the relevant `%build` block
   - `%build`: `zig build -Doptimize=ReleaseSafe --prefix %{buildroot}%{_prefix}` (or binary copy for SRPM path)
   - `%files`: binary + padctl-capture + padctl-debug + service + udev rules + `/usr/share/padctl/`
 - [ ] Create `contrib/copr/README.md` (COPR setup steps for maintainers; Bazzite install command)
