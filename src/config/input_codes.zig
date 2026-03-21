@@ -319,3 +319,38 @@ test "resolveBtnCode: unknown returns error" {
     try std.testing.expectError(error.UnknownBtnCode, resolveBtnCode("INVALID"));
     try std.testing.expectError(error.UnknownBtnCode, resolveBtnCode("ABS_X"));
 }
+
+test "resolveKeyCode: known codes" {
+    try std.testing.expectEqual(@as(u16, 0x1e), try resolveKeyCode("KEY_A"));
+    try std.testing.expectEqual(@as(u16, 0x3b), try resolveKeyCode("KEY_F1"));
+    try std.testing.expectEqual(@as(u16, 0x58), try resolveKeyCode("KEY_F12"));
+    try std.testing.expectEqual(@as(u16, 0x1c), try resolveKeyCode("KEY_ENTER"));
+    try std.testing.expectEqual(@as(u16, 0x39), try resolveKeyCode("KEY_SPACE"));
+    try std.testing.expectEqual(@as(u16, 0x01), try resolveKeyCode("KEY_ESC"));
+    try std.testing.expectEqual(@as(u16, 0x67), try resolveKeyCode("KEY_UP"));
+    try std.testing.expectEqual(@as(u16, 0x6c), try resolveKeyCode("KEY_DOWN"));
+}
+
+test "resolveKeyCode: unknown returns error" {
+    try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode("INVALID"));
+    try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode(""));
+    try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode("BTN_SOUTH"));
+    try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode("ABS_X"));
+}
+
+test "resolveMouseCode: known codes" {
+    try std.testing.expectEqual(@as(u16, 0x110), try resolveMouseCode("mouse_left"));
+    try std.testing.expectEqual(@as(u16, 0x111), try resolveMouseCode("mouse_right"));
+    try std.testing.expectEqual(@as(u16, 0x112), try resolveMouseCode("mouse_middle"));
+    try std.testing.expectEqual(@as(u16, 0x113), try resolveMouseCode("mouse_side"));
+    try std.testing.expectEqual(@as(u16, 0x114), try resolveMouseCode("mouse_extra"));
+    try std.testing.expectEqual(@as(u16, 0x115), try resolveMouseCode("mouse_forward"));
+    try std.testing.expectEqual(@as(u16, 0x116), try resolveMouseCode("mouse_back"));
+}
+
+test "resolveMouseCode: unknown returns error" {
+    try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("INVALID"));
+    try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode(""));
+    try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("BTN_LEFT"));
+    try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("MOUSE_LEFT"));
+}
