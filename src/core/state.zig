@@ -133,6 +133,24 @@ pub const GamepadStateDelta = struct {
     battery_level: ?u8 = null,
 };
 
+pub fn generateRandomDelta(rng: std.Random) GamepadStateDelta {
+    var d = GamepadStateDelta{};
+    inline for (std.meta.fields(GamepadStateDelta)) |f| {
+        if (rng.boolean()) {
+            const Inner = @typeInfo(f.type).optional.child;
+            @field(d, f.name) = switch (Inner) {
+                bool => rng.boolean(),
+                i16 => @bitCast(rng.int(u16)),
+                i8 => @bitCast(rng.int(u8)),
+                u8 => rng.int(u8),
+                u32 => rng.int(u32),
+                else => unreachable,
+            };
+        }
+    }
+    return d;
+}
+
 // --- tests ---
 
 test "applyDelta: null fields leave state unchanged" {
@@ -237,4 +255,34 @@ test "diff: battery_level appears in delta when changed" {
 
     const same = curr.diff(curr);
     try std.testing.expectEqual(@as(?u8, null), same.battery_level);
+}
+
+test "property: applyDelta(a, diff(b, a)) == b" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const rng = prng.random();
+    for (0..1000) |_| {
+        var a = GamepadState{};
+        a.applyDelta(generateRandomDelta(rng));
+        var b = GamepadState{};
+        b.applyDelta(generateRandomDelta(rng));
+        const d = b.diff(a);
+        var result = a;
+        result.applyDelta(d);
+        inline for (std.meta.fields(GamepadState)) |f| {
+            try std.testing.expectEqual(@field(b, f.name), @field(result, f.name));
+        }
+    }
+}
+
+test "property: diff(s, s) produces all-null delta" {
+    var prng = std.Random.DefaultPrng.init(99);
+    const rng = prng.random();
+    for (0..1000) |_| {
+        var s = GamepadState{};
+        s.applyDelta(generateRandomDelta(rng));
+        const d = s.diff(s);
+        inline for (std.meta.fields(GamepadStateDelta)) |f| {
+            try std.testing.expectEqual(@as(f.type, null), @field(d, f.name));
+        }
+    }
 }
