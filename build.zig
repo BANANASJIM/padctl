@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // -Dlibusb=false disables libusb linkage for musl cross-compile
+    const use_libusb = b.option(bool, "libusb", "Link libusb-1.0 (default: true)") orelse true;
+
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
 
@@ -15,7 +18,11 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("toml", toml_mod);
 
     const exe = b.addExecutable(.{ .name = "padctl", .root_module = exe_mod });
-    exe.linkSystemLibrary("usb-1.0");
+    if (use_libusb) {
+        exe.linkSystemLibrary("usb-1.0");
+    } else {
+        exe.addIncludePath(b.path("compat"));
+    }
     exe.linkLibC();
     b.installArtifact(exe);
 
@@ -35,7 +42,11 @@ pub fn build(b: *std.Build) void {
     debug_mod.addImport("src", src_mod);
 
     const debug_exe = b.addExecutable(.{ .name = "padctl-debug", .root_module = debug_mod });
-    debug_exe.linkSystemLibrary("usb-1.0");
+    if (use_libusb) {
+        debug_exe.linkSystemLibrary("usb-1.0");
+    } else {
+        debug_exe.addIncludePath(b.path("compat"));
+    }
     debug_exe.linkLibC();
     b.installArtifact(debug_exe);
 
@@ -80,7 +91,11 @@ pub fn build(b: *std.Build) void {
     unit_mod.addImport("analyse", capture_analyse_mod);
     unit_mod.addImport("toml_gen", capture_toml_gen_mod);
     const unit_tests = b.addTest(.{ .root_module = unit_mod });
-    unit_tests.linkSystemLibrary("usb-1.0");
+    if (use_libusb) {
+        unit_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        unit_tests.addIncludePath(b.path("compat"));
+    }
     unit_tests.linkLibC();
     const test_step = b.step("test", "Run Layer 0 + Layer 1 tests (CI)");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);

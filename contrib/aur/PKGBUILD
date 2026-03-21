@@ -1,0 +1,37 @@
+# Maintainer: padctl maintainers
+pkgname=padctl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="HID gamepad remapper — declarative TOML config, uinput output"
+arch=('x86_64' 'aarch64')
+url="https://github.com/example/padctl"
+license=('MIT')
+depends=()
+makedepends=('zig')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${pkgname}-${pkgver}"
+    zig build -Doptimize=ReleaseSafe
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+
+    install -Dm755 zig-out/bin/padctl         "${pkgdir}/usr/bin/padctl"
+    install -Dm755 zig-out/bin/padctl-capture "${pkgdir}/usr/bin/padctl-capture"
+    install -Dm755 zig-out/bin/padctl-debug   "${pkgdir}/usr/bin/padctl-debug"
+
+    install -Dm644 install/padctl@.service \
+        "${pkgdir}/usr/lib/systemd/system/padctl@.service"
+
+    install -Dm644 install/99-padctl.rules \
+        "${pkgdir}/usr/lib/udev/rules.d/99-padctl.rules"
+
+    while IFS= read -r -d '' toml; do
+        install -Dm644 "${toml}" "${pkgdir}/usr/share/padctl/${toml}"
+    done < <(find devices -name '*.toml' -print0)
+
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

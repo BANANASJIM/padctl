@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-linux-musl, aarch64-linux-musl]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.0
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
+
+      - name: Strip
+        run: strip zig-out/bin/padctl
+
+      - name: Package
+        run: |
+          VERSION=${{ github.ref_name }}
+          TARGET=${{ matrix.target }}
+          ARCHIVE=padctl-${VERSION}-${TARGET}.tar.gz
+          STAGING=padctl-${VERSION}-${TARGET}
+          mkdir -p "${STAGING}/bin"
+          cp zig-out/bin/padctl "${STAGING}/bin/"
+          cp -r devices contrib install "${STAGING}/"
+          tar czf "${ARCHIVE}" "${STAGING}"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload to Release
+        run: gh release upload ${{ github.ref_name }} "${{ env.ARCHIVE }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

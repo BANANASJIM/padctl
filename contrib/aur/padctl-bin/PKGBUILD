@@ -1,0 +1,41 @@
+# Maintainer: padctl maintainers
+pkgname=padctl-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="HID gamepad remapper — prebuilt binary"
+arch=('x86_64' 'aarch64')
+url="https://github.com/example/padctl"
+license=('MIT')
+depends=()
+makedepends=()
+provides=('padctl')
+conflicts=('padctl')
+
+_baseurl="${url}/releases/download/v${pkgver}"
+
+source_x86_64=("${_baseurl}/padctl-v${pkgver}-x86_64-linux-musl.tar.gz")
+source_aarch64=("${_baseurl}/padctl-v${pkgver}-aarch64-linux-musl.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    local _arch
+    case "${CARCH}" in
+        x86_64)  _arch="x86_64-linux-musl" ;;
+        aarch64) _arch="aarch64-linux-musl" ;;
+    esac
+
+    local _src="padctl-v${pkgver}-${_arch}"
+
+    install -Dm755 "${_src}/bin/padctl" "${pkgdir}/usr/bin/padctl"
+
+    install -Dm644 "${_src}/install/padctl@.service" \
+        "${pkgdir}/usr/lib/systemd/system/padctl@.service"
+
+    install -Dm644 "${_src}/install/99-padctl.rules" \
+        "${pkgdir}/usr/lib/udev/rules.d/99-padctl.rules"
+
+    while IFS= read -r -d '' toml; do
+        install -Dm644 "${toml}" "${pkgdir}/usr/share/padctl/${toml#${_src}/}"
+    done < <(find "${_src}/devices" -name '*.toml' -print0)
+}
