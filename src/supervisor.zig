@@ -37,6 +37,8 @@ pub const Supervisor = struct {
     hup_fd: posix.fd_t,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
+    // devname → phys_key (both slices owned by this map)
+    devname_map: std.StringHashMap([]const u8),
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -58,6 +60,7 @@ pub const Supervisor = struct {
             .stop_fd = stop_fd,
             .hup_fd = hup_fd,
             .configs = .{},
+            .devname_map = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
@@ -76,6 +79,45 @@ pub const Supervisor = struct {
             self.allocator.destroy(c);
         }
         self.configs.deinit(self.allocator);
+        var it = self.devname_map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.devname_map.deinit();
+    }
+
+    /// Attach a pre-constructed instance under a given devname / phys_key.
+    /// Returns without error if devname already tracked (dedup guard).
+    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance) !void {
+        if (self.devname_map.contains(devname)) return;
+        const dev_copy = try self.allocator.dupe(u8, devname);
+        errdefer self.allocator.free(dev_copy);
+        const phys_copy = try self.allocator.dupe(u8, phys_key);
+        errdefer self.allocator.free(phys_copy);
+        try self.devname_map.put(dev_copy, phys_copy);
+        try self.spawnInstance(phys_key, instance);
+    }
+
+    /// Stop and free the instance attached under devname. No-op if not found.
+    pub fn detach(self: *Supervisor, devname: []const u8) void {
+        const entry = self.devname_map.fetchRemove(devname) orelse return;
+        self.allocator.free(entry.key);
+        const phys_key = entry.value;
+        defer self.allocator.free(phys_key);
+
+        for (self.managed.items, 0..) |*m, i| {
+            if (std.mem.eql(u8, m.phys_key, phys_key)) {
+                m.instance.stop();
+                m.thread.join();
+                m.instance.deinit();
+                self.allocator.destroy(m.instance);
+                m.mapping_arena.deinit();
+                self.allocator.free(m.phys_key);
+                _ = self.managed.swapRemove(i);
+                return;
+            }
+        }
     }
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance) !void {

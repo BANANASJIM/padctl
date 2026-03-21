@@ -77,6 +77,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     unit_mod.addImport("toml", toml_mod);
+    unit_mod.addImport("analyse", capture_analyse_mod);
+    unit_mod.addImport("toml_gen", capture_toml_gen_mod);
     const unit_tests = b.addTest(.{ .root_module = unit_mod });
     unit_tests.linkSystemLibrary("usb-1.0");
     unit_tests.linkLibC();

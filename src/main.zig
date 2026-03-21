@@ -20,6 +20,7 @@ pub const io = struct {
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
+    pub const netlink = @import("io/netlink.zig");
 };
 
 pub const testing_support = struct {
@@ -28,6 +29,7 @@ pub const testing_support = struct {
     pub const phase2a_e2e_test = @import("test/phase2a_e2e_test.zig");
     pub const phase2b_e2e_test = @import("test/phase2b_e2e_test.zig");
     pub const phase2c_e2e_test = @import("test/phase2c_e2e_test.zig");
+    pub const phase3_e2e_test = @import("test/phase3_e2e_test.zig");
 };
 
 pub const config = struct {
