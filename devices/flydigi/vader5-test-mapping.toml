@@ -1,6 +1,92 @@
-name = "vader5-debug-test"
+name = "vader5-full"
 
+# Base layer: standard Xbox gamepad pass-through with back-paddle remaps
 [remap]
-A = "KEY_SPACE"
-B = "BTN_LEFT"
-X = "KEY_W"
+M1 = "KEY_F13"
+M2 = "KEY_F14"
+M3 = "A"
+M4 = "B"
+
+[gyro]
+mode = "off"
+
+[stick.left]
+mode = "gamepad"
+deadzone = 128
+sensitivity = 1.0
+
+[stick.right]
+mode = "gamepad"
+deadzone = 128
+sensitivity = 1.0
+
+[dpad]
+mode = "gamepad"
+
+# Layer 1: FPS mode (hold LM)
+# Right stick → mouse aim, gyro → fine aim, face buttons → keyboard
+[[layer]]
+name = "fps"
+trigger = "LM"
+activation = "hold"
+tap = "mouse_side"
+hold_timeout = 200
+
+[layer.remap]
+RT = "mouse_left"
+LT = "mouse_right"
+A = "KEY_R"
+B = "KEY_C"
+RB = "KEY_E"
+Y = "KEY_G"
+
+[layer.gyro]
+mode = "mouse"
+sensitivity = 8.0
+deadzone = 40
+smoothing = 0.4
+invert_y = true
+
+[layer.stick_right]
+mode = "mouse"
+sensitivity = 2.5
+deadzone = 100
+suppress_gamepad = true
+
+[layer.dpad]
+mode = "arrows"
+suppress_gamepad = true
+
+# Layer 2: Desktop/media mode (hold RM)
+# Left stick → mouse, right stick → scroll, face buttons → common keys
+[[layer]]
+name = "desktop"
+trigger = "RM"
+activation = "hold"
+tap = "mouse_middle"
+hold_timeout = 150
+
+[layer.remap]
+A = "KEY_ENTER"
+B = "KEY_ESC"
+X = "KEY_TAB"
+Y = "KEY_SPACE"
+RB = "KEY_VOLUMEUP"
+LB = "KEY_VOLUMEDOWN"
+Start = "KEY_PLAYPAUSE"
+
+[layer.stick_left]
+mode = "mouse"
+sensitivity = 1.8
+deadzone = 120
+suppress_gamepad = true
+
+[layer.stick_right]
+mode = "scroll"
+sensitivity = 0.8
+deadzone = 200
+suppress_gamepad = true
+
+[layer.dpad]
+mode = "arrows"
+suppress_gamepad = true
