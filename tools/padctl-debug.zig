@@ -228,7 +228,10 @@ pub fn main() !void {
                 if (n > 0) {
                     const iface_id: u8 = @intCast(cfg.device.interface[i].id);
                     if (interp.processReport(iface_id, raw_buf[0..n])) |maybe_delta| {
-                        if (maybe_delta) |delta| gs.applyDelta(delta);
+                        if (maybe_delta) |delta| {
+                            gs.applyDelta(delta);
+                            gs.synthesizeDpadAxes();
+                        }
                     } else |_| {}
                     @memcpy(last_raw_storage[0..n], raw_buf[0..n]);
                     last_raw_len = n;

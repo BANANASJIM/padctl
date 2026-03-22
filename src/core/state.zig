@@ -85,6 +85,16 @@ pub const GamepadState = struct {
         return d;
     }
 
+    pub fn synthesizeDpadAxes(gs: *GamepadState) void {
+        const up = (gs.buttons & (@as(u64, 1) << @intFromEnum(ButtonId.DPadUp))) != 0;
+        const down = (gs.buttons & (@as(u64, 1) << @intFromEnum(ButtonId.DPadDown))) != 0;
+        const left = (gs.buttons & (@as(u64, 1) << @intFromEnum(ButtonId.DPadLeft))) != 0;
+        const right = (gs.buttons & (@as(u64, 1) << @intFromEnum(ButtonId.DPadRight))) != 0;
+
+        gs.dpad_x = if (right) @as(i8, 1) else if (left) @as(i8, -1) else @as(i8, 0);
+        gs.dpad_y = if (down) @as(i8, 1) else if (up) @as(i8, -1) else @as(i8, 0);
+    }
+
     pub fn applyDelta(self: *GamepadState, delta: GamepadStateDelta) void {
         if (delta.ax) |v| self.ax = v;
         if (delta.ay) |v| self.ay = v;
@@ -289,5 +299,48 @@ test "property: diff(s, s) produces all-null delta" {
         inline for (std.meta.fields(GamepadStateDelta)) |f| {
             try std.testing.expectEqual(@as(f.type, null), @field(d, f.name));
         }
+    }
+}
+
+test "synthesizeDpadAxes: no buttons → 0,0" {
+    var gs = GamepadState{};
+    gs.synthesizeDpadAxes();
+    try std.testing.expectEqual(@as(i8, 0), gs.dpad_x);
+    try std.testing.expectEqual(@as(i8, 0), gs.dpad_y);
+}
+
+test "synthesizeDpadAxes: cardinal directions" {
+    const T = std.testing;
+    const cases = [_]struct { btn: ButtonId, dx: i8, dy: i8 }{
+        .{ .btn = .DPadUp, .dx = 0, .dy = -1 },
+        .{ .btn = .DPadDown, .dx = 0, .dy = 1 },
+        .{ .btn = .DPadLeft, .dx = -1, .dy = 0 },
+        .{ .btn = .DPadRight, .dx = 1, .dy = 0 },
+    };
+    for (cases) |c| {
+        var gs = GamepadState{};
+        gs.buttons = @as(u64, 1) << @intFromEnum(c.btn);
+        gs.synthesizeDpadAxes();
+        try T.expectEqual(c.dx, gs.dpad_x);
+        try T.expectEqual(c.dy, gs.dpad_y);
+    }
+}
+
+test "synthesizeDpadAxes: diagonal combinations" {
+    const T = std.testing;
+    const cases = [_]struct { btns: []const ButtonId, dx: i8, dy: i8 }{
+        .{ .btns = &.{ .DPadUp, .DPadRight }, .dx = 1, .dy = -1 },
+        .{ .btns = &.{ .DPadUp, .DPadLeft }, .dx = -1, .dy = -1 },
+        .{ .btns = &.{ .DPadDown, .DPadRight }, .dx = 1, .dy = 1 },
+        .{ .btns = &.{ .DPadDown, .DPadLeft }, .dx = -1, .dy = 1 },
+    };
+    for (cases) |c| {
+        var gs = GamepadState{};
+        for (c.btns) |b| {
+            gs.buttons |= @as(u64, 1) << @intFromEnum(b);
+        }
+        gs.synthesizeDpadAxes();
+        try T.expectEqual(c.dx, gs.dpad_x);
+        try T.expectEqual(c.dy, gs.dpad_y);
     }
 }

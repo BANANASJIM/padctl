@@ -357,6 +357,7 @@ pub const EventLoop = struct {
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
                                 self.gamepad_state.applyDelta(delta);
+                                self.gamepad_state.synthesizeDpadAxes();
                                 try ctx.output.emit(events.gamepad);
                                 if (ctx.touchpad_output) |tp| try tp.emitTouch(events.gamepad);
                                 if (ctx.aux_output) |ao| {
@@ -364,6 +365,7 @@ pub const EventLoop = struct {
                                 }
                             } else {
                                 self.gamepad_state.applyDelta(delta);
+                                self.gamepad_state.synthesizeDpadAxes();
                                 try ctx.output.emit(self.gamepad_state);
                                 if (ctx.touchpad_output) |tp| try tp.emitTouch(self.gamepad_state);
                             }
