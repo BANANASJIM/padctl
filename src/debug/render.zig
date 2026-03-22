@@ -7,16 +7,20 @@ pub const GamepadState = state.GamepadState;
 pub const ButtonId = state.ButtonId;
 pub const DeviceConfig = device_config.DeviceConfig;
 
-// Box width: 68 visible chars between (and including) │ borders
-const W = 68;
+// Box: 70 visible chars total (including │ borders)
+const W = 70;
 
-// ANSI helpers
+// 3-column layout widths (visible chars including leading border)
+const CL = 20; // left: │ + 19
+const CM = 15; // mid:  │ + 14
+// right: W - CL - CM = 35 (│ + 33 inner + closing │)
+const CR_START = CL + CM; // col 35: where right section │ sits
+
 const CSI = "\x1b[";
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const GREEN = "\x1b[32m";
-const RED = "\x1b[31m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
@@ -92,8 +96,6 @@ fn signedBar(writer: anytype, value: i16, width: u8) !void {
     }
 }
 
-/// Write a button label [TAG] with color based on pressed state.
-/// Returns the visible char count written.
 fn btnLabel(writer: anytype, gs: *const GamepadState, btn: ButtonId, label: []const u8) !usize {
     const bit: u6 = @intCast(@intFromEnum(btn));
     const pressed = gs.buttons & (@as(u64, 1) << bit) != 0;
@@ -102,29 +104,26 @@ fn btnLabel(writer: anytype, gs: *const GamepadState, btn: ButtonId, label: []co
     } else {
         try writer.print(DIM ++ "[{s}]" ++ RESET, .{label});
     }
-    return label.len + 2; // [label]
+    return label.len + 2;
 }
 
-/// Write spaces to pad from `col` to `target`, then write "│\r\n".
+fn pad(writer: anytype, from: usize, to: usize) !void {
+    var i: usize = from;
+    while (i < to) : (i += 1) try writer.writeAll(" ");
+}
+
 fn closeRow(writer: anytype, col: usize) !void {
-    if (col < W - 1) {
-        var i: usize = col;
-        while (i < W - 1) : (i += 1) try writer.writeAll(" ");
-    }
+    try pad(writer, col, W - 1);
     try writer.writeAll("│\r\n");
 }
 
-/// Write a section header line: ├─ title ──...──┤
 fn sectionHeader(writer: anytype, title: []const u8) !void {
     try writer.writeAll(BOLD ++ CYAN ++ "├─ " ++ RESET ++ BOLD ++ CYAN);
     try writer.writeAll(title);
     try writer.writeAll(" ");
-    // fill remaining with ─: used = 4 + title.len (├─ + title + space)
     const used = 4 + title.len;
-    if (used < W) {
-        var i: usize = used;
-        while (i < W - 1) : (i += 1) try writer.writeAll("─");
-    }
+    var i: usize = used;
+    while (i < W - 1) : (i += 1) try writer.writeAll("─");
     try writer.writeAll("┤" ++ RESET ++ "\r\n");
 }
 
@@ -137,19 +136,22 @@ pub fn renderFrame(
 ) !void {
     try clearScreen(writer);
 
-    // Top border
-    try writer.writeAll(BOLD ++ CYAN);
-    try writer.writeAll("┌─ Sticks ──────────┬─ Triggers ──┬─ Buttons ──────────────────────┐\r\n");
-    try writer.writeAll(RESET);
+    // ┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐
+    // 1 + 19 + 1 + 14 + 1 + 33 + 1 = 70
+    try writer.writeAll(BOLD ++ CYAN ++
+        "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
+        RESET);
 
-    // Row: LX / LT bar / buttons row 1
+    // Row 1: LX / LT bar / A B X Y
     {
         try writer.writeAll("│ LX:");
-        try writer.print("{:>6} ", .{gs.ax});
-        try writer.writeAll("        │ LT ");
-        try bar(writer, gs.lt, 8);
-        try writer.writeAll(" │ ");
-        var col: usize = 36; // "│ LX:  1234         │ LT ████████ │ " = 36
+        try writer.print("{:>6}", .{gs.ax});
+        try pad(writer, 11, CL); // 11 visible, pad to 20
+        try writer.writeAll("│ LT ");
+        try bar(writer, gs.lt, 9); // 9-wide bar
+        try pad(writer, CL + 14, CL + CM); // CL+14=34, pad to 35 if needed
+        try writer.writeAll("│ ");
+        var col: usize = CR_START + 2; // 37
         col += try btnLabel(writer, gs, .A, "A");
         try writer.writeAll(" ");
         col += 1;
@@ -163,14 +165,16 @@ pub fn renderFrame(
         try closeRow(writer, col);
     }
 
-    // Row: LY / RT bar / buttons row 2
+    // Row 2: LY / RT bar / LB RB START SEL
     {
         try writer.writeAll("│ LY:");
-        try writer.print("{:>6} ", .{gs.ay});
-        try writer.writeAll("        │ RT ");
-        try bar(writer, gs.rt, 8);
-        try writer.writeAll(" │ ");
-        var col: usize = 36;
+        try writer.print("{:>6}", .{gs.ay});
+        try pad(writer, 11, CL);
+        try writer.writeAll("│ RT ");
+        try bar(writer, gs.rt, 9);
+        try pad(writer, CL + 14, CL + CM);
+        try writer.writeAll("│ ");
+        var col: usize = CR_START + 2;
         col += try btnLabel(writer, gs, .LB, "LB");
         try writer.writeAll(" ");
         col += 1;
@@ -184,13 +188,19 @@ pub fn renderFrame(
         try closeRow(writer, col);
     }
 
-    // Row: RX / LT:RT values / buttons row 3
+    // Row 3: RX / LT:RT values / L3 R3 HOME
     {
         try writer.writeAll("│ RX:");
-        try writer.print("{:>6} ", .{gs.rx});
-        try writer.writeAll("        │ LT:");
-        try writer.print("{:>4} RT:{:>4}│ ", .{ gs.lt, gs.rt });
-        var col: usize = 36;
+        try writer.print("{:>6}", .{gs.rx});
+        try pad(writer, 11, CL);
+        // Mid: │LT:xxx RT:xxx  = 1+3+3+4+3 = 14, pad to 15
+        try writer.writeAll("│LT:");
+        try writer.print("{:>3}", .{gs.lt});
+        try writer.writeAll(" RT:");
+        try writer.print("{:>3}", .{gs.rt});
+        try pad(writer, CL + 14, CL + CM);
+        try writer.writeAll("│ ");
+        var col: usize = CR_START + 2;
         col += try btnLabel(writer, gs, .LS, "L3");
         try writer.writeAll(" ");
         col += 1;
@@ -201,12 +211,14 @@ pub fn renderFrame(
         try closeRow(writer, col);
     }
 
-    // Row: RY / dpad header / M1-M4
+    // Row 4: RY / dpad header / M1-M4
     {
         try writer.writeAll("│ RY:");
-        try writer.print("{:>6} ", .{gs.ry});
-        try writer.writeAll("        ├─ DPad ──────┤ ");
-        var col: usize = 36;
+        try writer.print("{:>6}", .{gs.ry});
+        try pad(writer, 11, CL);
+        // ├─ DPad ──────┤ = 15 visible, then 2 spaces into right col
+        try writer.writeAll("├─ DPad ──────┤  ");
+        var col: usize = CR_START + 2;
         col += try btnLabel(writer, gs, .M1, "M1");
         try writer.writeAll(" ");
         col += 1;
@@ -220,16 +232,19 @@ pub fn renderFrame(
         try closeRow(writer, col);
     }
 
-    // DPad rows
+    // DPad up
     {
+        try writer.writeAll("│");
+        try pad(writer, 1, CL);
+        try writer.writeAll("│      ");
         const up_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadUp)))) != 0;
-        try writer.writeAll("│                   │     ");
         if (up_p) try writer.writeAll(GREEN ++ "↑" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
-        try writer.writeAll("       │");
-        // right half: extended buttons or empty
+        try pad(writer, CL + 8, CR_START);
+        try writer.writeAll("│");
+        // right section: ext buttons or empty
         if (config.hasExtButtons()) {
             try writer.writeAll(" ");
-            var col: usize = 36;
+            var col: usize = CR_START + 2;
             if (config.has_c) {
                 col += try btnLabel(writer, gs, .C, "C");
                 try writer.writeAll(" ");
@@ -255,101 +270,99 @@ pub fn renderFrame(
             }
             try closeRow(writer, col);
         } else {
-            try closeRow(writer, 35);
+            try closeRow(writer, CR_START + 1);
         }
     }
 
+    // DPad left · right
     {
+        try writer.writeAll("│");
+        try pad(writer, 1, CL);
+        try writer.writeAll("│    ");
         const left_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadLeft)))) != 0;
         const right_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadRight)))) != 0;
-        try writer.writeAll("│                   │   ");
         if (left_p) try writer.writeAll(GREEN ++ "←" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
         try writer.writeAll(" · ");
         if (right_p) try writer.writeAll(GREEN ++ "→" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
-        try writer.writeAll("     │");
-        try closeRow(writer, 35);
+        try pad(writer, CL + 10, CR_START);
+        try writer.writeAll("│");
+        try closeRow(writer, CR_START + 1);
     }
 
+    // DPad down
     {
+        try writer.writeAll("│");
+        try pad(writer, 1, CL);
+        try writer.writeAll("│      ");
         const down_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadDown)))) != 0;
-        try writer.writeAll("│                   │     ");
         if (down_p) try writer.writeAll(GREEN ++ "↓" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
-        try writer.writeAll("       │");
-        try closeRow(writer, 35);
+        try pad(writer, CL + 8, CR_START);
+        try writer.writeAll("│");
+        try closeRow(writer, CR_START + 1);
     }
 
-    // Gyro section (conditional)
+    // Gyro (conditional)
     if (config.has_gyro) {
         try sectionHeader(writer, "Gyro");
-
-        try writer.writeAll("│ GX ");
-        try signedBar(writer, gs.gyro_x, 32);
-        try writer.print("  {:>6}  AX:{:>6} ", .{ gs.gyro_x, gs.accel_x });
-        try closeRow(writer, W - 1);
-
-        try writer.writeAll("│ GY ");
-        try signedBar(writer, gs.gyro_y, 32);
-        try writer.print("  {:>6}  AY:{:>6} ", .{ gs.gyro_y, gs.accel_y });
-        try closeRow(writer, W - 1);
-
-        try writer.writeAll("│ GZ ");
-        try signedBar(writer, gs.gyro_z, 32);
-        try writer.print("  {:>6}  AZ:{:>6} ", .{ gs.gyro_z, gs.accel_z });
-        try closeRow(writer, W - 1);
+        // │ GX  + 32-bar + "  " + 6-digit + "  AX:" + 6-digit = 5+32+2+6+5+6 = 56
+        inline for (.{
+            .{ "GX", "AX", &gs.gyro_x, &gs.accel_x },
+            .{ "GY", "AY", &gs.gyro_y, &gs.accel_y },
+            .{ "GZ", "AZ", &gs.gyro_z, &gs.accel_z },
+        }) |row| {
+            try writer.writeAll("│ " ++ row[0] ++ " ");
+            try signedBar(writer, row[2].*, 32);
+            try writer.print("  {:>6}  " ++ row[1] ++ ":{:>6}", .{ row[2].*, row[3].* });
+            try closeRow(writer, 56);
+        }
     }
 
-    // Touchpad section (conditional)
+    // Touchpad (conditional)
     if (config.has_touchpad) {
         try sectionHeader(writer, "Touchpad");
-
-        // Touch0
-        {
-            const active_str = if (gs.touch0_active) GREEN ++ "ON " ++ RESET else DIM ++ "OFF" ++ RESET;
-            try writer.writeAll("│ T0 ");
-            try writer.writeAll(active_str);
-            try writer.print("  X:{:>6}  Y:{:>6}", .{ gs.touch0_x, gs.touch0_y });
-            try closeRow(writer, 33);
-        }
-
-        // Touch1
-        {
-            const active_str = if (gs.touch1_active) GREEN ++ "ON " ++ RESET else DIM ++ "OFF" ++ RESET;
-            try writer.writeAll("│ T1 ");
-            try writer.writeAll(active_str);
-            try writer.print("  X:{:>6}  Y:{:>6}", .{ gs.touch1_x, gs.touch1_y });
-            try closeRow(writer, 33);
+        // │ T0 ON   X:  xxxx  Y:  xxxx = 5+3+2+2+6+4+6 = 28
+        inline for (.{
+            .{ "T0", &gs.touch0_active, &gs.touch0_x, &gs.touch0_y },
+            .{ "T1", &gs.touch1_active, &gs.touch1_x, &gs.touch1_y },
+        }) |row| {
+            try writer.writeAll("│ " ++ row[0] ++ " ");
+            if (row[1].*) {
+                try writer.writeAll(GREEN ++ "ON " ++ RESET);
+            } else {
+                try writer.writeAll(DIM ++ "OFF" ++ RESET);
+            }
+            try writer.print("  X:{:>6}  Y:{:>6}", .{ row[2].*, row[3].* });
+            try closeRow(writer, 28);
         }
     }
 
-    // Raw hex section
+    // Raw hex
     try sectionHeader(writer, "Raw Hex");
-
     try writer.writeAll("│ ");
     const show = @min(raw.len, 16);
     for (raw[0..show]) |b| {
         try writer.print("{x:0>2} ", .{b});
     }
-    // 2 + show*3 visible chars so far; pad to W-1
     try closeRow(writer, 2 + show * 3);
 
-    try writer.writeAll("│ ");
-    const show2 = if (raw.len > 16) @min(raw.len - 16, 16) else 0;
-    for (raw[raw.len - show2 ..]) |b| {
-        try writer.print("{x:0>2} ", .{b});
+    if (raw.len > 16) {
+        try writer.writeAll("│ ");
+        const show2 = @min(raw.len - 16, 16);
+        for (raw[16 .. 16 + show2]) |b| {
+            try writer.print("{x:0>2} ", .{b});
+        }
+        try closeRow(writer, 2 + show2 * 3);
     }
-    try closeRow(writer, 2 + show2 * 3);
 
-    // Bottom border with hotkeys
+    // Footer
     try writer.writeAll(BOLD ++ CYAN ++ "└" ++ RESET);
     if (rumble_on) {
         try writer.writeAll(YELLOW ++ " [Q]uit  [R]umble ON  " ++ RESET);
     } else {
         try writer.writeAll(" [Q]uit  [R]umble OFF ");
     }
-    // 23 visible chars used (└ + 22 text), fill rest with ─ then ┘
     try writer.writeAll(BOLD ++ CYAN);
-    const footer_used = 23;
-    var fi: usize = footer_used;
+    var fi: usize = 23; // └(1) + text(22) = 23 visible
     while (fi < W - 1) : (fi += 1) try writer.writeAll("─");
     try writer.writeAll("┘" ++ RESET ++ "\r\n");
 }
