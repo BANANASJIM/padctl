@@ -4,9 +4,13 @@ const linux = std.os.linux;
 
 const src = @import("src");
 const device_config = src.config.device;
+const InterfaceConfig = device_config.InterfaceConfig;
 const Interpreter = src.core.interpreter.Interpreter;
 const GamepadState = src.core.state.GamepadState;
+const DeviceIO = src.io.device_io.DeviceIO;
 const HidrawDevice = src.io.hidraw.HidrawDevice;
+const UsbrawDevice = src.io.usbraw.UsbrawDevice;
+const init_seq = src.init_seq;
 const render = src.debug.render;
 
 const TCGETS: u32 = 0x5401;
@@ -53,23 +57,35 @@ fn disableRawMode(fd: posix.fd_t, orig: *const Termios) void {
     tcsetattr(fd, orig) catch {};
 }
 
-fn hidrawRead(fd: posix.fd_t, buf: []u8) !usize {
-    const n = posix.read(fd, buf) catch |err| switch (err) {
-        error.WouldBlock => return 0,
-        else => return err,
-    };
-    return n;
+fn sendRumble(dev: DeviceIO, strong: u8, weak: u8) void {
+    const pkt = [_]u8{ 0x00, 0x08, 0x00, strong, weak, 0x00, 0x00, 0x00 };
+    dev.write(&pkt) catch {};
 }
 
-fn sendRumble(fd: posix.fd_t, strong: u8, weak: u8) void {
-    const pkt = [_]u8{ 0x00, 0x08, 0x00, strong, weak, 0x00, 0x00, 0x00 };
-    _ = posix.write(fd, &pkt) catch {};
+fn createDeviceIO(
+    allocator: std.mem.Allocator,
+    iface: InterfaceConfig,
+    vid: u16,
+    pid: u16,
+) !DeviceIO {
+    if (std.mem.eql(u8, iface.class, "hid")) {
+        const path = try HidrawDevice.discover(allocator, vid, pid, @intCast(iface.id));
+        defer allocator.free(path);
+        var dev = try allocator.create(HidrawDevice);
+        dev.* = HidrawDevice.init(allocator);
+        try dev.open(path);
+        return dev.deviceIO();
+    } else if (std.mem.eql(u8, iface.class, "vendor")) {
+        const ep_in: u8 = @intCast(iface.ep_in orelse return error.MissingEndpoint);
+        const ep_out: u8 = @intCast(iface.ep_out orelse return error.MissingEndpoint);
+        const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
+        return dev.deviceIO();
+    }
+    return error.UnknownInterfaceClass;
 }
 
 const Cli = struct {
     config_path: ?[]const u8 = null,
-    device_path: ?[]const u8 = null,
-    interface_id: u8 = 1,
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
@@ -80,20 +96,14 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
             cli.config_path = args.next() orelse return error.MissingArgValue;
-        } else if (std.mem.eql(u8, arg, "--device")) {
-            cli.device_path = args.next() orelse return error.MissingArgValue;
-        } else if (std.mem.eql(u8, arg, "--interface")) {
-            const s = args.next() orelse return error.MissingArgValue;
-            cli.interface_id = try std.fmt.parseInt(u8, s, 10);
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             const help =
-                \\Usage: padctl-debug --config <path> [--device /dev/hidrawN] [--interface N]
+                \\Usage: padctl-debug --config <path>
                 \\
                 \\  --config <path>      Device config TOML (required)
-                \\  --device <path>      hidraw device node (default: auto-discover by VID/PID)
-                \\  --interface <N>      Interface ID for report matching (default: 1)
                 \\  --help               Show this help
                 \\
+                \\Opens all interfaces from config (vendor via libusb, HID via hidraw).
                 \\Keys: Q = quit, R = toggle rumble test
                 \\
             ;
@@ -130,26 +140,45 @@ pub fn main() !void {
 
     const cfg = &parsed.value;
     const interp = Interpreter.init(cfg);
+    const vid: u16 = @intCast(cfg.device.vid & 0xffff);
+    const pid: u16 = @intCast(cfg.device.pid & 0xffff);
 
-    var discovered_path: ?[]const u8 = null;
-    defer if (discovered_path) |p| allocator.free(p);
-
-    const dev_path = if (cli.device_path) |p| p else blk: {
-        const vid: u16 = @intCast(cfg.device.vid & 0xffff);
-        const pid: u16 = @intCast(cfg.device.pid & 0xffff);
-        const p = HidrawDevice.discover(allocator, vid, pid, cli.interface_id) catch |err| {
-            std.log.err("device not found (vid={x:0>4} pid={x:0>4}): {}", .{ vid, pid, err });
-            std.process.exit(1);
-        };
-        discovered_path = p;
-        break :blk p;
-    };
-
-    const hid_fd = posix.open(dev_path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
-        std.log.err("failed to open '{s}': {}", .{ dev_path, err });
+    // Open all interfaces
+    const devices = allocator.alloc(DeviceIO, cfg.device.interface.len) catch |err| {
+        std.log.err("alloc failed: {}", .{err});
         std.process.exit(1);
     };
-    defer posix.close(hid_fd);
+    defer allocator.free(devices);
+
+    var opened: usize = 0;
+    defer for (devices[0..opened]) |dev| dev.close();
+
+    for (cfg.device.interface, 0..) |iface, i| {
+        devices[i] = createDeviceIO(allocator, iface, vid, pid) catch |err| {
+            std.log.err("failed to open interface {d} (class={s}): {}", .{ iface.id, iface.class, err });
+            std.process.exit(1);
+        };
+        opened += 1;
+        std.log.info("opened interface {d} (class={s})", .{ iface.id, iface.class });
+    }
+
+    // Run init handshake on all devices
+    if (cfg.device.init) |init_cfg| {
+        for (devices[0..opened]) |dev| {
+            init_seq.runInitSequence(allocator, dev, init_cfg) catch |err| {
+                std.log.warn("init handshake failed: {}, continuing", .{err});
+            };
+        }
+    }
+
+    // Find vendor-class device for rumble output
+    var vendor_dev: ?DeviceIO = null;
+    for (cfg.device.interface, 0..) |iface, i| {
+        if (std.mem.eql(u8, iface.class, "vendor")) {
+            vendor_dev = devices[i];
+            break;
+        }
+    }
 
     const stdin_fd = posix.STDIN_FILENO;
     const stdout_fd = posix.STDOUT_FILENO;
@@ -168,31 +197,47 @@ pub fn main() !void {
     var rumble_on = false;
     var last_render: i64 = 0;
 
-    // Frame buffer: 80x24 ANSI output fits comfortably in 8 KiB
     var frame_buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&frame_buf);
     const writer = fbs.writer();
 
-    while (true) {
-        var fds = [_]posix.pollfd{
-            .{ .fd = hid_fd, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
-        };
-        _ = posix.poll(&fds, 16) catch break;
+    // Build pollfds: one per device + stdin
+    const n_devs = opened;
+    const n_fds = n_devs + 1;
+    var pollfds_buf: [17]posix.pollfd = undefined; // up to 16 interfaces + stdin
+    for (devices[0..n_devs], 0..) |dev, i| {
+        pollfds_buf[i] = dev.pollfd();
+    }
+    pollfds_buf[n_devs] = .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 };
+    const pollfds = pollfds_buf[0..n_fds];
 
-        if (fds[0].revents & posix.POLL.IN != 0) {
-            const n = hidrawRead(hid_fd, &raw_buf) catch break;
-            if (n > 0) {
-                const raw = raw_buf[0..n];
-                if (interp.processReport(cli.interface_id, raw)) |maybe_delta| {
-                    if (maybe_delta) |delta| gs.applyDelta(delta);
-                } else |_| {}
-                @memcpy(last_raw_storage[0..n], raw);
-                last_raw_len = n;
+    while (true) {
+        // Reset revents
+        for (pollfds) |*pfd| pfd.revents = 0;
+
+        _ = posix.poll(pollfds, 16) catch break;
+
+        // Check device fds
+        for (0..n_devs) |i| {
+            if (pollfds[i].revents & posix.POLL.IN != 0) {
+                const n = devices[i].read(&raw_buf) catch |err| switch (err) {
+                    error.Again => continue,
+                    error.Disconnected => break,
+                    error.Io => continue,
+                };
+                if (n > 0) {
+                    const iface_id: u8 = @intCast(cfg.device.interface[i].id);
+                    if (interp.processReport(iface_id, raw_buf[0..n])) |maybe_delta| {
+                        if (maybe_delta) |delta| gs.applyDelta(delta);
+                    } else |_| {}
+                    @memcpy(last_raw_storage[0..n], raw_buf[0..n]);
+                    last_raw_len = n;
+                }
             }
         }
 
-        if (fds[1].revents & posix.POLL.IN != 0) {
+        // Check stdin
+        if (pollfds[n_devs].revents & posix.POLL.IN != 0) {
             var key_buf: [4]u8 = undefined;
             const kn = posix.read(stdin_fd, &key_buf) catch 0;
             if (kn > 0) {
@@ -200,7 +245,9 @@ pub fn main() !void {
                     'q', 'Q' => break,
                     'r', 'R' => {
                         rumble_on = !rumble_on;
-                        sendRumble(hid_fd, if (rumble_on) 0x80 else 0x00, if (rumble_on) 0x80 else 0x00);
+                        if (vendor_dev) |vd| {
+                            sendRumble(vd, if (rumble_on) 0x80 else 0x00, if (rumble_on) 0x80 else 0x00);
+                        }
                     },
                     else => {},
                 }

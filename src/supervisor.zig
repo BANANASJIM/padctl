@@ -430,16 +430,17 @@ pub const Supervisor = struct {
             seen.deinit();
         }
 
-        var it = dir.iterate();
-        while (try it.next()) |entry| {
+        var walker = try dir.walk(self.allocator);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
             if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
+            if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
 
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const toml_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
+            const toml_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path });
 
             const parsed = config_device.parseFile(self.allocator, toml_path) catch |err| {
-                std.log.warn("skip {s}: {}", .{ entry.name, err });
+                std.log.warn("skip {s}: {}", .{ entry.path, err });
                 continue;
             };
             const cfg_ptr = try self.allocator.create(config_device.ParseResult);
@@ -449,7 +450,7 @@ pub const Supervisor = struct {
             const pid: u16 = @intCast(cfg_ptr.value.device.pid);
 
             const paths = HidrawDevice.discoverAllWithRoot(self.allocator, vid, pid, dev_root) catch |err| {
-                std.log.warn("discoverAll for {s}: {}", .{ entry.name, err });
+                std.log.warn("discoverAll for {s}: {}", .{ entry.path, err });
                 cfg_ptr.deinit();
                 self.allocator.destroy(cfg_ptr);
                 continue;

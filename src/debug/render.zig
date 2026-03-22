@@ -186,9 +186,8 @@ pub fn renderFrame(
         while (pad < 16 - show) : (pad += 1) try writer.writeAll("   ");
     }
     try writer.writeAll("│\r\n│ ");
-    const show2_start: usize = 16;
-    const show2 = if (raw.len > show2_start) @min(raw.len - show2_start, 16) else 0;
-    for (raw[show2_start .. show2_start + show2]) |b| {
+    const show2 = if (raw.len > 16) @min(raw.len - 16, 16) else 0;
+    for (raw[raw.len - show2 ..]) |b| {
         try writer.print("{x:0>2} ", .{b});
     }
     if (show2 < 16) {

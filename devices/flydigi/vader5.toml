@@ -6,6 +6,8 @@ pid = 0x2401
 [[device.interface]]
 id = 0
 class = "vendor"   # libusb; EP1 IN 20B main input, EP5 OUT 8B Xbox rumble
+ep_in = 0x81
+ep_out = 0x05
 
 [[device.interface]]
 id = 1
