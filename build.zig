@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
     });
     exe_mod.addImport("toml", toml_mod);
     exe_mod.addImport("build_options", build_opts.createModule());
@@ -40,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
     });
     src_mod.addImport("toml", toml_mod);
     src_mod.addImport("build_options", build_opts.createModule());
@@ -49,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tools/padctl-debug.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
     });
     debug_mod.addImport("src", src_mod);
 
@@ -77,6 +80,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/io/hidraw.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
     });
     io_hidraw_mod.link_libc = true;
 
@@ -84,6 +88,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tools/padctl-capture.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
     });
     capture_mod.addImport("analyse", capture_analyse_mod);
     capture_mod.addImport("toml_gen", capture_toml_gen_mod);
@@ -97,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
     });
     unit_mod.addImport("toml", toml_mod);
     unit_mod.addImport("analyse", capture_analyse_mod);
@@ -119,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = .trap,
         .sanitize_thread = true,
     });
     tsan_mod.addImport("toml", toml_mod);
@@ -135,6 +142,33 @@ pub fn build(b: *std.Build) void {
     tsan_tests.linkLibC();
     const tsan_step = b.step("test-tsan", "Run tests with ThreadSanitizer");
     tsan_step.dependOn(&b.addRunArtifact(tsan_tests).step);
+
+    // test-safe: ReleaseSafe test run (catches UB under optimization)
+    const safe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .sanitize_c = .trap,
+    });
+    safe_mod.addImport("toml", toml_mod);
+    safe_mod.addImport("analyse", capture_analyse_mod);
+    safe_mod.addImport("toml_gen", capture_toml_gen_mod);
+    safe_mod.addImport("build_options", build_opts.createModule());
+    if (use_wasm) addWasm3(b, safe_mod, wasm3_c_flags);
+    const safe_tests = b.addTest(.{ .root_module = safe_mod });
+    if (use_libusb) {
+        safe_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        safe_tests.addIncludePath(b.path("compat"));
+    }
+    safe_tests.linkLibC();
+    const safe_step = b.step("test-safe", "Run tests with ReleaseSafe (optimized + safety checks)");
+    safe_step.dependOn(&b.addRunArtifact(safe_tests).step);
+
+    // check-fmt: verify code formatting
+    const fmt_step = b.step("check-fmt", "Check code formatting");
+    const fmt = b.addFmt(.{ .paths = &.{ "src/", "tools/" }, .check = true });
+    fmt_step.dependOn(&fmt.step);
 
     // capture L0 tests (analyse pure functions)
     const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod });
