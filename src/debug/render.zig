@@ -7,6 +7,58 @@ pub const GamepadState = state.GamepadState;
 pub const ButtonId = state.ButtonId;
 pub const DeviceConfig = device_config.DeviceConfig;
 
+pub const KeyEvent = struct {
+    button: ButtonId,
+    pressed: bool,
+    timestamp_ms: i64,
+};
+
+pub const Stats = struct {
+    packets_total: u64 = 0,
+    packets_per_sec: u32 = 0,
+    last_sec_packets: u32 = 0,
+    last_sec_time: i64 = 0,
+    key_press_count: u64 = 0,
+    last_events: [8]KeyEvent = undefined,
+    event_write_pos: u8 = 0, // next write slot (0..7, wraps)
+    event_total: u64 = 0,
+    start_time: i64 = 0,
+
+    pub fn init(now: i64) Stats {
+        return .{ .last_sec_time = now, .start_time = now };
+    }
+
+    pub fn recordPacket(self: *Stats, now: i64) void {
+        self.packets_total += 1;
+        self.last_sec_packets += 1;
+        const elapsed = now - self.last_sec_time;
+        if (elapsed >= 1000) {
+            self.packets_per_sec = @intCast(@as(u64, self.last_sec_packets) * 1000 / @as(u64, @intCast(elapsed)));
+            self.last_sec_packets = 0;
+            self.last_sec_time = now;
+        }
+    }
+
+    pub fn recordButtonChange(self: *Stats, button: ButtonId, pressed: bool, now: i64) void {
+        if (pressed) self.key_press_count += 1;
+        self.last_events[self.event_write_pos] = .{ .button = button, .pressed = pressed, .timestamp_ms = now };
+        self.event_write_pos = (self.event_write_pos + 1) % 8;
+        self.event_total += 1;
+    }
+
+    pub fn eventCount(self: *const Stats) u8 {
+        return @intCast(@min(self.event_total, 8));
+    }
+
+    pub fn eventAt(self: *const Stats, i: u8) ?KeyEvent {
+        const count = self.eventCount();
+        if (i >= count) return null;
+        // Most recent is at (write_pos - 1) % 8, i=0 means newest
+        const slot = (self.event_write_pos -% 1 -% i) % 8;
+        return self.last_events[slot];
+    }
+};
+
 // Box: 70 visible chars total (including │ borders)
 const W = 70;
 
@@ -153,6 +205,7 @@ pub const RenderConfig = struct {
     output_info: ?OutputInfo = null,
     button_labels: [button_id_count]?[]const u8 = .{null} ** button_id_count,
     mapped_buttons: ?[]const MappedButton = null,
+    stats: ?*const Stats = null,
 
     pub fn hasExtButtons(self: RenderConfig) bool {
         return self.has_c or self.has_z or self.has_lm or self.has_rm or self.has_o;
@@ -804,6 +857,11 @@ fn renderTail(
         try closeRow(writer, 2 + show2 * 3);
     }
 
+    // Stats (optional)
+    if (config.stats) |st| {
+        try renderStats(writer, st);
+    }
+
     // Footer
     try writer.writeAll(BOLD ++ CYAN ++ "└" ++ RESET);
     if (rumble_on) {
@@ -815,7 +873,9 @@ fn renderTail(
         .raw => try writer.writeAll(" [M]ode: RAW "),
         .mapped => try writer.writeAll(YELLOW ++ " [M]ode: MAPPED " ++ RESET),
     }
-    var fi: usize = 37;
+    const stats_hint: []const u8 = if (config.stats != null) " [S] " else " ";
+    try writer.writeAll(stats_hint);
+    var fi: usize = 37 + stats_hint.len;
     if (view_mode == .mapped) {
         if (config.output_info) |info| {
             if (info.mapping_file.len > 0) {
@@ -833,6 +893,60 @@ fn renderTail(
     try writer.writeAll(BOLD ++ CYAN);
     while (fi < W - 1) : (fi += 1) try writer.writeAll("─");
     try writer.writeAll("┘" ++ RESET ++ "\r\n");
+}
+
+fn renderStats(writer: anytype, st: *const Stats) !void {
+    try sectionHeader(writer, "Stats");
+
+    // Line 1: packets, keys, uptime
+    const now = std.time.milliTimestamp();
+    const uptime_s: u64 = @intCast(@max(0, @divTrunc(now - st.start_time, 1000)));
+    const mins = uptime_s / 60;
+    const secs = uptime_s % 60;
+
+    try writer.writeAll("│ ");
+    try writer.print("Packets: {d} ({d}/s)  Keys: {d}  Uptime: {d}m {d:0>2}s", .{
+        st.packets_total, st.packets_per_sec, st.key_press_count, mins, secs,
+    });
+    // Estimate column (rough, pad to close)
+    const line1_est = 2 + 9 + digitCount(st.packets_total) + 2 + digitCount(st.packets_per_sec) + 10 + digitCount(st.key_press_count) + 11 + digitCount(mins) + 2 + 2;
+    try closeRow(writer, line1_est);
+
+    // Line 2: key history (most recent first)
+    try writer.writeAll("│ History: ");
+    var col: usize = 11;
+    const show_count = st.eventCount();
+    if (show_count == 0) {
+        try writer.writeAll("(none)");
+        col += 6;
+    } else {
+        var i: u8 = 0;
+        while (i < show_count) : (i += 1) {
+            if (st.eventAt(i)) |ev| {
+                const arrow: []const u8 = if (ev.pressed) "+" else "-";
+                const name = @tagName(ev.button);
+                const age_ms: u64 = @intCast(@max(0, now - ev.timestamp_ms));
+                const age_s = @as(f64, @floatFromInt(age_ms)) / 1000.0;
+                if (col + name.len + 10 > W - 2) break;
+                try writer.print("[{s}{s} {d:.1}s] ", .{ name, arrow, age_s });
+                col += name.len + 1 + 1 + digitCountF(age_s) + 4;
+            }
+        }
+    }
+    try closeRow(writer, col);
+}
+
+fn digitCount(v: anytype) usize {
+    if (v == 0) return 1;
+    var n: usize = 0;
+    var x: u64 = if (@typeInfo(@TypeOf(v)) == .int) @intCast(if (v < 0) @as(u64, @intCast(-v)) else @as(u64, @intCast(v))) else v;
+    while (x > 0) : (x /= 10) n += 1;
+    return n;
+}
+
+fn digitCountF(v: f64) usize {
+    const int_part: u64 = @intFromFloat(@floor(v));
+    return digitCount(int_part) + 2; // "N.N"
 }
 
 // --- tests ---
@@ -1026,4 +1140,81 @@ test "categorizeEventCode: categories" {
     try testing.expectEqual(OutputCategory.mouse, categorizeEventCode("BTN_LEFT"));
     try testing.expectEqual(OutputCategory.mouse, categorizeEventCode("mouse_left"));
     try testing.expectEqual(OutputCategory.gamepad, categorizeEventCode("BTN_TRIGGER_HAPPY1"));
+}
+
+test "Stats: packet counting and per-second rate" {
+    var st = Stats.init(1000);
+    st.recordPacket(1000);
+    st.recordPacket(1100);
+    st.recordPacket(1200);
+    try testing.expectEqual(@as(u64, 3), st.packets_total);
+    try testing.expectEqual(@as(u32, 0), st.packets_per_sec); // no second elapsed yet
+
+    // Simulate 1 second boundary
+    st.recordPacket(2000);
+    try testing.expectEqual(@as(u64, 4), st.packets_total);
+    try testing.expect(st.packets_per_sec > 0);
+}
+
+test "Stats: button change tracking and ring buffer" {
+    var st = Stats.init(0);
+    st.recordButtonChange(.A, true, 100);
+    try testing.expectEqual(@as(u64, 1), st.key_press_count);
+    try testing.expectEqual(@as(u64, 1), st.event_total);
+
+    // Release does not increment key_press_count
+    st.recordButtonChange(.A, false, 200);
+    try testing.expectEqual(@as(u64, 1), st.key_press_count);
+    try testing.expectEqual(@as(u64, 2), st.event_total);
+
+    // Most recent event first
+    const ev0 = st.eventAt(0).?;
+    try testing.expectEqual(ButtonId.A, ev0.button);
+    try testing.expectEqual(false, ev0.pressed);
+
+    const ev1 = st.eventAt(1).?;
+    try testing.expectEqual(true, ev1.pressed);
+}
+
+test "Stats: ring buffer wraps at 8" {
+    var st = Stats.init(0);
+    // Fill 10 events, ring buffer holds last 8
+    for (0..10) |i| {
+        st.recordButtonChange(.B, true, @intCast(i * 100));
+    }
+    try testing.expectEqual(@as(u64, 10), st.key_press_count);
+    try testing.expectEqual(@as(u64, 10), st.event_total);
+
+    // eventAt(0) = most recent (i=9, timestamp=900)
+    const newest = st.eventAt(0).?;
+    try testing.expectEqual(@as(i64, 900), newest.timestamp_ms);
+
+    // eventAt(7) = oldest kept (i=2, timestamp=200)
+    const oldest = st.eventAt(7).?;
+    try testing.expectEqual(@as(i64, 200), oldest.timestamp_ms);
+
+    // eventAt(8) = out of range
+    try testing.expectEqual(@as(?KeyEvent, null), st.eventAt(8));
+}
+
+test "renderStats: produces Stats section with data" {
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const gs = GamepadState{};
+    const raw = [_]u8{};
+
+    var st = Stats.init(std.time.milliTimestamp() - 5000);
+    st.packets_total = 300;
+    st.packets_per_sec = 60;
+    st.key_press_count = 12;
+    st.recordButtonChange(.A, true, std.time.milliTimestamp() - 100);
+
+    const cfg = RenderConfig{ .stats = &st };
+    try renderFrame(fbs.writer(), &gs, &raw, false, cfg, .raw);
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "Stats") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "300") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "60/s") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "12") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "History") != null);
 }

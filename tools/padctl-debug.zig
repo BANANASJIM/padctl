@@ -111,7 +111,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 \\  --help               Show this help
                 \\
                 \\Opens all interfaces from config (vendor via libusb, HID via hidraw).
-                \\Keys: Q = quit, R = toggle rumble test, M = toggle raw/mapped view
+                \\Keys: Q = quit, R = toggle rumble, M = toggle raw/mapped, S = stats
                 \\
             ;
             _ = posix.write(posix.STDOUT_FILENO, help) catch 0;
@@ -343,7 +343,10 @@ pub fn main() !void {
     var last_raw_len: usize = 0;
     var rumble_on = false;
     var view_mode: render.ViewMode = .raw;
+    var show_stats = false;
+    var stats = render.Stats.init(std.time.milliTimestamp());
     var last_render: i64 = 0;
+    var prev_buttons: u64 = 0;
 
     var frame_buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&frame_buf);
@@ -386,11 +389,27 @@ pub fn main() !void {
                 };
                 if (!running) break;
                 if (n > 0) {
+                    const pkt_now = std.time.milliTimestamp();
+                    stats.recordPacket(pkt_now);
                     const iface_id: u8 = @intCast(cfg.device.interface[i].id);
                     if (interp.processReport(iface_id, raw_buf[0..n])) |maybe_delta| {
                         if (maybe_delta) |delta| {
                             gs.applyDelta(delta);
                             gs.synthesizeDpadAxes();
+                            // Track button changes for stats
+                            if (delta.buttons) |new_btns| {
+                                const changed = new_btns ^ prev_buttons;
+                                if (changed != 0) {
+                                    for (0..std.meta.fields(ButtonId).len) |bi| {
+                                        const bit: u6 = @intCast(bi);
+                                        if (changed & (@as(u64, 1) << bit) != 0) {
+                                            const pressed = new_btns & (@as(u64, 1) << bit) != 0;
+                                            stats.recordButtonChange(@enumFromInt(bi), pressed, pkt_now);
+                                        }
+                                    }
+                                }
+                                prev_buttons = new_btns;
+                            }
                             if (mapper) |*m| {
                                 if (m.apply(delta, 16)) |out| {
                                     mapped_gs = out.gamepad;
@@ -425,6 +444,9 @@ pub fn main() !void {
                             view_mode = if (view_mode == .raw) .mapped else .raw;
                         }
                     },
+                    's', 'S' => {
+                        show_stats = !show_stats;
+                    },
                     else => {},
                 }
             }
@@ -434,6 +456,7 @@ pub fn main() !void {
         if (now - last_render >= 16) {
             last_render = now;
             fbs.reset();
+            render_cfg.stats = if (show_stats) &stats else null;
             const display_gs = if (view_mode == .mapped and mapper != null) &mapped_gs else &gs;
             render.renderFrame(writer, display_gs, last_raw_storage[0..last_raw_len], rumble_on, render_cfg, view_mode) catch {};
             _ = posix.write(stdout_fd, fbs.getWritten()) catch {};
