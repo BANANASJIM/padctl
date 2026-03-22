@@ -242,7 +242,11 @@ pub const EventLoop = struct {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
-            std.log.info("ppoll returned", .{});
+            for (self.pollfds[0..self.fd_count], 0..) |pfd, i| {
+                if (pfd.revents != 0) {
+                    std.log.info("ppoll: slot {d} fd={d} revents=0x{x}", .{ i, pfd.fd, @as(u16, @bitCast(pfd.revents)) });
+                }
+            }
 
             const now = std.time.nanoTimestamp();
             const dt_ns = now - self.last_ts;
