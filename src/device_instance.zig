@@ -116,11 +116,8 @@ pub const DeviceInstance = struct {
                 };
             }
         }
-        std.log.info("init: handshake done", .{});
-
         var loop = try EventLoop.initManaged();
         errdefer loop.deinit();
-        std.log.info("init: event loop created", .{});
 
         for (devices) |dev| try loop.addDevice(dev);
 
@@ -141,7 +138,6 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             uinput_dev = try UinputDevice.create(out_cfg);
-            std.log.info("init: uinput created", .{});
             if (out_cfg.force_feedback != null) {
                 errdefer uinput_dev.?.close();
                 try loop.addUinputFf(uinput_dev.?.pollFfFd());
@@ -153,8 +149,6 @@ pub const DeviceInstance = struct {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
         }
-        std.log.info("init: output devices done, returning instance", .{});
-
         return .{
             .allocator = allocator,
             .devices = devices,
@@ -186,8 +180,6 @@ pub const DeviceInstance = struct {
     /// Thread entry point. Runs the event loop; applies pending mapping swaps
     /// between iterations (woken via stop_pipe by updateMapping).
     pub fn run(self: *DeviceInstance) !void {
-        std.log.info("DeviceInstance.run entered, devices={d}", .{self.devices.len});
-        defer std.log.info("DeviceInstance.run exiting", .{});
         while (!@atomicLoad(bool, &self.stopped, .acquire)) {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
@@ -209,7 +201,6 @@ pub const DeviceInstance = struct {
 
             const mcfg: ?*const MappingConfig = if (mapper_ptr) |m| m.config else self.mapping_cfg;
 
-            std.log.info("entering event loop iteration", .{});
             try self.loop.run(.{
                 .devices = self.devices,
                 .interpreter = &self.interp,
@@ -224,7 +215,6 @@ pub const DeviceInstance = struct {
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
             });
-            std.log.info("event loop returned, disconnected={}", .{self.loop.disconnected});
             if (self.loop.disconnected) break;
         }
     }

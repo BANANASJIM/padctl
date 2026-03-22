@@ -237,16 +237,10 @@ pub const EventLoop = struct {
             null;
 
         while (self.running) {
-            std.log.info("ppoll: fd_count={d}, timeout={?}", .{ self.fd_count, if (timeout) |t| t.sec else null });
             _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
-            for (self.pollfds[0..self.fd_count], 0..) |pfd, i| {
-                if (pfd.revents != 0) {
-                    std.log.info("ppoll: slot {d} fd={d} revents=0x{x}", .{ i, pfd.fd, @as(u16, @bitCast(pfd.revents)) });
-                }
-            }
 
             const now = std.time.nanoTimestamp();
             const dt_ns = now - self.last_ts;
@@ -329,7 +323,10 @@ pub const EventLoop = struct {
                     };
                     if (n == 0) break;
 
-                    const interface_id: u8 = @intCast(i);
+                    const interface_id: u8 = if (ctx.device_config) |dcfg|
+                        @intCast(dcfg.device.interface[i].id)
+                    else
+                        @intCast(i);
 
                     if (ctx.generic_state) |gs| {
                         // Generic path: match report, extract fields, emit directly
