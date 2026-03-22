@@ -571,7 +571,7 @@ pub const Supervisor = struct {
     }
 
     pub fn startFromDirWithRoot(self: *Supervisor, dir_path: []const u8, dev_root: []const u8) !void {
-        var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
+        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
 
         // seen deduplicates by physical path across all TOML files; owns the key bytes.
