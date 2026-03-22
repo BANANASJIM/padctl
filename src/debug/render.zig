@@ -34,7 +34,7 @@ pub const Stats = struct {
         const elapsed = now - self.last_sec_time;
         if (elapsed >= 1000) {
             self.packets_per_sec = @intCast(@as(u64, self.last_sec_packets) * 1000 / @as(u64, @intCast(elapsed)));
-            self.last_sec_packets = 0;
+            self.last_sec_packets = 1; // current packet starts the new window
             self.last_sec_time = now;
         }
     }
@@ -908,8 +908,7 @@ fn renderStats(writer: anytype, st: *const Stats) !void {
     try writer.print("Packets: {d} ({d}/s)  Keys: {d}  Uptime: {d}m {d:0>2}s", .{
         st.packets_total, st.packets_per_sec, st.key_press_count, mins, secs,
     });
-    // Estimate column (rough, pad to close)
-    const line1_est = 2 + 9 + digitCount(st.packets_total) + 2 + digitCount(st.packets_per_sec) + 10 + digitCount(st.key_press_count) + 11 + digitCount(mins) + 2 + 2;
+    const line1_est = 2 + 9 + digitCount(st.packets_total) + 2 + digitCount(st.packets_per_sec) + 11 + digitCount(st.key_press_count) + 10 + digitCount(mins) + 2 + 2 + 1;
     try closeRow(writer, line1_est);
 
     // Line 2: key history (most recent first)

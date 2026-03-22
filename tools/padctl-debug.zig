@@ -396,7 +396,7 @@ pub fn main() !void {
                         if (maybe_delta) |delta| {
                             gs.applyDelta(delta);
                             gs.synthesizeDpadAxes();
-                            // Track button changes for stats
+                            comptime std.debug.assert(std.meta.fields(ButtonId).len <= 64);
                             if (delta.buttons) |new_btns| {
                                 const changed = new_btns ^ prev_buttons;
                                 if (changed != 0) {

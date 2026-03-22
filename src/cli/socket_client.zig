@@ -4,9 +4,12 @@ const linux = std.os.linux;
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
-pub const ConnectError = posix.SocketError || posix.ConnectError || error{PathTooLong};
+pub const ConnectError = posix.SocketError || posix.ConnectError || error{ PathTooLong, InvalidPath };
 
 pub fn connectToSocket(path: []const u8) ConnectError!posix.fd_t {
+    if (path.len == 0 or path[0] != '/' or std.mem.indexOf(u8, path, "..") != null)
+        return error.InvalidPath;
+
     const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer posix.close(fd);
 
@@ -21,9 +24,23 @@ pub fn connectToSocket(path: []const u8) ConnectError!posix.fd_t {
 
 pub fn sendCommand(fd: posix.fd_t, cmd: []const u8, buf: []u8) ![]const u8 {
     _ = try posix.write(fd, cmd);
-    const n = try posix.read(fd, buf);
-    if (n == 0) return error.EndOfStream;
-    return buf[0..n];
+
+    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = posix.poll(&fds, 3000) catch return error.Io;
+    if (ready == 0) return error.Timeout;
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = posix.read(fd, buf[total..]) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        total += n;
+        if (std.mem.indexOfScalar(u8, buf[0..total], '\n') != null) break;
+    }
+    if (total == 0) return error.EndOfStream;
+    return buf[0..total];
 }
 
 pub fn formatSwitch(buf: []u8, name: []const u8, device_id: ?[]const u8) []const u8 {

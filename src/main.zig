@@ -313,7 +313,7 @@ fn printHelp() void {
         \\  list-mappings         List discovered mapping profiles from XDG paths
         \\    --config-dir <dir>  Also show device-specific mappings from this directory
         \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
-        \\  switch <name>         Switch active mapping profile via daemon socket
+        \\  switch <name>         Switch active mapping profile (name must come before options)
         \\    --device <id>       Apply only to specific device
         \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
         \\  status                Show daemon status (current mapping, devices)
