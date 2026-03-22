@@ -1,0 +1,6 @@
+name = "vader5-debug-test"
+
+[remap]
+A = "KEY_SPACE"
+B = "BTN_LEFT"
+X = "KEY_W"
