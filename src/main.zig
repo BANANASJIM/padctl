@@ -65,6 +65,7 @@ pub const testing_support = struct {
     pub const cli_e2e_test = @import("test/cli_e2e_test.zig");
     pub const auto_device_test = @import("test/auto_device_test.zig");
     pub const transform_boundary_test = @import("test/transform_boundary_test.zig");
+    pub const bugfix_regression_test = @import("test/bugfix_regression_test.zig");
 };
 
 pub const config = struct {

@@ -252,6 +252,21 @@ pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const
     return allocator.dupe(u8, dedup);
 }
 
+/// Strip trailing "/inputN" suffix from a physical path for dedup.
+/// e.g. "usb-0000:00:14.0-8/input1" → "usb-0000:00:14.0-8"
+pub fn stripInputSuffix(phys: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, phys, '/') orelse return phys;
+    const tail = phys[slash + 1 ..];
+    if (std.mem.startsWith(u8, tail, "input")) {
+        const num = tail["input".len..];
+        if (num.len > 0) {
+            _ = std.fmt.parseInt(u8, num, 10) catch return phys;
+            return phys[0..slash];
+        }
+    }
+    return phys;
+}
+
 /// Parse interface number from HIDIOCGRAWPHYS string.
 /// Looks for the last "/inputN" component and extracts N.
 /// Returns null if no "input" segment is found.
