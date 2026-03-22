@@ -236,11 +236,21 @@ pub const EventLoop = struct {
         else
             null;
 
+        var iter_count: usize = 0;
         while (self.running) {
             _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
+
+            if (iter_count < 3) {
+                for (self.pollfds[0..self.fd_count], 0..) |pfd, idx| {
+                    if (pfd.revents != 0) {
+                        std.log.info("ppoll iter {d}: slot[{d}] fd={d} revents=0x{x}", .{ iter_count, idx, pfd.fd, pfd.revents });
+                    }
+                }
+            }
+            iter_count += 1;
 
             const now = std.time.nanoTimestamp();
             const dt_ns = now - self.last_ts;
@@ -302,20 +312,24 @@ pub const EventLoop = struct {
                 const slot = self.device_base + i;
                 if (slot >= self.fd_count) break;
 
-                // POLLHUP/POLLERR means the peer closed — treat as disconnect.
-                if (self.pollfds[slot].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                const revents = self.pollfds[slot].revents;
+                const has_in = revents & posix.POLL.IN != 0;
+                const has_hup = revents & (posix.POLL.HUP | posix.POLL.ERR) != 0;
+
+                if (!has_in and has_hup) {
                     self.disconnected = true;
                     self.running = false;
                     break;
                 }
 
-                if (self.pollfds[slot].revents & posix.POLL.IN == 0) continue;
+                if (!has_in) continue;
 
                 // Drain all available frames from this device
                 while (true) {
                     const n = dev.read(&buf) catch |err| switch (err) {
                         error.Again => break,
                         error.Disconnected => {
+                            self.disconnected = true;
                             self.running = false;
                             break;
                         },
