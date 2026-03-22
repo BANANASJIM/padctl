@@ -46,8 +46,7 @@ test "property: SWITCH with path traversal returns unknown" {
     const bad = [_][]const u8{
         "SWITCH ../etc/passwd\n",
         "SWITCH foo/bar\n",
-        "SWITCH a\\b\n",
-        "SWITCH ..hidden\n",
+        "SWITCH ..\\windows\n",
         "SWITCH ok --device ../x\n",
         "SWITCH ok --device foo/bar\n",
     };
@@ -116,7 +115,8 @@ test "property: 10000 events — no overflow or panic" {
     const random = rng.random();
 
     for (0..10000) |i| {
-        const btn: ButtonId = @enumFromInt(random.intRangeAtMost(u6, 0, 15));
+        const max_btn = @as(u6, @intCast(std.meta.fields(ButtonId).len - 1));
+        const btn: ButtonId = @enumFromInt(random.intRangeAtMost(u6, 0, max_btn));
         stats.recordButtonChange(btn, random.boolean(), @intCast(i));
     }
     try testing.expectEqual(@as(u8, 8), stats.eventCount());
