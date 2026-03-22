@@ -245,8 +245,15 @@ test "parseCommand: path traversal rejected" {
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH ok --device ../x\n").tag);
 }
 
+fn testSocketpair() ![2]posix.fd_t {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds) != 0)
+        return posix.unexpectedErrno(posix.errno(0));
+    return fds;
+}
+
 test "ControlSocket: socketpair read/write" {
-    const fds = try posix.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const fds = try testSocketpair();
     defer posix.close(fds[0]);
     defer posix.close(fds[1]);
 

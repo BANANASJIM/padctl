@@ -68,8 +68,15 @@ test "formatSwitch: per-device" {
     try testing.expectEqualStrings("SWITCH racing --device hidraw0\n", cmd);
 }
 
+fn testSocketpair() ![2]posix.fd_t {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds) != 0)
+        return posix.unexpectedErrno(posix.errno(0));
+    return fds;
+}
+
 test "sendCommand: socketpair round-trip" {
-    const fds = try posix.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const fds = try testSocketpair();
     defer posix.close(fds[0]);
     defer posix.close(fds[1]);
 
@@ -82,7 +89,7 @@ test "sendCommand: socketpair round-trip" {
 }
 
 test "sendCommand: empty response returns EndOfStream" {
-    const fds = try posix.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const fds = try testSocketpair();
     defer posix.close(fds[0]);
     // Close server side immediately
     posix.close(fds[1]);
