@@ -65,20 +65,25 @@ pub fn runInitSequence(
         defer allocator.free(bytes);
         sendAndWaitPrefix(device, bytes, prefix, 50) catch |err| {
             if (err == error.InitFailed) {
-                std.log.warn("init command got no ack, continuing", .{});
+                std.log.debug("init command got no ack, continuing", .{});
             } else return err;
         };
     }
+
+    var total: usize = init_config.commands.len;
 
     if (init_config.enable) |enable_cmd| {
         const bytes = try parseHexBytes(allocator, enable_cmd);
         defer allocator.free(bytes);
         sendAndWaitPrefix(device, bytes, prefix, 50) catch |err| {
             if (err == error.InitFailed) {
-                std.log.warn("enable command got no ack, continuing", .{});
+                std.log.debug("enable command got no ack, continuing", .{});
             } else return err;
         };
+        total += 1;
     }
+
+    std.log.info("init: sent {d} commands", .{total});
 }
 
 // --- tests ---

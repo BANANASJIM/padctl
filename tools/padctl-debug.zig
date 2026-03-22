@@ -168,7 +168,7 @@ pub fn main() !void {
         for (cfg.device.interface[0..opened], devices[0..opened]) |iface, dev| {
             if (!std.mem.eql(u8, iface.class, "vendor")) continue;
             init_seq.runInitSequence(allocator, dev, init_cfg) catch |err| {
-                std.log.warn("init handshake failed on interface {d}: {}, continuing", .{ iface.id, err });
+                std.log.debug("init handshake failed on interface {d}: {}, continuing", .{ iface.id, err });
             };
         }
     }
