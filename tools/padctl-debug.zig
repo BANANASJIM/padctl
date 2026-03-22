@@ -75,6 +75,7 @@ fn createDeviceIO(
         const path = try HidrawDevice.discover(allocator, vid, pid, @intCast(iface.id));
         defer allocator.free(path);
         var dev = try allocator.create(HidrawDevice);
+        errdefer allocator.destroy(dev);
         dev.* = HidrawDevice.init(allocator);
         try dev.open(path);
         return dev.deviceIO();
@@ -330,7 +331,9 @@ pub fn main() !void {
     const stdout_fd = posix.STDOUT_FILENO;
 
     var orig_term: Termios = undefined;
-    enableRawMode(stdin_fd, &orig_term) catch {};
+    enableRawMode(stdin_fd, &orig_term) catch |err| {
+        std.log.warn("could not enable raw mode: {}", .{err});
+    };
     defer disableRawMode(stdin_fd, &orig_term);
 
     _ = posix.write(stdout_fd, "\x1b[?25l") catch 0;
@@ -367,7 +370,10 @@ pub fn main() !void {
         // Reset revents
         for (pollfds) |*pfd| pfd.revents = 0;
 
-        _ = posix.poll(pollfds, 16) catch break;
+        _ = posix.poll(pollfds, 16) catch |err| {
+            std.log.err("poll failed: {}", .{err});
+            break;
+        };
 
         // Check device fds
         for (0..n_devs) |i| {
