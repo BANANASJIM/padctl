@@ -71,6 +71,7 @@ pub const testing_support = struct {
     pub const config_props = @import("test/properties/config_props.zig");
     pub const hidraw_dedup_test = @import("test/hidraw_dedup_test.zig");
     pub const state_props = @import("test/properties/state_props.zig");
+    pub const mapper_props = @import("test/properties/mapper_props.zig");
 };
 
 pub const config = struct {
