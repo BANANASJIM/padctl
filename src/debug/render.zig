@@ -75,6 +75,20 @@ pub fn shortenEventCode(label: []const u8) []const u8 {
     inline for (map) |entry| {
         if (mem.eql(u8, label, entry[0])) return entry[1];
     }
+    // BTN_TRIGGER_HAPPY10+ → "H10" etc.
+    if (label.len > "BTN_TRIGGER_HAPPY".len and mem.eql(u8, label[0.."BTN_TRIGGER_HAPPY".len], "BTN_TRIGGER_HAPPY")) {
+        const happy_table = comptime blk: {
+            @setEvalBranchQuota(10000);
+            var tbl: [41][]const u8 = undefined;
+            for (0..41) |i| {
+                tbl[i] = std.fmt.comptimePrint("H{d}", .{i});
+            }
+            break :blk tbl;
+        };
+        const num_str = label["BTN_TRIGGER_HAPPY".len..];
+        const n = std.fmt.parseInt(u8, num_str, 10) catch return label[0..@min(label.len, 4)];
+        if (n < happy_table.len) return happy_table[n];
+    }
     // KEY_X → "X" (strip KEY_ prefix, max 4 chars)
     if (label.len > 4 and mem.eql(u8, label[0..4], "KEY_"))
         return label[4..@min(label.len, 8)];
@@ -95,7 +109,15 @@ pub fn categorizeEventCode(code: []const u8) OutputCategory {
         mem.eql(u8, code, "mouse_left") or
         mem.eql(u8, code, "mouse_right") or
         mem.eql(u8, code, "mouse_middle") or
-        mem.eql(u8, code, "mouse_side")) return .mouse;
+        mem.eql(u8, code, "BTN_SIDE") or
+        mem.eql(u8, code, "BTN_EXTRA") or
+        mem.eql(u8, code, "BTN_FORWARD") or
+        mem.eql(u8, code, "BTN_BACK") or
+        mem.eql(u8, code, "BTN_TASK") or
+        mem.eql(u8, code, "mouse_side") or
+        mem.eql(u8, code, "mouse_extra") or
+        mem.eql(u8, code, "mouse_forward") or
+        mem.eql(u8, code, "mouse_back")) return .mouse;
     // Keyboard
     if (code.len > 4 and mem.eql(u8, code[0..4], "KEY_")) return .keyboard;
     // Everything else is gamepad
@@ -541,9 +563,10 @@ fn renderMappedMode(
 const RightLine = struct {
     kind: enum { header, buttons },
     text: []const u8 = "",
-    // For buttons kind: indices into mapped_buttons
+    // For buttons kind: indices into per-category list
     start: usize = 0,
     end: usize = 0,
+    cat: OutputCategory = .gamepad,
 };
 
 fn addButtonLines(
@@ -578,7 +601,7 @@ fn addButtonLines(
         if (items_in_row > 0 and row_width + needed > RIGHT_INNER) {
             // Emit current row
             if (c < max) {
-                lines[c] = .{ .kind = .buttons, .start = first_in_row, .end = btn_idx };
+                lines[c] = .{ .kind = .buttons, .start = first_in_row, .end = btn_idx, .cat = cat };
                 c += 1;
             }
             first_in_row = btn_idx;
@@ -590,7 +613,7 @@ fn addButtonLines(
     }
     // Emit last row
     if (items_in_row > 0 and c < max) {
-        lines[c] = .{ .kind = .buttons, .start = first_in_row, .end = n_indices };
+        lines[c] = .{ .kind = .buttons, .start = first_in_row, .end = n_indices, .cat = cat };
         c += 1;
     }
 
@@ -695,13 +718,10 @@ fn renderRightCol(
                     try closeRow(writer, CR_START + 2);
                     return;
                 };
-                // Find the right category by looking at what category the line's buttons belong to
-                // We need to collect indices for the category, then use start..end
-                const line_cat = buttons[findCatIndex(buttons, line, 0)].category;
                 var indices: [64]usize = undefined;
                 var n: usize = 0;
                 for (buttons, 0..) |mb, i| {
-                    if (mb.category == line_cat) {
+                    if (mb.category == line.cat) {
                         if (n < indices.len) {
                             indices[n] = i;
                             n += 1;
@@ -723,20 +743,6 @@ fn renderRightCol(
     } else {
         try closeRow(writer, CR_START + 2);
     }
-}
-
-fn findCatIndex(buttons: []const MappedButton, line: RightLine, _: usize) usize {
-    // Walk through buttons finding the category that this line's start index refers to
-    // The start/end in the line are indices into the per-category list
-    // We need to find which category's list this is. Look backwards through prior header lines.
-    // Simpler: just find any button that would be at position 'start' in its category group.
-    var cat_counts = [_]usize{0} ** 3; // gamepad, keyboard, mouse
-    for (buttons, 0..) |mb, i| {
-        const cat_idx: usize = @intFromEnum(mb.category);
-        if (cat_counts[cat_idx] == line.start) return i;
-        cat_counts[cat_idx] += 1;
-    }
-    return 0;
 }
 
 fn renderTail(

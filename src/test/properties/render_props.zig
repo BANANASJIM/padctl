@@ -36,6 +36,40 @@ test "property: renderFrame robustness — random state never crashes" {
             };
         }
     }
+
+    // Test mapped mode with non-empty mapped_buttons
+    const mapped = [_]render.MappedButton{
+        blk: {
+            var mb = render.MappedButton{ .btn_id = .A, .category = .gamepad, .label_len = 1 };
+            mb.short_label[0] = 'S';
+            break :blk mb;
+        },
+        blk: {
+            var mb = render.MappedButton{ .btn_id = .M1, .category = .keyboard, .label_len = 3 };
+            @memcpy(mb.short_label[0..3], "F13");
+            break :blk mb;
+        },
+        blk: {
+            var mb = render.MappedButton{ .btn_id = .B, .category = .mouse, .label_len = 2 };
+            @memcpy(mb.short_label[0..2], "ML");
+            break :blk mb;
+        },
+    };
+
+    for (0..1) |_| {
+        const gs = randomGamepadState(random);
+        const raw_len = random.intRangeAtMost(usize, 0, 64);
+        var raw: [64]u8 = undefined;
+        random.bytes(raw[0..raw_len]);
+
+        var stream = std.io.fixedBufferStream(&out_buf);
+        render.renderFrame(stream.writer(), &gs, raw[0..raw_len], random.boolean(), .{
+            .mapped_buttons = &mapped,
+            .output_info = .{ .name = "PBT Pad" },
+        }, .mapped) catch |err| switch (err) {
+            error.NoSpaceLeft => {},
+        };
+    }
 }
 
 fn randomGamepadState(random: std.Random) GamepadState {
