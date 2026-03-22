@@ -3,10 +3,8 @@ name = "Flydigi Vader 5 Pro"
 vid = 0x37d7
 pid = 0x2401
 
-[[device.interface]]
-id = 0
-class = "hid"      # hidraw; 20B standard Xbox input, 8B rumble output
-
+# Only IF1 is used. IF0 is vendor-class (bInterfaceClass=255) with no
+# hidraw node; the reference driver also uses IF1 exclusively.
 [[device.interface]]
 id = 1
 class = "hid"      # hidraw; EP2 IN 32B extended input, EP6 OUT 32B config commands
@@ -52,32 +50,10 @@ accel_z = { offset = 27, type = "i16le" }
 source = { offset = 11, size = 4 }
 map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Select = 6, X = 7, Y = 8, Start = 9, LB = 10, RB = 11, LS = 14, RS = 15, C = 16, Z = 17, M1 = 18, M2 = 19, M3 = 20, M4 = 21, LM = 22, RM = 23, O = 24, Home = 27 }
 
-# --- IF0 standard input (Xbox-compatible, 20 bytes) ---
-[[report]]
-name = "standard"
-interface = 0
-size = 20
-
-[report.match]
-offset = 0
-expect = [0x00]
-
-[report.fields]
-left_x  = { offset = 6,  type = "i16le" }
-left_y  = { offset = 8,  type = "i16le", transform = "negate" }
-right_x = { offset = 10, type = "i16le" }
-right_y = { offset = 12, type = "i16le", transform = "negate" }
-lt      = { offset = 4,  type = "u8" }
-rt      = { offset = 5,  type = "u8" }
-
-[report.button_group]
-source = { offset = 2, size = 2 }
-map = { DPadUp = 0, DPadDown = 1, DPadLeft = 2, DPadRight = 3, Start = 4, Select = 5, LS = 6, RS = 7, LB = 8, RB = 9, Home = 10, A = 12, B = 13, X = 14, Y = 15 }
-
 # --- Commands ---
 [commands.rumble]
-interface = 0
-template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+interface = 1
+template = "5aa5 1206 {strong:u8} {weak:u8} 0000 0000"
 
 # --- Output device ---
 # Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and

@@ -667,6 +667,106 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| m.thread.join();
     }
 
+    /// Enter the supervisor event loop: poll for signals, netlink hot-plug,
+    /// inotify config changes, and control-socket commands. Blocks until
+    /// SIGTERM/SIGINT. When the loop exits, all managed instances are stopped.
+    pub fn serve(self: *Supervisor) void {
+        defer self.stopAll();
+
+        var pollfds: [10]posix.pollfd = undefined;
+        pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
+        pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
+        var base_nfds: usize = 2;
+        const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
+            pollfds[base_nfds] = cs.pollfd();
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+
+        while (true) {
+            var nfds = base_nfds;
+            if (self.ctrl_sock) |*cs| {
+                nfds += cs.clientPollfds(pollfds[base_nfds..]);
+            }
+
+            _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
+                error.SignalInterrupt => continue,
+                else => return,
+            };
+
+            if (pollfds[0].revents & posix.POLL.IN != 0) {
+                var buf: [128]u8 = undefined;
+                _ = posix.read(self.stop_fd, &buf) catch {};
+                break;
+            }
+
+            if (pollfds[1].revents & posix.POLL.IN != 0) {
+                var buf: [128]u8 = undefined;
+                _ = posix.read(self.hup_fd, &buf) catch {};
+                pollfds[1].revents = 0;
+                // TODO: reload from startFromDir path
+            }
+
+            if (netlink_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainNetlink();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (inotify_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainInotify();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (debounce_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    var tbuf: [8]u8 = undefined;
+                    _ = posix.read(self.debounce_fd, &tbuf) catch {};
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (listen_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.ctrl_sock.?.acceptClient();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (self.ctrl_sock != null) {
+                for (pollfds[base_nfds..nfds]) |*pfd| {
+                    if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                        self.ctrl_sock.?.removeClient(pfd.fd);
+                    } else if (pfd.revents & posix.POLL.IN != 0) {
+                        self.handleClientCommand(pfd.fd);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn attach(self: *Supervisor, devname: []const u8) !void {
         return self.attachWithRoot(devname, "/dev");
     }

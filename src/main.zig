@@ -360,7 +360,7 @@ fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
         std.log.info("no devices found in '{s}', waiting for hot-plug", .{dir_path});
     }
 
-    sup.joinAll();
+    sup.serve();
 }
 
 pub fn main() !void {
