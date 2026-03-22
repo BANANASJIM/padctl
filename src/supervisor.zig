@@ -800,7 +800,9 @@ pub const Supervisor = struct {
         }
         if (cfg == null) return;
 
-        const phys = readPhysFromSysfs(path) orelse "";
+        const phys_raw = readPhysFromSysfs(path) orelse "";
+        const phys = try self.allocator.dupe(u8, phys_raw);
+        defer self.allocator.free(phys);
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
