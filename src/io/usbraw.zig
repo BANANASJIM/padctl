@@ -1,6 +1,8 @@
 const std = @import("std");
 const io = @import("device_io.zig");
 
+const is_test = @import("builtin").is_test;
+
 pub const DeviceIO = io.DeviceIO;
 
 const c = @cImport({
@@ -28,7 +30,7 @@ pub const RingBuffer = struct {
             // Drop oldest
             self.tail = (self.tail + 1) % SLOTS;
             self.count -= 1;
-            std.log.warn("usbraw: ring buffer overflow, dropping oldest report", .{});
+            if (!is_test) std.log.warn("usbraw: ring buffer overflow, dropping oldest report", .{});
         }
         const n = @min(data.len, SLOT_SIZE);
         @memcpy(self.slots[self.head][0..n], data[0..n]);

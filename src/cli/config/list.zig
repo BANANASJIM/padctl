@@ -31,17 +31,13 @@ fn listDir(_: std.mem.Allocator, w: anytype, dir_path: []const u8, label: []cons
     }
 }
 
-pub fn run(allocator: std.mem.Allocator) !void {
+pub fn run(allocator: std.mem.Allocator, writer: anytype) !void {
     const running = daemonRunning();
 
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    const w = out.writer(allocator);
-
     if (running) {
-        try w.writeAll("Daemon: running [active]\n\n");
+        try writer.writeAll("Daemon: running [active]\n\n");
     } else {
-        try w.writeAll("Daemon: not running\n\n");
+        try writer.writeAll("Daemon: not running\n\n");
     }
 
     const dev_dirs = try paths.resolveDeviceConfigDirs(allocator);
@@ -50,26 +46,22 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const map_dirs = try paths.resolveMappingConfigDirs(allocator);
     defer paths.freeConfigDirs(allocator, map_dirs);
 
-    try w.writeAll("Devices:\n");
+    try writer.writeAll("Devices:\n");
     const dev_labels = [_][]const u8{ "user", "system", "builtin" };
     for (dev_dirs, dev_labels) |d, lbl| {
-        try listDir(allocator, w, d, lbl);
+        try listDir(allocator, writer, d, lbl);
     }
 
-    try w.writeAll("\nMappings:\n");
+    try writer.writeAll("\nMappings:\n");
     const map_labels = [_][]const u8{ "user", "system", "builtin" };
     for (map_dirs, map_labels) |d, lbl| {
-        try listDir(allocator, w, d, lbl);
+        try listDir(allocator, writer, d, lbl);
     }
-
-    _ = posix.write(posix.STDOUT_FILENO, out.items) catch 0;
 }
 
 // --- tests ---
 
 test "list: smoke (no panic on empty dirs)" {
     const allocator = std.testing.allocator;
-    // Just ensure run() doesn't crash with empty/nonexistent XDG dirs.
-    // We can't assert output without mocking, but no panic = pass.
-    run(allocator) catch {};
+    run(allocator, std.io.null_writer) catch {};
 }

@@ -1,5 +1,15 @@
 const std = @import("std");
 
+fn stdoutWrite(_: void, data: []const u8) error{}!usize {
+    return std.posix.write(std.posix.STDOUT_FILENO, data) catch data.len;
+}
+const stdout_writer: std.io.GenericWriter(void, error{}, stdoutWrite) = .{ .context = {} };
+
+fn stderrWrite(_: void, data: []const u8) error{}!usize {
+    return std.posix.write(std.posix.STDERR_FILENO, data) catch data.len;
+}
+const stderr_writer: std.io.GenericWriter(void, error{}, stderrWrite) = .{ .context = {} };
+
 pub const tools = struct {
     pub const validate = @import("tools/validate.zig");
     pub const docgen = @import("tools/docgen.zig");
@@ -386,7 +396,7 @@ pub fn main() !void {
 
     // scan subcommand
     if (parsed.scan) {
-        cli.scan.run(allocator, parsed.scan_config_dir) catch |err| {
+        cli.scan.run(allocator, parsed.scan_config_dir, stdout_writer) catch |err| {
             std.log.err("scan failed: {}", .{err});
             std.process.exit(1);
         };
@@ -395,7 +405,7 @@ pub fn main() !void {
 
     // list-mappings subcommand
     if (parsed.list_mappings) {
-        cli.list_mappings.run(allocator, parsed.list_mappings_config_dir) catch |err| {
+        cli.list_mappings.run(allocator, parsed.list_mappings_config_dir, stdout_writer) catch |err| {
             std.log.err("list-mappings failed: {}", .{err});
             std.process.exit(1);
         };
@@ -413,19 +423,19 @@ pub fn main() !void {
 
     // switch subcommand
     if (parsed.switch_cmd) |sw| {
-        const rc = cli.switch_mapping.run(sw.name, sw.device_id, parsed.socket_path);
+        const rc = cli.switch_mapping.run(sw.name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
         std.process.exit(rc);
     }
 
     // status subcommand
     if (parsed.status_cmd) {
-        const rc = cli.status.run(parsed.socket_path);
+        const rc = cli.status.run(parsed.socket_path, stdout_writer, stderr_writer);
         std.process.exit(rc);
     }
 
     // devices subcommand
     if (parsed.devices_cmd) {
-        const rc = cli.devices.run(parsed.socket_path);
+        const rc = cli.devices.run(parsed.socket_path, stdout_writer, stderr_writer);
         std.process.exit(rc);
     }
 
@@ -433,7 +443,7 @@ pub fn main() !void {
     if (parsed.config_cmd) |cmd| {
         switch (cmd) {
             .list => {
-                cli.config.list.run(allocator) catch |err| {
+                cli.config.list.run(allocator, stdout_writer) catch |err| {
                     std.log.err("config list failed: {}", .{err});
                     std.process.exit(1);
                 };
@@ -451,7 +461,7 @@ pub fn main() !void {
                 };
             },
             .@"test" => |opts| {
-                cli.config.@"test".run(allocator, opts.config, opts.mapping) catch |err| {
+                cli.config.@"test".run(allocator, opts.config, opts.mapping, stdout_writer) catch |err| {
                     std.log.err("config test failed: {}", .{err});
                     std.process.exit(1);
                 };

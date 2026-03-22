@@ -189,6 +189,6 @@ test "config edit: no mapping found error" {
 
 // MED-3: `padctl config test` — no hidraw device returns NoHidrawDevice.
 test "config test: no hidraw device error" {
-    const result = config_test_mod.run(testing.allocator, null, null);
+    const result = config_test_mod.run(testing.allocator, null, null, std.io.null_writer);
     try testing.expectError(error.NoHidrawDevice, result);
 }

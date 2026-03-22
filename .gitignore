@@ -5,6 +5,7 @@ zig-cache/
 *.o
 *.a
 kcov-output/
+.worktrees/
 
 # OpenPlan framework (development governance, not public)
 openplan.jsonc

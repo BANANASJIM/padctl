@@ -41,7 +41,7 @@ fn mappingLabel(mapping: *const mapping_mod.MappingConfig, button: []const u8) ?
     return null;
 }
 
-pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path: ?[]const u8) !void {
+pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path: ?[]const u8, writer: anytype) !void {
     // Load mapping
     const mapping: ?mapping_mod.ParseResult = blk: {
         const mpath = if (mapping_path) |mp| mp else {
@@ -76,7 +76,7 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
         try w.writeAll("Mapping: (none — showing raw bytes)\n");
     }
     try w.writeAll("Press Ctrl-C to exit.\n\n");
-    _ = posix.write(posix.STDOUT_FILENO, out.items) catch 0;
+    writer.writeAll(out.items) catch {};
     out.clearRetainingCapacity();
 
     // Read loop
@@ -103,7 +103,7 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
         }
 
         try w.writeByte('\n');
-        _ = posix.write(posix.STDOUT_FILENO, out.items) catch 0;
+        writer.writeAll(out.items) catch {};
     }
 }
 

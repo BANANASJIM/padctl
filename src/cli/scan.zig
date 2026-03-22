@@ -180,17 +180,12 @@ fn padRight(buf: []u8, s: []const u8, width: usize) []const u8 {
     return buf[0..width];
 }
 
-pub fn run(allocator: std.mem.Allocator, config_dir: []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, config_dir: []const u8, writer: anytype) !void {
     const entries = try scan(allocator, config_dir);
     defer freeEntries(allocator, entries);
 
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    const w = out.writer(allocator);
-
     if (entries.len == 0) {
-        try w.writeAll("No HID devices found.\n");
-        _ = posix.write(posix.STDOUT_FILENO, out.items) catch 0;
+        try writer.writeAll("No HID devices found.\n");
         return;
     }
 
@@ -200,14 +195,14 @@ pub fn run(allocator: std.mem.Allocator, config_dir: []const u8) !void {
     const pad_total = path_w + vidpid_w + name_w;
     var pad: [pad_total]u8 = undefined;
 
-    try w.print("{s} {s} {s} {s}\n", .{
+    try writer.print("{s} {s} {s} {s}\n", .{
         padRight(pad[0..path_w], "DEVICE", path_w),
         padRight(pad[path_w .. path_w + vidpid_w], "VID:PID", vidpid_w),
         padRight(pad[path_w + vidpid_w .. pad_total], "NAME", name_w),
         "CONFIG",
     });
-    try w.writeByteNTimes('-', path_w + 1 + vidpid_w + 1 + name_w + 1 + 24);
-    try w.writeByte('\n');
+    try writer.writeByteNTimes('-', path_w + 1 + vidpid_w + 1 + name_w + 1 + 24);
+    try writer.writeByte('\n');
 
     var unmatched: usize = 0;
     for (entries) |e| {
@@ -215,7 +210,7 @@ pub fn run(allocator: std.mem.Allocator, config_dir: []const u8) !void {
         const vidpid = std.fmt.bufPrint(&vidpid_buf, "{x:0>4}:{x:0>4}", .{ e.vid, e.pid }) catch unreachable;
 
         var row_pad: [pad_total]u8 = undefined;
-        try w.print("{s} {s} {s} {s}\n", .{
+        try writer.print("{s} {s} {s} {s}\n", .{
             padRight(row_pad[0..path_w], e.path, path_w),
             padRight(row_pad[path_w .. path_w + vidpid_w], vidpid, vidpid_w),
             padRight(row_pad[path_w + vidpid_w .. pad_total], e.name, name_w),
@@ -225,24 +220,22 @@ pub fn run(allocator: std.mem.Allocator, config_dir: []const u8) !void {
         if (e.config_path == null) unmatched += 1;
     }
 
-    try w.writeByte('\n');
-    try w.print("{d} device(s) found, {d} matched, {d} unmatched.\n", .{
+    try writer.writeByte('\n');
+    try writer.print("{d} device(s) found, {d} matched, {d} unmatched.\n", .{
         entries.len,
         entries.len - unmatched,
         unmatched,
     });
 
     if (unmatched > 0) {
-        try w.writeByte('\n');
-        try w.writeAll("To capture an unmatched device:\n");
+        try writer.writeByte('\n');
+        try writer.writeAll("To capture an unmatched device:\n");
         for (entries) |e| {
             if (e.config_path == null) {
-                try w.print("  padctl-capture --vid 0x{x:0>4} --pid 0x{x:0>4}\n", .{ e.vid, e.pid });
+                try writer.print("  padctl-capture --vid 0x{x:0>4} --pid 0x{x:0>4}\n", .{ e.vid, e.pid });
             }
         }
     }
-
-    _ = posix.write(posix.STDOUT_FILENO, out.items) catch 0;
 }
 
 // --- tests ---
