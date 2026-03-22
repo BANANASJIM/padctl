@@ -38,7 +38,7 @@ pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
 
         var it = dir.iterate();
         while (try it.next()) |entry| {
-            if (entry.kind != .file) continue;
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
 
             const name = entry.name[0 .. entry.name.len - ".toml".len];
@@ -124,7 +124,7 @@ test "discoverMappings: temp dir with profiles" {
 
         var it = dir.iterate();
         while (try it.next()) |entry| {
-            if (entry.kind != .file) continue;
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
 
             const name = entry.name[0 .. entry.name.len - ".toml".len];

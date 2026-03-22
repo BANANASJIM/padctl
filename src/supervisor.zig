@@ -546,6 +546,7 @@ pub const Supervisor = struct {
 
         var dit = self.devname_map.keyIterator();
         while (dit.next()) |key| {
+            if (pos + 2 >= resp_buf.len) break;
             resp_buf[pos] = ' ';
             pos += 1;
             const k = key.*;

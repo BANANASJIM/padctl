@@ -330,7 +330,7 @@ pub fn main() !void {
     const stdin_fd = posix.STDIN_FILENO;
     const stdout_fd = posix.STDOUT_FILENO;
 
-    var orig_term: Termios = undefined;
+    var orig_term: Termios = std.mem.zeroes(Termios);
     enableRawMode(stdin_fd, &orig_term) catch |err| {
         std.log.warn("could not enable raw mode: {}", .{err});
     };
@@ -357,6 +357,10 @@ pub fn main() !void {
 
     // Build pollfds: one per device + stdin
     const n_devs = opened;
+    if (n_devs > 16) {
+        std.log.err("too many interfaces ({d}), max 16", .{n_devs});
+        std.process.exit(1);
+    }
     const n_fds = n_devs + 1;
     var pollfds_buf: [17]posix.pollfd = undefined; // up to 16 interfaces + stdin
     for (devices[0..n_devs], 0..) |dev, i| {
