@@ -357,8 +357,7 @@ fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
     };
 
     if (sup.managed.items.len == 0) {
-        std.log.info("no devices found in '{s}', exiting", .{dir_path});
-        return;
+        std.log.info("no devices found in '{s}', waiting for hot-plug", .{dir_path});
     }
 
     sup.joinAll();
