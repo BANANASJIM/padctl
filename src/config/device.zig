@@ -351,8 +351,8 @@ const test_toml =
     \\
     \\[report.checksum]
     \\algo = "crc32"
-    \\range = [0, 29]
-    \\expect = { offset = 30, type = "u16le" }
+    \\range = [0, 27]
+    \\expect = { offset = 28, type = "u32le" }
     \\
     \\[[report]]
     \\name = "standard"

@@ -12,7 +12,7 @@ pub const ValidationError = struct {
     }
 };
 
-const valid_checksum_algos = [_][]const u8{ "crc32", "crc8", "xor", "none" };
+const valid_checksum_algos = [_][]const u8{ "crc32", "crc8", "xor", "sum8", "none" };
 
 fn isValidChecksumAlgo(algo: []const u8) bool {
     for (valid_checksum_algos) |a| {
@@ -158,9 +158,9 @@ const valid_toml =
     \\source = { offset = 1, size = 1 }
     \\map = { A = 0, B = 1 }
     \\[report.checksum]
-    \\algo = "crc32"
+    \\algo = "sum8"
     \\range = [0, 6]
-    \\expect = { offset = 6, type = "u16le" }
+    \\expect = { offset = 7, type = "u8" }
     \\[output]
     \\name = "T"
 ;
