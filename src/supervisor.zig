@@ -11,6 +11,10 @@ const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
+const ControlSocket = @import("io/control_socket.zig").ControlSocket;
+const control_socket = @import("io/control_socket.zig");
+
+pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
@@ -94,6 +98,7 @@ pub const Supervisor = struct {
     configs: std.ArrayList(*config_device.ParseResult),
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
+    ctrl_sock: ?ControlSocket,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -117,6 +122,11 @@ pub const Supervisor = struct {
 
         const inotify_result = initInotify(allocator);
 
+        const sock = ControlSocket.init(allocator, DEFAULT_SOCKET_PATH) catch |err| blk: {
+            std.log.warn("control socket unavailable: {}", .{err});
+            break :blk null;
+        };
+
         return .{
             .allocator = allocator,
             .managed = .{},
@@ -128,6 +138,7 @@ pub const Supervisor = struct {
             .config_dir = inotify_result.config_dir,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
+            .ctrl_sock = sock,
         };
     }
 
@@ -147,10 +158,12 @@ pub const Supervisor = struct {
             .config_dir = null,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
+            .ctrl_sock = null,
         };
     }
 
     pub fn deinit(self: *Supervisor) void {
+        if (self.ctrl_sock) |*cs| cs.deinit();
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
@@ -346,30 +359,43 @@ pub const Supervisor = struct {
         }
         defer self.stopAll();
 
-        var pollfds: [5]posix.pollfd = undefined;
+        // 5 base fds + 1 listen + 4 clients = 10
+        var pollfds: [10]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
-        var nfds: usize = 2;
+        var base_nfds: usize = 2;
         const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
-            pollfds[nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = nfds;
-            nfds += 1;
+            pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
             break :blk s;
         } else null;
         const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
-            pollfds[nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = nfds;
-            nfds += 1;
+            pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
             break :blk s;
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
-            pollfds[nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = nfds;
-            nfds += 1;
+            pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
+            pollfds[base_nfds] = cs.pollfd();
+            const s = base_nfds;
+            base_nfds += 1;
             break :blk s;
         } else null;
 
         while (true) {
+            // Rebuild client fds each iteration (clients may come and go)
+            var nfds = base_nfds;
+            if (self.ctrl_sock) |*cs| {
+                nfds += cs.clientPollfds(pollfds[base_nfds..]);
+            }
+
             _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
@@ -410,7 +436,134 @@ pub const Supervisor = struct {
                     pollfds[slot].revents = 0;
                 }
             }
+
+            if (listen_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.ctrl_sock.?.acceptClient();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            // Handle client fds
+            if (self.ctrl_sock != null) {
+                for (pollfds[base_nfds..nfds]) |*pfd| {
+                    if (pfd.revents & posix.POLL.IN != 0) {
+                        self.handleClientCommand(pfd.fd);
+                    }
+                    if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                        self.ctrl_sock.?.removeClient(pfd.fd);
+                    }
+                }
+            }
         }
+    }
+
+    fn handleClientCommand(self: *Supervisor, fd: posix.fd_t) void {
+        var cs = &self.ctrl_sock.?;
+        const cmd = cs.readCommand(fd) orelse return;
+        switch (cmd.tag) {
+            .switch_mapping => self.handleSwitch(fd, cmd.name, null),
+            .switch_device => self.handleSwitch(fd, cmd.name, cmd.device_id),
+            .status => self.handleStatus(fd),
+            .list => self.handleList(fd),
+            .devices => self.handleDevices(fd),
+            .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
+        }
+    }
+
+    fn handleSwitch(self: *Supervisor, fd: posix.fd_t, name: []const u8, device_id: ?[]const u8) void {
+        var cs = &self.ctrl_sock.?;
+        if (self.managed.items.len == 0) {
+            cs.sendResponse(fd, "ERR no-devices\n");
+            return;
+        }
+
+        // TODO: Wave 3 will add mapping file discovery and loading.
+        // For now, SWITCH validates that devices exist and the command is well-formed.
+        var switched: usize = 0;
+        if (device_id) |dev_id| {
+            for (self.managed.items) |*m| {
+                if (m.devname) |dn| {
+                    if (std.mem.eql(u8, dn, dev_id)) {
+                        switched += 1;
+                        break;
+                    }
+                }
+            }
+            if (switched == 0) {
+                cs.sendResponse(fd, "ERR device-not-found\n");
+                return;
+            }
+        } else {
+            switched = self.managed.items.len;
+        }
+
+        var resp_buf: [128]u8 = undefined;
+        if (device_id) |dev_id| {
+            const resp = std.fmt.bufPrint(&resp_buf, "OK {s} {s}\n", .{ name, dev_id }) catch {
+                cs.sendResponse(fd, "OK\n");
+                return;
+            };
+            cs.sendResponse(fd, resp);
+        } else {
+            const resp = std.fmt.bufPrint(&resp_buf, "OK {s}\n", .{name}) catch {
+                cs.sendResponse(fd, "OK\n");
+                return;
+            };
+            cs.sendResponse(fd, resp);
+        }
+    }
+
+    fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
+        var cs = &self.ctrl_sock.?;
+        var resp_buf: [512]u8 = undefined;
+        var pos: usize = 0;
+
+        const header = "STATUS ";
+        @memcpy(resp_buf[pos .. pos + header.len], header);
+        pos += header.len;
+
+        for (self.managed.items, 0..) |*m, i| {
+            if (i > 0) {
+                resp_buf[pos] = ' ';
+                pos += 1;
+            }
+            const key = m.phys_key;
+            const copy_len = @min(key.len, resp_buf.len - pos - 2);
+            @memcpy(resp_buf[pos .. pos + copy_len], key[0..copy_len]);
+            pos += copy_len;
+        }
+        resp_buf[pos] = '\n';
+        pos += 1;
+        cs.sendResponse(fd, resp_buf[0..pos]);
+    }
+
+    fn handleList(self: *Supervisor, fd: posix.fd_t) void {
+        // TODO: Wave 3 will implement mapping discovery
+        self.ctrl_sock.?.sendResponse(fd, "LIST\n");
+    }
+
+    fn handleDevices(self: *Supervisor, fd: posix.fd_t) void {
+        var cs = &self.ctrl_sock.?;
+        var resp_buf: [512]u8 = undefined;
+        var pos: usize = 0;
+
+        const header = "DEVICES";
+        @memcpy(resp_buf[pos .. pos + header.len], header);
+        pos += header.len;
+
+        var dit = self.devname_map.keyIterator();
+        while (dit.next()) |key| {
+            resp_buf[pos] = ' ';
+            pos += 1;
+            const k = key.*;
+            const copy_len = @min(k.len, resp_buf.len - pos - 2);
+            @memcpy(resp_buf[pos .. pos + copy_len], k[0..copy_len]);
+            pos += copy_len;
+        }
+        resp_buf[pos] = '\n';
+        pos += 1;
+        cs.sendResponse(fd, resp_buf[0..pos]);
     }
 
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
