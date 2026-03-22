@@ -244,12 +244,7 @@ pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const
     var buf: [256]u8 = std.mem.zeroes([256]u8);
     _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&buf));
     const phys = std.mem.sliceTo(&buf, 0);
-    // Strip trailing "/inputN" so all interfaces of the same physical device share one key
-    const dedup = if (std.mem.lastIndexOfScalar(u8, phys, '/')) |slash|
-        phys[0..slash]
-    else
-        phys;
-    return allocator.dupe(u8, dedup);
+    return allocator.dupe(u8, stripInputSuffix(phys));
 }
 
 /// Strip trailing "/inputN" suffix from a physical path for dedup.

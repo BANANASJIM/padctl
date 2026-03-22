@@ -136,11 +136,17 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .touch1_active => delta.touch1_active = val != 0,
         .battery_level => delta.battery_level = @intCast(val & 0xff),
         .dpad => {
-            const HAT_X = [9]i8{ 0, 0, 1, 1, 1, 0, -1, -1, -1 };
-            const HAT_Y = [9]i8{ 0, -1, -1, 0, 1, 1, 1, 0, -1 };
-            const idx: usize = if (val >= 0 and val <= 8) @intCast(val) else 0;
-            delta.dpad_x = HAT_X[idx];
-            delta.dpad_y = HAT_Y[idx];
+            // HID hat switch: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8+=neutral
+            const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
+            const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
+            if (val >= 0 and val < 8) {
+                const idx: usize = @intCast(val);
+                delta.dpad_x = HAT_X[idx];
+                delta.dpad_y = HAT_Y[idx];
+            } else {
+                delta.dpad_x = 0;
+                delta.dpad_y = 0;
+            }
         },
         .unknown => {},
     }
@@ -1534,10 +1540,11 @@ test "T4: touch0_active bits round-trip" {
     try testing.expectEqual(@as(?bool, false), d2.touch0_active);
 }
 
-test "FieldTag.dpad: hat switch values 0-8 decode correctly" {
-    const HAT_X = [9]i8{ 0, 0, 1, 1, 1, 0, -1, -1, -1 };
-    const HAT_Y = [9]i8{ 0, -1, -1, 0, 1, 1, 1, 0, -1 };
-    for (0..9) |i| {
+test "FieldTag.dpad: hat switch values 0-7 decode correctly" {
+    // HID hat: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+    const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
+    const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
+    for (0..8) |i| {
         var delta = GamepadStateDelta{};
         applyFieldTag(&delta, .dpad, @intCast(i));
         try std.testing.expectEqual(HAT_X[i], delta.dpad_x.?);
@@ -1545,9 +1552,9 @@ test "FieldTag.dpad: hat switch values 0-8 decode correctly" {
     }
 }
 
-test "FieldTag.dpad: value > 8 treated as no direction" {
+test "FieldTag.dpad: value 8 (released) and >8 treated as neutral" {
     var delta = GamepadStateDelta{};
-    applyFieldTag(&delta, .dpad, 9);
+    applyFieldTag(&delta, .dpad, 8);
     try std.testing.expectEqual(@as(i8, 0), delta.dpad_x.?);
     try std.testing.expectEqual(@as(i8, 0), delta.dpad_y.?);
 

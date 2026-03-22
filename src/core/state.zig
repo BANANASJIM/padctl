@@ -158,7 +158,7 @@ pub fn generateRandomDelta(rng: std.Random) GamepadStateDelta {
                 i16 => @bitCast(rng.int(u16)),
                 i8 => @bitCast(rng.int(u8)),
                 u8 => rng.int(u8),
-                u32 => rng.int(u32),
+                u64 => rng.int(u64),
                 else => unreachable,
             };
         }
