@@ -172,7 +172,7 @@ pub const Supervisor = struct {
         if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
         if (self.config_dir) |dir| self.allocator.free(dir);
-        for (self.managed.items) |*m| self.teardownManaged(m);
+        if (self.managed.items.len > 0) self.stopAll();
         self.managed.deinit(self.allocator);
         for (self.configs.items) |c| {
             c.deinit();
