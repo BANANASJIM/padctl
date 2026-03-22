@@ -230,7 +230,7 @@ pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64
     const t_max = typeMaxByTag(chain.type_tag);
     for (chain.items[0..chain.len]) |tr| {
         val = switch (tr.op) {
-            .negate => -val,
+            .negate => if (val == std.math.minInt(i64)) std.math.maxInt(i64) else -val,
             .abs => blk: {
                 const clamped = if (val == std.math.minInt(i64)) std.math.maxInt(i64) else val;
                 break :blk @intCast(@abs(clamped));
@@ -844,6 +844,67 @@ test "checksum xor" {
     // xor = 0xAA ^ 0x01 ^ 0x02 ^ 0x03 = 0xAA
     const raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0xAA, 0x00 };
     _ = try interp.processReport(0, &raw);
+}
+
+test "checksum xor mismatch returns error" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 6
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0xAA]
+        \\[report.checksum]
+        \\algo = "xor"
+        \\range = [0, 4]
+        \\expect = { offset = 4, type = "u8" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // xor = 0xAA ^ 0x01 ^ 0x02 ^ 0x03 = 0xAA; put wrong value 0x00
+    const raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0x00, 0x00 };
+    try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
+}
+
+test "checksum range out of bounds returns null" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 20
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0xAA]
+        \\[report.checksum]
+        \\algo = "sum8"
+        \\range = [0, 20]
+        \\expect = { offset = 18, type = "u8" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // Report smaller than declared size — should return null (size check), not panic
+    const raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03 };
+    const result = try interp.processReport(0, &raw);
+    try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
 test "transform negate" {

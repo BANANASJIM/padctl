@@ -223,12 +223,11 @@ pub const HidrawDevice = struct {
 
     fn close(ptr: *anyopaque) void {
         const self: *HidrawDevice = @ptrCast(@alignCast(ptr));
+        if (self.fd == -1) return;
         for (self.evdev_fds.constSlice()) |evfd| posix.close(evfd);
         self.evdev_fds.len = 0;
-        if (self.fd >= 0) {
-            posix.close(self.fd);
-            self.fd = -1;
-        }
+        posix.close(self.fd);
+        self.fd = -1;
         self.allocator.destroy(self);
     }
 };
@@ -262,7 +261,7 @@ pub fn readInterfaceId(path: []const u8) ?u8 {
 
 /// Read HID_PHYS value from sysfs uevent file for a hidraw node.
 /// Returned slice points into an internal read buffer; caller must copy if needed.
-pub fn readPhysFromSysfs(path: []const u8) ?[]const u8 {
+fn readPhysFromSysfs(path: []const u8) ?[]const u8 {
     const basename = std.fs.path.basename(path);
     var path_buf: [256]u8 = undefined;
     const sysfs_path = std.fmt.bufPrint(&path_buf, "/sys/class/hidraw/{s}/device/uevent", .{basename}) catch return null;

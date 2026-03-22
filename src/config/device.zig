@@ -245,6 +245,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
 
         if (report.button_group) |bg| {
+            if (bg.source.offset + bg.source.size > report.size) return error.OffsetOutOfBounds;
             const bg_source_size = bg.source.size;
             const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
             var it = bg.map.map.iterator();

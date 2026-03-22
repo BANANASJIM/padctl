@@ -167,3 +167,17 @@ test "MockDeviceIO injectDisconnect returns Disconnected" {
     // Stays disconnected on subsequent reads
     try std.testing.expectError(DeviceIO.ReadError.Disconnected, io.read(&buf));
 }
+
+test "MockDeviceIO read truncates frame to buffer size" {
+    const allocator = std.testing.allocator;
+    var big_frame: [70]u8 = undefined;
+    for (&big_frame, 0..) |*b, i| b.* = @intCast(i % 256);
+    var mock = try MockDeviceIO.init(allocator, &.{&big_frame});
+    defer mock.deinit();
+
+    const io = mock.deviceIO();
+    var buf: [32]u8 = undefined;
+    const n = try io.read(&buf);
+    try std.testing.expectEqual(@as(usize, 32), n);
+    try std.testing.expectEqualSlices(u8, big_frame[0..32], &buf);
+}

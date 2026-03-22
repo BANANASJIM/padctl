@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const ioctl = @import("../io/ioctl_constants.zig");
-const readPhysFromSysfs = @import("../io/hidraw.zig").readPhysFromSysfs;
+const readPhysicalPath = @import("../io/hidraw.zig").readPhysicalPath;
 
 const DEFAULT_CONFIG_DIR = "/usr/share/padctl/devices";
 const MAX_HIDRAW = 64;
@@ -55,13 +55,12 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         var info: ioctl.HidrawDevinfo = undefined;
         if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) continue;
 
-        const phys_raw = readPhysFromSysfs(path) orelse "";
+        const phys_owned = readPhysicalPath(allocator, path) catch try allocator.dupe(u8, "");
 
-        if (phys_raw.len > 0) {
-            const new_phys = try allocator.dupe(u8, phys_raw);
-            const gop = try phys_seen.getOrPut(new_phys);
+        if (phys_owned.len > 0) {
+            const gop = try phys_seen.getOrPut(phys_owned);
             if (gop.found_existing) {
-                allocator.free(new_phys);
+                allocator.free(phys_owned);
                 continue;
             }
         }
@@ -79,7 +78,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
             .vid = vid,
             .pid = pid,
             .name = try allocator.dupe(u8, name_raw),
-            .phys = try allocator.dupe(u8, phys_raw),
+            .phys = try allocator.dupe(u8, phys_owned),
             .config_path = config_path,
         });
     }

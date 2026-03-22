@@ -76,7 +76,8 @@ pub const EventLoopContext = struct {
 
 fn i64ToParamValue(v: ?i64) u16 {
     const raw = v orelse 0;
-    return @intCast((raw & 0xff) << 8);
+    const clamped: u8 = @intCast(std.math.clamp(raw, 0, 255));
+    return @as(u16, clamped) << 8;
 }
 
 const AdaptiveTriggerParamConfig = @import("config/mapping.zig").AdaptiveTriggerParamConfig;

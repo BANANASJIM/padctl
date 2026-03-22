@@ -451,6 +451,7 @@ pub const AuxDevice = struct {
         var buf: [MAX_EVENTS]c.input_event = undefined;
         var n: usize = 0;
         for (events) |ev| {
+            if (n >= MAX_EVENTS - 1) break;
             switch (ev) {
                 .key => |k| {
                     buf[n] = .{ .type = c.EV_KEY, .code = k.code, .value = if (k.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };

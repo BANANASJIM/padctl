@@ -9,7 +9,6 @@ const config_device = @import("config/device.zig");
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
-const readPhysFromSysfs = @import("io/hidraw.zig").readPhysFromSysfs;
 const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
@@ -198,6 +197,7 @@ pub const Supervisor = struct {
         try self.devname_map.put(dev_copy, phys_copy);
         errdefer _ = self.devname_map.fetchRemove(dev_copy);
         try self.spawnInstance(phys_key, instance);
+        self.managed.items[self.managed.items.len - 1].devname = try self.allocator.dupe(u8, devname);
     }
 
     /// Stop and free the instance attached under devname. No-op if not found.
@@ -319,8 +319,8 @@ pub const Supervisor = struct {
                 // Reset instance state for restart
                 m.instance.mapping_cfg = map_copy;
                 @atomicStore(bool, &m.instance.stopped, false, .release);
-                m.instance.loop.running = true;
-                m.instance.loop.disconnected = false;
+                @atomicStore(bool, &m.instance.loop.running, true, .release);
+                @atomicStore(bool, &m.instance.loop.disconnected, false, .release);
 
                 m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
             }
@@ -831,8 +831,7 @@ pub const Supervisor = struct {
         }
         if (cfg == null) return;
 
-        const phys_raw = readPhysFromSysfs(path) orelse "";
-        const phys = try self.allocator.dupe(u8, phys_raw);
+        const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
