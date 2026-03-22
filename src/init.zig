@@ -25,6 +25,8 @@ pub fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
 fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, retries: u16, report_size: usize) !void {
     // Zero-pad to report_size to match HID output report length
     var pad_buf: [64]u8 = .{0} ** 64;
+    if (bytes.len > pad_buf.len)
+        std.log.warn("init command {d} bytes exceeds {d}-byte buffer, truncated", .{ bytes.len, pad_buf.len });
     const send_len = @max(bytes.len, report_size);
     const copy_len = @min(bytes.len, pad_buf.len);
     @memcpy(pad_buf[0..copy_len], bytes[0..copy_len]);
