@@ -426,7 +426,12 @@ pub fn main() !void {
 
         if (!running) break;
 
-        // Check stdin
+        // Check stdin — handle POLLHUP (pipe closed / backgrounded) to avoid busy-spin
+        if (pollfds[n_devs].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+            // Disable stdin polling to prevent poll() from returning immediately
+            pollfds[n_devs].fd = -1;
+        }
+
         if (pollfds[n_devs].revents & posix.POLL.IN != 0) {
             var key_buf: [4]u8 = undefined;
             const kn = posix.read(stdin_fd, &key_buf) catch 0;
