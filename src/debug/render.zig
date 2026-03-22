@@ -24,6 +24,47 @@ const GREEN = "\x1b[32m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
+fn shortenLabel(label: []const u8) []const u8 {
+    const map = .{
+        .{ "BTN_SOUTH", "S" },
+        .{ "BTN_EAST", "E" },
+        .{ "BTN_NORTH", "N" },
+        .{ "BTN_WEST", "W" },
+        .{ "BTN_TL", "TL" },
+        .{ "BTN_TR", "TR" },
+        .{ "BTN_START", "STA" },
+        .{ "BTN_SELECT", "SEL" },
+        .{ "BTN_THUMBL", "L3" },
+        .{ "BTN_THUMBR", "R3" },
+        .{ "BTN_MODE", "HM" },
+        .{ "BTN_LEFT", "ML" },
+        .{ "BTN_RIGHT", "MR" },
+        .{ "BTN_TRIGGER_HAPPY1", "H1" },
+        .{ "BTN_TRIGGER_HAPPY2", "H2" },
+        .{ "BTN_TRIGGER_HAPPY3", "H3" },
+        .{ "BTN_TRIGGER_HAPPY4", "H4" },
+        .{ "BTN_TRIGGER_HAPPY5", "H5" },
+        .{ "BTN_TRIGGER_HAPPY6", "H6" },
+        .{ "BTN_TRIGGER_HAPPY7", "H7" },
+        .{ "BTN_TRIGGER_HAPPY8", "H8" },
+        .{ "BTN_TRIGGER_HAPPY9", "H9" },
+        .{ "KEY_SPACE", "SPC" },
+        .{ "KEY_ENTER", "ENT" },
+        .{ "KEY_ESC", "ESC" },
+        .{ "KEY_TAB", "TAB" },
+        .{ "KEY_F13", "F13" },
+        .{ "KEY_F14", "F14" },
+    };
+    inline for (map) |entry| {
+        if (mem.eql(u8, label, entry[0])) return entry[1];
+    }
+    // KEY_X → "X" (strip KEY_ prefix, max 4 chars)
+    if (label.len > 4 and mem.eql(u8, label[0..4], "KEY_"))
+        return label[4..@min(label.len, 8)];
+    // Truncate anything else to 4 chars
+    return label[0..@min(label.len, 4)];
+}
+
 pub const OutputInfo = struct {
     name: []const u8 = "Unknown",
     mapping_file: []const u8 = "",
@@ -47,7 +88,7 @@ pub const RenderConfig = struct {
     }
 
     pub fn btnDisplayLabel(self: *const RenderConfig, btn: ButtonId, default: []const u8) []const u8 {
-        return self.button_labels[@intFromEnum(btn)] orelse default;
+        return shortenLabel(self.button_labels[@intFromEnum(btn)] orelse default);
     }
 
     pub fn deriveFromConfig(cfg: *const DeviceConfig) RenderConfig {
