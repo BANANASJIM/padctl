@@ -124,11 +124,12 @@ const Cli = struct {
     doc_gen_output: []const u8 = "docs/src/devices",
     install_opts: ?cli.install.InstallOptions = null,
     scan: bool = false,
-    scan_config_dir: []const u8 = "/usr/share/padctl/devices",
+    scan_config_dir: ?[]const u8 = null,
     list_mappings: bool = false,
     list_mappings_config_dir: ?[]const u8 = null,
     reload: bool = false,
     reload_pid: ?[]const u8 = null,
+    pid_file: ?[]const u8 = null,
     config_cmd: ?ConfigCmd = null,
     switch_cmd: ?struct { name: []const u8, device_id: ?[]const u8 = null } = null,
     status_cmd: bool = false,
@@ -209,6 +210,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             in_validate = true;
             const first = args.next() orelse return error.MissingArgValue;
             try parsed_cli.validate_files.append(allocator, first);
+        } else if (std.mem.eql(u8, arg, "--pid-file")) {
+            parsed_cli.pid_file = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--doc-gen")) {
             parsed_cli.doc_gen = true;
         } else if (std.mem.eql(u8, arg, "--output")) {
@@ -320,7 +323,7 @@ fn printHelp() void {
         \\    --prefix <dir>      Installation prefix (default: /usr)
         \\    --destdir <dir>     Staging root for package builds (default: "")
         \\  scan                  List connected HID devices and config match status
-        \\    --config-dir <dir>  Search for device configs here (default: /usr/share/padctl/devices)
+        \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
         \\  list-mappings         List discovered mapping profiles from XDG paths
         \\    --config-dir <dir>  Also show device-specific mappings from this directory
         \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
@@ -345,6 +348,7 @@ fn printHelp() void {
         \\  --config-dir <dir>  Glob *.toml in dir; discover all matching devices
         \\  --mapping <path>    Mapping config TOML file (optional)
         \\  --validate <path>   Validate device config and exit (returns 0/1)
+        \\  --pid-file <path>   Write PID to file on start, remove on exit
         \\  --doc-gen           Generate Markdown device reference from --config path(s)
         \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
         \\  --help, -h          Show this help
@@ -354,7 +358,19 @@ fn printHelp() void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
 }
 
-fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
+fn writePidFile(path: []const u8) void {
+    var buf: [32]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{d}\n", .{std.os.linux.getpid()}) catch return;
+    var f = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch return;
+    defer f.close();
+    _ = f.writeAll(s) catch {};
+}
+
+fn deletePidFile(path: []const u8) void {
+    std.fs.deleteFileAbsolute(path) catch {};
+}
+
+fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]const u8) void {
     var sup = Supervisor.init(allocator) catch |err| {
         std.log.err("failed to init supervisor: {}", .{err});
         std.process.exit(1);
@@ -369,6 +385,9 @@ fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
     if (sup.managed.items.len == 0) {
         std.log.info("no devices found in '{s}', waiting for hot-plug", .{dir_path});
     }
+
+    if (pid_file) |pf| writePidFile(pf);
+    defer if (pid_file) |pf| deletePidFile(pf);
 
     sup.serve(dir_path);
 }
@@ -396,10 +415,23 @@ pub fn main() !void {
 
     // scan subcommand
     if (parsed.scan) {
-        cli.scan.run(allocator, parsed.scan_config_dir, stdout_writer) catch |err| {
-            std.log.err("scan failed: {}", .{err});
-            std.process.exit(1);
-        };
+        if (parsed.scan_config_dir) |dir| {
+            const dirs = [_][]const u8{dir};
+            cli.scan.run(allocator, &dirs, stdout_writer) catch |err| {
+                std.log.err("scan failed: {}", .{err});
+                std.process.exit(1);
+            };
+        } else {
+            const dirs = config.paths.resolveDeviceConfigDirs(allocator) catch |err| {
+                std.log.err("failed to resolve XDG config dirs: {}", .{err});
+                std.process.exit(1);
+            };
+            defer config.paths.freeConfigDirs(allocator, dirs);
+            cli.scan.run(allocator, dirs, stdout_writer) catch |err| {
+                std.log.err("scan failed: {}", .{err});
+                std.process.exit(1);
+            };
+        }
         std.process.exit(0);
     }
 
@@ -516,7 +548,7 @@ pub fn main() !void {
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
     if (parsed.config_dir) |dir_path| {
-        runFromDir(allocator, dir_path);
+        runFromDir(allocator, dir_path, parsed.pid_file);
         return;
     }
 
@@ -530,7 +562,7 @@ pub fn main() !void {
 
         for (dirs) |dir| {
             std.fs.accessAbsolute(dir, .{}) catch continue;
-            runFromDir(allocator, dir);
+            runFromDir(allocator, dir, parsed.pid_file);
             return;
         }
 

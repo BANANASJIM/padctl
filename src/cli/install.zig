@@ -223,12 +223,15 @@ fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rule
     for (entries.items) |e| {
         const line = try std.fmt.allocPrint(
             allocator,
-            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"systemd\", ENV{{SYSTEMD_WANTS}}=\"padctl.service\"\n# {s}\n",
+            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"systemd\", ENV{{SYSTEMD_WANTS}}=\"padctl.service\", TAG+=\"uaccess\"\n# {s}\n",
             .{ e.vid, e.pid, e.name },
         );
         defer allocator.free(line);
         try buf.appendSlice(allocator, line);
     }
+
+    try buf.appendSlice(allocator, "\n# uinput access for logged-in users\n");
+    try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\"\n");
 
     var f = try std.fs.createFileAbsolute(rules_path, .{ .truncate = true });
     defer f.close();
@@ -370,4 +373,6 @@ test "generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "37d7") != null);
     try testing.expect(std.mem.indexOf(u8, content, "2401") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
 }

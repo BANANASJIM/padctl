@@ -21,13 +21,26 @@ fn listDir(_: std.mem.Allocator, w: anytype, dir_path: []const u8, label: []cons
     var found = false;
     var it = dir.iterate();
     while (try it.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
-        if (!found) {
-            try w.print("  [{s}] {s}\n", .{ label, dir_path });
-            found = true;
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".toml")) {
+            if (!found) {
+                try w.print("  [{s}] {s}\n", .{ label, dir_path });
+                found = true;
+            }
+            try w.print("    {s}\n", .{entry.name});
+        } else if (entry.kind == .directory) {
+            var sub = dir.openDir(entry.name, .{ .iterate = true }) catch continue;
+            defer sub.close();
+            var sub_it = sub.iterate();
+            while (try sub_it.next()) |sub_entry| {
+                if (sub_entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, sub_entry.name, ".toml")) continue;
+                if (!found) {
+                    try w.print("  [{s}] {s}\n", .{ label, dir_path });
+                    found = true;
+                }
+                try w.print("    {s}/{s}\n", .{ entry.name, sub_entry.name });
+            }
         }
-        try w.print("    {s}\n", .{entry.name});
     }
 }
 

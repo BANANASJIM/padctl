@@ -4,7 +4,7 @@ Release:        1%{?dist}
 Summary:        HID gamepad remapper with declarative TOML config
 
 License:        MIT
-URL:            https://github.com/example/padctl
+URL:            https://github.com/BANANASJIM/padctl
 
 %global _arch_tag %{expand:%(uname -m)}-linux-musl
 Source0:        %{url}/releases/download/v%{version}/padctl-v%{version}-%{_arch_tag}.tar.gz
@@ -54,5 +54,5 @@ install -Dm644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
 %systemd_postun_with_restart padctl.service
 
 %changelog
-* Thu Mar 20 2026 padctl maintainers <maintainers@example.com> - 0.1.0-1
+* Thu Mar 20 2026 padctl maintainers <maintainers@padctl.dev> - 0.1.0-1
 - Initial COPR package (prebuilt binary)

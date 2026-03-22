@@ -180,9 +180,39 @@ fn padRight(buf: []u8, s: []const u8, width: usize) []const u8 {
     return buf[0..width];
 }
 
-pub fn run(allocator: std.mem.Allocator, config_dir: []const u8, writer: anytype) !void {
-    const entries = try scan(allocator, config_dir);
-    defer freeEntries(allocator, entries);
+pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer: anytype) !void {
+    var all_entries: std.ArrayList(ScanEntry) = .{};
+    defer {
+        for (all_entries.items) |e| freeEntry(allocator, e);
+        all_entries.deinit(allocator);
+    }
+
+    for (config_dirs) |dir| {
+        const entries = scan(allocator, dir) catch continue;
+        defer allocator.free(entries);
+        for (entries) |e| {
+            // Merge: if same path already seen, skip; otherwise check if we can upgrade config_path
+            var found = false;
+            for (all_entries.items) |*existing| {
+                if (std.mem.eql(u8, existing.path, e.path)) {
+                    found = true;
+                    if (existing.config_path == null and e.config_path != null) {
+                        existing.config_path = e.config_path;
+                        // Free the duplicate non-config fields
+                        allocator.free(e.path);
+                        allocator.free(e.name);
+                        allocator.free(e.phys);
+                    } else {
+                        freeEntry(allocator, e);
+                    }
+                    break;
+                }
+            }
+            if (!found) try all_entries.append(allocator, e);
+        }
+    }
+
+    const entries = all_entries.items;
 
     if (entries.len == 0) {
         try writer.writeAll("No HID devices found.\n");

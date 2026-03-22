@@ -27,7 +27,7 @@
             zigBuildFlags = [ "-Doptimize=ReleaseSafe" ];
             meta = {
               description = "HID gamepad remapper — declarative TOML config, uinput output";
-              homepage = "https://github.com/example/padctl";
+              homepage = "https://github.com/BANANASJIM/padctl";
               license = nixpkgs.lib.licenses.mit;
               maintainers = [ ];
               platforms = [ "x86_64-linux" "aarch64-linux" ];

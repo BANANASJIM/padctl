@@ -149,16 +149,18 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (real hardware)");
     _ = e2e_step;
 
-    // spike
-    const spike_mod = b.createModule(.{
-        .root_source_file = b.path("spike/toml_spike.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    spike_mod.addImport("toml", toml_mod);
-    const spike_exe = b.addExecutable(.{ .name = "toml-spike", .root_module = spike_mod });
-    const spike_step = b.step("spike", "Run TOML spike");
-    spike_step.dependOn(&b.addRunArtifact(spike_exe).step);
+    // spike (only available when spike/toml_spike.zig exists)
+    if (std.fs.cwd().access("spike/toml_spike.zig", .{})) |_| {
+        const spike_mod = b.createModule(.{
+            .root_source_file = b.path("spike/toml_spike.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        spike_mod.addImport("toml", toml_mod);
+        const spike_exe = b.addExecutable(.{ .name = "toml-spike", .root_module = spike_mod });
+        const spike_step = b.step("spike", "Run TOML spike");
+        spike_step.dependOn(&b.addRunArtifact(spike_exe).step);
+    } else |_| {}
 }
 
 fn addWasm3(b: *std.Build, mod: *std.Build.Module, c_flags: []const []const u8) void {
