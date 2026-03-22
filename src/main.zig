@@ -9,6 +9,7 @@ pub const cli = struct {
     pub const install = @import("cli/install.zig");
     pub const scan = @import("cli/scan.zig");
     pub const reload = @import("cli/reload.zig");
+    pub const list_mappings = @import("cli/list_mappings.zig");
     pub const config = struct {
         pub const list = @import("cli/config/list.zig");
         pub const init = @import("cli/config/init.zig");
@@ -78,6 +79,7 @@ pub const config = struct {
     pub const device = @import("config/device.zig");
     pub const input_codes = @import("config/input_codes.zig");
     pub const mapping = @import("config/mapping.zig");
+    pub const mapping_discovery = @import("config/mapping_discovery.zig");
     pub const presets = @import("config/presets.zig");
     pub const paths = @import("config/paths.zig");
 };
@@ -108,6 +110,8 @@ const Cli = struct {
     install_opts: ?cli.install.InstallOptions = null,
     scan: bool = false,
     scan_config_dir: []const u8 = "/usr/share/padctl/devices",
+    list_mappings: bool = false,
+    list_mappings_config_dir: ?[]const u8 = null,
     reload: bool = false,
     reload_pid: ?[]const u8 = null,
     config_cmd: ?ConfigCmd = null,
@@ -163,6 +167,16 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     parsed_cli.scan_config_dir = args.next() orelse return error.MissingArgValue;
                 } else {
                     std.log.err("unknown scan argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
+        } else if (std.mem.eql(u8, arg, "list-mappings")) {
+            parsed_cli.list_mappings = true;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--config-dir")) {
+                    parsed_cli.list_mappings_config_dir = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown list-mappings argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
                 }
             }
@@ -239,6 +253,7 @@ fn printHelp() void {
         \\Usage: padctl [options]
         \\       padctl install [--prefix /usr] [--destdir ""]
         \\       padctl scan [--config-dir <dir>]
+        \\       padctl list-mappings [--config-dir <dir>]
         \\       padctl reload [--pid <pid>]
         \\
         \\Subcommands:
@@ -247,6 +262,8 @@ fn printHelp() void {
         \\    --destdir <dir>     Staging root for package builds (default: "")
         \\  scan                  List connected HID devices and config match status
         \\    --config-dir <dir>  Search for device configs here (default: /usr/share/padctl/devices)
+        \\  list-mappings         List discovered mapping profiles from XDG paths
+        \\    --config-dir <dir>  Also show device-specific mappings from this directory
         \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
         \\  config list           List XDG-layer device and mapping configs
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
@@ -316,6 +333,15 @@ pub fn main() !void {
     if (parsed.scan) {
         cli.scan.run(allocator, parsed.scan_config_dir) catch |err| {
             std.log.err("scan failed: {}", .{err});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    }
+
+    // list-mappings subcommand
+    if (parsed.list_mappings) {
+        cli.list_mappings.run(allocator, parsed.list_mappings_config_dir) catch |err| {
+            std.log.err("list-mappings failed: {}", .{err});
             std.process.exit(1);
         };
         std.process.exit(0);
