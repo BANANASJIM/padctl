@@ -241,18 +241,23 @@ pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const
     return allocator.dupe(u8, stripped);
 }
 
-/// Read the interface number from sysfs bInterfaceNumber for a hidraw node.
+/// Read the interface number from sysfs uevent HID_PHYS for a hidraw node.
 pub fn readInterfaceId(path: []const u8) ?u8 {
-    const basename = std.fs.path.basename(path);
-    var buf: [256]u8 = undefined;
-    const sysfs_path = std.fmt.bufPrint(&buf, "/sys/class/hidraw/{s}/device/../bInterfaceNumber", .{basename}) catch return null;
+    const basename_s = std.fs.path.basename(path);
+    var path_buf: [256]u8 = undefined;
+    const sysfs_path = std.fmt.bufPrint(&path_buf, "/sys/class/hidraw/{s}/device/uevent", .{basename_s}) catch return null;
     const fd = std.fs.openFileAbsolute(sysfs_path, .{}) catch return null;
     defer fd.close();
-    var num_buf: [8]u8 = undefined;
-    const n = fd.read(&num_buf) catch return null;
+    var buf: [1024]u8 = undefined;
+    const n = fd.read(&buf) catch return null;
     if (n == 0) return null;
-    const trimmed = std.mem.trimRight(u8, num_buf[0..n], "\n\r ");
-    return std.fmt.parseInt(u8, trimmed, 10) catch null;
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "HID_PHYS=")) {
+            return parseInterfaceId(line["HID_PHYS=".len..]);
+        }
+    }
+    return null;
 }
 
 /// Read HID_PHYS value from sysfs uevent file for a hidraw node.

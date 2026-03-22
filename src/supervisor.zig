@@ -624,7 +624,8 @@ pub const Supervisor = struct {
 
             var spawned: usize = 0;
             for (paths) |hidraw_path| {
-                if (readInterfaceId(hidraw_path)) |iface_id| {
+                const iface_id = readInterfaceId(hidraw_path) orelse continue;
+                {
                     var declared = false;
                     for (cfg_ifaces) |ci| {
                         if (iface_id == @as(u8, @intCast(ci.id))) {
