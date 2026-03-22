@@ -9,8 +9,8 @@ test "renderFrame: empty raw slice does not panic" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var gs = render.GamepadState{};
-    try render.renderFrame(fbs.writer(), &gs, &.{}, false);
-    try render.renderFrame(fbs.writer(), &gs, &[_]u8{0x42}, true);
+    try render.renderFrame(fbs.writer(), &gs, &.{}, false, .{});
+    try render.renderFrame(fbs.writer(), &gs, &[_]u8{0x42}, true, .{});
 }
 
 // -- Test 2: stripInputSuffix strips /inputN --
