@@ -50,8 +50,8 @@ pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
             errdefer allocator.free(full_path);
 
-            try seen.put(owned_name, {});
             try list.append(allocator, .{ .name = owned_name, .path = full_path, .source = source });
+            try seen.put(owned_name, {});
         }
     }
 
@@ -134,8 +134,8 @@ test "discoverMappings: temp dir with profiles" {
             errdefer allocator.free(owned_name);
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
             errdefer allocator.free(full_path);
-            try seen.put(owned_name, {});
             try list.append(allocator, .{ .name = owned_name, .path = full_path, .source = source });
+            try seen.put(owned_name, {});
         }
     }
 
