@@ -37,7 +37,7 @@ pub const TimerCallback = struct {
 };
 
 /// Arm a timerfd for a one-shot timeout (it_interval = 0).
-pub fn armTimer(fd: posix.fd_t, timeout_ms: u32) !void {
+pub fn armTimer(fd: posix.fd_t, timeout_ms: u32) void {
     const spec = linux.itimerspec{
         .it_value = .{
             .sec = @intCast(timeout_ms / 1000),
@@ -370,7 +370,7 @@ pub const EventLoop = struct {
                                     continue;
                                 };
                                 if (events.timer_request) |tr| switch (tr) {
-                                    .arm => |ms| armTimer(self.timer_fd, ms) catch {},
+                                    .arm => |ms| armTimer(self.timer_fd, ms),
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
                                 self.gamepad_state.applyDelta(delta);
@@ -548,7 +548,7 @@ test "armTimer / disarmTimer: arm then disarm does not leave fd readable" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    try armTimer(loop.timer_fd, 5000); // 5 seconds — will not fire during test
+    armTimer(loop.timer_fd, 5000); // 5 seconds — will not fire during test
     disarmTimer(loop.timer_fd);
 
     // After disarm, timerfd should not be readable
@@ -561,7 +561,7 @@ test "armTimer: fires after timeout" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    try armTimer(loop.timer_fd, 20); // 20ms
+    armTimer(loop.timer_fd, 20); // 20ms
 
     var pfd = [1]posix.pollfd{.{ .fd = loop.timer_fd, .events = posix.POLL.IN, .revents = 0 }};
     // Wait up to 200ms for the timer to fire
@@ -585,7 +585,7 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     try loop.addDevice(dev);
 
     // Arm for 20ms, then run the loop
-    try armTimer(loop.timer_fd, 20);
+    armTimer(loop.timer_fd, 20);
 
     const mapper_empty = try mapping_mod.parseString(allocator,
         \\[[layer]]
