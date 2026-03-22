@@ -78,7 +78,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
             .vid = vid,
             .pid = pid,
             .name = try allocator.dupe(u8, name_raw),
-            .phys = try allocator.dupe(u8, phys_owned),
+            .phys = phys_owned,
             .config_path = config_path,
         });
     }

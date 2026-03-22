@@ -194,10 +194,12 @@ pub const Supervisor = struct {
         errdefer self.allocator.free(dev_copy);
         const phys_copy = try self.allocator.dupe(u8, phys_key);
         errdefer self.allocator.free(phys_copy);
+        const dn_copy = try self.allocator.dupe(u8, devname);
+        errdefer self.allocator.free(dn_copy);
         try self.devname_map.put(dev_copy, phys_copy);
         errdefer _ = self.devname_map.fetchRemove(dev_copy);
         try self.spawnInstance(phys_key, instance);
-        self.managed.items[self.managed.items.len - 1].devname = try self.allocator.dupe(u8, devname);
+        self.managed.items[self.managed.items.len - 1].devname = dn_copy;
     }
 
     /// Stop and free the instance attached under devname. No-op if not found.

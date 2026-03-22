@@ -102,8 +102,9 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
         const scan_dir: []const u8 = blk: {
             const dev_dirs = paths.resolveDeviceConfigDirs(allocator) catch break :blk "/usr/share/padctl/devices";
             defer paths.freeConfigDirs(allocator, dev_dirs);
+            const duped = allocator.dupe(u8, dev_dirs[2]) catch break :blk "/usr/share/padctl/devices";
             scan_dir_owned = true;
-            break :blk allocator.dupe(u8, dev_dirs[2]) catch break :blk "/usr/share/padctl/devices";
+            break :blk duped;
         };
         defer if (scan_dir_owned) allocator.free(@constCast(scan_dir));
 
@@ -141,11 +142,17 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
     // Determine preset
     var preset_idx: usize = 0;
     if (preset_arg) |p| {
+        var found = false;
         for (presets, 0..) |name, i| {
             if (std.mem.eql(u8, name, p)) {
                 preset_idx = i;
+                found = true;
                 break;
             }
+        }
+        if (!found) {
+            _ = posix.write(posix.STDERR_FILENO, "error: unknown preset\n") catch 0;
+            return error.UnknownPreset;
         }
     } else {
         preset_idx = try chooseFromList(allocator, &pbuf, "Output preset", &presets, &input_buf);

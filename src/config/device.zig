@@ -259,9 +259,19 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             }
         }
 
+        if (report.match) |m| {
+            if (m.offset < 0) return error.InvalidConfig;
+            for (m.expect) |byte| {
+                if (byte < 0 or byte > 255) return error.InvalidConfig;
+            }
+            if (m.offset + @as(i64, @intCast(m.expect.len)) > report.size) return error.InvalidConfig;
+        }
+
         if (report.checksum) |cs| {
             if (cs.range.len != 2) return error.InvalidConfig;
             if (cs.range[0] < 0 or cs.range[1] > report.size) return error.InvalidConfig;
+            if (cs.range[0] >= cs.range[1]) return error.InvalidConfig;
+            if (cs.expect.offset < 0) return error.InvalidConfig;
             const expect_end = cs.expect.offset + if (std.mem.eql(u8, cs.algo, "crc32")) @as(i64, 4) else 1;
             if (expect_end > report.size) return error.InvalidConfig;
         }
