@@ -21,7 +21,13 @@ pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
     defer seen.deinit();
 
     var list: std.ArrayList(MappingProfile) = .{};
-    errdefer freeProfiles(allocator, list.toOwnedSlice(allocator) catch &.{});
+    errdefer {
+        for (list.items) |p| {
+            allocator.free(p.name);
+            allocator.free(p.path);
+        }
+        list.deinit(allocator);
+    }
 
     for (dirs, sources) |dir_path, source| {
         var dir = if (std.fs.path.isAbsolute(dir_path))

@@ -12,9 +12,11 @@ pub const ControlSocket = struct {
     path: []const u8,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !ControlSocket {
+    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.mem.Allocator.Error || error{ChmodFailed};
+
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) InitError!ControlSocket {
         const path_z = try allocator.dupeZ(u8, path);
-        errdefer allocator.free(path_z);
+        defer allocator.free(path_z);
 
         // Unlink stale socket
         std.fs.deleteFileAbsolute(path) catch {};
@@ -28,10 +30,10 @@ pub const ControlSocket = struct {
         @memcpy(addr.path[0..copy_len], path_z[0..copy_len]);
 
         try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
+        errdefer std.fs.deleteFileAbsolute(path) catch {};
 
-        // chmod 0660
-        _ = linux.chmod(path_z.ptr, 0o660);
-        allocator.free(path_z);
+        const rc = linux.chmod(path_z.ptr, 0o660);
+        if (linux.E.init(rc) != .SUCCESS) return error.ChmodFailed;
 
         try posix.listen(fd, 4);
 
@@ -129,6 +131,8 @@ pub const CommandTag = enum {
     unknown,
 };
 
+/// Command fields (.name, .device_id) are slices into the caller's buffer.
+/// Only valid for the duration of the current call frame.
 pub const Command = struct {
     tag: CommandTag,
     name: []const u8 = "",
@@ -144,10 +148,12 @@ pub fn parseCommand(raw: []const u8) Command {
 
     if (std.ascii.eqlIgnoreCase(verb, "SWITCH")) {
         const name = it.next() orelse return .{ .tag = .unknown };
+        if (containsPathTraversal(name)) return .{ .tag = .unknown };
         // Check for --device flag
         if (it.next()) |flag| {
             if (std.mem.eql(u8, flag, "--device")) {
                 const dev_id = it.next() orelse return .{ .tag = .unknown };
+                if (containsPathTraversal(dev_id)) return .{ .tag = .unknown };
                 return .{ .tag = .switch_device, .name = name, .device_id = dev_id };
             }
         }
@@ -160,6 +166,12 @@ pub fn parseCommand(raw: []const u8) Command {
         return .{ .tag = .devices };
     }
     return .{ .tag = .unknown };
+}
+
+fn containsPathTraversal(s: []const u8) bool {
+    return std.mem.indexOfScalar(u8, s, '/') != null or
+        std.mem.indexOfScalar(u8, s, '\\') != null or
+        std.mem.indexOf(u8, s, "..") != null;
 }
 
 // --- tests ---
@@ -218,6 +230,13 @@ test "parseCommand: SWITCH missing name" {
 test "parseCommand: SWITCH --device missing id" {
     const cmd = parseCommand("SWITCH fps --device\n");
     try testing.expectEqual(CommandTag.unknown, cmd.tag);
+}
+
+test "parseCommand: path traversal rejected" {
+    try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH ../etc/passwd\n").tag);
+    try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH foo/bar\n").tag);
+    try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH a\\b\n").tag);
+    try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH ok --device ../x\n").tag);
 }
 
 test "ControlSocket: socketpair read/write" {

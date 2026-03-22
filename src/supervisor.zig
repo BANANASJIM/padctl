@@ -447,11 +447,10 @@ pub const Supervisor = struct {
             // Handle client fds
             if (self.ctrl_sock != null) {
                 for (pollfds[base_nfds..nfds]) |*pfd| {
-                    if (pfd.revents & posix.POLL.IN != 0) {
-                        self.handleClientCommand(pfd.fd);
-                    }
                     if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
                         self.ctrl_sock.?.removeClient(pfd.fd);
+                    } else if (pfd.revents & posix.POLL.IN != 0) {
+                        self.handleClientCommand(pfd.fd);
                     }
                 }
             }
