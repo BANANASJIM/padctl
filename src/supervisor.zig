@@ -307,11 +307,22 @@ pub const Supervisor = struct {
                 try self.spawnInstance(nc.phys_key, instance);
             } else if (nc.mapping_cfg) |new_map| {
                 const m = found.?;
+                // Stop-Swap-Restart: stop thread before touching arena
+                m.instance.stop();
+                m.thread.join();
+
                 _ = m.mapping_arena.reset(.retain_capacity);
                 const arena_alloc = m.mapping_arena.allocator();
                 const map_copy = try arena_alloc.create(MappingConfig);
                 map_copy.* = new_map.*;
-                m.instance.updateMapping(map_copy);
+
+                // Reset instance state for restart
+                m.instance.mapping_cfg = map_copy;
+                @atomicStore(bool, &m.instance.stopped, false, .release);
+                m.instance.loop.running = true;
+                m.instance.loop.disconnected = false;
+
+                m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
             }
         }
     }
