@@ -10,10 +10,10 @@ pub fn connectToSocket(path: []const u8) ConnectError!posix.fd_t {
     if (path.len == 0 or path[0] != '/' or std.mem.indexOf(u8, path, "..") != null)
         return error.InvalidPath;
 
-    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
     errdefer posix.close(fd);
 
-    var addr: linux.sockaddr.un = .{ .path = undefined };
+    var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
     @memset(&addr.path, 0);
     if (path.len >= addr.path.len) return error.PathTooLong;
     @memcpy(addr.path[0..path.len], path);

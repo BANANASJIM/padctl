@@ -30,7 +30,7 @@ pub const ControlSocket = struct {
         const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
         errdefer posix.close(fd);
 
-        var addr: linux.sockaddr.un = .{ .path = undefined };
+        var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         const copy_len = @min(path_z.len, addr.path.len - 1);
         @memcpy(addr.path[0..copy_len], path_z[0..copy_len]);
