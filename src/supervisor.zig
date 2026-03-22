@@ -648,6 +648,7 @@ pub const Supervisor = struct {
                     self.allocator.free(phys);
                     continue;
                 };
+                std.log.info("supervisor: init succeeded for {s}, spawning...", .{hidraw_path});
 
                 self.spawnInstance(phys, inst_ptr) catch |err| {
                     std.log.warn("spawnInstance for {s}: {}", .{ hidraw_path, err });

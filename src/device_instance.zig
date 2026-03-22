@@ -116,9 +116,11 @@ pub const DeviceInstance = struct {
                 };
             }
         }
+        std.log.info("init: handshake done", .{});
 
         var loop = try EventLoop.initManaged();
         errdefer loop.deinit();
+        std.log.info("init: event loop created", .{});
 
         for (devices) |dev| try loop.addDevice(dev);
 
@@ -139,6 +141,7 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             uinput_dev = try UinputDevice.create(out_cfg);
+            std.log.info("init: uinput created", .{});
             if (out_cfg.force_feedback != null) {
                 errdefer uinput_dev.?.close();
                 try loop.addUinputFf(uinput_dev.?.pollFfFd());
@@ -150,6 +153,7 @@ pub const DeviceInstance = struct {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
         }
+        std.log.info("init: output devices done, returning instance", .{});
 
         return .{
             .allocator = allocator,
