@@ -218,7 +218,6 @@ pub const DeviceInstance = struct {
                 std.log.err("event loop failed: {}", .{err});
                 break;
             };
-            std.log.debug("loop.run returned, disconnected={}", .{self.loop.disconnected});
             if (self.loop.disconnected) break;
         }
     }

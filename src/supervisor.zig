@@ -82,11 +82,9 @@ fn initInotify(allocator: std.mem.Allocator) InotifyResult {
 }
 
 fn threadEntry(inst: *DeviceInstance) void {
-    std.log.info("device thread started", .{});
     inst.run() catch |err| {
         std.log.err("DeviceInstance.run failed: {}", .{err});
     };
-    std.log.info("device thread exiting", .{});
 }
 
 pub const Supervisor = struct {
