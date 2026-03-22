@@ -676,7 +676,25 @@ pub const Supervisor = struct {
     /// Enter the supervisor event loop: poll for signals, netlink hot-plug,
     /// inotify config changes, and control-socket commands. Blocks until
     /// SIGTERM/SIGINT. When the loop exits, all managed instances are stopped.
-    pub fn serve(self: *Supervisor) void {
+    fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
+        self.stopAll();
+        for (self.configs.items) |c| {
+            c.deinit();
+            self.allocator.destroy(c);
+        }
+        self.configs.clearRetainingCapacity();
+        var it = self.devname_map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.devname_map.clearRetainingCapacity();
+        self.startFromDir(dir_path) catch |err| {
+            std.log.err("reload from dir failed: {}", .{err});
+        };
+    }
+
+    pub fn serve(self: *Supervisor, dir_path: []const u8) void {
         defer self.stopAll();
 
         var pollfds: [10]posix.pollfd = undefined;
@@ -728,8 +746,8 @@ pub const Supervisor = struct {
             if (pollfds[1].revents & posix.POLL.IN != 0) {
                 var buf: [128]u8 = undefined;
                 _ = posix.read(self.hup_fd, &buf) catch {};
+                self.doReloadFromDir(dir_path);
                 pollfds[1].revents = 0;
-                // TODO: reload from startFromDir path
             }
 
             if (netlink_slot) |slot| {
@@ -750,6 +768,7 @@ pub const Supervisor = struct {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     var tbuf: [8]u8 = undefined;
                     _ = posix.read(self.debounce_fd, &tbuf) catch {};
+                    self.doReloadFromDir(dir_path);
                     pollfds[slot].revents = 0;
                 }
             }
