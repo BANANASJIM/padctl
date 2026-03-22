@@ -105,8 +105,15 @@ pub const DeviceInstance = struct {
         }
 
         if (cfg.device.init) |init_cfg| {
-            for (devices) |dev| {
-                try init_seq.runInitSequence(allocator, dev, init_cfg);
+            for (cfg.device.interface, devices) |iface, dev| {
+                const match = if (init_cfg.interface) |init_iface|
+                    iface.id == init_iface
+                else
+                    std.mem.eql(u8, iface.class, "vendor");
+                if (!match) continue;
+                init_seq.runInitSequence(allocator, dev, init_cfg) catch |err| {
+                    std.log.debug("init on interface {d}: {}", .{ iface.id, err });
+                };
             }
         }
 
