@@ -16,3 +16,4 @@ _templates/
 spike/
 hooks/
 .gitattributes
+docs/book/

@@ -178,18 +178,27 @@ steps = [
 
 ## Building from Source
 
-**Requirements:** Zig 0.15+
+**Requirements:** Zig 0.15+, libusb-1.0 (system package)
 
 ```sh
 zig build
 # outputs: zig-out/bin/padctl  zig-out/bin/padctl-capture  zig-out/bin/padctl-debug
 ```
 
-```sh
-zig build test
-```
+Build flags:
 
-Distro packages for libusb are not required at build time — padctl uses the kernel hidraw and uinput interfaces directly.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-Dlibusb=false` | `true` | Disable libusb-1.0 linkage (hidraw-only path) |
+| `-Dwasm=false` | `true` | Disable WASM plugin runtime |
+
+Testing:
+
+```sh
+zig build test              # unit tests (Layer 0+1, no privileges)
+zig build check-fmt         # verify code formatting
+zig build check-all         # all checks (test + tsan + safe + fmt)
+```
 
 ## Contributing
 

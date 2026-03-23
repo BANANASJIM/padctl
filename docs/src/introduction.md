@@ -11,4 +11,4 @@
 
 ## Source
 
-[https://github.com/jim-z/padctl](https://github.com/jim-z/padctl)
+[https://github.com/BANANASJIM/padctl](https://github.com/BANANASJIM/padctl)

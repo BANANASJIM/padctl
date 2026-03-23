@@ -42,11 +42,49 @@ No source code changes needed — no test files, no registration, no build syste
 
 ```
 devices/
-├── sony/          Sony (DualSense, DualShock)
-├── nintendo/      Nintendo (Switch Pro, Joy-Con)
-├── 8bitdo/        8BitDo
-├── microsoft/     Microsoft Xbox
-└── flydigi/       Flydigi
+├── 8bitdo/        8BitDo (Ultimate Controller)
+├── flydigi/       Flydigi (Vader 4 Pro, Vader 5 Pro)
+├── hori/          HORI (Horipad Steam)
+├── lenovo/        Lenovo (Legion Go, Legion Go S)
+├── microsoft/     Microsoft (Xbox Elite Series 2)
+├── nintendo/      Nintendo (Switch Pro Controller)
+├── sony/          Sony (DualSense, DualShock 4, DualShock 4 v2)
+└── valve/         Valve (Steam Deck)
 ```
 
 Add a new vendor directory if the manufacturer is not listed.
+
+## Code Contributions
+
+### Workflow
+
+1. Fork the repository and create a feature branch
+2. Make your changes
+3. Run all checks before submitting
+4. Open a pull request
+
+### Code Style
+
+All Zig code must pass `zig fmt`:
+
+```sh
+zig build check-fmt
+```
+
+### Testing
+
+```sh
+# Run all tests (Layer 0+1, no privileges required)
+zig build test
+
+# Run all checks (test + tsan + safe + fmt)
+zig build check-all
+```
+
+### Build Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-Dlibusb=false` | `true` | Disable libusb-1.0 linkage (hidraw-only path) |
+| `-Dwasm=false` | `true` | Disable WASM plugin runtime |
+| `-Dtest-coverage=true` | `false` | Run tests with kcov coverage |
