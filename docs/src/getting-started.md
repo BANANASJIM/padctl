@@ -66,7 +66,7 @@ The service runs padctl in daemon mode, managing all matched devices with hotplu
 padctl --validate devices/sony/dualsense.toml
 ```
 
-Exit 0 = valid. Exit 1 = validation errors printed to stderr.
+Exit 0 = valid. Exit 1 = validation errors printed to stderr. Exit 2 = file not found or parse failure.
 
 ## Generate Device Docs
 

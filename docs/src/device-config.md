@@ -24,14 +24,14 @@ Device configs are TOML files in `devices/<vendor>/<model>.toml`.
 
 Optional initialization sequence sent after device open.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `commands` | string[] | Hex byte strings sent in order |
-| `response_prefix` | integer[] | Expected response prefix bytes |
-| `enable` | string | Hex byte string sent to activate extended mode (e.g. BT mode switch) |
-| `disable` | string | Hex byte string sent on shutdown |
-| `interface` | integer | Interface to send init commands on |
-| `report_size` | integer | Expected report size after init |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `commands` | string[] | yes | Hex byte strings sent in order |
+| `response_prefix` | integer[] | yes | Expected response prefix bytes |
+| `enable` | string | no | Hex byte string sent to activate extended mode (e.g. BT mode switch) |
+| `disable` | string | no | Hex byte string sent on shutdown |
+| `interface` | integer | no | Interface to send init commands on |
+| `report_size` | integer | no | Expected report size after init |
 
 ## `[[report]]`
 
@@ -72,6 +72,8 @@ battery_level = { bits = [53, 0, 4] }
 
 Use `offset` + `type` for whole-byte fields. Use `bits` for sub-byte bit extraction (e.g. a 4-bit battery level packed within a byte).
 
+> **Note:** When using `bits`, the `type` field must be `null`, `"unsigned"`, or `"signed"` — standard type strings like `"u8"` or `"i16le"` are not valid.
+
 #### Data Types
 
 `u8` `i8` `u16le` `i16le` `u16be` `i16be` `u32le` `i32le` `u32be` `i32be`
@@ -110,7 +112,7 @@ Optional integrity check on the report.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `algo` | string | `crc32` `crc8` `xor` `none` |
+| `algo` | string | `crc32` `crc8` `sum8` `xor` `none` |
 | `range` | integer[2] | `[start, end]` byte range to checksum |
 | `seed` | integer | Initial seed value prepended to CRC calculation (e.g. `0xa1` for DualSense BT) |
 | `expect.offset` | integer | Where the checksum is stored in the report |

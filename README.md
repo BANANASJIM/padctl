@@ -39,7 +39,7 @@ padctl maps vendor-specific USB/HID reports from gamepads to standard Linux inpu
 - **Hot-reload** — SIGHUP re-reads configs without restarting; diffed per physical device (new devices spawned, removed devices stopped, unchanged devices untouched)
 - **Hotplug** — netlink `UEVENT` listener adds/removes devices at runtime
 - **Force feedback** — FF_RUMBLE passthrough: uinput receives game vibration commands and forwards them to the physical device via HID output reports
-- **10 device configs** — ships with configs for Sony, Nintendo, Microsoft, Valve, 8BitDo, Flydigi, HORI, and Lenovo devices
+- **12 device configs** — ships with configs for Sony, Nintendo, Microsoft, Valve, 8BitDo, Flydigi, HORI, and Lenovo devices
 
 ## Quick Start
 
@@ -108,6 +108,8 @@ User-level configs always take precedence. Place personal overrides in `~/.confi
 | Vendor | Model | Config | Gyro | FF |
 |---|---|---|---|---|
 | Sony | DualSense (PS5) | `devices/sony/dualsense.toml` | yes | yes |
+| Sony | DualShock 4 | `devices/sony/dualshock4.toml` | yes | yes |
+| Sony | DualShock 4 v2 | `devices/sony/dualshock4-v2.toml` | yes | yes |
 | Nintendo | Switch Pro Controller | `devices/nintendo/switch-pro.toml` | — | — |
 | Microsoft | Xbox Elite Series 2 | `devices/microsoft/xbox-elite.toml` | — | yes |
 | Valve | Steam Deck | `devices/valve/steam-deck.toml` | yes | yes |
@@ -143,7 +145,7 @@ expect = [0x01]
 left_x  = { offset = 1, type = "u8", transform = "scale(-32768, 32767)" }
 left_y  = { offset = 2, type = "u8", transform = "scale(-32768, 32767), negate" }
 lt      = { offset = 5, type = "u8" }
-cross   = { offset = 8, type = "bit", bit = 4 }
+cross   = { bits = [8, 4, 1] }
 gyro_x  = { offset = 16, type = "i16le" }
 ```
 
