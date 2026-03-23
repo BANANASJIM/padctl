@@ -23,7 +23,7 @@ test "T1: 32-byte frames — magic prefix detected" {
     // 100 frames; bytes 0-2 always 0x5a 0xa5 0xef; rest vary
     var datas: [100][32]u8 = undefined;
     var frames: [100]Frame = undefined;
-    var prng = std.rand.DefaultPrng.init(42);
+    var prng = std.Random.DefaultPrng.init(42);
     const rng = prng.random();
     for (&datas, 0..) |*d, i| {
         rng.bytes(d);

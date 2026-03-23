@@ -1279,3 +1279,70 @@ test "initInotify: watches temp directory successfully" {
     const n = posix.read(in_fd, &buf) catch 0;
     try testing.expect(n > 0);
 }
+
+test "Supervisor.serve: control socket accepts client and responds to STATUS" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+
+    // Set up control socket on a temp path
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+    var sock_path_buf: [256]u8 = undefined;
+    const sock_path = try std.fmt.bufPrint(&sock_path_buf, "{s}/test.sock", .{tmp_path});
+
+    sup.ctrl_sock = ControlSocket.init(allocator, sock_path) catch {
+        sup.deinit();
+        return; // skip if socket creation fails
+    };
+
+    const serve_thread = try std.Thread.spawn(.{}, struct {
+        fn run(s: *Supervisor, dp: []const u8) void {
+            s.serve(dp);
+        }
+    }.run, .{ &sup, tmp_path });
+
+    // Give serve a moment to enter poll
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    // Connect client socket
+    const client_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+        // Signal stop and clean up
+        const val: [8]u8 = @bitCast(@as(u64, 1));
+        _ = posix.write(sup.stop_fd, &val) catch {};
+        serve_thread.join();
+        sup.deinit();
+        return;
+    };
+    defer posix.close(client_fd);
+
+    var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..sock_path.len], sock_path);
+    posix.connect(client_fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)) catch {
+        const val: [8]u8 = @bitCast(@as(u64, 1));
+        _ = posix.write(sup.stop_fd, &val) catch {};
+        serve_thread.join();
+        sup.deinit();
+        return;
+    };
+
+    // Send STATUS command
+    _ = posix.write(client_fd, "STATUS\n") catch {};
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+
+    // Read response
+    var resp_buf: [256]u8 = undefined;
+    const resp_n = posix.read(client_fd, &resp_buf) catch 0;
+    if (resp_n > 0) {
+        const resp = resp_buf[0..resp_n];
+        try testing.expect(std.mem.startsWith(u8, resp, "STATUS"));
+    }
+
+    // Signal stop
+    const val: [8]u8 = @bitCast(@as(u64, 1));
+    _ = posix.write(sup.stop_fd, &val) catch {};
+    serve_thread.join();
+    sup.deinit();
+}

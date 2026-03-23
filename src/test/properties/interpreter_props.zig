@@ -14,7 +14,7 @@ test "property: interpreter robustness — random packets never crash" {
     var paths = try helpers.collectTomlPaths(allocator);
     defer helpers.freeTomlPaths(allocator, &paths);
 
-    if (paths.items.len == 0) return;
+    try testing.expect(paths.items.len >= 13);
 
     var rng = std.Random.DefaultPrng.init(0xDEAD_BEEF);
     const random = rng.random();

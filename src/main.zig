@@ -88,6 +88,7 @@ pub const testing_support = struct {
     pub const state_props = @import("test/properties/state_props.zig");
     pub const mapper_props = @import("test/properties/mapper_props.zig");
     pub const ipc_props = @import("test/properties/ipc_props.zig");
+    pub const transform_props = @import("test/properties/transform_props.zig");
 };
 
 pub const config = struct {

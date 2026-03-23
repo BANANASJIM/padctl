@@ -128,6 +128,28 @@ test "property: 10000 events — no overflow or panic" {
     try testing.expectEqual(@as(?render.KeyEvent, null), stats.eventAt(8));
 }
 
+test "property: ring buffer wrap — timestamps in descending order" {
+    var stats = Stats.init(0);
+    var prng = std.Random.DefaultPrng.init(0xABCD_EF01);
+    const rng = prng.random();
+
+    const n = rng.intRangeAtMost(usize, 9, 200);
+    for (0..n) |i| {
+        const max_btn = @as(u6, @intCast(std.meta.fields(ButtonId).len - 1));
+        const btn: ButtonId = @enumFromInt(rng.intRangeAtMost(u6, 0, max_btn));
+        stats.recordButtonChange(btn, rng.boolean(), @intCast(i));
+    }
+
+    // eventAt(0) is most recent; timestamps must be non-increasing
+    const count = stats.eventCount();
+    var i: u8 = 0;
+    while (i + 1 < count) : (i += 1) {
+        const cur = stats.eventAt(i).?.timestamp_ms;
+        const nxt = stats.eventAt(i + 1).?.timestamp_ms;
+        try testing.expect(cur >= nxt);
+    }
+}
+
 // --- Mapping discovery idempotency ---
 
 test "property: discoverMappings on nonexistent XDG dirs does not crash" {

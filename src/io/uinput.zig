@@ -1166,3 +1166,278 @@ test "stateFieldForAxis: unknown axis returns error" {
     try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis(""));
     try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis("LEFT_X"));
 }
+
+fn readEvents(read_fd: std.posix.fd_t, out: []c.input_event) usize {
+    const bytes = std.posix.read(read_fd, std.mem.sliceAsBytes(out)) catch return 0;
+    return bytes / @sizeOf(c.input_event);
+}
+
+test "UinputDevice.emit: axis diff writes correct input_events via pipe" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[1],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+        .axis_count = 2,
+    };
+    dev.axis_codes[0] = c.ABS_X;
+    dev.axis_codes[1] = c.ABS_Y;
+    dev.axis_state_offsets[0] = .ax;
+    dev.axis_state_offsets[1] = .ay;
+
+    var s = state.GamepadState{};
+    s.ax = 500;
+    s.ay = -300;
+    try dev.emit(s);
+
+    var events: [8]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    // 2 axis changes + 1 SYN_REPORT
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqual(@as(u16, c.EV_ABS), events[0].type);
+    try std.testing.expectEqual(@as(u16, c.ABS_X), events[0].code);
+    try std.testing.expectEqual(@as(i32, 500), events[0].value);
+    try std.testing.expectEqual(@as(u16, c.EV_ABS), events[1].type);
+    try std.testing.expectEqual(@as(u16, c.ABS_Y), events[1].code);
+    try std.testing.expectEqual(@as(i32, -300), events[1].value);
+    try std.testing.expectEqual(@as(u16, c.EV_SYN), events[2].type);
+    try std.testing.expectEqual(@as(u16, c.SYN_REPORT), events[2].code);
+}
+
+test "UinputDevice.emit: no change produces no write" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[1],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+        .axis_count = 1,
+    };
+    dev.axis_codes[0] = c.ABS_X;
+    dev.axis_state_offsets[0] = .ax;
+
+    try dev.emit(state.GamepadState{});
+    try dev.emit(state.GamepadState{});
+
+    var events: [4]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+test "UinputDevice.emit: button press/release generates EV_KEY events" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[1],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.button_codes[@intFromEnum(state.ButtonId.A)] = c.BTN_SOUTH;
+
+    // Press A
+    var s = state.GamepadState{};
+    s.buttons = @as(u64, 1) << @intFromEnum(state.ButtonId.A);
+    try dev.emit(s);
+
+    var events: [8]c.input_event = undefined;
+    var n = readEvents(pfds[0], &events);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), events[0].type);
+    try std.testing.expectEqual(@as(u16, c.BTN_SOUTH), events[0].code);
+    try std.testing.expectEqual(@as(i32, 1), events[0].value);
+
+    // Release A
+    var s2 = state.GamepadState{};
+    s2.buttons = 0;
+    try dev.emit(s2);
+
+    n = readEvents(pfds[0], &events);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), events[0].type);
+    try std.testing.expectEqual(@as(u16, c.BTN_SOUTH), events[0].code);
+    try std.testing.expectEqual(@as(i32, 0), events[0].value);
+}
+
+test "UinputDevice.emit: dpad hat generates ABS_HAT0X/Y events" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[1],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+        .has_dpad_hat = true,
+    };
+
+    var s = state.GamepadState{};
+    s.dpad_x = 1;
+    s.dpad_y = -1;
+    try dev.emit(s);
+
+    var events: [8]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqual(@as(u16, c.ABS_HAT0X), events[0].code);
+    try std.testing.expectEqual(@as(i32, 1), events[0].value);
+    try std.testing.expectEqual(@as(u16, c.ABS_HAT0Y), events[1].code);
+    try std.testing.expectEqual(@as(i32, -1), events[1].value);
+}
+
+test "TouchpadDevice.emit: finger down generates MT protocol events" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = TouchpadDevice{
+        .fd = pfds[1],
+        .max_slots = 2,
+    };
+
+    var s = state.GamepadState{};
+    s.touch0_active = true;
+    s.touch0_x = 100;
+    s.touch0_y = 200;
+    try dev.emit(s);
+
+    var events: [16]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    try std.testing.expect(n >= 5); // SLOT + TRACKING_ID + X + Y + BTN_TOUCH + SYN
+
+    // Verify MT_SLOT=0 comes first
+    try std.testing.expectEqual(@as(u16, c.ABS_MT_SLOT), events[0].code);
+    try std.testing.expectEqual(@as(i32, 0), events[0].value);
+    // Verify tracking ID assigned (non-negative)
+    try std.testing.expectEqual(@as(u16, c.ABS_MT_TRACKING_ID), events[1].code);
+    try std.testing.expect(events[1].value >= 0);
+    // Verify position
+    try std.testing.expectEqual(@as(u16, c.ABS_MT_POSITION_X), events[2].code);
+    try std.testing.expectEqual(@as(i32, 100), events[2].value);
+    try std.testing.expectEqual(@as(u16, c.ABS_MT_POSITION_Y), events[3].code);
+    try std.testing.expectEqual(@as(i32, 200), events[3].value);
+}
+
+test "TouchpadDevice.emit: finger lift sends tracking_id=-1" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = TouchpadDevice{
+        .fd = pfds[1],
+        .max_slots = 2,
+    };
+
+    // First touch down
+    var s1 = state.GamepadState{};
+    s1.touch0_active = true;
+    s1.touch0_x = 50;
+    s1.touch0_y = 50;
+    try dev.emit(s1);
+    // Drain
+    var drain: [32]c.input_event = undefined;
+    _ = readEvents(pfds[0], &drain);
+
+    // Then lift
+    var s2 = state.GamepadState{};
+    s2.touch0_active = false;
+    try dev.emit(s2);
+
+    var events: [16]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    try std.testing.expect(n >= 3); // SLOT + TRACKING_ID(-1) + BTN_TOUCH(0) + SYN
+
+    try std.testing.expectEqual(@as(u16, c.ABS_MT_SLOT), events[0].code);
+    try std.testing.expectEqual(@as(u16, c.ABS_MT_TRACKING_ID), events[1].code);
+    try std.testing.expectEqual(@as(i32, -1), events[1].value);
+}
+
+test "TouchpadDevice.emit: dual finger produces events for both slots" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = TouchpadDevice{
+        .fd = pfds[1],
+        .max_slots = 2,
+    };
+
+    var s = state.GamepadState{};
+    s.touch0_active = true;
+    s.touch0_x = 10;
+    s.touch0_y = 20;
+    s.touch1_active = true;
+    s.touch1_x = 30;
+    s.touch1_y = 40;
+    try dev.emit(s);
+
+    var events: [32]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    // Should have events for slot 0 and slot 1
+    var saw_slot0 = false;
+    var saw_slot1 = false;
+    for (events[0..n]) |ev| {
+        if (ev.type == c.EV_ABS and ev.code == c.ABS_MT_SLOT) {
+            if (ev.value == 0) saw_slot0 = true;
+            if (ev.value == 1) saw_slot1 = true;
+        }
+    }
+    try std.testing.expect(saw_slot0);
+    try std.testing.expect(saw_slot1);
+}
+
+test "GenericUinputDevice.emitGeneric: differential events via pipe" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = GenericUinputDevice{ .fd = pfds[1] };
+    var gs = generic.GenericDeviceState{};
+    gs.count = 2;
+    gs.slots[0].event_type = c.EV_ABS;
+    gs.slots[0].event_code = c.ABS_X;
+    gs.slots[1].event_type = c.EV_KEY;
+    gs.slots[1].event_code = c.BTN_SOUTH;
+
+    // Set new values (prev defaults to 0)
+    gs.values[0] = 1000;
+    gs.values[1] = 1;
+    try dev.emitGeneric(&gs);
+
+    var events: [8]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    // 2 changed fields + 1 SYN
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqual(@as(u16, c.EV_ABS), events[0].type);
+    try std.testing.expectEqual(@as(u16, c.ABS_X), events[0].code);
+    try std.testing.expectEqual(@as(i32, 1000), events[0].value);
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), events[1].type);
+    try std.testing.expectEqual(@as(u16, c.BTN_SOUTH), events[1].code);
+    try std.testing.expectEqual(@as(i32, 1), events[1].value);
+    try std.testing.expectEqual(@as(u16, c.EV_SYN), events[2].type);
+
+    // prev_values should now match values
+    try std.testing.expectEqual(@as(i32, 1000), gs.prev_values[0]);
+    try std.testing.expectEqual(@as(i32, 1), gs.prev_values[1]);
+}
+
+test "GenericUinputDevice.emitGeneric: no change produces no write" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = GenericUinputDevice{ .fd = pfds[1] };
+    var gs = generic.GenericDeviceState{};
+    gs.count = 1;
+    gs.slots[0].event_type = c.EV_ABS;
+    gs.slots[0].event_code = c.ABS_X;
+    gs.values[0] = 42;
+    gs.prev_values[0] = 42;
+    try dev.emitGeneric(&gs);
+
+    var events: [4]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    try std.testing.expectEqual(@as(usize, 0), n);
+}

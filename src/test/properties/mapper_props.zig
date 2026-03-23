@@ -274,6 +274,37 @@ test "property: duplicate remap targets — last write wins, no crash" {
     }
 }
 
+// P7a: apply idempotency — same delta twice produces no new button-press aux events
+test "property: apply same delta twice — no duplicate button press events" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = "KEY_F13"
+        \\B = "mouse_left"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    var prng = std.Random.DefaultPrng.init(0xD0D0);
+    const rng = prng.random();
+
+    for (0..1000) |_| {
+        const delta = GamepadStateDelta{ .buttons = rng.int(u64) };
+        const ev1 = try m.apply(delta, 16);
+        const ev2 = try m.apply(delta, 16);
+
+        // second apply with identical state should produce no key/mouse press events
+        for (ev2.aux.slice()) |aux| {
+            switch (aux) {
+                .key => |k| try testing.expect(!k.pressed),
+                .mouse_button => |mb| try testing.expect(!mb.pressed),
+                .rel => {},
+            }
+        }
+        _ = ev1;
+    }
+}
+
 // P7b: layer + base both mapping to same target
 test "property: layer and base remap to same target — no crash" {
     const allocator = testing.allocator;
