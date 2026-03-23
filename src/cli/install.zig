@@ -83,7 +83,7 @@ fn runCmd(argv: []const []const u8) void {
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
-    if (std.os.linux.getuid() != 0) {
+    if (opts.destdir.len == 0 and std.os.linux.getuid() != 0) {
         _ = std.posix.write(std.posix.STDERR_FILENO, "error: must run as root — use: sudo padctl install\n") catch {};
         std.process.exit(1);
     }
@@ -174,7 +174,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 }
 
 pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
-    if (std.os.linux.getuid() != 0) {
+    if (opts.destdir.len == 0 and std.os.linux.getuid() != 0) {
         _ = std.posix.write(std.posix.STDERR_FILENO, "error: must run as root — use: sudo padctl uninstall\n") catch {};
         std.process.exit(1);
     }
