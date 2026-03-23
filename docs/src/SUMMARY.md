@@ -19,4 +19,7 @@
   - [Sony DualShock 4 v2](devices/sony-sony-dualshock-4-v2.md)
   - [Valve Steam Deck](devices/valve-valve-steam-deck.md)
 - [Contributing](contributing/README.md)
+  - [Device Config Guide](contributing/device-config-guide.md)
   - [HID Reverse Engineering Guide](contributing/reverse-engineering.md)
+  - [Reference Tables](contributing/reference-tables.md)
+  - [Code Contributions](contributing/code-contributions.md)
