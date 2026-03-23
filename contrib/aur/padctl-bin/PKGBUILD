@@ -1,4 +1,5 @@
 # Maintainer: padctl maintainers
+# NOTE: This is a template. Update pkgver and sha256sums before AUR submission.
 pkgname=padctl-bin
 pkgver=0.1.0
 pkgrel=1
