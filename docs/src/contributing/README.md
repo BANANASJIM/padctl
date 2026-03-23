@@ -11,10 +11,7 @@ If you have a gamepad that padctl doesn't support yet, you can add it by creatin
 3. **Test it** — `padctl-debug devices/vendor/model.toml`
 4. **Submit a PR**
 
-Two guides to help you get started:
-
-- **[HID Reverse Engineering Guide](reverse-engineering.md)** — start from scratch with Wireshark, xxd, and padctl-capture. Covers the full process from plugging in an unknown gamepad to a working TOML config.
-- **[Device TOML from InputPlumber](device-toml-from-inputplumber.md)** — if the device already has an InputPlumber driver, convert the Rust structs to padctl TOML.
+See the **[HID Reverse Engineering Guide](reverse-engineering.md)** to get started — it covers the full process from plugging in an unknown gamepad to a working TOML config.
 
 ## Code Contributions
 
