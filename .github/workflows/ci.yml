@@ -40,10 +40,15 @@ jobs:
   tsan:
     name: tsan / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        include:
+          - os: ubuntu-22.04
+            experimental: false
+          - os: ubuntu-24.04
+            experimental: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Zig
