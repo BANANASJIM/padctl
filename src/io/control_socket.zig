@@ -12,7 +12,7 @@ pub const ControlSocket = struct {
     path: []const u8,
     allocator: std.mem.Allocator,
 
-    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.fs.Dir.MakeError || std.mem.Allocator.Error || error{ChmodFailed};
+    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.fs.Dir.MakeError || std.mem.Allocator.Error || error{ ChmodFailed, PathTooLong };
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) InitError!ControlSocket {
         const path_z = try allocator.dupeZ(u8, path);
@@ -32,8 +32,8 @@ pub const ControlSocket = struct {
 
         var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
-        const copy_len = @min(path_z.len, addr.path.len - 1);
-        @memcpy(addr.path[0..copy_len], path_z[0..copy_len]);
+        if (path_z.len > addr.path.len - 1) return error.PathTooLong;
+        @memcpy(addr.path[0 .. path_z.len - 1], path_z[0 .. path_z.len - 1]);
 
         try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
         errdefer std.fs.deleteFileAbsolute(path) catch {};
@@ -266,4 +266,23 @@ test "ControlSocket: socketpair read/write" {
     const cmd = parseCommand(buf[0..n]);
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("fps", cmd.name);
+}
+
+test "ControlSocket: init rejects overly long unix socket path" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    const leaf = try allocator.alloc(u8, addr.path.len);
+    defer allocator.free(leaf);
+    @memset(leaf, 'a');
+
+    const socket_path = try std.fs.path.join(allocator, &.{ root, leaf });
+    defer allocator.free(socket_path);
+
+    try testing.expectError(error.PathTooLong, ControlSocket.init(allocator, socket_path));
 }

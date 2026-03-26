@@ -1,17 +1,21 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 
 const DeviceInstance = @import("device_instance.zig").DeviceInstance;
 const MappingConfig = @import("config/mapping.zig").MappingConfig;
+const mapping_cfg = @import("config/mapping.zig");
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const config_device = @import("config/device.zig");
+const Mapper = @import("core/mapper.zig").Mapper;
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
 const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
+const mapping_discovery = @import("config/mapping_discovery.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
@@ -24,6 +28,7 @@ pub const ManagedInstance = struct {
     instance: *DeviceInstance,
     thread: std.Thread,
     mapping_arena: std.heap.ArenaAllocator,
+    switch_mapping: ?*mapping_cfg.ParseResult = null,
 };
 
 /// Config snapshot used for hot-reload diffing.
@@ -38,6 +43,24 @@ const InotifyResult = struct {
     debounce_fd: posix.fd_t,
     config_dir: ?[]const u8,
 };
+
+var test_switch_mapping_override: ?[]const u8 = null;
+var test_switch_fail_commit_index: ?usize = null;
+
+const SwitchTx = struct {
+    idx: usize,
+    new_mapper: ?Mapper,
+    parsed_ptr: ?*mapping_cfg.ParseResult,
+    old_mapper: ?Mapper = null,
+    old_mapping_cfg: ?*const MappingConfig = null,
+    old_switch_mapping: ?*mapping_cfg.ParseResult = null,
+    committed: bool = false,
+};
+
+fn shouldInjectSwitchFailure(commit_index: usize) bool {
+    if (!builtin.is_test) return false;
+    return test_switch_fail_commit_index != null and test_switch_fail_commit_index.? == commit_index;
+}
 
 fn initInotify(allocator: std.mem.Allocator) InotifyResult {
     const disabled: InotifyResult = .{ .inotify_fd = -1, .debounce_fd = -1, .config_dir = null };
@@ -63,12 +86,33 @@ fn initInotify(allocator: std.mem.Allocator) InotifyResult {
     }
     const in_fd: posix.fd_t = @intCast(rc_init);
 
-    const rc_watch = linux.inotify_add_watch(in_fd, dir_z.ptr, linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO);
+    const root_mask = linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO | linux.IN.MOVED_FROM | linux.IN.DELETE | linux.IN.CREATE;
+    const rc_watch = linux.inotify_add_watch(in_fd, dir_z.ptr, root_mask);
     const watch_err = linux.E.init(rc_watch);
     if (watch_err != .SUCCESS) {
         posix.close(in_fd);
         allocator.free(config_dir);
         return disabled;
+    }
+
+    const mappings_dir = std.fmt.allocPrint(allocator, "{s}/mappings", .{config_dir}) catch {
+        posix.close(in_fd);
+        allocator.free(config_dir);
+        return disabled;
+    };
+    defer allocator.free(mappings_dir);
+    const mappings_z = allocator.dupeZ(u8, mappings_dir) catch {
+        posix.close(in_fd);
+        allocator.free(config_dir);
+        return disabled;
+    };
+    defer allocator.free(mappings_z);
+
+    const map_mask = linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO | linux.IN.MOVED_FROM | linux.IN.DELETE | linux.IN.CREATE;
+    const rc_map_watch = linux.inotify_add_watch(in_fd, mappings_z.ptr, map_mask);
+    const map_watch_err = linux.E.init(rc_map_watch);
+    if (map_watch_err != .SUCCESS) {
+        std.log.warn("inotify watch on {s} failed: {} (continuing with root watch only)", .{ mappings_dir, map_watch_err });
     }
 
     const db_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch {
@@ -234,15 +278,138 @@ pub const Supervisor = struct {
             .instance = instance,
             .thread = thread,
             .mapping_arena = std.heap.ArenaAllocator.init(self.allocator),
+            .switch_mapping = null,
         });
     }
 
     fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {
+        if (m.switch_mapping) |pm| {
+            pm.deinit();
+            self.allocator.destroy(pm);
+        }
         m.instance.deinit();
         self.allocator.destroy(m.instance);
         m.mapping_arena.deinit();
         self.allocator.free(m.phys_key);
         if (m.devname) |dn| self.allocator.free(dn);
+    }
+
+    fn restartManagedThread(m: *ManagedInstance) !void {
+        @atomicStore(bool, &m.instance.stopped, false, .release);
+        @atomicStore(bool, &m.instance.loop.running, true, .release);
+        @atomicStore(bool, &m.instance.loop.disconnected, false, .release);
+        m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
+    }
+
+    fn clearSwitchMapping(self: *Supervisor, m: *ManagedInstance) void {
+        if (m.switch_mapping) |pm| {
+            pm.deinit();
+            self.allocator.destroy(pm);
+            m.switch_mapping = null;
+        }
+    }
+
+    fn lookupSwitchMappingPath(self: *Supervisor, name: []const u8) !?[]const u8 {
+        if (builtin.is_test) {
+            if (test_switch_mapping_override) |override_path| {
+                return @as(?[]const u8, try self.allocator.dupe(u8, override_path));
+            }
+        }
+        return @as(?[]const u8, try mapping_discovery.findMapping(self.allocator, name));
+    }
+
+    fn restoreSwitchTarget(self: *Supervisor, tx: *SwitchTx, m: *ManagedInstance, deinit_current_mapper: bool) void {
+        if (deinit_current_mapper) {
+            if (m.instance.mapper) |*cur| {
+                cur.deinit();
+                m.instance.mapper = null;
+            }
+            if (m.switch_mapping) |pm| {
+                pm.deinit();
+                self.allocator.destroy(pm);
+                m.switch_mapping = null;
+            }
+        }
+
+        m.instance.mapper = tx.old_mapper;
+        m.instance.mapping_cfg = tx.old_mapping_cfg;
+        m.switch_mapping = tx.old_switch_mapping;
+        restartManagedThread(m) catch |err| {
+            std.log.err("rollback restart failed for {s}: {}", .{ m.phys_key, err });
+        };
+
+        tx.old_mapper = null;
+        tx.old_mapping_cfg = null;
+        tx.old_switch_mapping = null;
+        tx.committed = false;
+    }
+
+    fn rollbackCommittedSwitches(self: *Supervisor, txs: []SwitchTx) void {
+        var r = txs.len;
+        while (r > 0) {
+            r -= 1;
+            const tx = &txs[r];
+            if (!tx.committed) continue;
+            const m = &self.managed.items[tx.idx];
+            self.restoreSwitchTarget(tx, m, true);
+        }
+    }
+
+    fn cleanupSwitchTxs(self: *Supervisor, txs: []SwitchTx) void {
+        for (txs) |*tx| {
+            if (tx.committed) {
+                if (tx.old_mapper) |*old| old.deinit();
+                if (tx.old_switch_mapping) |pm| {
+                    pm.deinit();
+                    self.allocator.destroy(pm);
+                }
+            } else {
+                if (tx.new_mapper) |*new| new.deinit();
+                if (tx.parsed_ptr) |pm| {
+                    pm.deinit();
+                    self.allocator.destroy(pm);
+                }
+            }
+        }
+    }
+
+    fn commitSwitchTarget(self: *Supervisor, tx: *SwitchTx) !void {
+        const m = &self.managed.items[tx.idx];
+        tx.old_mapper = m.instance.mapper;
+        tx.old_mapping_cfg = m.instance.mapping_cfg;
+        tx.old_switch_mapping = m.switch_mapping;
+
+        m.instance.stop();
+        m.thread.join();
+
+        if (builtin.is_test and test_switch_fail_commit_index != null and test_switch_fail_commit_index.? == tx.idx) {
+            self.restoreSwitchTarget(tx, m, false);
+            return error.SwitchFailed;
+        }
+
+        m.instance.mapper = tx.new_mapper.?;
+        tx.new_mapper = null;
+        m.instance.mapping_cfg = &tx.parsed_ptr.?.value;
+        restartManagedThread(m) catch |err| {
+            if (m.instance.mapper) |*cur| {
+                cur.deinit();
+                m.instance.mapper = null;
+            }
+            m.instance.mapper = tx.old_mapper;
+            m.instance.mapping_cfg = tx.old_mapping_cfg;
+            m.switch_mapping = tx.old_switch_mapping;
+            restartManagedThread(m) catch |rollback_err| {
+                std.log.err("rollback restart failed for {s}: {}", .{ m.phys_key, rollback_err });
+            };
+            tx.old_mapper = null;
+            tx.old_mapping_cfg = null;
+            tx.old_switch_mapping = null;
+            tx.committed = false;
+            return err;
+        };
+        m.switch_mapping = tx.parsed_ptr;
+        tx.parsed_ptr = null;
+        tx.committed = true;
     }
 
     fn doReload(
@@ -312,6 +479,7 @@ pub const Supervisor = struct {
                 // Stop-Swap-Restart: stop thread before touching arena
                 m.instance.stop();
                 m.thread.join();
+                self.clearSwitchMapping(m);
 
                 _ = m.mapping_arena.reset(.retain_capacity);
                 const arena_alloc = m.mapping_arena.allocator();
@@ -319,12 +487,25 @@ pub const Supervisor = struct {
                 map_copy.* = new_map.*;
 
                 // Reset instance state for restart
+                if (m.instance.mapper) |*mapper| {
+                    mapper.config = map_copy;
+                } else {
+                    m.instance.mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
+                }
                 m.instance.mapping_cfg = map_copy;
-                @atomicStore(bool, &m.instance.stopped, false, .release);
-                @atomicStore(bool, &m.instance.loop.running, true, .release);
-                @atomicStore(bool, &m.instance.loop.disconnected, false, .release);
-
-                m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
+                try restartManagedThread(m);
+            } else {
+                const m = found.?;
+                m.instance.stop();
+                m.thread.join();
+                self.clearSwitchMapping(m);
+                _ = m.mapping_arena.reset(.retain_capacity);
+                if (m.instance.mapper) |*mapper| {
+                    mapper.deinit();
+                    m.instance.mapper = null;
+                }
+                m.instance.mapping_cfg = null;
+                try restartManagedThread(m);
             }
         }
     }
@@ -485,31 +666,117 @@ pub const Supervisor = struct {
         }
     }
 
+    fn applySwitchMapping(self: *Supervisor, m: *ManagedInstance, parsed_ptr: *mapping_cfg.ParseResult) !void {
+        const new_mapper = try Mapper.init(&parsed_ptr.value, m.instance.loop.timer_fd, self.allocator);
+        m.instance.stop();
+        m.thread.join();
+        self.clearSwitchMapping(m);
+        if (m.instance.mapper) |*old| old.deinit();
+        m.instance.mapper = new_mapper;
+        m.instance.mapping_cfg = &parsed_ptr.value;
+        restartManagedThread(m) catch |err| {
+            if (m.instance.mapper) |*mapper| {
+                mapper.deinit();
+                m.instance.mapper = null;
+            }
+            m.instance.mapping_cfg = null;
+            return err;
+        };
+        m.switch_mapping = parsed_ptr;
+    }
+
     fn handleSwitch(self: *Supervisor, fd: posix.fd_t, name: []const u8, device_id: ?[]const u8) void {
         var cs = &self.ctrl_sock.?;
         if (self.managed.items.len == 0) {
             cs.sendResponse(fd, "ERR no-devices\n");
             return;
         }
+        const path = self.lookupSwitchMappingPath(name) catch {
+            cs.sendResponse(fd, "ERR mapping-lookup-failed\n");
+            return;
+        };
+        if (path == null) {
+            cs.sendResponse(fd, "ERR mapping-not-found\n");
+            return;
+        }
+        defer self.allocator.free(path.?);
 
-        // TODO: Wave 3 will add mapping file discovery and loading.
-        // For now, SWITCH validates that devices exist and the command is well-formed.
-        var switched: usize = 0;
+        var targets = std.ArrayList(usize){};
+        defer targets.deinit(self.allocator);
+
         if (device_id) |dev_id| {
-            for (self.managed.items) |*m| {
+            var found = false;
+            for (self.managed.items, 0..) |*m, idx| {
                 if (m.devname) |dn| {
                     if (std.mem.eql(u8, dn, dev_id)) {
-                        switched += 1;
+                        targets.append(self.allocator, idx) catch {
+                            cs.sendResponse(fd, "ERR oom\n");
+                            return;
+                        };
+                        found = true;
                         break;
                     }
                 }
             }
-            if (switched == 0) {
+            if (!found) {
                 cs.sendResponse(fd, "ERR device-not-found\n");
                 return;
             }
         } else {
-            switched = self.managed.items.len;
+            for (self.managed.items, 0..) |_, idx| {
+                targets.append(self.allocator, idx) catch {
+                    cs.sendResponse(fd, "ERR oom\n");
+                    return;
+                };
+            }
+        }
+
+        var txs = std.ArrayList(SwitchTx){};
+        defer {
+            self.cleanupSwitchTxs(txs.items);
+            txs.deinit(self.allocator);
+        }
+
+        for (targets.items) |idx| {
+            const m = &self.managed.items[idx];
+            const parsed = mapping_cfg.parseFile(self.allocator, path.?) catch {
+                cs.sendResponse(fd, "ERR mapping-parse-failed\n");
+                return;
+            };
+            const parsed_ptr = self.allocator.create(mapping_cfg.ParseResult) catch {
+                parsed.deinit();
+                cs.sendResponse(fd, "ERR oom\n");
+                return;
+            };
+            parsed_ptr.* = parsed;
+            const new_mapper = Mapper.init(&parsed_ptr.value, m.instance.loop.timer_fd, self.allocator) catch {
+                parsed_ptr.deinit();
+                self.allocator.destroy(parsed_ptr);
+                cs.sendResponse(fd, "ERR switch-failed\n");
+                return;
+            };
+            txs.append(self.allocator, .{
+                .idx = idx,
+                .new_mapper = new_mapper,
+                .parsed_ptr = parsed_ptr,
+            }) catch {
+                cs.sendResponse(fd, "ERR oom\n");
+                return;
+            };
+        }
+
+        for (txs.items, 0..) |*tx, commit_idx| {
+            if (shouldInjectSwitchFailure(commit_idx)) {
+                self.rollbackCommittedSwitches(txs.items);
+                cs.sendResponse(fd, "ERR switch-failed\n");
+                return;
+            }
+
+            self.commitSwitchTarget(tx) catch {
+                self.rollbackCommittedSwitches(txs.items);
+                cs.sendResponse(fd, "ERR switch-failed\n");
+                return;
+            };
         }
 
         var resp_buf: [128]u8 = undefined;
@@ -544,8 +811,27 @@ pub const Supervisor = struct {
     }
 
     fn handleList(self: *Supervisor, fd: posix.fd_t) void {
-        // TODO: Wave 3 will implement mapping discovery
-        self.ctrl_sock.?.sendResponse(fd, "LIST\n");
+        const profiles = mapping_discovery.discoverMappings(self.allocator) catch {
+            self.ctrl_sock.?.sendResponse(fd, "ERR list-failed\n");
+            return;
+        };
+        defer mapping_discovery.freeProfiles(self.allocator, profiles);
+
+        var resp_buf: [1024]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&resp_buf);
+        const w = fbs.writer();
+        w.writeAll("LIST") catch {
+            self.ctrl_sock.?.sendResponse(fd, "LIST\n");
+            return;
+        };
+        for (profiles) |p| {
+            w.print(" {s}", .{p.name}) catch break;
+        }
+        w.writeByte('\n') catch {
+            self.ctrl_sock.?.sendResponse(fd, "LIST\n");
+            return;
+        };
+        self.ctrl_sock.?.sendResponse(fd, fbs.getWritten());
     }
 
     fn handleDevices(self: *Supervisor, fd: posix.fd_t) void {
@@ -855,6 +1141,7 @@ pub const Supervisor = struct {
 
 const testing = std.testing;
 const mapping_mod = @import("config/mapping.zig");
+const mapper_mod = @import("core/mapper.zig");
 const device_mod = @import("config/device.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
@@ -921,6 +1208,126 @@ fn testInitFn(allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*Device
     return makeTestInstance(allocator, mock, entry.device_cfg);
 }
 
+fn testSocketpair() ![2]posix.fd_t {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds) != 0) {
+        return posix.unexpectedErrno(posix.errno(0));
+    }
+    return fds;
+}
+
+fn makeControlSocket(allocator: std.mem.Allocator, tmp_path: []const u8) !ControlSocket {
+    var sock_path_buf: [256]u8 = undefined;
+    const sock_path = try std.fmt.bufPrint(&sock_path_buf, "{s}/ctrl.sock", .{tmp_path});
+    return ControlSocket.init(allocator, sock_path);
+}
+
+test "Supervisor: global SWITCH rolls back all devices on failure" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    const base_dir = "/tmp/padctl_supervisor_test_switch";
+    std.fs.deleteTreeAbsolute(base_dir) catch {};
+    try std.fs.makeDirAbsolute(base_dir);
+    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+
+    const mappings_dir = try std.fmt.allocPrint(allocator, "{s}/mappings", .{base_dir});
+    defer allocator.free(mappings_dir);
+    try std.fs.makeDirAbsolute(mappings_dir);
+    const mapping_path = try std.fmt.allocPrint(allocator, "{s}/fps.toml", .{mappings_dir});
+    defer allocator.free(mapping_path);
+    {
+        const f = try std.fs.createFileAbsolute(mapping_path, .{});
+        f.close();
+    }
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst_a);
+    try sup.spawnInstance("usb-1-2", inst_b);
+
+    test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+    defer {
+        if (test_switch_mapping_override) |p| allocator.free(p);
+        test_switch_mapping_override = null;
+    }
+    test_switch_fail_commit_index = 1;
+    defer test_switch_fail_commit_index = null;
+
+    sup.handleSwitch(resp_fds[0], "fps", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR switch-failed\n", resp_buf[0..n]);
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].instance.mapper == null);
+    try testing.expect(sup.managed.items[1].instance.mapper == null);
+    try testing.expect(sup.managed.items[0].instance.mapping_cfg == null);
+    try testing.expect(sup.managed.items[1].instance.mapping_cfg == null);
+    try testing.expect(sup.managed.items[0].switch_mapping == null);
+    try testing.expect(sup.managed.items[1].switch_mapping == null);
+    try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[0].instance.stopped, .acquire));
+    try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[1].instance.stopped, .acquire));
+}
+
+test "Supervisor: SWITCH with no devices returns no-devices" {
+    const allocator = testing.allocator;
+
+    const base_dir = "/tmp/padctl_supervisor_test_no_devices";
+    std.fs.deleteTreeAbsolute(base_dir) catch {};
+    try std.fs.makeDirAbsolute(base_dir);
+    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    sup.handleSwitch(resp_fds[0], "fps", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR no-devices\n", resp_buf[0..n]);
+}
+
 test "Supervisor: SIGHUP updates mapping without restarting instance" {
     const allocator = testing.allocator;
 
@@ -953,6 +1360,8 @@ test "Supervisor: SIGHUP updates mapping without restarting instance" {
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);
+    try testing.expect(sup.managed.items[0].instance.mapping_cfg != null);
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
 }
 
 test "Supervisor: SIGHUP with new phys_key spawns new instance" {
@@ -1046,6 +1455,39 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     }
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+}
+
+test "Supervisor: reload null mapping clears existing mapper" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    const parsed_map = try mapping_mod.parseString(allocator, "");
+    defer parsed_map.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    inst.mapping_cfg = &parsed_map.value;
+    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
+    try sup.spawnInstance("usb-1-1", inst);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const entry = ConfigEntry{
+        .phys_key = "usb-1-1",
+        .device_cfg = &parsed_dev.value,
+        .mapping_cfg = null,
+    };
+    try sup.reload(&.{entry}, testInitFn);
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].instance.mapping_cfg == null);
+    try testing.expect(sup.managed.items[0].instance.mapper == null);
 }
 
 test "Supervisor: empty config dir → zero instances" {
