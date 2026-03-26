@@ -1458,6 +1458,7 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     const entry2 = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = &map2 };
 
     try sup.reload(&.{entry1}, testInitFn);
+    sup.managed.items[0].instance.mapper.?.next_token = 42;
     try sup.reload(&.{entry2}, testInitFn);
     defer {
         sup.stopAll();
@@ -1465,6 +1466,8 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     }
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
+    try testing.expectEqual(@as(u32, 1), sup.managed.items[0].instance.mapper.?.next_token);
 }
 
 test "Supervisor: reload null mapping clears existing mapper" {
