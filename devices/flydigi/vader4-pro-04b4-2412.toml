@@ -1,7 +1,7 @@
 [device]
 name = "Flydigi Vader 4 Pro (DInput/2.4G)"
 vid = 0x04b4
-pid = 0x2414
+pid = 0x2412
 
 # Community reports show this variant on interface 2 in DInput/2.4G mode.
 [[device.interface]]
