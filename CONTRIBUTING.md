@@ -63,6 +63,14 @@ Add a new vendor directory if the manufacturer is not listed.
 3. Run all checks before submitting
 4. Open a pull request
 
+To enable repository git hooks locally:
+
+```sh
+git config core.hooksPath hooks
+```
+
+With hooks enabled, `pre-push` runs `zig build test-tsan` before push.
+
 ### Code Style
 
 All Zig code must pass `zig fmt`:

@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if [ "$SKIP_TSAN" = "1" ]; then
+    echo "pre-push: SKIP_TSAN=1 set, skipping zig build test-tsan"
+    exit 0
+fi
+
+echo "pre-push: running zig build test-tsan..."
+if ! zig build test-tsan; then
+    echo "ERROR: zig build test-tsan failed. Push aborted."
+    echo "Hint: run 'zig build test-tsan' locally to inspect failures."
+    echo "If you must bypass temporarily: SKIP_TSAN=1 git push"
+    exit 1
+fi
+
+echo "pre-push: test-tsan passed."
