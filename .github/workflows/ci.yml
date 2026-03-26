@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        os: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04]
         include:
           - name: default
             zig_args: ""
@@ -73,3 +73,36 @@ jobs:
           path: |
             tsan-build.log
             tsan*
+
+  distro-check:
+    name: distro-check / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian-12
+            image: debian:12
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl xz-utils gcc g++ make pkg-config linux-libc-dev
+          - name: fedora-41
+            image: fedora:41
+            setup: dnf install -y ca-certificates curl xz gcc gcc-c++ make pkgconf-pkg-config kernel-headers glibc-headers glibc-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run check-all in container
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+          DISTRO_SETUP: ${{ matrix.setup }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            "$DISTRO_IMAGE" \
+            /bin/sh -lc "
+              set -eu
+              ${DISTRO_SETUP}
+              curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+              tar -xJf /tmp/zig.tar.xz -C /tmp
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all
+            "
