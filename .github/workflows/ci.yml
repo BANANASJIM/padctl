@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  check-matrix:
     name: check / ${{ matrix.os }} / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -37,6 +37,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
       - name: Run all checks
         run: zig build ${{ matrix.zig_args }} check-all
+
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    needs: [check-matrix]
+    if: ${{ always() }}
+    steps:
+      - name: Require check matrix success
+        run: |
+          if [ "${{ needs.check-matrix.result }}" != "success" ]; then
+            echo "check-matrix result: ${{ needs.check-matrix.result }}"
+            exit 1
+          fi
 
   tsan:
     name: tsan / ubuntu-22.04
