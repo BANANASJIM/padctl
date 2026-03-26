@@ -49,7 +49,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
 
-        const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
+        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
         defer posix.close(fd);
 
         var info: ioctl.HidrawDevinfo = undefined;
@@ -58,8 +58,11 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         const phys_owned = readPhysicalPath(allocator, path) catch try allocator.dupe(u8, "");
 
         if (phys_owned.len > 0) {
-            const gop = try phys_seen.getOrPut(phys_owned);
+            const phys_key = try allocator.dupe(u8, phys_owned);
+            errdefer allocator.free(phys_key);
+            const gop = try phys_seen.getOrPut(phys_key);
             if (gop.found_existing) {
+                allocator.free(phys_key);
                 allocator.free(phys_owned);
                 continue;
             }
@@ -313,4 +316,26 @@ test "findConfig: no match returns error" {
 test "freeEntries: empty slice is a no-op" {
     const empty: []ScanEntry = &.{};
     freeEntries(std.testing.allocator, empty);
+}
+
+test "scan dedup map stores its own phys key copy" {
+    const allocator = std.testing.allocator;
+    var phys_seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = phys_seen.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        phys_seen.deinit();
+    }
+
+    const phys_owned = try allocator.dupe(u8, "usb-1-2");
+    defer allocator.free(phys_owned);
+
+    const phys_key = try allocator.dupe(u8, phys_owned);
+    const gop = try phys_seen.getOrPut(phys_key);
+    try std.testing.expect(!gop.found_existing);
+
+    var it = phys_seen.keyIterator();
+    const stored = it.next().?;
+    try std.testing.expectEqualStrings(phys_owned, stored.*);
+    try std.testing.expect(@intFromPtr(phys_owned.ptr) != @intFromPtr(stored.ptr));
 }

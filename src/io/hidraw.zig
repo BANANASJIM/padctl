@@ -61,7 +61,7 @@ pub const HidrawDevice = struct {
             const path = try std.fmt.allocPrint(allocator, "{s}/hidraw{d}", .{ dev_root, i });
             defer allocator.free(path);
 
-            const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
+            const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
             defer posix.close(fd);
 
             var info: ioctl.HidrawDevinfo = undefined;
@@ -103,7 +103,7 @@ pub const HidrawDevice = struct {
             var path_buf: [128]u8 = undefined;
             const path = std.fmt.bufPrint(&path_buf, "{s}/hidraw{d}", .{ dev_root, i }) catch continue;
 
-            const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
+            const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
             defer posix.close(fd);
 
             var info: ioctl.HidrawDevinfo = undefined;
