@@ -51,5 +51,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
       - name: Run TSAN tests
         run: |
+          set -o pipefail
           rm -rf .zig-cache
-          zig build test-tsan
+          export TSAN_OPTIONS="halt_on_error=1:verbosity=1:history_size=7:log_path=$PWD/tsan"
+          zig build test-tsan 2>&1 | tee tsan-build.log
+      - name: TSAN diagnostics
+        if: failure()
+        run: |
+          echo "==== TSAN summary from build log ===="
+          grep -nE "ThreadSanitizer|data race|thread leak|SUMMARY|signal [0-9]+|terminated with signal|error: while executing test" tsan-build.log || true
+          echo "==== TSAN log files ===="
+          ls -lah tsan* || true
+      - name: Upload TSAN logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-logs
+          path: |
+            tsan-build.log
+            tsan*

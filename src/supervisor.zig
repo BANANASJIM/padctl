@@ -483,19 +483,28 @@ pub const Supervisor = struct {
                 m.thread.join();
                 self.clearSwitchMapping(m);
 
+                var old_mapper = m.instance.mapper;
+                const old_mapping_cfg = m.instance.mapping_cfg;
                 _ = m.mapping_arena.reset(.retain_capacity);
                 const arena_alloc = m.mapping_arena.allocator();
                 const map_copy = try arena_alloc.create(MappingConfig);
                 map_copy.* = new_map.*;
 
-                // Reset instance state for restart
-                if (m.instance.mapper) |*mapper| {
-                    mapper.config = map_copy;
-                } else {
-                    m.instance.mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
-                }
+                // Rebuild the mapper so layer state/timers do not keep slices into
+                // the old mapping arena after the reset above.
+                var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
+                m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
-                try restartManagedThread(m);
+                restartManagedThread(m) catch |err| {
+                    m.instance.mapper = old_mapper;
+                    m.instance.mapping_cfg = old_mapping_cfg;
+                    new_mapper.deinit();
+                    return err;
+                };
+
+                if (old_mapper) |*mapper| {
+                    mapper.deinit();
+                }
             } else {
                 const m = found.?;
                 m.instance.stop();
