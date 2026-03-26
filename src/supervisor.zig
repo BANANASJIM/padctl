@@ -351,6 +351,8 @@ pub const Supervisor = struct {
             const tx = &txs[r];
             if (!tx.committed) continue;
             const m = &self.managed.items[tx.idx];
+            m.instance.stop();
+            m.thread.join();
             self.restoreSwitchTarget(tx, m, true);
         }
     }
