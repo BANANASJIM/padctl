@@ -6,6 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     name: check / ${{ matrix.name }}
@@ -26,16 +30,9 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - name: Cache Zig
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/zig
-            .zig-cache
-          key: ${{ runner.os }}-zig-0.15.2-${{ matrix.name }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
       - name: Install system dependencies
         if: matrix.name != 'libusb-false'
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
       - name: Run all checks
         run: zig build ${{ matrix.zig_args }} check-all
 
@@ -48,7 +45,7 @@ jobs:
         with:
           version: 0.15.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
       - name: Run TSAN tests
         run: |
           set -o pipefail
