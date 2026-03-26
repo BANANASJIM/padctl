@@ -82,6 +82,34 @@ fn runCmd(argv: []const []const u8) void {
     _ = child.spawnAndWait() catch {};
 }
 
+fn dirExistsAbsolute(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
+fn findDevicesSourceDir(allocator: std.mem.Allocator, self_dir: []const u8, cwd_override: ?[]const u8) !?[]u8 {
+    const sibling = try std.fmt.allocPrint(allocator, "{s}/devices", .{self_dir});
+    defer allocator.free(sibling);
+    if (dirExistsAbsolute(sibling)) return try allocator.dupe(u8, sibling);
+
+    var parent = self_dir;
+    while (std.fs.path.dirname(parent)) |next| {
+        parent = next;
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/devices", .{parent});
+        defer allocator.free(candidate);
+        if (dirExistsAbsolute(candidate)) return try allocator.dupe(u8, candidate);
+        if (std.mem.eql(u8, parent, "/")) break;
+    }
+
+    const cwd = cwd_override orelse try std.process.getCwdAlloc(allocator);
+    defer if (cwd_override == null) allocator.free(cwd);
+    const cwd_candidate = try std.fmt.allocPrint(allocator, "{s}/devices", .{cwd});
+    defer allocator.free(cwd_candidate);
+    if (dirExistsAbsolute(cwd_candidate)) return try allocator.dupe(u8, cwd_candidate);
+
+    return null;
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     if (opts.destdir.len == 0 and std.os.linux.getuid() != 0) {
         _ = std.posix.write(std.posix.STDERR_FILENO, "error: must run as root — use: sudo padctl install\n") catch {};
@@ -145,14 +173,18 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
     // 3. Copy devices/*.toml
-    const src_devices = try std.fmt.allocPrint(allocator, "{s}/devices", .{self_dir});
-    defer allocator.free(src_devices);
-    copyDevicesTomls(allocator, src_devices, share_dir) catch |err| {
-        _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: ") catch {};
-        var errbuf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&errbuf, "{}\n", .{err}) catch "unknown error\n";
-        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-    };
+    const src_devices = try findDevicesSourceDir(allocator, self_dir, null);
+    defer if (src_devices) |path| allocator.free(path);
+    if (src_devices) |path| {
+        copyDevicesTomls(allocator, path, share_dir) catch |err| {
+            _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: ") catch {};
+            var errbuf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&errbuf, "{}\n", .{err}) catch "unknown error\n";
+            _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+        };
+    } else {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: devices directory not found near executable or current working directory\n") catch {};
+    }
 
     // 4. Generate 99-padctl.rules
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
@@ -510,4 +542,52 @@ test "generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
+}
+
+test "findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const repo_devices = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(repo_devices);
+    try ensureDirAll(allocator, repo_devices);
+
+    const self_dir = try std.fmt.allocPrint(allocator, "{s}/zig-out/bin", .{tmp_path});
+    defer allocator.free(self_dir);
+    try ensureDirAll(allocator, self_dir);
+
+    const found = try findDevicesSourceDir(allocator, self_dir, "/definitely/missing");
+    defer if (found) |path| allocator.free(path);
+
+    try testing.expect(found != null);
+    try testing.expectEqualStrings(repo_devices, found.?);
+}
+
+test "findDevicesSourceDir falls back to cwd devices" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const cwd_devices = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(cwd_devices);
+    try ensureDirAll(allocator, cwd_devices);
+
+    const self_dir = try std.fmt.allocPrint(allocator, "{s}/out/bin", .{tmp_path});
+    defer allocator.free(self_dir);
+    try ensureDirAll(allocator, self_dir);
+
+    const found = try findDevicesSourceDir(allocator, self_dir, tmp_path);
+    defer if (found) |path| allocator.free(path);
+
+    try testing.expect(found != null);
+    try testing.expectEqualStrings(cwd_devices, found.?);
 }
