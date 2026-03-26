@@ -20,42 +20,56 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Hot-reload** — `SIGHUP` re-reads configs without restart, diffed per physical device
 - **Force feedback** — FF_RUMBLE passthrough from uinput to physical device
 
-## Architecture (Simplified)
+## Architecture
 
-```mermaid
-flowchart TD
-  A["Physical device (USB/BT)"]
-
-  A --> B["HID class interface"]
-  B --> C["/dev/hidrawN"]
-  C --> D["io/hidraw.zig"]
-
-  A --> E["Vendor class interface"]
-  E --> F["libusb"]
-  F --> G["io/usbraw.zig"]
-
-  D --> H["DeviceIO unified interface"]
-  G --> H
-  H --> I["ppoll event loop (main.zig)"]
-
-  I --> J["config/device.zig<br/>(devices/*.toml)"]
-  I --> K["io/hotplug.zig<br/>(udev monitor)"]
-
-  J --> L["[input rules]"]
-  J --> M["[output] DSL (OutputConfig)"]
-
-  L --> N["core/interpreter.zig"]
-  N --> O["core/state.zig (GamepadState)"]
-  O --> P["core/mapper.zig<br/>(layer switch + remap)"]
-  M --> P
-
-  P --> Q["Gamepad mode"]
-  P --> R["Generic mode"]
-
-  Q --> Q1["UinputDevice ([output])"]
-  Q --> Q2["AuxDevice ([output.aux])"]
-  R --> R1["GenericUinputDevice ([output.mapping])"]
-  R --> R2["TouchpadDevice ([output.touchpad])"]
+```text
++----------------------------+
+| Physical Device (USB / BT) |
++----------------------------+
+              |
+      +-------+-------+
+      |               |
+      v               v
++----------------+  +-------------------+
+| HID / hidraw   |  | Vendor / libusb   |
+| io/hidraw.zig  |  | io/usbraw.zig     |
++----------------+  +-------------------+
+       \              /
+        \            /
+         v          v
+      +--------------------+
+      | DeviceIO (unified) |
+      +--------------------+
+                |
+                v
+      +--------------------+
+      | main loop (ppoll)  |
+      +--------------------+
+                |
+      +---------+---------+
+      |                   |
+      v                   v
++------------------+  +------------------+
+| config/device.zig|  | io/hotplug.zig   |
+| devices/*.toml   |  | udev monitor     |
++------------------+  +------------------+
+          |
+          v
++-----------------------------------------+
+| [input rules] -> interpreter -> state   |
+| [output]     -> OutputConfig            |
++-----------------------------------------+
+                      |
+                      v
+           +----------------------+
+           | mapper (layer/remap) |
+           +----------------------+
+                |            |
+                v            v
+      +----------------+  +------------------+
+      | gamepad output |  | generic output   |
+      | uinput + aux   |  | generic + touch  |
+      +----------------+  +------------------+
 ```
 
 ## Supported Devices
