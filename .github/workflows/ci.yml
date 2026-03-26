@@ -7,14 +7,54 @@ on:
 
 jobs:
   check:
+    name: check / ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            zig_args: ""
+          - name: wasm-false
+            zig_args: -Dwasm=false
+          - name: libusb-false
+            zig_args: -Dlibusb=false
     steps:
       - uses: actions/checkout@v4
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-0.15.2-${{ matrix.name }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
       - name: Install system dependencies
+        if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
       - name: Run all checks
-        run: zig build check-all
+        run: zig build ${{ matrix.zig_args }} check-all
+
+  tsan:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-0.15.2-tsan-${{ hashFiles('build.zig', 'build.zig.zon') }}
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+      - name: Run TSAN tests
+        run: zig build test-tsan
