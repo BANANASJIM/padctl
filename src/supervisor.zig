@@ -44,9 +44,6 @@ const InotifyResult = struct {
     config_dir: ?[]const u8,
 };
 
-var test_switch_mapping_override: ?[]const u8 = null;
-var test_switch_fail_commit_index: ?usize = null;
-
 const SwitchTx = struct {
     idx: usize,
     new_mapper: ?Mapper,
@@ -57,9 +54,9 @@ const SwitchTx = struct {
     committed: bool = false,
 };
 
-fn shouldInjectSwitchFailure(commit_index: usize) bool {
+fn shouldInjectSwitchFailure(self: *const Supervisor, commit_index: usize) bool {
     if (!builtin.is_test) return false;
-    return test_switch_fail_commit_index != null and test_switch_fail_commit_index.? == commit_index;
+    return self.test_switch_fail_commit_index != null and self.test_switch_fail_commit_index.? == commit_index;
 }
 
 fn initInotify(allocator: std.mem.Allocator) InotifyResult {
@@ -144,6 +141,8 @@ pub const Supervisor = struct {
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
+    test_switch_mapping_override: ?[]const u8 = null,
+    test_switch_fail_commit_index: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -184,6 +183,8 @@ pub const Supervisor = struct {
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = sock,
+            .test_switch_mapping_override = null,
+            .test_switch_fail_commit_index = null,
         };
     }
 
@@ -204,11 +205,14 @@ pub const Supervisor = struct {
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = null,
+            .test_switch_mapping_override = null,
+            .test_switch_fail_commit_index = null,
         };
     }
 
     pub fn deinit(self: *Supervisor) void {
         if (self.ctrl_sock) |*cs| cs.deinit();
+        if (self.test_switch_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
@@ -311,7 +315,7 @@ pub const Supervisor = struct {
 
     fn lookupSwitchMappingPath(self: *Supervisor, name: []const u8) !?[]const u8 {
         if (builtin.is_test) {
-            if (test_switch_mapping_override) |override_path| {
+            if (self.test_switch_mapping_override) |override_path| {
                 return @as(?[]const u8, try self.allocator.dupe(u8, override_path));
             }
         }
@@ -384,7 +388,7 @@ pub const Supervisor = struct {
         m.instance.stop();
         m.thread.join();
 
-        if (builtin.is_test and test_switch_fail_commit_index != null and test_switch_fail_commit_index.? == tx.idx) {
+        if (builtin.is_test and self.test_switch_fail_commit_index != null and self.test_switch_fail_commit_index.? == tx.idx) {
             self.restoreSwitchTarget(tx, m, false);
             return error.SwitchFailed;
         }
@@ -777,7 +781,7 @@ pub const Supervisor = struct {
         }
 
         for (txs.items, 0..) |*tx, commit_idx| {
-            if (shouldInjectSwitchFailure(commit_idx)) {
+            if (shouldInjectSwitchFailure(self, commit_idx)) {
                 self.rollbackCommittedSwitches(txs.items);
                 cs.sendResponse(fd, "ERR switch-failed\n");
                 return;
@@ -1283,13 +1287,8 @@ test "Supervisor: global SWITCH rolls back all devices on failure" {
     try sup.spawnInstance("usb-1-1", inst_a);
     try sup.spawnInstance("usb-1-2", inst_b);
 
-    test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
-    defer {
-        if (test_switch_mapping_override) |p| allocator.free(p);
-        test_switch_mapping_override = null;
-    }
-    test_switch_fail_commit_index = 1;
-    defer test_switch_fail_commit_index = null;
+    sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+    sup.test_switch_fail_commit_index = 1;
 
     sup.handleSwitch(resp_fds[0], "fps", null);
 
