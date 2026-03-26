@@ -12,11 +12,12 @@ concurrency:
 
 jobs:
   check:
-    name: check / ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    name: check / ${{ matrix.os }} / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
         include:
           - name: default
             zig_args: ""
@@ -37,7 +38,12 @@ jobs:
         run: zig build ${{ matrix.zig_args }} check-all
 
   tsan:
-    runs-on: ubuntu-latest
+    name: tsan / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
     steps:
       - uses: actions/checkout@v4
       - name: Install Zig
