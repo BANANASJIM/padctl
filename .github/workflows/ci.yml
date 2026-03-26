@@ -56,7 +56,7 @@ jobs:
         with:
           version: 0.15.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev gdb
       - name: Run TSAN tests
         run: |
           set -o pipefail
@@ -66,8 +66,23 @@ jobs:
       - name: TSAN diagnostics
         if: failure()
         run: |
+          set -euo pipefail
           echo "==== TSAN summary from build log ===="
           grep -nE "ThreadSanitizer|data race|thread leak|SUMMARY|signal [0-9]+|terminated with signal|error: while executing test" tsan-build.log || true
+          FAILED_CMD="$(grep -E '^\.?/?\.zig-cache/o/.+/test --cache-dir=' tsan-build.log | tail -n 1 || true)"
+          if [ -n "${FAILED_CMD}" ]; then
+            echo "${FAILED_CMD}" > tsan-failed-cmd.txt
+            echo "==== Re-running failed test command once ===="
+            bash -lc "${FAILED_CMD}" > tsan-rerun.log 2>&1 || true
+            echo "==== Running failed command under gdb ===="
+            eval "set -- ${FAILED_CMD}"
+            gdb -q -batch \
+              -ex "set pagination off" \
+              -ex "set confirm off" \
+              -ex "run" \
+              -ex "thread apply all bt full" \
+              --args "$@" > tsan-gdb.log 2>&1 || true
+          fi
           echo "==== TSAN log files ===="
           ls -lah tsan* || true
       - name: Upload TSAN logs
@@ -77,6 +92,9 @@ jobs:
           name: tsan-logs
           path: |
             tsan-build.log
+            tsan-failed-cmd.txt
+            tsan-rerun.log
+            tsan-gdb.log
             tsan*
 
   distro-check:
