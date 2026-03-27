@@ -194,9 +194,23 @@ pub fn build(b: *std.Build) void {
     integ_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(integ_tests).step);
 
-    // test-e2e: Layer 3 (real hardware)
-    const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (real hardware)");
-    _ = e2e_step;
+    // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
+    const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/full_pipeline_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    e2e_mod.addImport("src", src_mod);
+    const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
+    if (use_libusb) {
+        e2e_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        e2e_tests.addIncludePath(b.path("compat"));
+    }
+    e2e_tests.linkLibC();
+    e2e_step.dependOn(&b.addRunArtifact(e2e_tests).step);
 
     // spike (only available when spike/toml_spike.zig exists)
     if (std.fs.cwd().access("spike/toml_spike.zig", .{})) |_| {
