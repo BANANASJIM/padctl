@@ -1,3 +1,5 @@
+pub const MAX_TRANSFORMS = 8;
+
 pub const ButtonId = enum {
     A,
     B,

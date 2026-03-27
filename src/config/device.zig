@@ -166,7 +166,7 @@ fn isValidTransform(t: []const u8) bool {
     return false;
 }
 
-const max_transforms = 8; // must match interpreter.MAX_TRANSFORMS
+const max_transforms = state.MAX_TRANSFORMS;
 
 fn isValidTransformChain(chain: []const u8) bool {
     var pos: usize = 0;

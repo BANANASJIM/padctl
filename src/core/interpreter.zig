@@ -168,7 +168,7 @@ pub const CompiledTransform = struct {
     b: i64 = 0,
 };
 
-pub const MAX_TRANSFORMS = 8;
+pub const MAX_TRANSFORMS = state.MAX_TRANSFORMS;
 
 pub const CompiledTransformChain = struct {
     items: [MAX_TRANSFORMS]CompiledTransform = undefined,
