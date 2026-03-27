@@ -17,26 +17,7 @@ pub fn build(b: *std.Build) void {
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_c = .trap,
-    });
-    exe_mod.addImport("toml", toml_mod);
-    exe_mod.addImport("build_options", build_opts.createModule());
-    if (use_wasm) addWasm3(b, exe_mod, wasm3_c_flags);
-
-    const exe = b.addExecutable(.{ .name = "padctl", .root_module = exe_mod });
-    if (use_libusb) {
-        exe.linkSystemLibrary("usb-1.0");
-    } else {
-        exe.addIncludePath(b.path("compat"));
-    }
-    exe.linkLibC();
-    b.installArtifact(exe);
-
-    // src library module: shared by padctl-debug binary and tests
+    // src module: shared by padctl, padctl-debug, and integration tests
     const src_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -46,6 +27,15 @@ pub fn build(b: *std.Build) void {
     src_mod.addImport("toml", toml_mod);
     src_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, src_mod, wasm3_c_flags);
+
+    const exe = b.addExecutable(.{ .name = "padctl", .root_module = src_mod });
+    if (use_libusb) {
+        exe.linkSystemLibrary("usb-1.0");
+    } else {
+        exe.addIncludePath(b.path("compat"));
+    }
+    exe.linkLibC();
+    b.installArtifact(exe);
 
     const debug_mod = b.createModule(.{
         .root_source_file = b.path("tools/padctl-debug.zig"),
