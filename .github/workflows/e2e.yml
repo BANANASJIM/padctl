@@ -1,0 +1,24 @@
+name: e2e
+on: [push, pull_request]
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+      - name: Enable UHID/uinput (best-effort)
+        run: |
+          sudo modprobe uhid uinput 2>/dev/null || true
+          sudo chmod 666 /dev/uhid /dev/uinput 2>/dev/null || true
+      - name: Run e2e tests
+        run: zig build test-e2e
