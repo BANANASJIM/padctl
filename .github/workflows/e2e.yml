@@ -16,9 +16,9 @@ jobs:
           version: 0.15.2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
-      - name: Enable UHID/uinput
+      - name: Enable UHID/uinput (best-effort)
         run: |
-          sudo modprobe uhid uinput || true
-          sudo chmod 666 /dev/uhid /dev/uinput
+          sudo modprobe uhid uinput 2>/dev/null || true
+          sudo chmod 666 /dev/uhid /dev/uinput 2>/dev/null || true
       - name: Run e2e tests
         run: zig build test-e2e
