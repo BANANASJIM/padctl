@@ -49,13 +49,26 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
 
-        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| switch (err) {
+            // Missing nodes are expected while probing hidraw0..hidraw63.
+            error.FileNotFound => continue,
+            else => {
+                std.log.warn("scan: open {s} failed: {}", .{ path, err });
+                continue;
+            },
+        };
         defer posix.close(fd);
 
         var info: ioctl.HidrawDevinfo = undefined;
-        if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) continue;
+        if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) {
+            std.log.warn("scan: HIDIOCGRAWINFO failed for {s}", .{path});
+            continue;
+        }
 
-        const phys_owned = readPhysicalPath(allocator, path) catch try allocator.dupe(u8, "");
+        const phys_owned = readPhysicalPath(allocator, path) catch |err| blk: {
+            std.log.warn("scan: readPhysicalPath {s} failed: {}", .{ path, err });
+            break :blk try allocator.dupe(u8, "");
+        };
 
         if (phys_owned.len > 0) {
             const phys_key = try allocator.dupe(u8, phys_owned);
@@ -71,7 +84,10 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         }
 
         var name_buf: [NAME_BUF_LEN]u8 = std.mem.zeroes([NAME_BUF_LEN]u8);
-        _ = linux.ioctl(fd, HIDIOCGRAWNAME, @intFromPtr(&name_buf));
+        const name_rc = linux.ioctl(fd, HIDIOCGRAWNAME, @intFromPtr(&name_buf));
+        if (std.posix.errno(name_rc) != .SUCCESS) {
+            std.log.warn("scan: HIDIOCGRAWNAME failed for {s}: {}", .{ path, std.posix.errno(name_rc) });
+        }
         const name_raw = std.mem.sliceTo(&name_buf, 0);
 
         const vid: u16 = @bitCast(info.vendor);
@@ -121,7 +137,11 @@ fn findConfigInDir(
                 if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
                 const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
                 errdefer allocator.free(full_path);
-                if (tomlMatchesVidPid(allocator, full_path, vid, pid) catch false) return full_path;
+                const matches = tomlMatchesVidPid(allocator, full_path, vid, pid) catch |err| blk: {
+                    std.log.warn("scan: failed to read/parse '{s}': {}", .{ full_path, err });
+                    break :blk false;
+                };
+                if (matches) return full_path;
                 allocator.free(full_path);
             },
             else => {},
@@ -197,7 +217,10 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
     }
 
     for (config_dirs) |dir| {
-        const entries = scan(allocator, dir) catch continue;
+        const entries = scan(allocator, dir) catch |err| {
+            std.log.warn("scan: failed to scan config dir '{s}': {}", .{ dir, err });
+            continue;
+        };
         defer allocator.free(entries);
         for (entries) |e| {
             // Merge: if same path already seen, skip; otherwise check if we can upgrade config_path

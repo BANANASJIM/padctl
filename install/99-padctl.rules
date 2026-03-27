@@ -16,6 +16,8 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2dc8", ATTRS{idProduct}=="
 ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2401", TAG+="uaccess"
 # Flydigi Vader 4 Pro
 ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="3001", TAG+="uaccess"
+# Flydigi Vader 4 Pro (DInput/2.4G variant)
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="2412", TAG+="uaccess"
 # HORI Horipad Steam
 ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0f0d", ATTRS{idProduct}=="00c5", TAG+="uaccess"
 # Lenovo Legion Go
