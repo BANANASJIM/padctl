@@ -112,8 +112,11 @@ pub const UsbrawDevice = struct {
         }
 
         const pipe_fds = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer std.posix.close(pipe_fds[0]);
+        errdefer std.posix.close(pipe_fds[1]);
 
         const self = try alloc.create(UsbrawDevice);
+        errdefer alloc.destroy(self);
         self.* = .{
             .handle = handle,
             .ctx = ctx.?,
@@ -128,6 +131,11 @@ pub const UsbrawDevice = struct {
             .thread = undefined,
             .allocator = alloc,
         };
+        errdefer {
+            _ = c.libusb_release_interface(handle, interface_id);
+            c.libusb_close(handle);
+            c.libusb_exit(ctx.?);
+        }
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;
     }
@@ -174,8 +182,8 @@ pub const UsbrawDevice = struct {
     fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
         const self: *UsbrawDevice = @ptrCast(@alignCast(ptr));
         if (self.disconnected.load(.acquire)) return DeviceIO.ReadError.Disconnected;
-        var dummy: [1]u8 = undefined;
-        _ = std.posix.read(self.pipe_r, &dummy) catch {};
+        var drain: [64]u8 = undefined;
+        _ = std.posix.read(self.pipe_r, &drain) catch {};
         const n = self.ring.pop(buf);
         if (n == 0) return DeviceIO.ReadError.Again;
         return n;
