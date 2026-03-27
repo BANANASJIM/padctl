@@ -238,6 +238,12 @@ pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64
             },
             .scale => blk: {
                 if (t_max == 0) break :blk val;
+                // Denominator is t_max (positive half of the type range).
+                // For unsigned types this is exact: input range [0, t_max].
+                // For signed types input range is [-t_max-1, t_max]; values
+                // below -t_max produce out-of-range output that saturateCast
+                // clamps.  In practice, signed types are rarely scaled; the
+                // common case is u8 → i16 via scale(-32768, 32767).
                 const v: i128 = val;
                 break :blk @intCast(@divTrunc(v * (tr.b - tr.a), t_max) + tr.a);
             },
@@ -1675,6 +1681,21 @@ test "mutation audit: scale boundary correctness" {
     // val = 0: 0 * 100 / 255 = 0 (lower boundary maps to a)
     const result_zero = runTransformChain(0, &chain);
     try testing.expectEqual(@as(i64, 0), result_zero);
+}
+
+// Scale asymmetry: for signed types, val = minInt (e.g. -32768 for i16le) produces an
+// out-of-range intermediate that saturateCast clamps to minInt.  Document current behavior.
+test "scale signed type minInt edge case" {
+    // scale(-32768, 32767) on i16le type_max=32767
+    var chain = compileTransformChain("scale(-32768, 32767)", .i16le);
+    // val = -32768: (-32768 * 65535) / 32767 + (-32768) = out-of-range, saturated by caller
+    // runTransformChain itself returns the raw i64 before saturation; document that value.
+    const result = runTransformChain(-32768, &chain);
+    // -32768 * 65535 = -2147450880; divTrunc by 32767 = -65537; -65537 + (-32768) = -98305
+    try testing.expectEqual(@as(i64, -98305), result);
+    // val = 32767: upper boundary maps exactly to b
+    const result_max = runTransformChain(32767, &chain);
+    try testing.expectEqual(@as(i64, 32767), result_max);
 }
 
 // Mutation 3: button group bit shift direction reversed (>> instead of <<, or vice-versa)

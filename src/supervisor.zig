@@ -1215,6 +1215,11 @@ fn makeTestInstance(
     return inst;
 }
 
+// threadlocal: Zig test runner executes each test in its own OS thread from a pool.
+// threadlocal gives each test thread an independent slot, preventing cross-test
+// interference when tests run in parallel.  Limitation: tests that call reload()
+// with testInitFn must set g_mock_slot on the same thread that reload() runs on,
+// which holds because set and call happen sequentially within one test body.
 threadlocal var g_mock_slot: ?*MockDeviceIO = null;
 
 fn testInitFn(allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance {
