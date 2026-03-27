@@ -8,6 +8,12 @@ const stick = @import("stick.zig");
 const macro_player_mod = @import("macro_player.zig");
 const timer_queue_mod = @import("timer_queue.zig");
 const aux_event_mod = @import("aux_event.zig");
+const c = @cImport(@cInclude("linux/input-event-codes.h"));
+
+const REL_X: u16 = c.REL_X;
+const REL_Y: u16 = c.REL_Y;
+const REL_WHEEL: u16 = c.REL_WHEEL;
+const REL_HWHEEL: u16 = c.REL_HWHEEL;
 
 pub const RemapTargetResolved = @import("remap.zig").RemapTargetResolved;
 pub const resolveTarget = @import("remap.zig").resolveTarget;
@@ -129,8 +135,8 @@ pub const Mapper = struct {
             if (checkGyroActivate(activate_spec, self.state.buttons)) {
                 const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
                 if (std.mem.eql(u8, gcfg.mode, "mouse")) {
-                    if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
-                    if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
+                    if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = gout.rel_x } }) catch {};
+                    if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = REL_Y, .value = gout.rel_y } }) catch {};
                 } else if (std.mem.eql(u8, gcfg.mode, "joystick")) {
                     if (gout.joy_x) |jx| {
                         gyro_joy_x = jx;
@@ -148,21 +154,21 @@ pub const Mapper = struct {
             const left_cfg = self.effectiveStickConfig(.left);
             const left_out = self.stick_left.process(&left_cfg, self.state.ax, self.state.ay, dt_ms);
             if (std.mem.eql(u8, left_cfg.mode, "mouse")) {
-                if (left_out.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = left_out.rel_x } }) catch {};
-                if (left_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = left_out.rel_y } }) catch {};
+                if (left_out.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = left_out.rel_x } }) catch {};
+                if (left_out.rel_y != 0) aux.append(.{ .rel = .{ .code = REL_Y, .value = left_out.rel_y } }) catch {};
             } else if (std.mem.eql(u8, left_cfg.mode, "scroll")) {
-                if (left_out.wheel != 0) aux.append(.{ .rel = .{ .code = 8, .value = left_out.wheel } }) catch {};
-                if (left_out.hwheel != 0) aux.append(.{ .rel = .{ .code = 6, .value = left_out.hwheel } }) catch {};
+                if (left_out.wheel != 0) aux.append(.{ .rel = .{ .code = REL_WHEEL, .value = left_out.wheel } }) catch {};
+                if (left_out.hwheel != 0) aux.append(.{ .rel = .{ .code = REL_HWHEEL, .value = left_out.hwheel } }) catch {};
             }
 
             const right_cfg = self.effectiveStickConfig(.right);
             const right_out = self.stick_right.process(&right_cfg, self.state.rx, self.state.ry, dt_ms);
             if (std.mem.eql(u8, right_cfg.mode, "mouse")) {
-                if (right_out.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = right_out.rel_x } }) catch {};
-                if (right_out.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = right_out.rel_y } }) catch {};
+                if (right_out.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = right_out.rel_x } }) catch {};
+                if (right_out.rel_y != 0) aux.append(.{ .rel = .{ .code = REL_Y, .value = right_out.rel_y } }) catch {};
             } else if (std.mem.eql(u8, right_cfg.mode, "scroll")) {
-                if (right_out.wheel != 0) aux.append(.{ .rel = .{ .code = 8, .value = right_out.wheel } }) catch {};
-                if (right_out.hwheel != 0) aux.append(.{ .rel = .{ .code = 6, .value = right_out.hwheel } }) catch {};
+                if (right_out.wheel != 0) aux.append(.{ .rel = .{ .code = REL_WHEEL, .value = right_out.wheel } }) catch {};
+                if (right_out.hwheel != 0) aux.append(.{ .rel = .{ .code = REL_HWHEEL, .value = right_out.hwheel } }) catch {};
             }
 
             const dpad_cfg = self.effectiveDpadConfig();
