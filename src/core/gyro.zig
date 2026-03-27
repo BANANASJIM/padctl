@@ -183,7 +183,7 @@ test "EMA smoothing: consecutive frames converge" {
 
 // T4: extreme parameter values
 
-test "T4: sensitivity=0 produces zero output" {
+test "gyro: sensitivity=0 produces zero output" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .sensitivity_x = 0.0, .sensitivity_y = 0.0, .smoothing = 0.0 };
     const out = g.process(&cfg, 30000, 30000, 0);
@@ -194,7 +194,7 @@ test "T4: sensitivity=0 produces zero output" {
     try testing.expect(!std.math.isInf(g.accum_x));
 }
 
-test "T4: deadzone=32767 absorbs all input, output is zero" {
+test "gyro: deadzone=32767 absorbs all input, output is zero" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .deadzone = 32767, .smoothing = 0.0, .sensitivity_x = 1000.0, .sensitivity_y = 1000.0 };
     const out = g.process(&cfg, 32766, 32766, 0);
@@ -202,7 +202,7 @@ test "T4: deadzone=32767 absorbs all input, output is zero" {
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
 
-test "T4: curve=0 pow(x,0)=1 for nonzero input, no NaN" {
+test "gyro: curve=0 pow(x,0)=1 for nonzero input, no NaN" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .curve = 0.0, .smoothing = 0.0, .sensitivity_x = 1.0, .sensitivity_y = 1.0 };
     _ = g.process(&cfg, 100, 100, 0);
@@ -210,7 +210,7 @@ test "T4: curve=0 pow(x,0)=1 for nonzero input, no NaN" {
     try testing.expect(!std.math.isInf(g.accum_x));
 }
 
-test "T4: sensitivity=0 and deadzone=32767 combination yields zero" {
+test "gyro: sensitivity=0 and deadzone=32767 combination yields zero" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .sensitivity_x = 0.0, .sensitivity_y = 0.0, .deadzone = 32767, .smoothing = 0.0 };
     const out = g.process(&cfg, 30000, 30000, 0);
@@ -220,7 +220,7 @@ test "T4: sensitivity=0 and deadzone=32767 combination yields zero" {
 
 // T11: gyro curve normalization (vader5 parity)
 
-test "T11: full deflection sensitivity=1 yields ~1 unit/frame" {
+test "gyro: full deflection sensitivity=1 yields ~1 unit/frame" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .curve = 1.0, .sensitivity_x = 1.0, .sensitivity_y = 1.0 };
     _ = g.process(&cfg, 32767, 32767, 0);
@@ -231,7 +231,7 @@ test "T11: full deflection sensitivity=1 yields ~1 unit/frame" {
     try testing.expect(g.accum_x >= 0.0 and g.accum_x < 1.0);
 }
 
-test "T11: curve normalization: half-deflection curve=1 gives 0.5x full-deflection output" {
+test "gyro: curve normalization: half-deflection curve=1 gives 0.5x full-deflection output" {
     var g_half = GyroProcessor{};
     var g_full = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .curve = 1.0, .sensitivity_x = 100.0, .sensitivity_y = 100.0 };
@@ -244,7 +244,7 @@ test "T11: curve normalization: half-deflection curve=1 gives 0.5x full-deflecti
     try testing.expect(ratio > 0.45 and ratio < 0.55);
 }
 
-test "T11: custom max_val clips normalization ceiling" {
+test "gyro: custom max_val clips normalization ceiling" {
     var g = GyroProcessor{};
     // max_val=1000: input of 1000 should normalize to 1.0
     const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .curve = 1.0, .sensitivity_x = 1.0, .sensitivity_y = 1.0, .max_val = 1000.0 };

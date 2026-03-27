@@ -1357,7 +1357,7 @@ test "checksum crc32 with seed" {
 
 // T3: boundary reports
 
-test "T3: empty report (0 bytes) returns null without panic" {
+test "interpreter: empty report (0 bytes) returns null without panic" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -1366,7 +1366,7 @@ test "T3: empty report (0 bytes) returns null without panic" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
-test "T3: oversized report parsed without bounds error" {
+test "interpreter: oversized report parsed without bounds error" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -1381,7 +1381,7 @@ test "T3: oversized report parsed without bounds error" {
     try testing.expect(result != null);
 }
 
-test "T3: all-0xFF report does not panic" {
+test "interpreter: all-0xFF report does not panic" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -1406,7 +1406,7 @@ test "fuzz processReport: no panic on arbitrary input" {
     }.run, .{});
 }
 
-test "T3: field at last valid offset (offset = size - 1) reads correctly" {
+test "interpreter: field at last valid offset (offset = size - 1) reads correctly" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -1436,19 +1436,19 @@ test "T3: field at last valid offset (offset = size - 1) reads correctly" {
 
 // T4: extractBits unit tests
 
-test "T4: extractBits single byte, low nibble" {
+test "interpreter: extractBits single byte, low nibble" {
     const raw = [_]u8{0xAB}; // 0b10101011
     // byte_offset=0, start_bit=0, bit_count=4 → low nibble = 0xB = 11
     try testing.expectEqual(@as(u32, 0x0B), extractBits(&raw, 0, 0, 4));
 }
 
-test "T4: extractBits single byte, high nibble" {
+test "interpreter: extractBits single byte, high nibble" {
     const raw = [_]u8{0xAB}; // 0b10101011
     // byte_offset=0, start_bit=4, bit_count=4 → high nibble = 0xA = 10
     try testing.expectEqual(@as(u32, 0x0A), extractBits(&raw, 0, 4, 4));
 }
 
-test "T4: extractBits single bit" {
+test "interpreter: extractBits single bit" {
     const raw = [_]u8{ 0x00, 0x08 }; // byte1 = 0b00001000
     // byte_offset=1, start_bit=3, bit_count=1 → bit3 = 1
     try testing.expectEqual(@as(u32, 1), extractBits(&raw, 1, 3, 1));
@@ -1456,7 +1456,7 @@ test "T4: extractBits single bit" {
     try testing.expectEqual(@as(u32, 0), extractBits(&raw, 1, 2, 1));
 }
 
-test "T4: extractBits cross-byte 12-bit (DualSense touchpad X)" {
+test "interpreter: extractBits cross-byte 12-bit (DualSense touchpad X)" {
     // touch0_x: bits = [34, 0, 12]
     // Simulate: byte[0]=0x34, byte[1]=0x12 → LE u16 = 0x1234
     // start_bit=0, bit_count=12 → 0x1234 & 0xFFF = 0x234
@@ -1464,7 +1464,7 @@ test "T4: extractBits cross-byte 12-bit (DualSense touchpad X)" {
     try testing.expectEqual(@as(u32, 0x234), extractBits(&raw, 0, 0, 12));
 }
 
-test "T4: extractBits cross-byte 12-bit with start_bit=4 (DualSense touchpad Y)" {
+test "interpreter: extractBits cross-byte 12-bit with start_bit=4 (DualSense touchpad Y)" {
     // touch0_y: bits = [35, 4, 12]
     // byte[0]=0xAB, byte[1]=0xCD → LE = 0xCDAB
     // shift right by 4 → 0x0CDA, mask 12 bits → 0xCDA
@@ -1472,34 +1472,34 @@ test "T4: extractBits cross-byte 12-bit with start_bit=4 (DualSense touchpad Y)"
     try testing.expectEqual(@as(u32, 0xCDA), extractBits(&raw, 0, 4, 12));
 }
 
-test "T4: extractBits full 32-bit" {
+test "interpreter: extractBits full 32-bit" {
     var raw: [4]u8 = undefined;
     std.mem.writeInt(u32, &raw, 0xDEADBEEF, .little);
     try testing.expectEqual(@as(u32, 0xDEADBEEF), extractBits(&raw, 0, 0, 32));
 }
 
-test "T4: extractBits full 8-bit" {
+test "interpreter: extractBits full 8-bit" {
     const raw = [_]u8{0xFF};
     try testing.expectEqual(@as(u32, 0xFF), extractBits(&raw, 0, 0, 8));
 }
 
-test "T4: extractBits with byte_offset" {
+test "interpreter: extractBits with byte_offset" {
     const raw = [_]u8{ 0x00, 0x00, 0xAB, 0xCD };
     // byte_offset=2, start_bit=0, bit_count=16 → LE u16 from bytes[2..4] = 0xCDAB
     try testing.expectEqual(@as(u32, 0xCDAB), extractBits(&raw, 2, 0, 16));
 }
 
-test "T4: signExtend positive value" {
+test "interpreter: signExtend positive value" {
     // 12-bit value 0x7FF (2047), sign bit (bit11) = 0 → positive
     try testing.expectEqual(@as(i32, 2047), signExtend(0x7FF, 12));
 }
 
-test "T4: signExtend negative value" {
+test "interpreter: signExtend negative value" {
     // 12-bit value 0x800 (bit11 = 1) → sign extend to -2048
     try testing.expectEqual(@as(i32, -2048), signExtend(0x800, 12));
 }
 
-test "T4: signExtend 1-bit" {
+test "interpreter: signExtend 1-bit" {
     try testing.expectEqual(@as(i32, 0), signExtend(0, 1));
     try testing.expectEqual(@as(i32, -1), signExtend(1, 1));
 }
@@ -1526,7 +1526,7 @@ const bits_toml =
     \\left_x = { bits = [2, 0, 12], type = "signed" }
 ;
 
-test "T4: bits field round-trip through interpreter" {
+test "interpreter: bits field round-trip through interpreter" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, bits_toml);
     defer parsed.deinit();
@@ -1542,7 +1542,7 @@ test "T4: bits field round-trip through interpreter" {
     try testing.expectEqual(@as(?i16, -100), delta.ax);
 }
 
-test "T4: bits field unsigned default" {
+test "interpreter: bits field unsigned default" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -1577,7 +1577,7 @@ test "extractBits: start_bit=7 single bit" {
     try testing.expectEqual(@as(u32, 0), extractBits(&[_]u8{0x7F}, 0, 7, 1));
 }
 
-test "T4: touch0_active bits round-trip" {
+test "interpreter: touch0_active bits round-trip" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]

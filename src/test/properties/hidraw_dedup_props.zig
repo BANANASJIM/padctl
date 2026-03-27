@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const hidraw = @import("../io/hidraw.zig");
+const hidraw = @import("../../io/hidraw.zig");
 const stripInputSuffix = hidraw.stripInputSuffix;
 
 // P5: stripInputSuffix properties

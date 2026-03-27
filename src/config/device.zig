@@ -680,7 +680,7 @@ test "emulate preset: unknown preset returns error" {
 
 // T5: config boundary cases
 
-test "T5: VID=0 is a valid config value" {
+test "device: VID=0 is a valid config value" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -700,7 +700,7 @@ test "T5: VID=0 is a valid config value" {
     try std.testing.expectEqual(@as(i64, 0), result.value.device.vid);
 }
 
-test "T5: empty device name parses and validates without error" {
+test "device: empty device name parses and validates without error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -722,7 +722,7 @@ test "T5: empty device name parses and validates without error" {
 
 // T4: bits DSL config validation tests
 
-test "T4: bits field parses and validates" {
+test "device: bits field parses and validates" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -749,7 +749,7 @@ test "T4: bits field parses and validates" {
     try std.testing.expect(fc.offset == null);
 }
 
-test "T4: bits field with signed type" {
+test "device: bits field with signed type" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -770,7 +770,7 @@ test "T4: bits field with signed type" {
     defer result.deinit();
 }
 
-test "T4: bits field with invalid type returns error" {
+test "device: bits field with invalid type returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -790,7 +790,7 @@ test "T4: bits field with invalid type returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "T4: bits out of bounds returns error" {
+test "device: bits out of bounds returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -810,7 +810,7 @@ test "T4: bits out of bounds returns error" {
     try std.testing.expectError(error.OffsetOutOfBounds, parseString(allocator, toml_str));
 }
 
-test "T4: bits with offset present returns error (mutual exclusivity)" {
+test "device: bits with offset present returns error (mutual exclusivity)" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -830,7 +830,7 @@ test "T4: bits with offset present returns error (mutual exclusivity)" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "T4: missing both offset and bits returns error" {
+test "device: missing both offset and bits returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -850,7 +850,7 @@ test "T4: missing both offset and bits returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "T4: bits with transform returns error" {
+test "device: bits with transform returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -870,7 +870,7 @@ test "T4: bits with transform returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "T4: bits span > 4 bytes returns error" {
+test "device: bits span > 4 bytes returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]

@@ -51,11 +51,6 @@ test "install paths: destdir prepended to all paths" {
     try testing.expect(std.mem.startsWith(u8, bin, destdir));
 }
 
-// Manual: real install writes system paths and requires root.
-test "install: run as root writes files (manual)" {
-    if (true) return error.SkipZigTest;
-}
-
 // --- 2. XDG path resolution ---
 
 test "XDG: resolveDeviceConfigDirs returns 3 entries" {
@@ -143,11 +138,6 @@ test "scan output: unmatched capture hint format" {
     try testing.expect(std.mem.indexOf(u8, out.items, "padctl-capture") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "0x37d7") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "0x2401") != null);
-}
-
-// Manual: scan requires /dev/hidrawN nodes.
-test "scan: real device enumeration (manual)" {
-    if (true) return error.SkipZigTest;
 }
 
 // --- 4. Scan: matching logic ---

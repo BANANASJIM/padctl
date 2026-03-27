@@ -178,7 +178,7 @@ test "dt=0: mouse delta is zero" {
 
 // T4: extreme parameter values
 
-test "T4: sensitivity=0 produces zero mouse output" {
+test "stick: sensitivity=0 produces zero mouse output" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 0.0 };
     const out = sp.process(&cfg, 32000, 32000, 16);
@@ -187,7 +187,7 @@ test "T4: sensitivity=0 produces zero mouse output" {
     try testing.expect(!std.math.isNan(sp.mouse_accum_x));
 }
 
-test "T4: deadzone=32767 absorbs all stick input" {
+test "stick: deadzone=32767 absorbs all stick input" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 32767, .sensitivity = 100.0 };
     const out = sp.process(&cfg, 32766, 32766, 16);
@@ -195,7 +195,7 @@ test "T4: deadzone=32767 absorbs all stick input" {
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
 
-test "T4: dt_ms=1 integrates without overflow" {
+test "stick: dt_ms=1 integrates without overflow" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 1.0 };
     _ = sp.process(&cfg, 32000, 0, 1);
@@ -203,7 +203,7 @@ test "T4: dt_ms=1 integrates without overflow" {
     try testing.expect(!std.math.isInf(sp.mouse_accum_x));
 }
 
-test "T4: dt_ms=100 integrates without overflow" {
+test "stick: dt_ms=100 integrates without overflow" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 1.0 };
     _ = sp.process(&cfg, 32000, 0, 100);
@@ -213,7 +213,7 @@ test "T4: dt_ms=100 integrates without overflow" {
 
 // T10: REL_HWHEEL tests
 
-test "T10: scroll mode X axis produces hwheel" {
+test "stick: scroll mode X axis produces hwheel" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
     var hsteps: i32 = 0;
@@ -225,7 +225,7 @@ test "T10: scroll mode X axis produces hwheel" {
     try testing.expect(hsteps > 0);
 }
 
-test "T10: scroll mode Y axis produces wheel, not hwheel" {
+test "stick: scroll mode Y axis produces wheel, not hwheel" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
     var vsteps: i32 = 0;
@@ -237,7 +237,7 @@ test "T10: scroll mode Y axis produces wheel, not hwheel" {
     try testing.expect(vsteps > 0);
 }
 
-test "T10: scroll mode both axes produce independent outputs" {
+test "stick: scroll mode both axes produce independent outputs" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
     var total_wheel: i32 = 0;
@@ -251,7 +251,7 @@ test "T10: scroll mode both axes produce independent outputs" {
     try testing.expect(total_hwheel > 0);
 }
 
-test "T10: hscroll_accum resets on reset()" {
+test "stick: hscroll_accum resets on reset()" {
     var sp = StickProcessor{};
     sp.hscroll_accum = 0.5;
     sp.reset();

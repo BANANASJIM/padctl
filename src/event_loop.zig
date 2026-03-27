@@ -776,7 +776,7 @@ const MockFfOutput = struct {
     fn mockClose(_: *anyopaque) void {}
 };
 
-test "T4: FF event routed to DeviceIO.write via fillTemplate" {
+test "event_loop: FF event routed to DeviceIO.write via fillTemplate" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
@@ -837,7 +837,7 @@ test "T4: FF event routed to DeviceIO.write via fillTemplate" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, mock_dev.write_log.items);
 }
 
-test "T4: no commands.rumble — silent skip" {
+test "event_loop: no commands.rumble — silent skip" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
@@ -920,7 +920,7 @@ const custom_ff_toml =
     \\template = "aa {strong:u8} {weak:u8} bb"
 ;
 
-test "T10: config-driven FF command key — output.force_feedback.type overrides default rumble" {
+test "event_loop: config-driven FF command key — output.force_feedback.type overrides default rumble" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();

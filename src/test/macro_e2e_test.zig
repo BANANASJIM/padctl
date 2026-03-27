@@ -81,7 +81,7 @@ fn testInstance(
 
 // --- T7.1-2: Multi-device parallel (L1) ---
 
-test "T7: multi-device — stop(A) does not affect B" {
+test "macro: multi-device — stop(A) does not affect B" {
     const allocator = testing.allocator;
 
     const parsed = try device_mod.parseString(allocator, minimal_device_toml);
@@ -126,7 +126,7 @@ test "T7: multi-device — stop(A) does not affect B" {
     try testing.expect(inst_b.stopped);
 }
 
-test "T7: multi-device — independent write sinks" {
+test "macro: multi-device — independent write sinks" {
     // Two instances share no output — writes to mock_a are not visible in mock_b.
     const allocator = testing.allocator;
 
@@ -143,7 +143,7 @@ test "T7: multi-device — independent write sinks" {
 
 // --- T7.3-5: Macro playback (L0) ---
 
-test "T7: macro playback — tap B, delay 50, tap LEFT sequence" {
+test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
     const allocator = testing.allocator;
 
     const steps = [_]MacroStep{
@@ -200,7 +200,7 @@ test "T7: macro playback — tap B, delay 50, tap LEFT sequence" {
     }
 }
 
-test "T7: pause_for_release — down LSHIFT, pause, no output until released" {
+test "macro: pause_for_release — down LSHIFT, pause, no output until released" {
     const allocator = testing.allocator;
 
     const steps = [_]MacroStep{
@@ -250,7 +250,7 @@ test "T7: pause_for_release — down LSHIFT, pause, no output until released" {
 
 // --- T7.6: Layer switch clears active macros (L0) ---
 
-test "T7: layer switch while macro active — held keys released, macros cleared" {
+test "macro: layer switch while macro active — held keys released, macros cleared" {
     const allocator = testing.allocator;
 
     var ctx = try makeMapper(
@@ -303,7 +303,7 @@ test "T7: layer switch while macro active — held keys released, macros cleared
 
 // --- T7.7: Hot-reload — mapping replaced, new mapping effective (L0) ---
 
-test "T7: hot-reload — updateMapping swaps config; next apply uses new mapping" {
+test "macro: hot-reload — updateMapping swaps config; next apply uses new mapping" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -404,7 +404,7 @@ test "T7: hot-reload — updateMapping swaps config; next apply uses new mapping
 
 // --- L0: macro trigger via Mapper.apply (regression guard) ---
 
-test "T7: mapper macro trigger — M1=macro:dodge_roll press starts player" {
+test "macro: mapper macro trigger — M1=macro:dodge_roll press starts player" {
     const allocator = testing.allocator;
 
     var ctx = try makeMapper(
@@ -428,7 +428,7 @@ test "T7: mapper macro trigger — M1=macro:dodge_roll press starts player" {
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
 
-test "T7: mapper macro trigger — no second player on held button (no re-trigger)" {
+test "macro: mapper macro trigger — no second player on held button (no re-trigger)" {
     const allocator = testing.allocator;
 
     var ctx = try makeMapper(

@@ -17,7 +17,7 @@ const ButtonId = state_mod.ButtonId;
 
 // --- T1: capture analyse ---
 
-test "T1: 32-byte frames — magic prefix detected" {
+test "capture: 32-byte frames — magic prefix detected" {
     const allocator = testing.allocator;
 
     // 100 frames; bytes 0-2 always 0x5a 0xa5 0xef; rest vary
@@ -49,7 +49,7 @@ test "T1: 32-byte frames — magic prefix detected" {
     try testing.expect(found_magic[2]);
 }
 
-test "T1: i16le axis at offset 3-4, range -32468..32102" {
+test "capture: i16le axis at offset 3-4, range -32468..32102" {
     const allocator = testing.allocator;
 
     const axis_vals = [_]i16{ -32468, 0, 16000, 32102, -10000 };
@@ -80,7 +80,7 @@ test "T1: i16le axis at offset 3-4, range -32468..32102" {
     try testing.expect(found);
 }
 
-test "T1: u8 axis at offset 8, range 0..255" {
+test "capture: u8 axis at offset 8, range 0..255" {
     const allocator = testing.allocator;
 
     const u8_vals = [_]u8{ 0, 64, 128, 200, 255 };
@@ -109,7 +109,7 @@ test "T1: u8 axis at offset 8, range 0..255" {
     try testing.expect(found);
 }
 
-test "T1: button detection — bit 3 of byte 11, 6 toggles, high confidence" {
+test "capture: button detection — bit 3 of byte 11, 6 toggles, high confidence" {
     const allocator = testing.allocator;
 
     var datas: [7][32]u8 = undefined;
@@ -137,7 +137,7 @@ test "T1: button detection — bit 3 of byte 11, 6 toggles, high confidence" {
 
 // --- T2: TOML skeleton generation ---
 
-test "T2: emitToml — contains [device], [[report]], [report.fields]" {
+test "capture: emitToml — contains [device], [[report]], [report.fields]" {
     const allocator = testing.allocator;
 
     // Build a minimal AnalysisResult
@@ -174,7 +174,7 @@ test "T2: emitToml — contains [device], [[report]], [report.fields]" {
 
 // --- T3: debug render ---
 
-test "T3: renderFrame — ANSI sequences present" {
+test "capture: renderFrame — ANSI sequences present" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
@@ -183,7 +183,7 @@ test "T3: renderFrame — ANSI sequences present" {
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[") != null);
 }
 
-test "T3: renderFrame — correct axis values rendered" {
+test "capture: renderFrame — correct axis values rendered" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var gs = GamepadState{};
@@ -197,7 +197,7 @@ test "T3: renderFrame — correct axis values rendered" {
     try testing.expect(std.mem.indexOf(u8, out, "2345") != null);
 }
 
-test "T3: renderFrame — pressed button differs from released" {
+test "capture: renderFrame — pressed button differs from released" {
     var buf_on: [8192]u8 = undefined;
     var buf_off: [8192]u8 = undefined;
     var fbs_on = std.io.fixedBufferStream(&buf_on);

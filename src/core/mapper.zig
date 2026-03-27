@@ -864,7 +864,7 @@ test "checkGyroActivate: unknown button name returns false" {
 
 // T1: OOM paths
 
-test "T1: Mapper.apply toggle OOM is silently swallowed" {
+test "mapper: Mapper.apply toggle OOM is silently swallowed" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]
@@ -886,14 +886,14 @@ test "T1: Mapper.apply toggle OOM is silently swallowed" {
     _ = try m.apply(.{}, 16);
 }
 
-test "T1: TimerQueue.arm OOM returns error" {
+test "mapper: TimerQueue.arm OOM returns error" {
     var fa = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     var q = TimerQueue.init(fa.allocator(), -1);
     defer q.deinit();
     try testing.expectError(error.OutOfMemory, q.arm(1000, 1));
 }
 
-test "T1: active_macros append OOM is silently ignored" {
+test "mapper: active_macros append OOM is silently ignored" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[macro]]
@@ -915,7 +915,7 @@ test "T1: active_macros append OOM is silently ignored" {
 
 // T5: AuxEventList overflow
 
-test "T5: AuxEventList 64-item fill succeeds, 65th returns Overflow" {
+test "mapper: AuxEventList 64-item fill succeeds, 65th returns Overflow" {
     var list = AuxEventList{};
     for (0..64) |_| {
         try list.append(.{ .rel = .{ .code = 0, .value = 1 } });
@@ -924,7 +924,7 @@ test "T5: AuxEventList 64-item fill succeeds, 65th returns Overflow" {
     try testing.expectError(error.Overflow, list.append(.{ .rel = .{ .code = 0, .value = 1 } }));
 }
 
-test "T5: AuxEventList empty slice returns zero length" {
+test "mapper: AuxEventList empty slice returns zero length" {
     const list = AuxEventList{};
     try testing.expectEqual(@as(usize, 0), list.slice().len);
 }
@@ -1049,7 +1049,7 @@ test "gyro mouse mode: joy_x/y do not affect emit_state axes" {
     try testing.expectEqual(@as(i16, 888), ev.gamepad.ry);
 }
 
-test "T7: layer switch resets gyro EMA and accumulators" {
+test "mapper: layer switch resets gyro EMA and accumulators" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]
@@ -1099,7 +1099,7 @@ test "T7: layer switch resets gyro EMA and accumulators" {
     try testing.expectEqual(@as(f32, 0), m.stick_right.scroll_accum);
 }
 
-test "T7: no layer switch — processor state preserved" {
+test "mapper: no layer switch — processor state preserved" {
     const allocator = testing.allocator;
     const parsed = try makeMapping("", allocator);
     defer parsed.deinit();
@@ -1117,7 +1117,7 @@ test "T7: no layer switch — processor state preserved" {
     try testing.expectEqual(@as(f32, 0.6), m.stick_left.mouse_accum_x);
 }
 
-test "T7: toggle layer switch resets processors" {
+test "mapper: toggle layer switch resets processors" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]

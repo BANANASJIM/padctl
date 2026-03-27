@@ -15,7 +15,7 @@ const Supervisor = @import("../supervisor.zig").Supervisor;
 
 // --- T4: uevent parsing ---
 
-test "T4: parseUevent — add hidraw3" {
+test "supervisor: parseUevent — add hidraw3" {
     const msg = "add@/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/0003:37D7:2401.0001/hidraw/hidraw3\x00SUBSYSTEM=hidraw\x00DEVNAME=hidraw3\x00";
     const ev = netlink_mod.parseUevent(msg);
     try testing.expectEqual(netlink_mod.UeventAction.add, ev.action);
@@ -23,14 +23,14 @@ test "T4: parseUevent — add hidraw3" {
     try testing.expectEqualStrings("hidraw", ev.subsystem.?);
 }
 
-test "T4: parseUevent — remove hidraw3" {
+test "supervisor: parseUevent — remove hidraw3" {
     const msg = "remove@/devices/.../hidraw/hidraw3\x00SUBSYSTEM=hidraw\x00DEVNAME=hidraw3\x00";
     const ev = netlink_mod.parseUevent(msg);
     try testing.expectEqual(netlink_mod.UeventAction.remove, ev.action);
     try testing.expectEqualStrings("hidraw3", ev.devname.?);
 }
 
-test "T4: parseUevent — non-hidraw subsystem" {
+test "supervisor: parseUevent — non-hidraw subsystem" {
     const msg = "add@/devices/.../input/input7\x00SUBSYSTEM=input\x00";
     const ev = netlink_mod.parseUevent(msg);
     try testing.expectEqual(netlink_mod.UeventAction.add, ev.action);
@@ -38,13 +38,13 @@ test "T4: parseUevent — non-hidraw subsystem" {
     try testing.expectEqual(@as(?[]const u8, null), ev.devname);
 }
 
-test "T4: parseUevent — no DEVNAME key" {
+test "supervisor: parseUevent — no DEVNAME key" {
     const msg = "add@/devices/.../hidraw/hidraw5\x00SUBSYSTEM=hidraw\x00";
     const ev = netlink_mod.parseUevent(msg);
     try testing.expectEqual(@as(?[]const u8, null), ev.devname);
 }
 
-test "T4: parseUevent — no SUBSYSTEM key" {
+test "supervisor: parseUevent — no SUBSYSTEM key" {
     const msg = "add@/devices/.../hidraw/hidraw5\x00DEVNAME=hidraw5\x00";
     const ev = netlink_mod.parseUevent(msg);
     try testing.expectEqual(@as(?[]const u8, null), ev.subsystem);
@@ -93,7 +93,7 @@ fn makeInstance(allocator: std.mem.Allocator, mock: *MockDeviceIO, cfg: *const d
     return inst;
 }
 
-test "T5: attach — one instance created, thread running" {
+test "supervisor: attach — one instance created, thread running" {
     const allocator = testing.allocator;
 
     const parsed = try device_mod.parseString(allocator, minimal_device_toml);
@@ -112,7 +112,7 @@ test "T5: attach — one instance created, thread running" {
     sup.stopAll();
 }
 
-test "T5: attach duplicate devname — no-op, still one instance" {
+test "supervisor: attach duplicate devname — no-op, still one instance" {
     const allocator = testing.allocator;
 
     const parsed = try device_mod.parseString(allocator, minimal_device_toml);
@@ -143,7 +143,7 @@ test "T5: attach duplicate devname — no-op, still one instance" {
     sup.stopAll();
 }
 
-test "T5: detach — instance stopped and freed" {
+test "supervisor: detach — instance stopped and freed" {
     const allocator = testing.allocator;
 
     const parsed = try device_mod.parseString(allocator, minimal_device_toml);
@@ -163,7 +163,7 @@ test "T5: detach — instance stopped and freed" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "T5: detach unknown devname — no panic" {
+test "supervisor: detach unknown devname — no panic" {
     const allocator = testing.allocator;
 
     var sup = try Supervisor.initForTest(allocator);
@@ -172,7 +172,7 @@ test "T5: detach unknown devname — no panic" {
     sup.detach("hidraw99"); // must not panic
 }
 
-test "T5: attach-detach-attach — second instance created normally" {
+test "supervisor: attach-detach-attach — second instance created normally" {
     const allocator = testing.allocator;
 
     const parsed = try device_mod.parseString(allocator, minimal_device_toml);
