@@ -166,10 +166,13 @@ fn isValidTransform(t: []const u8) bool {
     return false;
 }
 
+const max_transforms = 8; // must match interpreter.MAX_TRANSFORMS
+
 fn isValidTransformChain(chain: []const u8) bool {
     var pos: usize = 0;
     var depth: usize = 0;
     var seg_start: usize = 0;
+    var count: usize = 0;
     while (pos < chain.len) : (pos += 1) {
         switch (chain[pos]) {
             '(' => depth += 1,
@@ -178,11 +181,15 @@ fn isValidTransformChain(chain: []const u8) bool {
             },
             ',' => if (depth == 0) {
                 if (!isValidTransform(chain[seg_start..pos])) return false;
+                count += 1;
+                if (count > max_transforms) return false;
                 seg_start = pos + 1;
             },
             else => {},
         }
     }
+    count += 1;
+    if (count > max_transforms) return false;
     return isValidTransform(chain[seg_start..]);
 }
 
@@ -479,6 +486,47 @@ test "invalid transform returns error" {
         \\x = { offset = 0, type = "u8", transform = "$val * 2 + 1" }
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "transform chain exceeding max count returns error" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\x = { offset = 0, type = "u8", transform = "abs, abs, abs, abs, abs, abs, abs, abs, abs" }
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "transform chain at max count is accepted" {
+    const allocator = std.testing.allocator;
+    const ok =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\x = { offset = 0, type = "u8", transform = "abs, abs, abs, abs, abs, abs, abs, abs" }
+    ;
+    const parsed = try parseString(allocator, ok);
+    defer parsed.deinit();
 }
 
 test "unknown button name returns error" {
