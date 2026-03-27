@@ -90,6 +90,8 @@ pub const testing_support = struct {
     pub const ipc_props = @import("test/properties/ipc_props.zig");
     pub const transform_props = @import("test/properties/transform_props.zig");
     pub const e2e_pipeline_props = @import("test/properties/e2e_pipeline_props.zig");
+    pub const metamorphic_props = @import("test/properties/metamorphic_props.zig");
+    pub const contract_props = @import("test/properties/contract_props.zig");
 };
 
 pub const config = struct {

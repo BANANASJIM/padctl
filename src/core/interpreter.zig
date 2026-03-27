@@ -814,7 +814,11 @@ test "checksum sum8 correct passes" {
     const interp = Interpreter.init(&parsed.value);
     // sum = 0xAA + 0x01 + 0x02 + 0x03 = 0xB0
     const raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0xB0, 0x00 };
-    _ = try interp.processReport(0, &raw);
+    // Assertion density: verify processReport succeeds (returns non-null delta)
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    // No fields declared — all fields must remain null
+    try testing.expectEqual(@as(?i16, null), delta.ax);
+    try testing.expectEqual(@as(?u8, null), delta.lt);
 }
 
 test "checksum xor" {
@@ -844,7 +848,9 @@ test "checksum xor" {
     const interp = Interpreter.init(&parsed.value);
     // xor = 0xAA ^ 0x01 ^ 0x02 ^ 0x03 = 0xAA
     const raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0xAA, 0x00 };
-    _ = try interp.processReport(0, &raw);
+    // Assertion density: checksum passes and returns a non-null delta
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u64, null), delta.buttons);
 }
 
 test "checksum xor mismatch returns error" {
@@ -1311,7 +1317,9 @@ test "checksum crc32 correct passes" {
     const interp = Interpreter.init(&parsed.value);
     // CRC32-IsoHdlc([0xAA,0x01,0x02,0x03]) = 0xa96f7f72
     var raw = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0x72, 0x7f, 0x6f, 0xa9, 0x00 };
-    _ = try interp.processReport(0, &raw);
+    // Assertion density: verify the call succeeds (non-null delta); no fields declared
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, null), delta.ax);
 }
 
 test "checksum crc32 mismatch returns error" {
@@ -1352,7 +1360,9 @@ test "checksum crc32 with seed" {
     const interp = Interpreter.init(&parsed.value);
     // seed=66=0x42 → CRC32(seed_byte=0x42, data=[0x01,0x02,0x03]) = 0xbaa416a5
     var raw = [_]u8{ 0x01, 0x01, 0x02, 0x03, 0xa5, 0x16, 0xa4, 0xba, 0x00 };
-    _ = try interp.processReport(0, &raw);
+    // Assertion density: verify the call succeeds (non-null delta); no fields declared
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u64, null), delta.buttons);
 }
 
 // T3: boundary reports
@@ -1377,8 +1387,9 @@ test "interpreter: oversized report parsed without bounds error" {
     raw[1] = 0xa5;
     raw[2] = 0xef;
     std.mem.writeInt(i16, raw[3..5], 100, .little);
-    const result = try interp.processReport(1, &raw);
-    try testing.expect(result != null);
+    // Assertion density: verify the specific field value parsed correctly
+    const delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, 100), delta.ax);
 }
 
 test "interpreter: all-0xFF report does not panic" {
@@ -1624,6 +1635,169 @@ test "FieldTag.dpad: hat switch values 0-7 decode correctly" {
         try std.testing.expectEqual(HAT_X[i], delta.dpad_x.?);
         try std.testing.expectEqual(HAT_Y[i], delta.dpad_y.?);
     }
+}
+
+// T5: mutation audit — each test proves the suite can catch a specific mutation
+
+// Mutation 1: readFieldByTag offset off-by-one (raw[off+1] instead of raw[off])
+// If the offset were incremented by 1, a field declared at offset=3 would read
+// raw[4..6] instead of raw[3..5], producing a different i16le value.
+test "mutation audit: readFieldByTag offset boundary" {
+    // raw bytes arranged so that [3..5]=0x01,0x00 (=1) but [4..6]=0x00,0x02 (=512)
+    const raw = [_]u8{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00 };
+    const val = readFieldByTag(&raw, 3, .i16le);
+    // Off-by-one mutation would produce 2 (low byte 0x00, high byte 0x02 → 0x0200=512)
+    try testing.expectEqual(@as(i64, 1), val);
+    // Also verify adjacent byte gives a different result (proving specificity)
+    const mutated = readFieldByTag(&raw, 4, .i16le);
+    try testing.expect(val != mutated);
+}
+
+// Mutation 2a: negate(-32768) — without the minInt guard, -(-32768) overflows i64
+// The guard returns maxInt(i64) instead of crashing/wrapping.
+test "mutation audit: negate minInt guard" {
+    // chain type_tag doesn't matter for negate; use i16le (type_max=32767)
+    var chain = compileTransformChain("negate", .i16le);
+    const result = runTransformChain(std.math.minInt(i64), &chain);
+    // A naive -val without guard would overflow or wrap to minInt(i64) again
+    try testing.expectEqual(@as(i64, std.math.maxInt(i64)), result);
+}
+
+// Mutation 2b: scale boundary correctness — verify scale math at boundary values.
+// Note: the t_max==0 guard in runTransformChain is defensive code; typeMaxByTag never
+// returns 0 for any valid FieldType, so that branch is unreachable with current types.
+test "mutation audit: scale boundary correctness" {
+    // scale(0, 100) on u8 type_max=255: scaled(v) = v * 100 / 255
+    var chain = compileTransformChain("scale(0, 100)", .u8);
+    // val = type_max (255): 255 * 100 / 255 = 100 (upper boundary maps to b)
+    const result = runTransformChain(255, &chain);
+    try testing.expectEqual(@as(i64, 100), result);
+    // val = 0: 0 * 100 / 255 = 0 (lower boundary maps to a)
+    const result_zero = runTransformChain(0, &chain);
+    try testing.expectEqual(@as(i64, 0), result_zero);
+}
+
+// Mutation 3: button group bit shift direction reversed (>> instead of <<, or vice-versa)
+// If (src_val >> bit_idx) became (src_val << bit_idx), a button at bit 1 would
+// only appear pressed when bit 30 is set (shift wraps), not bit 1.
+test "mutation audit: button group bit shift direction" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.button_group]
+        \\source = { offset = 1, size = 1 }
+        \\map = { A = 0, B = 1, X = 7 }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // Only bit 1 set (B button): raw[1] = 0b00000010 = 0x02
+    const raw_b = [_]u8{ 0x01, 0x02, 0x00, 0x00 };
+    const delta_b = (try interp.processReport(0, &raw_b)) orelse return error.NoMatch;
+    const btns_b = delta_b.buttons orelse return error.NoBtns;
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_bit: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const x_bit: u6 = @intCast(@intFromEnum(ButtonId.X));
+    // B must be pressed, A and X must not be
+    try testing.expect(btns_b & (@as(u64, 1) << b_bit) != 0);
+    try testing.expectEqual(@as(u64, 0), btns_b & (@as(u64, 1) << a_bit));
+    try testing.expectEqual(@as(u64, 0), btns_b & (@as(u64, 1) << x_bit));
+    // Only bit 7 set (X): raw[1] = 0x80
+    const raw_x = [_]u8{ 0x01, 0x80, 0x00, 0x00 };
+    const delta_x = (try interp.processReport(0, &raw_x)) orelse return error.NoMatch;
+    const btns_x = delta_x.buttons orelse return error.NoBtns;
+    try testing.expect(btns_x & (@as(u64, 1) << x_bit) != 0);
+    try testing.expectEqual(@as(u64, 0), btns_x & (@as(u64, 1) << b_bit));
+    try testing.expectEqual(@as(u64, 0), btns_x & (@as(u64, 1) << a_bit));
+}
+
+// Mutation 4: CRC32 wrong initial value
+// The implementation uses Crc32IsoHdlc (initial=0xFFFFFFFF, poly=0xEDB88320).
+// A mutation that used initial=0x00000000 would produce a different CRC for the
+// same data, causing a valid packet to be rejected (or an invalid one accepted).
+test "mutation audit: crc32 initial value sensitivity" {
+    // This test asserts the exact CRC32 value of a known payload so that if
+    // the initial register were changed from 0xFFFFFFFF to 0x00000000 the
+    // stored checksum would not match and ChecksumMismatch would be returned.
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 9
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0xBB]
+        \\[report.checksum]
+        \\algo = "crc32"
+        \\range = [0, 4]
+        \\expect = { offset = 4, type = "u32le" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // CRC32-IsoHdlc([0xBB,0x11,0x22,0x33]) — computed with initial=0xFFFFFFFF
+    // Must NOT equal CRC32 computed with initial=0x00000000 (would be 0x59c9027e)
+    var crc_correct = std.hash.crc.Crc32IsoHdlc.init();
+    crc_correct.update(&[_]u8{ 0xBB, 0x11, 0x22, 0x33 });
+    const correct_val = crc_correct.final();
+    var raw = [_]u8{ 0xBB, 0x11, 0x22, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    std.mem.writeInt(u32, raw[4..8], correct_val, .little);
+    // Must pass with correct CRC
+    _ = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    // Wrong initial-value CRC must fail
+    raw[4] = 0x7e;
+    raw[5] = 0x02;
+    raw[6] = 0xc9;
+    raw[7] = 0x59; // CRC32 with initial=0 for same data
+    try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
+}
+
+// Mutation 5: processReport match comparison inverted (== vs !=)
+// If checkMatch returned true when bytes do NOT match, any report with the
+// wrong magic would be processed; if inverted the other way, correct magic
+// would be rejected. We verify both polarities.
+test "mutation audit: processReport match polarity" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, vader5_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // Correct magic → must match and return non-null
+    const raw_ok = makeIf1Sample();
+    const d = try interp.processReport(1, &raw_ok);
+    try testing.expect(d != null);
+    // Single byte difference → must not match (returns null)
+    var raw_bad = makeIf1Sample();
+    raw_bad[2] ^= 0x01; // flip one bit in magic byte
+    const d_bad = try interp.processReport(1, &raw_bad);
+    try testing.expectEqual(@as(?GamepadStateDelta, null), d_bad);
+    // All-zero magic → must not match
+    var raw_zero = makeIf1Sample();
+    raw_zero[0] = 0;
+    raw_zero[1] = 0;
+    raw_zero[2] = 0;
+    const d_zero = try interp.processReport(1, &raw_zero);
+    try testing.expectEqual(@as(?GamepadStateDelta, null), d_zero);
 }
 
 test "FieldTag.dpad: value 8 (released) and >8 treated as neutral" {
