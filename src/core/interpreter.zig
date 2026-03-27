@@ -265,7 +265,7 @@ pub const CompiledChecksum = struct {
 
 // --- pre-compiled report ---
 
-const MAX_FIELDS = 32;
+pub const MAX_FIELDS = 32;
 const MAX_BUTTONS = 32;
 const MAX_REPORTS = 8;
 

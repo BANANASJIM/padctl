@@ -32,11 +32,11 @@ pub fn readField(raw: []const u8, off: usize, t: FieldType) i64 {
 
 // Bit extraction: assemble bytes little-endian, shift, mask.
 pub fn readBits(raw: []const u8, byte_offset: u16, start_bit: u3, bit_count: u6) u32 {
-    if (bit_count == 0) return 0;
     const needed: u8 = (@as(u8, start_bit) + @as(u8, bit_count) + 7) / 8;
     var val: u32 = 0;
     for (0..needed) |i| val |= @as(u32, raw[byte_offset + i]) << @intCast(i * 8);
     val >>= start_bit;
+    if (bit_count == 0) return 0;
     if (bit_count >= 32) return val;
     const shift: u5 = @intCast(bit_count);
     return val & ((@as(u32, 1) << shift) - 1);

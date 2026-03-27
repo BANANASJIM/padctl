@@ -165,6 +165,27 @@ test "SM: reload-while-empty is no-op" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
+test "SM: attach → reload-empty → attach — reload cleans devname_map" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    try attach(&sup, allocator, &mock_a, &parsed.value, "hidraw0", "key0");
+    try reloadEmpty(&sup);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    // After reload, devname_map must be cleared; re-attaching must succeed.
+    try attach(&sup, allocator, &mock_b, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    sup.stopAll();
+}
+
 test "SM: attach → reload-empty removes instance" {
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);
