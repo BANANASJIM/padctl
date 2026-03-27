@@ -12,7 +12,7 @@ pub const ValidationError = struct {
     }
 };
 
-const valid_checksum_algos = [_][]const u8{ "crc32", "crc8", "xor", "sum8", "none" };
+const valid_checksum_algos = [_][]const u8{ "crc32", "xor", "sum8" };
 
 fn isValidChecksumAlgo(algo: []const u8) bool {
     for (valid_checksum_algos) |a| {
@@ -70,7 +70,7 @@ fn validateExtended(
     for (cfg.report) |report| {
         const cs = report.checksum orelse continue;
         if (!isValidChecksumAlgo(cs.algo)) {
-            try addError(errors, allocator, file, "report '{s}': unknown checksum algo '{s}' (valid: crc32, crc8, xor, none)", .{ report.name, cs.algo });
+            try addError(errors, allocator, file, "report '{s}': unknown checksum algo '{s}' (valid: crc32, xor, sum8)", .{ report.name, cs.algo });
         }
     }
 

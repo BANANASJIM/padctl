@@ -8,9 +8,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\
         \\[Service]
         \\Type=simple
-        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/ --pid-file /run/padctl/padctl.pid
-        \\PIDFile=/run/padctl/padctl.pid
-        \\RuntimeDirectory=padctl
+        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/
         \\Restart=on-failure
         \\RestartSec=3
         \\ProtectSystem=strict
