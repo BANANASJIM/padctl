@@ -224,18 +224,17 @@ test "metamorphic: button bit flip toggles button state" {
 
 // MR5: scale linearity — doubling input approximately doubles output (within 1 lsb tolerance).
 // Uses runTransformChain directly since processReport saturation makes exact checks tricky.
+// scale(0, 100) on u8 (t_max=255): scaled(v) = v * 100 / 255, non-trivial rational mapping.
 test "metamorphic: scale linearity — doubling input roughly doubles output" {
     var prng = std.Random.DefaultPrng.init(0x5CA1E);
     const rng = prng.random();
 
-    // scale(0, 32767) on i16le type_tag (t_max = 32767)
-    var chain = CompiledTransformChain{ .type_tag = .i16le };
-    chain.items[0] = .{ .op = .scale, .a = 0, .b = 32767 };
-    chain.len = 1;
+    // scale(0, 100) on u8 type_tag (t_max = 255): identity is avoided, exercises real linearity.
+    var chain = compileTransformChain("scale(0, 100)", .u8);
 
     for (0..1000) |_| {
-        // Pick v in [1, 16383] so 2v fits in i16
-        const v: i64 = rng.intRangeAtMost(i16, 1, 16383);
+        // Pick v in [1, 127] so 2v fits in u8 range
+        const v: i64 = rng.intRangeAtMost(u8, 1, 127);
         const out_v = runTransformChain(v, &chain);
         const out_2v = runTransformChain(v * 2, &chain);
 
@@ -310,8 +309,9 @@ test "metamorphic: double-negate round-trips at processReport level" {
     for (0..500) |_| {
         var raw = [_]u8{0} ** 4;
         const v: i16 = rng.int(i16);
-        // Skip minInt(i16) — negate is defined as saturate to maxInt there
-        if (v == std.math.minInt(i16)) continue;
+        // minInt(i16) round-trips correctly: negate(-32768)=32768, negate(32768)=-32768,
+        // saturateCast(i16,-32768)=-32768. The saturation-to-maxInt guard only fires for
+        // minInt(i64), which an i16 value never reaches.
         std.mem.writeInt(i16, raw[0..2], v, .little);
 
         const d_twice = (try i_twice.processReport(1, &raw)) orelse continue;

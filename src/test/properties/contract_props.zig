@@ -137,7 +137,18 @@ test "contract OutputDevice: close without prior emit is safe" {
     dev.close(); // must not crash
 }
 
-// C9: emit() records exact state — no mutation of the passed value.
+// C9: poll_ff() on a fresh MockOutput returns null (no force-feedback queued).
+test "contract OutputDevice: poll_ff on fresh mock returns null" {
+    const allocator = testing.allocator;
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    const dev = out.outputDevice();
+    const ff = try dev.pollFf();
+    try testing.expect(ff == null);
+}
+
+// C10: emit() records exact state — no mutation of the passed value.
 test "contract OutputDevice: emit records the exact state passed" {
     const allocator = testing.allocator;
     var out = MockOutput.init(allocator);
