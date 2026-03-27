@@ -2,7 +2,9 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const ioctl = @import("../io/ioctl_constants.zig");
-const readPhysicalPath = @import("../io/hidraw.zig").readPhysicalPath;
+const hidraw = @import("../io/hidraw.zig");
+const readPhysicalPath = hidraw.readPhysicalPath;
+const readInterfaceId = hidraw.readInterfaceId;
 
 const DEFAULT_CONFIG_DIR = "/usr/share/padctl/devices";
 const MAX_HIDRAW = 64;
@@ -26,9 +28,10 @@ pub const ScanEntry = struct {
     name: []const u8,
     phys: []const u8,
     config_path: ?[]const u8,
+    interface_id: ?u8 = null,
 };
 
-/// Enumerate /dev/hidrawN, deduplicate by physical path, match against *.toml.
+/// Enumerate /dev/hidrawN, match against *.toml with interface filtering.
 /// Caller owns result; call freeEntries() when done.
 pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
     var entries: std.ArrayList(ScanEntry) = .{};
@@ -37,20 +40,12 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         entries.deinit(allocator);
     }
 
-    var phys_seen = std.StringHashMap(void).init(allocator);
-    defer {
-        var it = phys_seen.keyIterator();
-        while (it.next()) |k| allocator.free(k.*);
-        phys_seen.deinit();
-    }
-
     var i: u8 = 0;
     while (i < MAX_HIDRAW) : (i += 1) {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
 
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| switch (err) {
-            // Missing nodes are expected while probing hidraw0..hidraw63.
             error.FileNotFound => continue,
             else => {
                 std.log.warn("scan: open {s} failed: {}", .{ path, err });
@@ -70,19 +65,6 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
             break :blk try allocator.dupe(u8, "");
         };
 
-        if (phys_owned.len > 0) {
-            const phys_key = try allocator.dupe(u8, phys_owned);
-            const gop = phys_seen.getOrPut(phys_key) catch |err| {
-                allocator.free(phys_key);
-                return err;
-            };
-            if (gop.found_existing) {
-                allocator.free(phys_key);
-                allocator.free(phys_owned);
-                continue;
-            }
-        }
-
         var name_buf: [NAME_BUF_LEN]u8 = std.mem.zeroes([NAME_BUF_LEN]u8);
         const name_rc = linux.ioctl(fd, HIDIOCGRAWNAME, @intFromPtr(&name_buf));
         if (std.posix.errno(name_rc) != .SUCCESS) {
@@ -92,7 +74,21 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
 
         const vid: u16 = @bitCast(info.vendor);
         const pid: u16 = @bitCast(info.product);
-        const config_path = findConfig(allocator, config_dir, vid, pid) catch null;
+        const config_match: ?ConfigMatch = findConfig(allocator, config_dir, vid, pid) catch null;
+
+        const iface_id = readInterfaceId(path);
+        var matched_config: ?[]const u8 = null;
+        if (config_match) |cm| {
+            if (cm.interface_id) |want_iface| {
+                if (iface_id != null and iface_id.? == want_iface) {
+                    matched_config = cm.path;
+                } else {
+                    allocator.free(cm.path);
+                }
+            } else {
+                matched_config = cm.path;
+            }
+        }
 
         try entries.append(allocator, .{
             .path = try allocator.dupe(u8, path),
@@ -100,14 +96,20 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
             .pid = pid,
             .name = try allocator.dupe(u8, name_raw),
             .phys = phys_owned,
-            .config_path = config_path,
+            .config_path = matched_config,
+            .interface_id = iface_id,
         });
     }
 
     return entries.toOwnedSlice(allocator);
 }
 
-fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16) ![]const u8 {
+const ConfigMatch = struct {
+    path: []const u8,
+    interface_id: ?u8,
+};
+
+fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16) !ConfigMatch {
     var dir = if (std.fs.path.isAbsolute(config_dir))
         try std.fs.openDirAbsolute(config_dir, .{ .iterate = true })
     else
@@ -122,7 +124,7 @@ fn findConfigInDir(
     dir_path: []const u8,
     vid: u16,
     pid: u16,
-) ![]const u8 {
+) !ConfigMatch {
     var it = dir.iterate();
     while (try it.next()) |entry| {
         switch (entry.kind) {
@@ -131,17 +133,17 @@ fn findConfigInDir(
                 defer sub.close();
                 const sub_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
                 defer allocator.free(sub_path);
-                if (findConfigInDir(allocator, sub, sub_path, vid, pid)) |p| return p else |_| {}
+                if (findConfigInDir(allocator, sub, sub_path, vid, pid)) |m| return m else |_| {}
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
                 const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
                 errdefer allocator.free(full_path);
-                const matches = tomlMatchesVidPid(allocator, full_path, vid, pid) catch |err| blk: {
+                const match_result = tomlMatchesVidPid(allocator, full_path, vid, pid) catch |err| blk: {
                     std.log.warn("scan: failed to read/parse '{s}': {}", .{ full_path, err });
-                    break :blk false;
+                    break :blk null;
                 };
-                if (matches) return full_path;
+                if (match_result) |iface_id| return .{ .path = full_path, .interface_id = iface_id };
                 allocator.free(full_path);
             },
             else => {},
@@ -150,12 +152,41 @@ fn findConfigInDir(
     return error.NotFound;
 }
 
-fn tomlMatchesVidPid(allocator: std.mem.Allocator, path: []const u8, vid: u16, pid: u16) !bool {
+/// Returns the declared interface id (wrapped in optional) if VID/PID match, or null if no match.
+/// The inner ?u8 is null when the config has no interface declaration.
+fn tomlMatchesVidPid(allocator: std.mem.Allocator, path: []const u8, vid: u16, pid: u16) !??u8 {
     const content = try std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024);
     defer allocator.free(content);
-    const file_vid = extractHexField(content, "vid") orelse return false;
-    const file_pid = extractHexField(content, "pid") orelse return false;
-    return file_vid == vid and file_pid == pid;
+    const file_vid = extractHexField(content, "vid") orelse return null;
+    const file_pid = extractHexField(content, "pid") orelse return null;
+    if (file_vid != vid or file_pid != pid) return null;
+    return extractInterfaceId(content);
+}
+
+/// Extract interface id from [[device.interface]] section in TOML content.
+/// Returns the `id` value if found, null otherwise.
+fn extractInterfaceId(content: []const u8) ?u8 {
+    const marker = "[[device.interface]]";
+    const idx = std.mem.indexOf(u8, content, marker) orelse return null;
+    const after = content[idx + marker.len ..];
+    // Parse lines until next section header or EOF
+    var lines = std.mem.splitScalar(u8, after, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (trimmed.len == 0) continue;
+        if (trimmed[0] == '[') break; // next section
+        if (trimmed[0] == '#') continue;
+        if (!std.mem.startsWith(u8, trimmed, "id")) continue;
+        const rest = std.mem.trimLeft(u8, trimmed["id".len..], " \t");
+        if (rest.len == 0 or rest[0] != '=') continue;
+        const val_str = std.mem.trimLeft(u8, rest[1..], " \t");
+        // Parse decimal integer
+        var end: usize = 0;
+        while (end < val_str.len and std.ascii.isDigit(val_str[end])) end += 1;
+        if (end == 0) continue;
+        return std.fmt.parseInt(u8, val_str[0..end], 10) catch null;
+    }
+    return null;
 }
 
 /// Extract the first occurrence of `key = 0x<hex>` or `key = <dec>` from TOML text.
@@ -337,10 +368,10 @@ test "extractHexField: ignores commented-out lines" {
 test "findConfig: matches VID/PID in real devices dir" {
     const allocator = std.testing.allocator;
     // vader5.toml: vid=0x37d7 pid=0x2401
-    const path = findConfig(allocator, "devices", 0x37d7, 0x2401) catch null;
-    defer if (path) |p| allocator.free(p);
-    try std.testing.expect(path != null);
-    try std.testing.expect(std.mem.endsWith(u8, path.?, ".toml"));
+    const cm = findConfig(allocator, "devices", 0x37d7, 0x2401) catch null;
+    defer if (cm) |m| allocator.free(m.path);
+    try std.testing.expect(cm != null);
+    try std.testing.expect(std.mem.endsWith(u8, cm.?.path, ".toml"));
 }
 
 test "findConfig: no match returns error" {
@@ -348,29 +379,26 @@ test "findConfig: no match returns error" {
     try std.testing.expectError(error.NotFound, findConfig(allocator, "devices", 0xffff, 0xffff));
 }
 
+test "findConfig: vader4-pro has interface_id 2" {
+    const allocator = std.testing.allocator;
+    // vader4-pro-04b4-2412.toml: vid=0x04b4 pid=0x2412, interface=2
+    const cm = findConfig(allocator, "devices", 0x04b4, 0x2412) catch null;
+    defer if (cm) |m| allocator.free(m.path);
+    try std.testing.expect(cm != null);
+    try std.testing.expectEqual(@as(?u8, 2), cm.?.interface_id);
+}
+
+test "extractInterfaceId: basic" {
+    const toml = "[[device.interface]]\nid = 2\nclass = \"hid\"\n";
+    try std.testing.expectEqual(@as(?u8, 2), extractInterfaceId(toml));
+}
+
+test "extractInterfaceId: missing section" {
+    const toml = "[device]\nname = \"foo\"\nvid = 0x1234\n";
+    try std.testing.expectEqual(@as(?u8, null), extractInterfaceId(toml));
+}
+
 test "freeEntries: empty slice is a no-op" {
     const empty: []ScanEntry = &.{};
     freeEntries(std.testing.allocator, empty);
-}
-
-test "scan dedup map stores its own phys key copy" {
-    const allocator = std.testing.allocator;
-    var phys_seen = std.StringHashMap(void).init(allocator);
-    defer {
-        var it = phys_seen.keyIterator();
-        while (it.next()) |k| allocator.free(k.*);
-        phys_seen.deinit();
-    }
-
-    const phys_owned = try allocator.dupe(u8, "usb-1-2");
-    defer allocator.free(phys_owned);
-
-    const phys_key = try allocator.dupe(u8, phys_owned);
-    const gop = try phys_seen.getOrPut(phys_key);
-    try std.testing.expect(!gop.found_existing);
-
-    var it = phys_seen.keyIterator();
-    const stored = it.next().?;
-    try std.testing.expectEqualStrings(phys_owned, stored.*);
-    try std.testing.expect(@intFromPtr(phys_owned.ptr) != @intFromPtr(stored.ptr));
 }
