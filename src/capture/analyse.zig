@@ -52,6 +52,7 @@ pub fn analyse(frames: []const Frame, allocator: std.mem.Allocator) !AnalysisRes
         .axes = try allocator.alloc(AxisCandidate, 0),
     };
 
+    if (frames[0].data.len > std.math.maxInt(u16)) return error.ReportTooLarge;
     const report_size: u16 = @intCast(frames[0].data.len);
 
     // magic bytes: bytes that never change across all frames
