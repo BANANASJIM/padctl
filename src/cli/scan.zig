@@ -74,21 +74,11 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
 
         const vid: u16 = @bitCast(info.vendor);
         const pid: u16 = @bitCast(info.product);
-        const config_match: ?ConfigMatch = findConfig(allocator, config_dir, vid, pid) catch null;
-
         const iface_id = readInterfaceId(path);
-        var matched_config: ?[]const u8 = null;
-        if (config_match) |cm| {
-            if (cm.interface_id) |want_iface| {
-                if (iface_id != null and iface_id.? == want_iface) {
-                    matched_config = cm.path;
-                } else {
-                    allocator.free(cm.path);
-                }
-            } else {
-                matched_config = cm.path;
-            }
-        }
+        const matched_config: ?[]const u8 = if (findConfig(allocator, config_dir, vid, pid, iface_id)) |m| m else |err| switch (err) {
+            error.NotFound => null,
+            else => return err,
+        };
 
         try entries.append(allocator, .{
             .path = try allocator.dupe(u8, path),
@@ -101,21 +91,46 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         });
     }
 
+    // Suppress unmatched sibling interfaces of matched physical devices.
+    // If any hidraw node for a physical device matched a config, hide the
+    // unmatched siblings sharing the same physical path.
+    for (entries.items) |e| {
+        if (e.config_path != null and e.phys.len > 0) {
+            for (entries.items) |*other| {
+                if (other.config_path == null and std.mem.eql(u8, other.phys, e.phys)) {
+                    other.config_path = ""; // sentinel: suppress but don't show
+                }
+            }
+        }
+    }
+
+    // Remove suppressed entries (sentinel config_path == "")
+    var keep: usize = 0;
+    for (entries.items) |e| {
+        if (e.config_path) |cp| {
+            if (cp.len == 0) {
+                // Sentinel — free owned fields but not config_path (it's a literal)
+                allocator.free(e.path);
+                allocator.free(e.name);
+                allocator.free(e.phys);
+                continue;
+            }
+        }
+        entries.items[keep] = e;
+        keep += 1;
+    }
+    entries.shrinkRetainingCapacity(keep);
+
     return entries.toOwnedSlice(allocator);
 }
 
-const ConfigMatch = struct {
-    path: []const u8,
-    interface_id: ?u8,
-};
-
-fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16) !ConfigMatch {
+fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8) ![]const u8 {
     var dir = if (std.fs.path.isAbsolute(config_dir))
         try std.fs.openDirAbsolute(config_dir, .{ .iterate = true })
     else
         try std.fs.cwd().openDir(config_dir, .{ .iterate = true });
     defer dir.close();
-    return findConfigInDir(allocator, dir, config_dir, vid, pid);
+    return findConfigInDir(allocator, dir, config_dir, vid, pid, iface_id);
 }
 
 fn findConfigInDir(
@@ -124,7 +139,8 @@ fn findConfigInDir(
     dir_path: []const u8,
     vid: u16,
     pid: u16,
-) !ConfigMatch {
+    iface_id: ?u8,
+) ![]const u8 {
     var it = dir.iterate();
     while (try it.next()) |entry| {
         switch (entry.kind) {
@@ -133,7 +149,7 @@ fn findConfigInDir(
                 defer sub.close();
                 const sub_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
                 defer allocator.free(sub_path);
-                if (findConfigInDir(allocator, sub, sub_path, vid, pid)) |m| return m else |_| {}
+                if (findConfigInDir(allocator, sub, sub_path, vid, pid, iface_id)) |m| return m else |_| {}
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
@@ -143,7 +159,16 @@ fn findConfigInDir(
                     std.log.warn("scan: failed to read/parse '{s}': {}", .{ full_path, err });
                     break :blk null;
                 };
-                if (match_result) |iface_id| return .{ .path = full_path, .interface_id = iface_id };
+                if (match_result) |cfg_iface| {
+                    // Config declares an interface: must match the device's interface
+                    if (cfg_iface) |want_iface| {
+                        if (iface_id != null and iface_id.? == want_iface) return full_path;
+                        allocator.free(full_path);
+                        continue; // wrong interface, keep searching
+                    }
+                    // Config has no interface constraint: matches any interface
+                    return full_path;
+                }
                 allocator.free(full_path);
             },
             else => {},
@@ -365,27 +390,32 @@ test "extractHexField: ignores commented-out lines" {
     try std.testing.expectEqual(@as(?u16, 0x5678), extractHexField("# vid = 0x1234\nvid = 0x5678\n", "vid"));
 }
 
-test "findConfig: matches VID/PID in real devices dir" {
+test "findConfig: matches VID/PID with correct interface" {
     const allocator = std.testing.allocator;
-    // vader5.toml: vid=0x37d7 pid=0x2401
-    const cm = findConfig(allocator, "devices", 0x37d7, 0x2401) catch null;
-    defer if (cm) |m| allocator.free(m.path);
-    try std.testing.expect(cm != null);
-    try std.testing.expect(std.mem.endsWith(u8, cm.?.path, ".toml"));
+    // vader5.toml: vid=0x37d7 pid=0x2401, interface=1
+    const path = findConfig(allocator, "devices", 0x37d7, 0x2401, 1) catch null;
+    defer if (path) |p| allocator.free(p);
+    try std.testing.expect(path != null);
+    try std.testing.expect(std.mem.endsWith(u8, path.?, ".toml"));
 }
 
 test "findConfig: no match returns error" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(error.NotFound, findConfig(allocator, "devices", 0xffff, 0xffff));
+    try std.testing.expectError(error.NotFound, findConfig(allocator, "devices", 0xffff, 0xffff, null));
 }
 
-test "findConfig: vader4-pro has interface_id 2" {
+test "findConfig: vader4-pro matches with correct interface" {
     const allocator = std.testing.allocator;
     // vader4-pro-04b4-2412.toml: vid=0x04b4 pid=0x2412, interface=2
-    const cm = findConfig(allocator, "devices", 0x04b4, 0x2412) catch null;
-    defer if (cm) |m| allocator.free(m.path);
-    try std.testing.expect(cm != null);
-    try std.testing.expectEqual(@as(?u8, 2), cm.?.interface_id);
+    const path = findConfig(allocator, "devices", 0x04b4, 0x2412, 2) catch null;
+    defer if (path) |p| allocator.free(p);
+    try std.testing.expect(path != null);
+}
+
+test "findConfig: vader4-pro rejects wrong interface" {
+    const allocator = std.testing.allocator;
+    // vader4-pro config requires interface 2; interface 0 should not match
+    try std.testing.expectError(error.NotFound, findConfig(allocator, "devices", 0x04b4, 0x2412, 0));
 }
 
 test "extractInterfaceId: basic" {
