@@ -381,8 +381,6 @@ pub const EventLoop = struct {
                                     .arm => |ms| armTimer(self.timer_fd, ms),
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
-                                self.gamepad_state.applyDelta(delta);
-                                self.gamepad_state.synthesizeDpadAxes();
                                 ctx.output.emit(events.gamepad) catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;
