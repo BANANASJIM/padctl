@@ -708,9 +708,10 @@ test "layer gyro override: active layer gyro config used" {
     _ = m.layer.onTriggerPress(configs[0].name, 200);
     _ = m.layer.onTimerExpired();
 
-    // With layer active, gyro should be in mouse mode
+    // With layer active, gyro should be in mouse mode with the configured sensitivity
     const gcfg = m.effectiveGyroConfig();
     try testing.expectEqualStrings("mouse", gcfg.mode);
+    try testing.expectApproxEqAbs(@as(f32, 100.0), gcfg.sensitivity_x, 1e-4);
 }
 
 test "layer dpad override: active layer dpad config used" {
@@ -882,8 +883,9 @@ test "mapper: Mapper.apply toggle OOM is silently swallowed" {
     // Rising edge then release — toggle fires, toggled.put OOMs silently.
     _ = try m.apply(.{ .buttons = sel_mask }, 16);
     _ = try m.apply(.{}, 16);
-    // Mapper must stay usable.
-    _ = try m.apply(.{}, 16);
+    // Mapper must stay usable: third frame must produce no-crash and empty aux events.
+    const ev = try m.apply(.{}, 16);
+    try testing.expectEqual(@as(usize, 0), ev.aux.len);
 }
 
 test "mapper: TimerQueue.arm OOM returns error" {
@@ -910,7 +912,10 @@ test "mapper: active_macros append OOM is silently ignored" {
     defer m.deinit();
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     // Rising edge triggers macro dispatch; append failure must not crash.
-    _ = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const ev = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    // OOM swallowed: no aux events emitted (macro not started), A suppressed by remap.
+    const a_mask: u64 = @as(u64, 1) << a_idx;
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & a_mask);
 }
 
 // T5: AuxEventList overflow
@@ -976,6 +981,12 @@ test "gyro activate: active when RB held, inactive when released" {
     // RB held, large gyro — should produce REL events
     const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
     try testing.expect(ev_active.aux.len > 0);
+    // At least one REL event must be present (not just any aux event)
+    var found_rel = false;
+    for (ev_active.aux.slice()) |e| {
+        if (e == .rel) found_rel = true;
+    }
+    try testing.expect(found_rel);
 
     // RB released — no REL events
     const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16);
@@ -1002,6 +1013,8 @@ test "gyro joystick mode: overrides emit_state.rx/ry, suppresses original axes" 
     // rx/ry must be gyro-derived (not the raw 5000)
     try testing.expect(ev.gamepad.rx != 5000);
     try testing.expect(ev.gamepad.ry != 5000);
+    // With gyro_x=+10000 (positive), joystick rx should be non-negative (same direction)
+    try testing.expect(ev.gamepad.rx >= 0);
     // No aux REL events from gyro (joystick mode emits no mouse events)
     for (ev.aux.slice()) |e| {
         switch (e) {
