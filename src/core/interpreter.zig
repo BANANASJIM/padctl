@@ -1663,21 +1663,16 @@ test "mutation audit: negate minInt guard" {
     try testing.expectEqual(@as(i64, std.math.maxInt(i64)), result);
 }
 
-// Mutation 2b: scale with type_max==0 (zero divisor guard)
-// compileTransformChain for a u8 type with scale, but use a custom CompiledTransformChain
-// where type_max would be 0 if the field type produces 0 — we test the guard directly.
-test "mutation audit: scale zero-divisor guard" {
-    // Build a chain manually: type_tag=u8 (max=255), scale(0,0) → 0
-    // To exercise the t_max==0 guard we need a type whose typeMaxByTag==0.
-    // No such type exists, so instead verify scale(a,b) on u8 type_max=255 with val=0.
-    // The meaningful boundary: val * (b - a) / t_max + a
-    // Mutation: if t_max guard removed and t_max were 0, this would be division-by-zero.
-    // We verify scale with val at the boundary (type_max value) returns b.
-    var chain = compileTransformChain("scale(0, 100)", .u8); // type_max = 255
-    // val = 255 (u8 max): 255 * (100 - 0) / 255 + 0 = 100
+// Mutation 2b: scale boundary correctness — verify scale math at boundary values.
+// Note: the t_max==0 guard in runTransformChain is defensive code; typeMaxByTag never
+// returns 0 for any valid FieldType, so that branch is unreachable with current types.
+test "mutation audit: scale boundary correctness" {
+    // scale(0, 100) on u8 type_max=255: scaled(v) = v * 100 / 255
+    var chain = compileTransformChain("scale(0, 100)", .u8);
+    // val = type_max (255): 255 * 100 / 255 = 100 (upper boundary maps to b)
     const result = runTransformChain(255, &chain);
     try testing.expectEqual(@as(i64, 100), result);
-    // val = 0: 0 * 100 / 255 + 0 = 0
+    // val = 0: 0 * 100 / 255 = 0 (lower boundary maps to a)
     const result_zero = runTransformChain(0, &chain);
     try testing.expectEqual(@as(i64, 0), result_zero);
 }
