@@ -295,7 +295,13 @@ pub const Supervisor = struct {
         self.allocator.destroy(m.instance);
         m.mapping_arena.deinit();
         self.allocator.free(m.phys_key);
-        if (m.devname) |dn| self.allocator.free(dn);
+        if (m.devname) |dn| {
+            if (self.devname_map.fetchRemove(dn)) |e| {
+                self.allocator.free(e.key);
+                self.allocator.free(e.value);
+            }
+            self.allocator.free(dn);
+        }
     }
 
     fn restartManagedThread(m: *ManagedInstance) !void {
