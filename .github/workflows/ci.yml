@@ -104,7 +104,7 @@ jobs:
 
   distro-check:
     name: distro-check / ${{ matrix.name }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
