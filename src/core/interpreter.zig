@@ -222,6 +222,7 @@ fn compileTransformSeg(seg: []const u8) CompiledTransform {
     if (std.mem.startsWith(u8, seg, "deadzone(")) {
         return .{ .op = .deadzone, .a = parseArgs1(seg) };
     }
+    std.log.warn("unrecognized transform segment '{s}', treating as deadzone(0)", .{seg});
     return .{ .op = .deadzone, .a = 0 };
 }
 

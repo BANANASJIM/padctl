@@ -112,7 +112,7 @@ Optional integrity check on the report.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `algo` | string | `crc32` `crc8` `sum8` `xor` `none` |
+| `algo` | string | `crc32` `sum8` `xor` |
 | `range` | integer[2] | `[start, end]` byte range to checksum |
 | `seed` | integer | Initial seed value prepended to CRC calculation (e.g. `0xa1` for DualSense BT) |
 | `expect.offset` | integer | Where the checksum is stored in the report |

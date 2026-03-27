@@ -145,6 +145,11 @@ pub fn extractHexField(content: []const u8, key: []const u8) ?u16 {
         const idx = std.mem.indexOfPos(u8, content, pos, key) orelse break;
         pos = idx + key.len;
 
+        // Skip matches inside comments or mid-line (key must be at line start)
+        const line_start = if (std.mem.lastIndexOf(u8, content[0..idx], "\n")) |nl| nl + 1 else 0;
+        const prefix = std.mem.trimLeft(u8, content[line_start..idx], " \t");
+        if (prefix.len > 0) continue;
+
         var p = pos;
         while (p < content.len and content[p] == ' ') p += 1;
         if (p >= content.len or content[p] != '=') continue;
@@ -299,6 +304,11 @@ test "extractHexField: quoted value not parsed" {
 
 test "extractHexField: uppercase hex" {
     try std.testing.expectEqual(@as(?u16, 0x1a86), extractHexField("vid = 0x1A86\n", "vid"));
+}
+
+test "extractHexField: ignores commented-out lines" {
+    try std.testing.expectEqual(@as(?u16, null), extractHexField("# vid = 0x1234\n", "vid"));
+    try std.testing.expectEqual(@as(?u16, 0x5678), extractHexField("# vid = 0x1234\nvid = 0x5678\n", "vid"));
 }
 
 test "findConfig: matches VID/PID in real devices dir" {
