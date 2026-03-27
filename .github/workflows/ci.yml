@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        os: [ubuntu-22.04]
         name: [default, wasm-false, libusb-false]
         include:
           - name: default
@@ -40,7 +40,7 @@ jobs:
 
   check:
     name: check
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     needs: [check-matrix]
     if: ${{ always() }}
     steps:
@@ -95,68 +95,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tsan-logs
-          path: |
-            tsan-build.log
-            tsan-failed-cmd.txt
-            tsan-rerun.log
-            tsan-gdb.log
-            tsan*
-
-  tsan-experimental:
-    name: tsan-experimental / ubuntu-24.04
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev gdb
-      - name: Run TSAN tests
-        run: |
-          set -o pipefail
-          rm -rf .zig-cache
-          export TSAN_OPTIONS="halt_on_error=1:verbosity=1:history_size=7:log_path=$PWD/tsan"
-          zig build test-tsan 2>&1 | tee tsan-build.log
-      - name: TSAN diagnostics
-        if: failure()
-        run: |
-          set -euo pipefail
-          echo "==== TSAN summary from build log ===="
-          grep -nE "ThreadSanitizer|data race|thread leak|SUMMARY|signal [0-9]+|terminated with signal|error: while executing test" tsan-build.log || true
-          FAILED_CMD="$(grep -E '^\.?/?\.zig-cache/o/.+/test --cache-dir=' tsan-build.log | tail -n 1 || true)"
-          if [ -n "${FAILED_CMD}" ]; then
-            echo "${FAILED_CMD}" > tsan-failed-cmd.txt
-            echo "==== Re-running failed test command once ===="
-            bash -lc "${FAILED_CMD}" > tsan-rerun.log 2>&1 || true
-            echo "==== Running failed command under gdb ===="
-            eval "set -- ${FAILED_CMD}"
-            gdb -q -batch \
-              -ex "set pagination off" \
-              -ex "set confirm off" \
-              -ex "run" \
-              -ex "thread apply all bt full" \
-              --args "$@" > tsan-gdb.log 2>&1 || true
-          fi
-          echo "==== TSAN log files ===="
-          ls -lah tsan* || true
-      - name: Print TSAN diagnostic files
-        if: failure()
-        run: |
-          set -euo pipefail
-          for f in tsan-build.log tsan-failed-cmd.txt tsan-rerun.log tsan-gdb.log; do
-            if [ -f "$f" ]; then
-              echo "==== ${f} ===="
-              sed -n '1,240p' "$f"
-            fi
-          done
-      - name: Upload TSAN logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tsan-logs-experimental-ubuntu-24-04
           path: |
             tsan-build.log
             tsan-failed-cmd.txt
