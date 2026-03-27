@@ -202,10 +202,10 @@ pub fn extractHexField(content: []const u8, key: []const u8) ?u16 {
         if (prefix.len > 0) continue;
 
         var p = pos;
-        while (p < content.len and content[p] == ' ') p += 1;
+        while (p < content.len and (content[p] == ' ' or content[p] == '\t')) p += 1;
         if (p >= content.len or content[p] != '=') continue;
         p += 1;
-        while (p < content.len and content[p] == ' ') p += 1;
+        while (p < content.len and (content[p] == ' ' or content[p] == '\t')) p += 1;
 
         if (p + 2 <= content.len and content[p] == '0' and (content[p + 1] == 'x' or content[p + 1] == 'X')) {
             const start = p + 2;
