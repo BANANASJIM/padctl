@@ -210,10 +210,10 @@ fn findHidraw(allocator: std.mem.Allocator, vid: u16, pid: u16) !?[]u8 {
     return null;
 }
 
-// Scan /dev/input/event0..31, use EVIOCGID to match VID/PID of the uinput device.
+// Scan /dev/input/event0..63, use EVIOCGID to match VID/PID of the uinput device.
 fn findEventNode(vid: u16, pid: u16) !posix.fd_t {
     var i: u8 = 0;
-    while (i < 32) : (i += 1) {
+    while (i < 64) : (i += 1) {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/input/event{d}", .{i}) catch continue;
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
@@ -293,6 +293,7 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
 
     // Heap-allocate HidrawDevice so DeviceIO vtable close is safe.
     const hidraw = try allocator.create(HidrawDevice);
+    errdefer allocator.destroy(hidraw);
     hidraw.* = HidrawDevice.init(allocator);
     try hidraw.open(hidraw_path);
 
@@ -380,6 +381,7 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     defer posix.close(ev_fd);
 
     const hidraw = try allocator.create(HidrawDevice);
+    errdefer allocator.destroy(hidraw);
     hidraw.* = HidrawDevice.init(allocator);
     try hidraw.open(hidraw_path);
 
@@ -485,6 +487,7 @@ test "T-E2E-3: report with bad match byte produces no output event" {
     defer posix.close(ev_fd);
 
     const hidraw = try allocator.create(HidrawDevice);
+    errdefer allocator.destroy(hidraw);
     hidraw.* = HidrawDevice.init(allocator);
     try hidraw.open(hidraw_path);
 
