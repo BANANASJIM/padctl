@@ -7,3 +7,6 @@ package padctl where
 @[default_target]
 lean_lib Padctl where
   srcDir := "."
+
+lean_exe oracle where
+  root := `test.OracleMain
