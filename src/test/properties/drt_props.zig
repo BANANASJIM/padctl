@@ -1,8 +1,7 @@
 // drt_props.zig — Differential Reference Testing for field extraction.
 //
 // For every device TOML: generate random HID packets, run the production
-// interpreter and compare against an oracle.  Primary oracle: Lean subprocess
-// (proven correct).  Fallback: Zig reference_interp (if Lean binary absent).
+// interpreter and compare against the Lean oracle (proven correct).
 //
 // DRT SCOPE: catches runtime extraction bugs (wrong read logic, bad transform
 // math) but NOT config compilation bugs, because both oracle and production
@@ -65,19 +64,6 @@ fn hatDecode(hat: i64) struct { x: i8, y: i8 } {
         return .{ .x = HAT_X[idx], .y = HAT_Y[idx] };
     }
     return .{ .x = 0, .y = 0 };
-}
-
-// Oracle abstraction: either Lean subprocess or Zig reference.
-const OracleMode = union(enum) {
-    lean_oracle: *lean.LeanOracle,
-    zig_ref,
-};
-
-fn oracleExtractFields(mode: OracleMode, cr: *const CompiledReport, pkt: []const u8, out: []ref.FieldResult) !usize {
-    return switch (mode) {
-        .lean_oracle => |oracle| lean.extractFieldsViaLean(oracle, cr, pkt, out),
-        .zig_ref => ref.extractFields(cr, pkt, out),
-    };
 }
 
 // Compare oracle results against production delta.
@@ -170,30 +156,23 @@ fn compareDelta(fr: ref.FieldResult, delta: anytype) !void {
     }
 }
 
-fn initOracle() OracleMode {
+fn initOracle() *lean.LeanOracle {
     var oracle = lean.LeanOracle.init() catch |err| {
-        std.log.warn("Lean oracle unavailable ({s}), falling back to Zig reference", .{@errorName(err)});
-        return .zig_ref;
+        std.log.err("Lean oracle REQUIRED but unavailable ({s}). Run 'cd formal/lean && lake build' first.", .{@errorName(err)});
+        @panic("Lean oracle binary not found — cannot run DRT without proven oracle");
     };
-    // Store on heap to avoid dangling pointer from stack local.
     const heap_oracle = std.heap.page_allocator.create(lean.LeanOracle) catch {
         oracle.deinit();
-        return .zig_ref;
+        @panic("OOM allocating Lean oracle");
     };
     heap_oracle.* = oracle;
     std.log.info("DRT: using Lean subprocess oracle", .{});
-    return .{ .lean_oracle = heap_oracle };
+    return heap_oracle;
 }
 
-fn deinitOracle(mode: *OracleMode) void {
-    switch (mode.*) {
-        .lean_oracle => |o| {
-            var oracle = o;
-            oracle.deinit();
-            std.heap.page_allocator.destroy(oracle);
-        },
-        .zig_ref => {},
-    }
+fn deinitOracle(oracle: *lean.LeanOracle) void {
+    oracle.deinit();
+    std.heap.page_allocator.destroy(oracle);
 }
 
 test "DRT: production interpreter matches reference oracle on random packets" {
@@ -204,8 +183,8 @@ test "DRT: production interpreter matches reference oracle on random packets" {
     var rng = std.Random.DefaultPrng.init(0xC0FFEE_42);
     const random = rng.random();
 
-    var mode = initOracle();
-    defer deinitOracle(&mode);
+    const oracle = initOracle();
+    defer deinitOracle(oracle);
 
     for (paths.items) |path| {
         const parsed = try device_mod.parseFile(allocator, path);
@@ -237,38 +216,9 @@ test "DRT: production interpreter matches reference oracle on random packets" {
                 tested_count += 1;
 
                 var ref_buf: [MAX_FIELDS]ref.FieldResult = undefined;
-                const ref_count = oracleExtractFields(mode, cr, pkt, &ref_buf) catch {
-                    // Lean oracle IPC error on this packet; fall back to Zig for this one.
-                    const zc = ref.extractFields(cr, pkt, &ref_buf);
-                    for (ref_buf[0..zc]) |fr| try compareDelta(fr, delta);
-                    continue;
-                };
+                const ref_count = try lean.extractFieldsViaLean(oracle, cr, pkt, &ref_buf);
 
                 for (ref_buf[0..ref_count]) |fr| try compareDelta(fr, delta);
-
-                // Dpad coverage: compare each dpad field against reference hat decode.
-                for (cr.fields[0..cr.field_count]) |*cf| {
-                    if (cf.tag != .dpad) continue;
-                    // For dpad, always use Zig reference for raw read + chain
-                    // (Lean oracle handles this within extractFields already).
-                    if (mode == .lean_oracle) continue;
-                    const hat_raw: i64 = switch (cf.mode) {
-                        .standard => ref.readField(pkt, cf.offset, cf.type_tag),
-                        .bits => blk: {
-                            const u = ref.readBits(pkt, cf.byte_offset, cf.start_bit, cf.bit_count);
-                            break :blk if (cf.is_signed)
-                                @as(i64, ref.signExtend(u, cf.bit_count))
-                            else
-                                @as(i64, u);
-                        },
-                    };
-                    const hat_val = ref.runChain(hat_raw, cf);
-                    const expected = hatDecode(hat_val);
-                    try testing.expect(delta.dpad_x != null);
-                    try testing.expect(delta.dpad_y != null);
-                    try testing.expectEqual(expected.x, delta.dpad_x.?);
-                    try testing.expectEqual(expected.y, delta.dpad_y.?);
-                }
             }
             try testing.expect(tested_count > 0);
         }
@@ -283,8 +233,8 @@ test "DRT: structured random packets — valid field values at correct offsets" 
     var rng = std.Random.DefaultPrng.init(0xABCD_EF01);
     const random = rng.random();
 
-    var mode = initOracle();
-    defer deinitOracle(&mode);
+    const oracle = initOracle();
+    defer deinitOracle(oracle);
 
     for (paths.items) |path| {
         const parsed = try device_mod.parseFile(allocator, path);
@@ -336,11 +286,7 @@ test "DRT: structured random packets — valid field values at correct offsets" 
                 tested_count += 1;
 
                 var ref_buf: [MAX_FIELDS]ref.FieldResult = undefined;
-                const ref_count = oracleExtractFields(mode, cr, pkt, &ref_buf) catch {
-                    const zc = ref.extractFields(cr, pkt, &ref_buf);
-                    for (ref_buf[0..zc]) |fr| try compareDelta(fr, delta);
-                    continue;
-                };
+                const ref_count = try lean.extractFieldsViaLean(oracle, cr, pkt, &ref_buf);
 
                 for (ref_buf[0..ref_count]) |fr| try compareDelta(fr, delta);
             }
