@@ -26,7 +26,7 @@ const makeMapper = h.makeMapper;
 
 // --- FF rumble pipeline (L1 via fillTemplate + UinputDevice mock) ---
 
-test "FF rumble: fillTemplate produces correct bytes for strong/weak" {
+test "gyro_stick: FF rumble — fillTemplate produces correct bytes for strong/weak" {
     const allocator = testing.allocator;
     const tmpl = "00 08 00 {strong:u8} {weak:u8} 00 00 00";
     const result = try command.fillTemplate(allocator, tmpl, &.{
@@ -37,7 +37,7 @@ test "FF rumble: fillTemplate produces correct bytes for strong/weak" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, result);
 }
 
-test "FF rumble: erase (strong=0, weak=0) produces all-zero payload" {
+test "gyro_stick: FF rumble — erase (strong=0, weak=0) produces all-zero payload" {
     const allocator = testing.allocator;
     const tmpl = "00 08 00 {strong:u8} {weak:u8} 00 00 00";
     const result = try command.fillTemplate(allocator, tmpl, &.{
@@ -49,7 +49,7 @@ test "FF rumble: erase (strong=0, weak=0) produces all-zero payload" {
 }
 
 // MockDeviceIO write log captures what FF routing would send.
-test "FF rumble: UinputDevice ff_effects play → correct FfEvent → DeviceIO write bytes" {
+test "gyro_stick: FF rumble — UinputDevice ff_effects play → correct FfEvent → DeviceIO write bytes" {
     const allocator = testing.allocator;
 
     // Simulate: ff_effects[3] populated, EV_FF play code=3 value=1 → FfEvent
@@ -94,7 +94,7 @@ test "FF rumble: UinputDevice ff_effects play → correct FfEvent → DeviceIO w
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0xff, 0x80, 0x00, 0x00, 0x00 }, mock_io.write_log.items);
 }
 
-test "FF erase: after ff_effects cleared, play returns zeros" {
+test "gyro_stick: FF erase — after ff_effects cleared, play returns zeros" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);

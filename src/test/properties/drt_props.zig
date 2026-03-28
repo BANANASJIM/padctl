@@ -20,6 +20,7 @@ const helpers = @import("../helpers.zig");
 
 const Interpreter = interp_mod.Interpreter;
 const CompiledReport = interp_mod.CompiledReport;
+const FieldType = interp_mod.FieldType;
 const MAX_FIELDS = interp_mod.MAX_FIELDS;
 
 // Dpad hat-switch decode: 0=N,1=NE,2=E,3=SE,4=S,5=SW,6=W,7=NW, 8+=neutral
@@ -231,6 +232,143 @@ test "DRT: production interpreter matches reference oracle on random packets" {
             // checksum devices silently skip all 1000 iterations (I4).
             try testing.expect(tested_count > 0);
         }
+    }
+}
+
+// DRT-STRUCTURED: structured packets (valid field values at correct offsets) exercise
+// the happy path more thoroughly than pure random bytes and complement the existing test.
+test "DRT: structured random packets — valid field values at correct offsets" {
+    const allocator = testing.allocator;
+    var paths = try helpers.collectTomlPaths(allocator);
+    defer paths.deinit(allocator);
+
+    var rng = std.Random.DefaultPrng.init(0xABCD_EF01);
+    const random = rng.random();
+
+    for (paths.items) |path| {
+        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        defer parsed.deinit();
+
+        const cfg = &parsed.value;
+        const interp = Interpreter.init(cfg);
+
+        for (interp.compiled[0..interp.report_count]) |*cr| {
+            const size: usize = @intCast(cr.src.size);
+            var buf: [1024]u8 = undefined;
+            const pkt = buf[0..@min(size, buf.len)];
+            const iface: u8 = @intCast(cr.src.interface);
+
+            var tested_count: usize = 0;
+            for (0..200) |_| {
+                @memset(pkt, 0);
+
+                // Fix match bytes.
+                if (cr.src.match) |m| {
+                    const off: usize = @intCast(m.offset);
+                    for (m.expect, 0..) |byte, i| {
+                        if (off + i < pkt.len) pkt[off + i] = @intCast(byte);
+                    }
+                }
+
+                // Write valid-range random values for each field.
+                for (cr.fields[0..cr.field_count]) |*cf| {
+                    if (cf.mode == .standard) {
+                        const lo = typeMin(cf.type_tag);
+                        const hi = typeMax(cf.type_tag);
+                        const range: u64 = @intCast(hi - lo);
+                        const val: i64 = lo + @as(i64, @intCast(random.intRangeAtMost(u64, 0, range)));
+                        writeField(pkt, cf.offset, cf.type_tag, val);
+                    } else {
+                        if (cf.bit_count == 0) continue;
+                        const max_val: u32 = if (cf.bit_count >= 32) std.math.maxInt(u32) else (@as(u32, 1) << @as(u5, @intCast(cf.bit_count))) - 1;
+                        const raw: u32 = random.intRangeAtMost(u32, 0, max_val);
+                        const shifted = @as(u64, raw) << @intCast(cf.start_bit);
+                        const needed: u8 = (@as(u8, cf.start_bit) + @as(u8, cf.bit_count) + 7) / 8;
+                        for (0..needed) |i| {
+                            pkt[cf.byte_offset + i] |= @intCast((shifted >> @intCast(i * 8)) & 0xFF);
+                        }
+                    }
+                }
+
+                // Inject checksum so extraction logic is exercised.
+                if (cr.checksum != null) injectChecksum(cr, pkt);
+
+                const prod_delta = interp.processReport(iface, pkt) catch continue;
+                const delta = prod_delta orelse continue;
+                tested_count += 1;
+
+                var ref_buf: [MAX_FIELDS]ref.FieldResult = undefined;
+                const ref_count = ref.extractFields(cr, pkt, &ref_buf);
+
+                for (ref_buf[0..ref_count]) |fr| {
+                    switch (fr.tag) {
+                        .ax => { try testing.expect(delta.ax != null); try testing.expectEqual(saturate(i16, fr.val), delta.ax.?); },
+                        .ay => { try testing.expect(delta.ay != null); try testing.expectEqual(saturate(i16, fr.val), delta.ay.?); },
+                        .rx => { try testing.expect(delta.rx != null); try testing.expectEqual(saturate(i16, fr.val), delta.rx.?); },
+                        .ry => { try testing.expect(delta.ry != null); try testing.expectEqual(saturate(i16, fr.val), delta.ry.?); },
+                        .lt => { try testing.expect(delta.lt != null); try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.lt.?); },
+                        .rt => { try testing.expect(delta.rt != null); try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.rt.?); },
+                        .gyro_x => { try testing.expect(delta.gyro_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.gyro_x.?); },
+                        .gyro_y => { try testing.expect(delta.gyro_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.gyro_y.?); },
+                        .gyro_z => { try testing.expect(delta.gyro_z != null); try testing.expectEqual(saturate(i16, fr.val), delta.gyro_z.?); },
+                        .accel_x => { try testing.expect(delta.accel_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.accel_x.?); },
+                        .accel_y => { try testing.expect(delta.accel_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.accel_y.?); },
+                        .accel_z => { try testing.expect(delta.accel_z != null); try testing.expectEqual(saturate(i16, fr.val), delta.accel_z.?); },
+                        .touch0_x => { try testing.expect(delta.touch0_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch0_x.?); },
+                        .touch0_y => { try testing.expect(delta.touch0_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch0_y.?); },
+                        .touch1_x => { try testing.expect(delta.touch1_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch1_x.?); },
+                        .touch1_y => { try testing.expect(delta.touch1_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch1_y.?); },
+                        .touch0_active => { try testing.expect(delta.touch0_active != null); try testing.expectEqual(fr.val != 0, delta.touch0_active.?); },
+                        .touch1_active => { try testing.expect(delta.touch1_active != null); try testing.expectEqual(fr.val != 0, delta.touch1_active.?); },
+                        .battery_level => { try testing.expect(delta.battery_level != null); try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.battery_level.?); },
+                        .dpad => {
+                            const hat = fr.val;
+                            const exp_x: i8 = if (hat >= 0 and hat < 8) HAT_X[@intCast(hat)] else 0;
+                            const exp_y: i8 = if (hat >= 0 and hat < 8) HAT_Y[@intCast(hat)] else 0;
+                            try testing.expectEqual(exp_x, delta.dpad_x orelse 0);
+                            try testing.expectEqual(exp_y, delta.dpad_y orelse 0);
+                        },
+                        .unknown => {},
+                    }
+                }
+            }
+            try testing.expect(tested_count > 0);
+        }
+    }
+}
+
+// Helper wrappers (avoid duplicating magic from uhid_all_devices_test).
+fn typeMin(t: FieldType) i64 {
+    return switch (t) {
+        .u8, .u16le, .u16be, .u32le, .u32be => 0,
+        .i8 => -128,
+        .i16le, .i16be => -32768,
+        .i32le, .i32be => -2147483648,
+    };
+}
+
+fn typeMax(t: FieldType) i64 {
+    return switch (t) {
+        .u8 => 255,
+        .i8 => 127,
+        .u16le, .u16be => 65535,
+        .i16le, .i16be => 32767,
+        .u32le, .u32be, .i32le, .i32be => 2147483647,
+    };
+}
+
+fn writeField(buf: []u8, offset: usize, t: FieldType, value: i64) void {
+    switch (t) {
+        .u8 => buf[offset] = @intCast(value & 0xFF),
+        .i8 => buf[offset] = @bitCast(@as(i8, @intCast(value))),
+        .u16le => std.mem.writeInt(u16, buf[offset..][0..2], @intCast(value & 0xFFFF), .little),
+        .i16le => std.mem.writeInt(i16, buf[offset..][0..2], @intCast(value), .little),
+        .u16be => std.mem.writeInt(u16, buf[offset..][0..2], @intCast(value & 0xFFFF), .big),
+        .i16be => std.mem.writeInt(i16, buf[offset..][0..2], @intCast(value), .big),
+        .u32le => std.mem.writeInt(u32, buf[offset..][0..4], @intCast(value & 0xFFFFFFFF), .little),
+        .i32le => std.mem.writeInt(i32, buf[offset..][0..4], @intCast(value), .little),
+        .u32be => std.mem.writeInt(u32, buf[offset..][0..4], @intCast(value & 0xFFFFFFFF), .big),
+        .i32be => std.mem.writeInt(i32, buf[offset..][0..4], @intCast(value), .big),
     }
 }
 
