@@ -230,6 +230,24 @@ pub fn build(b: *std.Build) void {
     e2e_tests.linkLibC();
     e2e_step.dependOn(&b.addRunArtifact(e2e_tests).step);
 
+    // L3 generative e2e: all device configs with mapping layer
+    const gen_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/full_e2e_generative_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    gen_e2e_mod.addImport("src", src_mod);
+    gen_e2e_mod.addImport("toml", toml_mod);
+    const gen_e2e_tests = b.addTest(.{ .root_module = gen_e2e_mod });
+    if (use_libusb) {
+        gen_e2e_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        gen_e2e_tests.addIncludePath(b.path("compat"));
+    }
+    gen_e2e_tests.linkLibC();
+    e2e_step.dependOn(&b.addRunArtifact(gen_e2e_tests).step);
+
     // spike (only available when spike/toml_spike.zig exists)
     if (std.fs.cwd().access("spike/toml_spike.zig", .{})) |_| {
         const spike_mod = b.createModule(.{
