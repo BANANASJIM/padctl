@@ -195,3 +195,43 @@ test "device_specific: axis extraction non-null for each device config" {
         }
     }
 }
+
+test "device_specific: DualSense BT mode report parsing (report_id 0x31, CRC32)" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // BT report: size=78, match byte 0x31 at offset 0.
+    // All USB field offsets shift +1 (byte 1 is BT-only flag byte).
+    // CRC32 stored at bytes 74-77, computed over seed(0xa1) prepended before pkt[0..74].
+    var pkt: [78]u8 = [_]u8{0} ** 78;
+    pkt[0] = 0x31; // report_id / match byte
+
+    // Known field values at BT offsets
+    const lt_val: u8 = 200; // lt at offset 6
+    const gyro_x_val: i16 = 1234; // gyro_x at offset 17
+    pkt[6] = lt_val;
+    std.mem.writeInt(i16, pkt[17..][0..2], gyro_x_val, .little);
+
+    // Buttons: set A(bit5) and X(bit4) in button_group at BT source offset=9
+    pkt[9] = (1 << 5) | (1 << 4);
+
+    // CRC32(seed=0xa1 || pkt[0..74]) stored little-endian at pkt[74..78]
+    {
+        var crc = std.hash.crc.Crc32IsoHdlc.init();
+        crc.update(&[_]u8{0xa1});
+        crc.update(pkt[0..74]);
+        std.mem.writeInt(u32, pkt[74..][0..4], crc.final(), .little);
+    }
+
+    const result = try interp.processReport(3, &pkt);
+    try testing.expect(result != null);
+    const delta = result.?;
+
+    try testing.expect(delta.lt != null);
+    try testing.expectEqual(lt_val, delta.lt.?);
+
+    try testing.expect(delta.gyro_x != null);
+    try testing.expectEqual(gyro_x_val, delta.gyro_x.?);
+}

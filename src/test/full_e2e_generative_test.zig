@@ -29,6 +29,8 @@ const ButtonId = state_mod.ButtonId;
 const uinput_mod = src.io.uinput;
 const UinputDevice = uinput_mod.UinputDevice;
 const OutputDevice = uinput_mod.OutputDevice;
+const AuxOutputDevice = uinput_mod.AuxOutputDevice;
+const AuxEvent = uinput_mod.AuxEvent;
 const HidrawDevice = src.io.hidraw.HidrawDevice;
 const DeviceIO = src.io.device_io.DeviceIO;
 const EventLoop = src.event_loop.EventLoop;
@@ -92,6 +94,49 @@ const EVIOCGID = linux.IOCTL.IOR('E', 0x02, InputId);
 const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
 const EV_ABS: u16 = 3;
+
+// --- Aux event mock capture (thread-safe ring buffer) ---
+
+const AuxCapture = struct {
+    mu: std.Thread.Mutex = .{},
+    buf: [256]AuxEvent = undefined,
+    head: usize = 0, // write index
+    tail: usize = 0, // read index
+
+    fn auxOutputDevice(self: *AuxCapture) AuxOutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = AuxOutputDevice.VTable{
+        .emit_aux = emitAuxVtable,
+        .close = closeVtable,
+    };
+
+    fn emitAuxVtable(ptr: *anyopaque, events: []const AuxEvent) uinput_mod.EmitError!void {
+        const self: *AuxCapture = @ptrCast(@alignCast(ptr));
+        self.mu.lock();
+        defer self.mu.unlock();
+        for (events) |ev| {
+            self.buf[self.head & 255] = ev;
+            self.head +%= 1;
+        }
+    }
+
+    fn closeVtable(_: *anyopaque) void {}
+
+    // Drain all accumulated events into out[]; returns count.
+    fn drain(self: *AuxCapture, out: []AuxEvent) usize {
+        self.mu.lock();
+        defer self.mu.unlock();
+        var n: usize = 0;
+        while (self.tail != self.head and n < out.len) {
+            out[n] = self.buf[self.tail & 255];
+            self.tail +%= 1;
+            n += 1;
+        }
+        return n;
+    }
+};
 
 // --- UHID helpers ---
 
@@ -475,10 +520,12 @@ const RunArg = struct {
     cfg: *const device_mod.DeviceConfig,
     mapping_cfg: ?*const mapping_mod.MappingConfig,
     devices: []DeviceIO,
+    aux_capture: ?*AuxCapture = null,
     loop_error: ?anyerror = null,
 };
 
 fn runThread(arg: *RunArg) void {
+    const aux_out: ?AuxOutputDevice = if (arg.aux_capture) |ac| ac.auxOutputDevice() else null;
     arg.loop.run(.{
         .devices = arg.devices,
         .interpreter = arg.interp,
@@ -486,6 +533,7 @@ fn runThread(arg: *RunArg) void {
         .mapper = arg.mapper,
         .device_config = arg.cfg,
         .mapping_config = arg.mapping_cfg,
+        .aux_output = aux_out,
         .poll_timeout_ms = 500,
     }) catch |err| {
         arg.loop_error = err;
@@ -679,6 +727,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         // Set up the interp copy for the thread
         var thread_interp = Interpreter.init(&parsed.value);
 
+        var aux_capture = AuxCapture{};
         var arg = RunArg{
             .loop = &loop,
             .interp = &thread_interp,
@@ -687,6 +736,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
             .cfg = &parsed.value,
             .mapping_cfg = &mapping_parsed.value,
             .devices = device_ios,
+            .aux_capture = &aux_capture,
         };
 
         const thread = try std.Thread.spawn(.{}, runThread, .{&arg});
@@ -795,6 +845,38 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                 }
                 if (getAbsValue(ev_slice, 0x05)) |actual| {
                     if (@abs(actual - oracle_out.gamepad.rt) > 1) return error.TestUnexpectedResult;
+                }
+            }
+
+            // DRT 3: aux key/mouse_button events — oracle-predicted events must be captured
+            {
+                var aux_buf: [64]AuxEvent = undefined;
+                const n = aux_capture.drain(&aux_buf);
+                const captured = aux_buf[0..n];
+                for (oracle_out.aux.slice()) |expected| {
+                    switch (expected) {
+                        .key => |k| {
+                            var found = false;
+                            for (captured) |got| {
+                                switch (got) {
+                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) { found = true; break; },
+                                    else => {},
+                                }
+                            }
+                            if (!found) press_misses += 1;
+                        },
+                        .mouse_button => |mb| {
+                            var found = false;
+                            for (captured) |got| {
+                                switch (got) {
+                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) { found = true; break; },
+                                    else => {},
+                                }
+                            }
+                            if (!found) press_misses += 1;
+                        },
+                        .rel => {}, // not compared (floating-point subsystems)
+                    }
                 }
             }
 
@@ -998,6 +1080,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
 
         var thread_interp = Interpreter.init(&dev_parsed.value);
 
+        var aux_capture2 = AuxCapture{};
         var arg = RunArg{
             .loop = &loop,
             .interp = &thread_interp,
@@ -1006,6 +1089,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             .cfg = &dev_parsed.value,
             .mapping_cfg = &map_parsed.value,
             .devices = device_ios,
+            .aux_capture = &aux_capture2,
         };
 
         const thread = try std.Thread.spawn(.{}, runThread, .{&arg});
@@ -1106,6 +1190,38 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                 }
                 if (getAbsValue(ev_slice, 0x05)) |actual| {
                     if (@abs(actual - oracle_out.gamepad.rt) > 1) return error.TestUnexpectedResult;
+                }
+            }
+
+            // DRT 3: aux key/mouse_button events — oracle-predicted events must be captured
+            {
+                var aux_buf: [64]AuxEvent = undefined;
+                const n = aux_capture2.drain(&aux_buf);
+                const captured = aux_buf[0..n];
+                for (oracle_out.aux.slice()) |expected| {
+                    switch (expected) {
+                        .key => |k| {
+                            var found = false;
+                            for (captured) |got| {
+                                switch (got) {
+                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) { found = true; break; },
+                                    else => {},
+                                }
+                            }
+                            if (!found) press_misses += 1;
+                        },
+                        .mouse_button => |mb| {
+                            var found = false;
+                            for (captured) |got| {
+                                switch (got) {
+                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) { found = true; break; },
+                                    else => {},
+                                }
+                            }
+                            if (!found) press_misses += 1;
+                        },
+                        .rel => {},
+                    }
                 }
             }
 
