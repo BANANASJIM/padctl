@@ -172,7 +172,10 @@ test "config_gen: generated device config parses successfully" {
     for (0..100) |_| {
         const toml_str = randomDeviceConfig(rng, &buf);
         if (toml_str.len == 0) continue;
-        const result = device.parseString(allocator, toml_str) catch continue;
+        const result = device.parseString(allocator, toml_str) catch |err| {
+            std.debug.print("Parse failed: {}\nTOML:\n{s}\n", .{ err, toml_str });
+            return err;
+        };
         result.deinit();
     }
 }

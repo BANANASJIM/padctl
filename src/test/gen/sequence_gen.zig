@@ -14,21 +14,22 @@ fn btnMask(id: ButtonId) u64 {
     return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
 }
 
-pub fn randomSequence(rng: std.Random, frames: []Frame) void {
+pub fn randomSequence(rng: std.Random, frames: []Frame, cfg: ?mapping.MappingConfig) void {
     // Compose random scenario templates into the frame buffer
     var pos: usize = 0;
+    var acc: u64 = 0; // accumulated pressed buttons
     while (pos < frames.len) {
         const scenario = rng.intRangeAtMost(u8, 0, 9);
         const remaining = frames.len - pos;
         const written = switch (scenario) {
             0 => genIdle(frames[pos..], rng, remaining),
-            1 => genButtonTap(frames[pos..], rng, remaining),
-            2 => genButtonHold(frames[pos..], rng, remaining),
-            3 => genSimultaneousPress(frames[pos..], rng, remaining),
-            4 => genLayerHold(frames[pos..], rng, remaining),
-            5 => genLayerToggle(frames[pos..], rng, remaining),
+            1 => genButtonTap(frames[pos..], rng, remaining, &acc),
+            2 => genButtonHold(frames[pos..], rng, remaining, &acc),
+            3 => genSimultaneousPress(frames[pos..], rng, remaining, &acc),
+            4 => genLayerHold(frames[pos..], rng, remaining, cfg, &acc),
+            5 => genLayerToggle(frames[pos..], rng, remaining, cfg, &acc),
             6 => genAxisSweep(frames[pos..], rng, remaining),
-            7 => genRapidToggle(frames[pos..], rng, remaining),
+            7 => genRapidToggle(frames[pos..], rng, remaining, cfg),
             8 => genAllButtons(frames[pos..], rng, remaining),
             9 => genStress(frames[pos..], rng, remaining),
             else => unreachable,
@@ -54,63 +55,109 @@ fn genIdle(frames: []Frame, _: std.Random, max: usize) usize {
     return n;
 }
 
-fn genButtonTap(frames: []Frame, rng: std.Random, max: usize) usize {
+fn genButtonTap(frames: []Frame, rng: std.Random, max: usize, acc: *u64) usize {
     const hold_len = rng.intRangeAtMost(usize, 2, 5);
     const needed = 2 + hold_len; // press + hold + release
     if (max < needed) return genIdle(frames, rng, max);
     const btn = randomButton(rng);
-    frames[0] = .{ .delta = .{ .buttons = btn }, .dt_ms = 16 };
+    acc.* |= btn;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
     for (frames[1 .. 1 + hold_len]) |*f| {
         f.* = .{ .delta = .{}, .dt_ms = 16 };
     }
-    frames[1 + hold_len] = .{ .delta = .{ .buttons = 0 }, .dt_ms = 16 };
+    acc.* &= ~btn;
+    frames[1 + hold_len] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
     return needed;
 }
 
-fn genButtonHold(frames: []Frame, rng: std.Random, max: usize) usize {
+fn genButtonHold(frames: []Frame, rng: std.Random, max: usize, acc: *u64) usize {
     const hold_len = rng.intRangeAtMost(usize, 10, 20);
     const needed = 2 + hold_len;
     if (max < needed) return genIdle(frames, rng, max);
     const btn = randomButton(rng);
-    frames[0] = .{ .delta = .{ .buttons = btn }, .dt_ms = 16 };
+    acc.* |= btn;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
     for (frames[1 .. 1 + hold_len]) |*f| {
         f.* = .{ .delta = .{}, .dt_ms = 16 };
     }
-    frames[1 + hold_len] = .{ .delta = .{ .buttons = 0 }, .dt_ms = 16 };
+    acc.* &= ~btn;
+    frames[1 + hold_len] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
     return needed;
 }
 
-fn genSimultaneousPress(frames: []Frame, rng: std.Random, max: usize) usize {
+fn genSimultaneousPress(frames: []Frame, rng: std.Random, max: usize, acc: *u64) usize {
     if (max < 3) return genIdle(frames, rng, max);
     const n_btns = rng.intRangeAtMost(u8, 2, 3);
     var mask: u64 = 0;
     for (0..n_btns) |_| mask |= randomButton(rng);
-    frames[0] = .{ .delta = .{ .buttons = mask }, .dt_ms = 16 };
+    acc.* |= mask;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
     frames[1] = .{ .delta = .{}, .dt_ms = 16 };
-    frames[2] = .{ .delta = .{ .buttons = 0 }, .dt_ms = 16 };
+    acc.* &= ~mask;
+    frames[2] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
     return 3;
 }
 
-fn genLayerHold(frames: []Frame, rng: std.Random, max: usize) usize {
+// Returns the trigger mask for the first hold-activation layer in cfg, or null.
+fn holdLayerTrigger(cfg: ?mapping.MappingConfig) ?u64 {
+    const layers = (cfg orelse return null).layer orelse return null;
+    for (layers) |*l| {
+        if (std.mem.eql(u8, l.activation, "hold")) {
+            return triggerNameToMask(l.trigger);
+        }
+    }
+    return null;
+}
+
+// Returns the trigger mask for the first toggle-activation layer in cfg, or null.
+fn toggleLayerTrigger(cfg: ?mapping.MappingConfig) ?u64 {
+    const layers = (cfg orelse return null).layer orelse return null;
+    for (layers) |*l| {
+        if (std.mem.eql(u8, l.activation, "toggle")) {
+            return triggerNameToMask(l.trigger);
+        }
+    }
+    return null;
+}
+
+fn triggerNameToMask(name: []const u8) u64 {
+    const fields = @typeInfo(ButtonId).@"enum".fields;
+    inline for (fields) |f| {
+        if (std.mem.eql(u8, f.name, name)) {
+            return @as(u64, 1) << @as(u6, @intCast(f.value));
+        }
+    }
+    return 0;
+}
+
+fn genLayerHold(frames: []Frame, rng: std.Random, max: usize, cfg: ?mapping.MappingConfig, acc: *u64) usize {
     if (max < 6) return genIdle(frames, rng, max);
-    const trigger = btnMask(.LT);
+    const trigger = holdLayerTrigger(cfg) orelse return genIdle(frames, rng, max);
     const btn = randomButton(rng);
-    frames[0] = .{ .delta = .{ .buttons = trigger }, .dt_ms = 16 }; // press trigger
+    acc.* |= trigger;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // press trigger
     frames[1] = .{ .delta = .{}, .dt_ms = 16 };
-    frames[2] = .{ .delta = .{ .buttons = trigger | btn }, .dt_ms = 16 }; // press button while layer held
+    acc.* |= btn;
+    frames[2] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // press button while layer held
     frames[3] = .{ .delta = .{}, .dt_ms = 16 };
-    frames[4] = .{ .delta = .{ .buttons = trigger }, .dt_ms = 16 }; // release button
-    frames[5] = .{ .delta = .{ .buttons = 0 }, .dt_ms = 16 }; // release trigger
+    acc.* &= ~btn;
+    frames[4] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // release button
+    acc.* &= ~trigger;
+    frames[5] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // release trigger
     return 6;
 }
 
-fn genLayerToggle(frames: []Frame, rng: std.Random, max: usize) usize {
+fn genLayerToggle(frames: []Frame, rng: std.Random, max: usize, cfg: ?mapping.MappingConfig, acc: *u64) usize {
     if (max < 4) return genIdle(frames, rng, max);
-    const trigger = btnMask(.Select);
-    frames[0] = .{ .delta = .{ .buttons = trigger }, .dt_ms = 16 }; // press
-    frames[1] = .{ .delta = .{ .buttons = 0 }, .dt_ms = 16 }; // release -> toggle on
-    frames[2] = .{ .delta = .{ .buttons = trigger }, .dt_ms = 16 }; // press
-    frames[3] = .{ .delta = .{ .buttons = 0 }, .dt_ms = 16 }; // release -> toggle off
+    const trigger = toggleLayerTrigger(cfg) orelse return genIdle(frames, rng, max);
+    acc.* |= trigger;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // press -> toggle on
+    acc.* &= ~trigger;
+    frames[1] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // release
+    acc.* |= trigger;
+    frames[2] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // press -> toggle off
+    acc.* &= ~trigger;
+    frames[3] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // release
     return 4;
 }
 
@@ -126,10 +173,10 @@ fn genAxisSweep(frames: []Frame, rng: std.Random, max: usize) usize {
     return n;
 }
 
-fn genRapidToggle(frames: []Frame, rng: std.Random, max: usize) usize {
+fn genRapidToggle(frames: []Frame, rng: std.Random, max: usize, cfg: ?mapping.MappingConfig) usize {
     const n = @min(10, max);
     _ = rng;
-    const trigger = btnMask(.Select);
+    const trigger = toggleLayerTrigger(cfg) orelse btnMask(.Select);
     for (frames[0..n], 0..) |*f, i| {
         f.* = .{
             .delta = .{ .buttons = if (i % 2 == 0) trigger else 0 },
@@ -141,7 +188,7 @@ fn genRapidToggle(frames: []Frame, rng: std.Random, max: usize) usize {
 
 fn genAllButtons(frames: []Frame, rng: std.Random, max: usize) usize {
     if (max < 2) return genIdle(frames, rng, max);
-    // Set all 32 ButtonId bits
+    // Set all 33 ButtonId bits
     const field_count = @typeInfo(ButtonId).@"enum".fields.len;
     var all: u64 = 0;
     for (0..field_count) |i| all |= @as(u64, 1) << @as(u6, @intCast(i));
@@ -171,7 +218,7 @@ test "sequence_gen: generated sequence has correct length" {
     var prng = std.Random.DefaultPrng.init(42);
     const rng = prng.random();
     var frames: [200]Frame = undefined;
-    randomSequence(rng, &frames);
+    randomSequence(rng, &frames, null);
     // All frames should be initialized (dt_ms > 0 for non-idle or == 16 for idle)
     for (frames) |f| {
         try std.testing.expect(f.dt_ms > 0);
