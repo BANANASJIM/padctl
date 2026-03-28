@@ -1,0 +1,21 @@
+[device]
+name = "Big-Endian Test Device"
+vid = 0xffff
+pid = 0x0001
+
+[[device.interface]]
+id = 0
+class = "hid"
+
+[[report]]
+name = "main"
+interface = 0
+size = 6
+
+[report.match]
+offset = 0
+expect = [0x42]
+
+[report.fields]
+left_x = { offset = 1, type = "i16be" }
+left_y = { offset = 3, type = "u16be" }

@@ -302,25 +302,82 @@ test "DRT: structured random packets — valid field values at correct offsets" 
 
                 for (ref_buf[0..ref_count]) |fr| {
                     switch (fr.tag) {
-                        .ax => { try testing.expect(delta.ax != null); try testing.expectEqual(saturate(i16, fr.val), delta.ax.?); },
-                        .ay => { try testing.expect(delta.ay != null); try testing.expectEqual(saturate(i16, fr.val), delta.ay.?); },
-                        .rx => { try testing.expect(delta.rx != null); try testing.expectEqual(saturate(i16, fr.val), delta.rx.?); },
-                        .ry => { try testing.expect(delta.ry != null); try testing.expectEqual(saturate(i16, fr.val), delta.ry.?); },
-                        .lt => { try testing.expect(delta.lt != null); try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.lt.?); },
-                        .rt => { try testing.expect(delta.rt != null); try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.rt.?); },
-                        .gyro_x => { try testing.expect(delta.gyro_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.gyro_x.?); },
-                        .gyro_y => { try testing.expect(delta.gyro_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.gyro_y.?); },
-                        .gyro_z => { try testing.expect(delta.gyro_z != null); try testing.expectEqual(saturate(i16, fr.val), delta.gyro_z.?); },
-                        .accel_x => { try testing.expect(delta.accel_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.accel_x.?); },
-                        .accel_y => { try testing.expect(delta.accel_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.accel_y.?); },
-                        .accel_z => { try testing.expect(delta.accel_z != null); try testing.expectEqual(saturate(i16, fr.val), delta.accel_z.?); },
-                        .touch0_x => { try testing.expect(delta.touch0_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch0_x.?); },
-                        .touch0_y => { try testing.expect(delta.touch0_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch0_y.?); },
-                        .touch1_x => { try testing.expect(delta.touch1_x != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch1_x.?); },
-                        .touch1_y => { try testing.expect(delta.touch1_y != null); try testing.expectEqual(saturate(i16, fr.val), delta.touch1_y.?); },
-                        .touch0_active => { try testing.expect(delta.touch0_active != null); try testing.expectEqual(fr.val != 0, delta.touch0_active.?); },
-                        .touch1_active => { try testing.expect(delta.touch1_active != null); try testing.expectEqual(fr.val != 0, delta.touch1_active.?); },
-                        .battery_level => { try testing.expect(delta.battery_level != null); try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.battery_level.?); },
+                        .ax => {
+                            try testing.expect(delta.ax != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.ax.?);
+                        },
+                        .ay => {
+                            try testing.expect(delta.ay != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.ay.?);
+                        },
+                        .rx => {
+                            try testing.expect(delta.rx != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.rx.?);
+                        },
+                        .ry => {
+                            try testing.expect(delta.ry != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.ry.?);
+                        },
+                        .lt => {
+                            try testing.expect(delta.lt != null);
+                            try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.lt.?);
+                        },
+                        .rt => {
+                            try testing.expect(delta.rt != null);
+                            try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.rt.?);
+                        },
+                        .gyro_x => {
+                            try testing.expect(delta.gyro_x != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.gyro_x.?);
+                        },
+                        .gyro_y => {
+                            try testing.expect(delta.gyro_y != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.gyro_y.?);
+                        },
+                        .gyro_z => {
+                            try testing.expect(delta.gyro_z != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.gyro_z.?);
+                        },
+                        .accel_x => {
+                            try testing.expect(delta.accel_x != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.accel_x.?);
+                        },
+                        .accel_y => {
+                            try testing.expect(delta.accel_y != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.accel_y.?);
+                        },
+                        .accel_z => {
+                            try testing.expect(delta.accel_z != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.accel_z.?);
+                        },
+                        .touch0_x => {
+                            try testing.expect(delta.touch0_x != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.touch0_x.?);
+                        },
+                        .touch0_y => {
+                            try testing.expect(delta.touch0_y != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.touch0_y.?);
+                        },
+                        .touch1_x => {
+                            try testing.expect(delta.touch1_x != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.touch1_x.?);
+                        },
+                        .touch1_y => {
+                            try testing.expect(delta.touch1_y != null);
+                            try testing.expectEqual(saturate(i16, fr.val), delta.touch1_y.?);
+                        },
+                        .touch0_active => {
+                            try testing.expect(delta.touch0_active != null);
+                            try testing.expectEqual(fr.val != 0, delta.touch0_active.?);
+                        },
+                        .touch1_active => {
+                            try testing.expect(delta.touch1_active != null);
+                            try testing.expectEqual(fr.val != 0, delta.touch1_active.?);
+                        },
+                        .battery_level => {
+                            try testing.expect(delta.battery_level != null);
+                            try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.battery_level.?);
+                        },
                         .dpad => {
                             const hat = fr.val;
                             const exp_x: i8 = if (hat >= 0 and hat < 8) HAT_X[@intCast(hat)] else 0;

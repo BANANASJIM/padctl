@@ -29,7 +29,7 @@ const ShrinkCtx = struct {
 
 // Check whether frames still diverge when replayed from a fresh mapper + oracle.
 fn shrinkCheck(raw_ctx: *anyopaque, frames: []const Frame) bool {
-    const ctx: *ShrinkCtx = @alignCast(@ptrCast(raw_ctx));
+    const ctx: *ShrinkCtx = @ptrCast(@alignCast(raw_ctx));
     const toml = ctx.toml_buf[0..ctx.toml_len];
 
     const parsed = mapping.parseString(ctx.allocator, toml) catch return false;
