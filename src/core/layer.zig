@@ -166,7 +166,7 @@ const testing = std.testing;
 const aim_cfg = LayerConfig{ .name = "aim", .trigger = "LT" };
 const fn_cfg = LayerConfig{ .name = "fn", .trigger = "Select" };
 
-test "getActive: no active layer returns null" {
+test "layer: getActive: no active layer returns null" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
 
@@ -174,7 +174,7 @@ test "getActive: no active layer returns null" {
     try testing.expect(ls.getActive(&configs) == null);
 }
 
-test "getActive: hold ACTIVE returns matching layer" {
+test "layer: getActive: hold ACTIVE returns matching layer" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     ls.tap_hold = .{ .layer_name = "aim", .layer_activated = true, .phase = .active };
@@ -185,7 +185,7 @@ test "getActive: hold ACTIVE returns matching layer" {
     try testing.expectEqualStrings("aim", active.?.name);
 }
 
-test "getActive: hold PENDING (not activated) does not activate layer" {
+test "layer: getActive: hold PENDING (not activated) does not activate layer" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     ls.tap_hold = .{ .layer_name = "aim", .layer_activated = false, .phase = .pending };
@@ -194,7 +194,7 @@ test "getActive: hold PENDING (not activated) does not activate layer" {
     try testing.expect(ls.getActive(&configs) == null);
 }
 
-test "getActive: toggle on returns matching layer" {
+test "layer: getActive: toggle on returns matching layer" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     try ls.toggled.put("fn", {});
@@ -205,7 +205,7 @@ test "getActive: toggle on returns matching layer" {
     try testing.expectEqualStrings("fn", active.?.name);
 }
 
-test "getActive: hold ACTIVE takes priority over toggled" {
+test "layer: getActive: hold ACTIVE takes priority over toggled" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     ls.tap_hold = .{ .layer_name = "aim", .layer_activated = true, .phase = .active };
@@ -217,7 +217,7 @@ test "getActive: hold ACTIVE takes priority over toggled" {
     try testing.expectEqualStrings("aim", active.?.name);
 }
 
-test "getActive: multiple toggled layers — declaration order wins (ADR-004)" {
+test "layer: getActive: multiple toggled layers — declaration order wins (ADR-004)" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     try ls.toggled.put("aim", {});
@@ -229,7 +229,7 @@ test "getActive: multiple toggled layers — declaration order wins (ADR-004)" {
     try testing.expectEqualStrings("aim", active.?.name);
 }
 
-test "getActive: multiple toggled layers — fn declared first wins when aim is absent" {
+test "layer: getActive: multiple toggled layers — fn declared first wins when aim is absent" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     try ls.toggled.put("fn", {});
@@ -240,7 +240,7 @@ test "getActive: multiple toggled layers — fn declared first wins when aim is 
     try testing.expectEqualStrings("fn", active.?.name);
 }
 
-test "getActive: configs length boundary — toggled name not in configs returns null" {
+test "layer: getActive: configs length boundary — toggled name not in configs returns null" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     try ls.toggled.put("unknown", {});
@@ -249,7 +249,7 @@ test "getActive: configs length boundary — toggled name not in configs returns
     try testing.expect(ls.getActive(&configs) == null);
 }
 
-test "getActive: empty configs always returns null" {
+test "layer: getActive: empty configs always returns null" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     ls.tap_hold = .{ .layer_name = "aim", .layer_activated = true, .phase = .active };
@@ -260,7 +260,7 @@ test "getActive: empty configs always returns null" {
 
 // --- T4: tap-hold state machine tests ---
 
-test "tap-hold: press → PENDING, arm_timer_ms set" {
+test "layer: tap-hold: press → PENDING, arm_timer_ms set" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
 
@@ -274,7 +274,7 @@ test "tap-hold: press → PENDING, arm_timer_ms set" {
     try testing.expectEqual(TapHoldPhase.pending, ls.tap_hold.?.phase);
 }
 
-test "tap-hold: PENDING + timer expired → ACTIVE, layer_activated = true" {
+test "layer: tap-hold: PENDING + timer expired → ACTIVE, layer_activated = true" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     _ = ls.onTriggerPress("aim", 200);
@@ -289,7 +289,7 @@ test "tap-hold: PENDING + timer expired → ACTIVE, layer_activated = true" {
     try testing.expect(ls.tap_hold.?.layer_activated);
 }
 
-test "tap-hold: PENDING + release → IDLE, tap_event has value" {
+test "layer: tap-hold: PENDING + release → IDLE, tap_event has value" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     _ = ls.onTriggerPress("aim", 200);
@@ -302,7 +302,7 @@ test "tap-hold: PENDING + release → IDLE, tap_event has value" {
     try testing.expect(ls.tap_hold == null);
 }
 
-test "tap-hold: PENDING + release with no tap target → IDLE, no tap_event" {
+test "layer: tap-hold: PENDING + release with no tap target → IDLE, no tap_event" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     _ = ls.onTriggerPress("aim", 200);
@@ -313,7 +313,7 @@ test "tap-hold: PENDING + release with no tap target → IDLE, no tap_event" {
     try testing.expect(ls.tap_hold == null);
 }
 
-test "tap-hold: ACTIVE + release → IDLE, layer_deactivated = true" {
+test "layer: tap-hold: ACTIVE + release → IDLE, layer_deactivated = true" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     _ = ls.onTriggerPress("aim", 200);
@@ -327,7 +327,7 @@ test "tap-hold: ACTIVE + release → IDLE, layer_deactivated = true" {
     try testing.expect(ls.tap_hold == null);
 }
 
-test "tap-hold: IDLE + release → no-op" {
+test "layer: tap-hold: IDLE + release → no-op" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
 
@@ -338,7 +338,7 @@ test "tap-hold: IDLE + release → no-op" {
     try testing.expect(!res.layer_deactivated);
 }
 
-test "tap-hold: IDLE + timer expired → no-op (stale timer)" {
+test "layer: tap-hold: IDLE + timer expired → no-op (stale timer)" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
 
@@ -347,7 +347,7 @@ test "tap-hold: IDLE + timer expired → no-op (stale timer)" {
     try testing.expect(res.arm_timer_ms == null);
 }
 
-test "tap-hold: ACTIVE re-press same trigger → ignored" {
+test "layer: tap-hold: ACTIVE re-press same trigger → ignored" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     _ = ls.onTriggerPress("aim", 200);
@@ -374,7 +374,7 @@ fn selMask() u64 {
     return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.Select)));
 }
 
-test "processLayerTriggers: Hold press → PENDING, arm timer" {
+test "layer: processLayerTriggers: Hold press → PENDING, arm timer" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{hold_aim};
@@ -388,7 +388,7 @@ test "processLayerTriggers: Hold press → PENDING, arm timer" {
     try testing.expectEqual(TapHoldPhase.pending, ls.tap_hold.?.phase);
 }
 
-test "processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive returns layer" {
+test "layer: processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive returns layer" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{hold_aim};
@@ -401,7 +401,7 @@ test "processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive returns l
     try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
 }
 
-test "processLayerTriggers: Hold ACTIVE + release → IDLE" {
+test "layer: processLayerTriggers: Hold ACTIVE + release → IDLE" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{hold_aim};
@@ -416,7 +416,7 @@ test "processLayerTriggers: Hold ACTIVE + release → IDLE" {
     try testing.expect(ls.getActive(&configs) == null);
 }
 
-test "processLayerTriggers: Hold PENDING release → tap event + disarm" {
+test "layer: processLayerTriggers: Hold PENDING release → tap event + disarm" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const tap_cfg = LayerConfig{ .name = "aim", .trigger = "LT", .activation = "hold", .tap = "KEY_F13" };
@@ -431,7 +431,7 @@ test "processLayerTriggers: Hold PENDING release → tap event + disarm" {
     try testing.expect(ls.tap_hold == null);
 }
 
-test "processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while PENDING" {
+test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while PENDING" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{ hold_aim, hold_fn };
@@ -447,7 +447,7 @@ test "processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignor
     try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 }
 
-test "processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while ACTIVE" {
+test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while ACTIVE" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{ hold_aim, hold_fn };
@@ -462,7 +462,7 @@ test "processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignor
     try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 }
 
-test "processLayerTriggers: Toggle release → layer on" {
+test "layer: processLayerTriggers: Toggle release → layer on" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{toggle_sel};
@@ -474,7 +474,7 @@ test "processLayerTriggers: Toggle release → layer on" {
     try testing.expect(ls.getActive(&configs) != null);
 }
 
-test "processLayerTriggers: Toggle second release → layer off" {
+test "layer: processLayerTriggers: Toggle second release → layer off" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{toggle_sel};
@@ -487,7 +487,7 @@ test "processLayerTriggers: Toggle second release → layer off" {
     try testing.expect(ls.getActive(&configs) == null);
 }
 
-test "processLayerTriggers: Toggle on blocked while Hold ACTIVE" {
+test "layer: processLayerTriggers: Toggle on blocked while Hold ACTIVE" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{ hold_aim, toggle_sel };
@@ -503,7 +503,7 @@ test "processLayerTriggers: Toggle on blocked while Hold ACTIVE" {
     try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
 }
 
-test "processLayerTriggers: Toggle + Hold coexist, Hold takes priority in getActive" {
+test "layer: processLayerTriggers: Toggle + Hold coexist, Hold takes priority in getActive" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{ hold_aim, toggle_sel };
@@ -522,7 +522,7 @@ test "processLayerTriggers: Toggle + Hold coexist, Hold takes priority in getAct
     try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
 }
 
-test "processLayerTriggers: multiple Toggles on — declaration order wins (ADR-004)" {
+test "layer: processLayerTriggers: multiple Toggles on — declaration order wins (ADR-004)" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const tog_a = LayerConfig{ .name = "a", .trigger = "LB", .activation = "toggle" };

@@ -398,14 +398,14 @@ fn parseHexOrDec(comptime T: type, s: []const u8) !T {
 
 // --- tests ---
 
-test "parseHexOrDec" {
+test "install: parseHexOrDec" {
     const testing = std.testing;
     try testing.expectEqual(@as(u16, 0x37d7), try parseHexOrDec(u16, "0x37d7"));
     try testing.expectEqual(@as(u16, 1234), try parseHexOrDec(u16, "1234"));
     try testing.expectEqual(@as(u16, 0x054c), try parseHexOrDec(u16, "0x054c"));
 }
 
-test "extractVidPid from vader5 content" {
+test "install: extractVidPid from vader5 content" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -442,7 +442,7 @@ test "extractVidPid from vader5 content" {
     try testing.expectEqualStrings("Flydigi Vader 5 Pro", entries.items[0].name);
 }
 
-test "isFieldKey exact and prefix-safe" {
+test "install: isFieldKey exact and prefix-safe" {
     const testing = std.testing;
     try testing.expect(isFieldKey("pid = 0x2401", "pid"));
     try testing.expect(isFieldKey("pid=0x2401", "pid"));
@@ -453,7 +453,7 @@ test "isFieldKey exact and prefix-safe" {
     try testing.expect(!isFieldKey("namespace = \"x\"", "name"));
 }
 
-test "extractVidPid ignores pid_controller field" {
+test "install: extractVidPid ignores pid_controller field" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -490,7 +490,7 @@ test "extractVidPid ignores pid_controller field" {
     try testing.expectEqual(@as(u16, 0x5678), entries.items[0].pid);
 }
 
-test "generateServiceContent uses prefix" {
+test "install: generateServiceContent uses prefix" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const content = try generateServiceContent(allocator, "/usr/local");
@@ -500,7 +500,7 @@ test "generateServiceContent uses prefix" {
     try testing.expect(std.mem.indexOf(u8, content, "/usr/bin/padctl") == null);
 }
 
-test "generateUdevRules produces valid output" {
+test "install: generateUdevRules produces valid output" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -542,7 +542,7 @@ test "generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
 }
 
-test "findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
+test "install: findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -566,7 +566,7 @@ test "findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
     try testing.expectEqualStrings(repo_devices, found.?);
 }
 
-test "findDevicesSourceDir falls back to cwd devices" {
+test "install: findDevicesSourceDir falls back to cwd devices" {
     const testing = std.testing;
     const allocator = testing.allocator;
 

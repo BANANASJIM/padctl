@@ -685,7 +685,7 @@ fn makeIf1Sample() [32]u8 {
     return raw;
 }
 
-test "IF1 sample: axes, buttons, IMU" {
+test "interpreter: IF1 sample: axes, buttons, IMU" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -712,7 +712,7 @@ test "IF1 sample: axes, buttons, IMU" {
     try testing.expect(btns & (@as(u64, 1) << b_bit) != 0);
 }
 
-test "match miss: wrong magic returns null" {
+test "interpreter: match miss: wrong magic returns null" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -723,7 +723,7 @@ test "match miss: wrong magic returns null" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
-test "short raw returns null" {
+test "interpreter: short raw returns null" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -733,7 +733,7 @@ test "short raw returns null" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
-test "wrong interface_id returns null" {
+test "interpreter: wrong interface_id returns null" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -743,7 +743,7 @@ test "wrong interface_id returns null" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
-test "different interface_id matches different report" {
+test "interpreter: different interface_id matches different report" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_if0_toml);
     defer parsed.deinit();
@@ -763,7 +763,7 @@ test "different interface_id matches different report" {
     try testing.expectEqual(@as(?i16, null), d2.ax); // not in IF0 report
 }
 
-test "checksum sum8 mismatch returns error" {
+test "interpreter: checksum sum8 mismatch returns error" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -793,7 +793,7 @@ test "checksum sum8 mismatch returns error" {
     try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
 }
 
-test "checksum sum8 correct passes" {
+test "interpreter: checksum sum8 correct passes" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -827,7 +827,7 @@ test "checksum sum8 correct passes" {
     try testing.expectEqual(@as(?u8, null), delta.lt);
 }
 
-test "checksum xor" {
+test "interpreter: checksum xor" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -859,7 +859,7 @@ test "checksum xor" {
     try testing.expectEqual(@as(?u64, null), delta.buttons);
 }
 
-test "checksum xor mismatch returns error" {
+test "interpreter: checksum xor mismatch returns error" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -889,7 +889,7 @@ test "checksum xor mismatch returns error" {
     try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
 }
 
-test "checksum range out of bounds returns null" {
+test "interpreter: checksum range out of bounds returns null" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -920,7 +920,7 @@ test "checksum range out of bounds returns null" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
-test "transform negate" {
+test "interpreter: transform negate" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -950,7 +950,7 @@ test "transform negate" {
     try testing.expectEqual(@as(?i16, -300), delta.ax);
 }
 
-test "transform scale" {
+test "interpreter: transform scale" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -981,7 +981,7 @@ test "transform scale" {
     try testing.expectEqual(@as(?i16, 32767), delta.ax);
 }
 
-test "transform clamp" {
+test "interpreter: transform clamp" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -1011,7 +1011,7 @@ test "transform clamp" {
     try testing.expectEqual(@as(?u8, 200), delta.lt);
 }
 
-test "transform chain scale+negate" {
+test "interpreter: transform chain scale+negate" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -1064,7 +1064,7 @@ fn makeDualSenseSample() [64]u8 {
     return raw;
 }
 
-test "DualSense USB report: axes, triggers, IMU, buttons" {
+test "interpreter: DualSense USB report: axes, triggers, IMU, buttons" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1097,7 +1097,7 @@ test "DualSense USB report: axes, triggers, IMU, buttons" {
     try testing.expect(btns & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.B)))) == 0); // Circle not pressed
 }
 
-test "DualSense right_y=0x00 saturates to 32767" {
+test "interpreter: DualSense right_y=0x00 saturates to 32767" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1109,7 +1109,7 @@ test "DualSense right_y=0x00 saturates to 32767" {
     try testing.expectEqual(@as(?i16, 32767), delta.ry);
 }
 
-test "DualSense joystick boundary values" {
+test "interpreter: DualSense joystick boundary values" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1133,7 +1133,7 @@ test "DualSense joystick boundary values" {
     try testing.expectEqual(@as(?i16, -32768), d3.ax);
 }
 
-test "DualSense L1+R1 simultaneously pressed" {
+test "interpreter: DualSense L1+R1 simultaneously pressed" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1150,7 +1150,7 @@ test "DualSense L1+R1 simultaneously pressed" {
     try testing.expect(btns & (@as(u64, 1) << rb_bit) != 0);
 }
 
-test "DualSense all buttons released" {
+test "interpreter: DualSense all buttons released" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1163,7 +1163,7 @@ test "DualSense all buttons released" {
     try testing.expectEqual(@as(u32, 0), btns);
 }
 
-test "DualSense battery_level: bits DSL extracts 4-bit nibble" {
+test "interpreter: DualSense battery_level: bits DSL extracts 4-bit nibble" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1178,7 +1178,7 @@ test "DualSense battery_level: bits DSL extracts 4-bit nibble" {
     try testing.expectEqual(@as(?u8, 8), delta.battery_level);
 }
 
-test "battery_level FieldTag: parseFieldTag and applyFieldTag" {
+test "interpreter: battery_level FieldTag: parseFieldTag and applyFieldTag" {
     try testing.expectEqual(FieldTag.battery_level, parseFieldTag("battery_level"));
     try testing.expectEqual(FieldTag.unknown, parseFieldTag("battery_raw"));
 
@@ -1219,7 +1219,7 @@ fn makeDualSenseBtSample() [78]u8 {
     return raw;
 }
 
-test "DualSense BT report: axes, triggers, IMU, buttons, CRC32" {
+test "interpreter: DualSense BT report: axes, triggers, IMU, buttons, CRC32" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1246,7 +1246,7 @@ test "DualSense BT report: axes, triggers, IMU, buttons, CRC32" {
     try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
 }
 
-test "DualSense BT report: CRC32 mismatch returns error" {
+test "interpreter: DualSense BT report: CRC32 mismatch returns error" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
@@ -1257,7 +1257,7 @@ test "DualSense BT report: CRC32 mismatch returns error" {
     try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(3, &raw));
 }
 
-test "button_group batch extraction" {
+test "interpreter: button_group batch extraction" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -1316,7 +1316,7 @@ const crc32_base_toml =
     \\expect = { offset = 4, type = "u32le" }
 ;
 
-test "checksum crc32 correct passes" {
+test "interpreter: checksum crc32 correct passes" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, crc32_base_toml);
     defer parsed.deinit();
@@ -1328,7 +1328,7 @@ test "checksum crc32 correct passes" {
     try testing.expectEqual(@as(?i16, null), delta.ax);
 }
 
-test "checksum crc32 mismatch returns error" {
+test "interpreter: checksum crc32 mismatch returns error" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, crc32_base_toml);
     defer parsed.deinit();
@@ -1338,7 +1338,7 @@ test "checksum crc32 mismatch returns error" {
     try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
 }
 
-test "checksum crc32 with seed" {
+test "interpreter: checksum crc32 with seed" {
     const allocator = testing.allocator;
     const toml_str =
         \\[device]
@@ -1409,7 +1409,7 @@ test "interpreter: all-0xFF report does not panic" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), result);
 }
 
-test "fuzz processReport: no panic on arbitrary input" {
+test "interpreter: fuzz processReport: no panic on arbitrary input" {
     const allocator = testing.allocator;
     const parsed = try device.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -1589,7 +1589,7 @@ test "interpreter: bits field unsigned default" {
     try testing.expectEqual(@as(?u8, 255), delta.lt);
 }
 
-test "extractBits: start_bit=7 single bit" {
+test "interpreter: extractBits: start_bit=7 single bit" {
     try testing.expectEqual(@as(u32, 1), extractBits(&[_]u8{0x80}, 0, 7, 1));
     try testing.expectEqual(@as(u32, 0), extractBits(&[_]u8{0x7F}, 0, 7, 1));
 }
@@ -1631,7 +1631,7 @@ test "interpreter: touch0_active bits round-trip" {
     try testing.expectEqual(@as(?bool, false), d2.touch0_active);
 }
 
-test "FieldTag.dpad: hat switch values 0-7 decode correctly" {
+test "interpreter: FieldTag.dpad: hat switch values 0-7 decode correctly" {
     // HID hat: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
     const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
     const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
@@ -1685,7 +1685,7 @@ test "mutation audit: scale boundary correctness" {
 
 // Scale asymmetry: for signed types, val = minInt (e.g. -32768 for i16le) produces an
 // out-of-range intermediate that saturateCast clamps to minInt.  Document current behavior.
-test "scale signed type minInt edge case" {
+test "interpreter: scale signed type minInt edge case" {
     // scale(-32768, 32767) on i16le type_max=32767
     var chain = compileTransformChain("scale(-32768, 32767)", .i16le);
     // val = -32768: (-32768 * 65535) / 32767 + (-32768) = out-of-range, saturated by caller
@@ -1821,7 +1821,7 @@ test "mutation audit: processReport match polarity" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), d_zero);
 }
 
-test "FieldTag.dpad: value 8 (released) and >8 treated as neutral" {
+test "interpreter: FieldTag.dpad: value 8 (released) and >8 treated as neutral" {
     var delta = GamepadStateDelta{};
     applyFieldTag(&delta, .dpad, 8);
     try std.testing.expectEqual(@as(i8, 0), delta.dpad_x.?);

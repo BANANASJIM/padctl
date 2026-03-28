@@ -1248,7 +1248,7 @@ fn makeControlSocket(allocator: std.mem.Allocator, tmp_path: []const u8) !Contro
     return ControlSocket.init(allocator, sock_path);
 }
 
-test "Supervisor: global SWITCH rolls back all devices on failure" {
+test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1317,7 +1317,7 @@ test "Supervisor: global SWITCH rolls back all devices on failure" {
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[1].instance.stopped, .acquire));
 }
 
-test "Supervisor: SWITCH with no devices returns no-devices" {
+test "supervisor: Supervisor: SWITCH with no devices returns no-devices" {
     const allocator = testing.allocator;
 
     const base_dir = "/tmp/padctl_supervisor_test_no_devices";
@@ -1349,7 +1349,7 @@ test "Supervisor: SWITCH with no devices returns no-devices" {
     try testing.expectEqualStrings("ERR no-devices\n", resp_buf[0..n]);
 }
 
-test "Supervisor: SIGHUP updates mapping without restarting instance" {
+test "supervisor: Supervisor: SIGHUP updates mapping without restarting instance" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1385,7 +1385,7 @@ test "Supervisor: SIGHUP updates mapping without restarting instance" {
     try testing.expect(sup.managed.items[0].instance.mapper != null);
 }
 
-test "Supervisor: SIGHUP with new phys_key spawns new instance" {
+test "supervisor: Supervisor: SIGHUP with new phys_key spawns new instance" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1414,7 +1414,7 @@ test "Supervisor: SIGHUP with new phys_key spawns new instance" {
     try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 }
 
-test "Supervisor: SIGHUP with removed phys_key stops instance" {
+test "supervisor: Supervisor: SIGHUP with removed phys_key stops instance" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1444,7 +1444,7 @@ test "Supervisor: SIGHUP with removed phys_key stops instance" {
     try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);
 }
 
-test "Supervisor: two rapid reloads serialize — no race condition" {
+test "supervisor: Supervisor: two rapid reloads serialize — no race condition" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1481,7 +1481,7 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     try testing.expectEqual(@as(u32, 1), sup.managed.items[0].instance.mapper.?.next_token);
 }
 
-test "Supervisor: reload null mapping clears existing mapper" {
+test "supervisor: Supervisor: reload null mapping clears existing mapper" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1514,7 +1514,7 @@ test "Supervisor: reload null mapping clears existing mapper" {
     try testing.expect(sup.managed.items[0].instance.mapper == null);
 }
 
-test "Supervisor: empty config dir → zero instances" {
+test "supervisor: Supervisor: empty config dir → zero instances" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1529,7 +1529,7 @@ test "Supervisor: empty config dir → zero instances" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "Supervisor: dir with no toml files → zero instances" {
+test "supervisor: Supervisor: dir with no toml files → zero instances" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1546,7 +1546,7 @@ test "Supervisor: dir with no toml files → zero instances" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "Supervisor: two toml files, no matching hidraw → zero instances" {
+test "supervisor: Supervisor: two toml files, no matching hidraw → zero instances" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1564,7 +1564,7 @@ test "Supervisor: two toml files, no matching hidraw → zero instances" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "Supervisor: duplicate attach devname — only one instance created" {
+test "supervisor: Supervisor: duplicate attach devname — only one instance created" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1594,7 +1594,7 @@ test "Supervisor: duplicate attach devname — only one instance created" {
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 }
 
-test "Supervisor: detach unknown devname — no panic" {
+test "supervisor: Supervisor: detach unknown devname — no panic" {
     const allocator = testing.allocator;
 
     var sup = try Supervisor.initForTest(allocator);
@@ -1604,7 +1604,7 @@ test "Supervisor: detach unknown devname — no panic" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "Supervisor: attach-detach-attach same devname — new instance after re-attach" {
+test "supervisor: Supervisor: attach-detach-attach same devname — new instance after re-attach" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1632,7 +1632,7 @@ test "Supervisor: attach-detach-attach same devname — new instance after re-at
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 }
 
-test "Supervisor: two devnames attached simultaneously — independent threads" {
+test "supervisor: Supervisor: two devnames attached simultaneously — independent threads" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -1657,7 +1657,7 @@ test "Supervisor: two devnames attached simultaneously — independent threads" 
     try testing.expect(sup.managed.items[0].instance != sup.managed.items[1].instance);
 }
 
-test "Supervisor: initForTest sets inotify_fd and debounce_fd to -1" {
+test "supervisor: Supervisor: initForTest sets inotify_fd and debounce_fd to -1" {
     const allocator = testing.allocator;
     var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
@@ -1667,7 +1667,7 @@ test "Supervisor: initForTest sets inotify_fd and debounce_fd to -1" {
     try testing.expectEqual(@as(?[]const u8, null), sup.config_dir);
 }
 
-test "Supervisor: inotify debounce coalescing with real timerfd" {
+test "supervisor: Supervisor: inotify debounce coalescing with real timerfd" {
     const allocator = testing.allocator;
     var sup = try Supervisor.initForTest(allocator);
 
@@ -1689,7 +1689,7 @@ test "Supervisor: inotify debounce coalescing with real timerfd" {
     try testing.expectError(error.WouldBlock, result);
 }
 
-test "Supervisor: armDebounce with invalid fd is no-op" {
+test "supervisor: Supervisor: armDebounce with invalid fd is no-op" {
     const allocator = testing.allocator;
     var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
@@ -1698,7 +1698,7 @@ test "Supervisor: armDebounce with invalid fd is no-op" {
     sup.armDebounce();
 }
 
-test "initInotify: non-existent config dir returns disabled" {
+test "supervisor: initInotify: non-existent config dir returns disabled" {
     const allocator = testing.allocator;
 
     // Use testing allocator — if a real config dir exists, this test still
@@ -1715,7 +1715,7 @@ test "initInotify: non-existent config dir returns disabled" {
     }
 }
 
-test "initInotify: watches temp directory successfully" {
+test "supervisor: initInotify: watches temp directory successfully" {
     const allocator = testing.allocator;
 
     // Create a temp dir to use as config dir, then manually set up inotify on it
@@ -1746,7 +1746,7 @@ test "initInotify: watches temp directory successfully" {
     try testing.expect(n > 0);
 }
 
-test "Supervisor.serve: control socket accepts client and responds to STATUS" {
+test "supervisor: Supervisor.serve: control socket accepts client and responds to STATUS" {
     const allocator = testing.allocator;
     var sup = try Supervisor.initForTest(allocator);
 

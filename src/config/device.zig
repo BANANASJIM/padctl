@@ -411,7 +411,7 @@ const test_toml =
     \\max_effects = 16
 ;
 
-test "load flydigi/vader5.toml succeeds" {
+test "device: load flydigi/vader5.toml succeeds" {
     const allocator = std.testing.allocator;
     const result = try parseFile(allocator, "devices/flydigi/vader5.toml");
     defer result.deinit();
@@ -424,7 +424,7 @@ test "load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqualStrings("extended", cfg.report[0].name);
 }
 
-test "valid config parses and validates" {
+test "device: valid config parses and validates" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml);
     defer result.deinit();
@@ -435,7 +435,7 @@ test "valid config parses and validates" {
     try std.testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
 }
 
-test "offset out of bounds returns error" {
+test "device: offset out of bounds returns error" {
     const allocator = std.testing.allocator;
     const bad =
         \\[device]
@@ -455,7 +455,7 @@ test "offset out of bounds returns error" {
     try std.testing.expectError(error.OffsetOutOfBounds, parseString(allocator, bad));
 }
 
-test "duplicate field name returns error" {
+test "device: duplicate field name returns error" {
     const cfg = DeviceConfig{
         .device = .{
             .name = "test",
@@ -468,7 +468,7 @@ test "duplicate field name returns error" {
     try validate(&cfg);
 }
 
-test "invalid transform returns error" {
+test "device: invalid transform returns error" {
     const allocator = std.testing.allocator;
     const bad =
         \\[device]
@@ -488,7 +488,7 @@ test "invalid transform returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
-test "transform chain exceeding max count returns error" {
+test "device: transform chain exceeding max count returns error" {
     const allocator = std.testing.allocator;
     const bad =
         \\[device]
@@ -508,7 +508,7 @@ test "transform chain exceeding max count returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
-test "transform chain at max count is accepted" {
+test "device: transform chain at max count is accepted" {
     const allocator = std.testing.allocator;
     const ok =
         \\[device]
@@ -529,7 +529,7 @@ test "transform chain at max count is accepted" {
     defer parsed.deinit();
 }
 
-test "unknown button name returns error" {
+test "device: unknown button name returns error" {
     const allocator = std.testing.allocator;
     const bad =
         \\[device]
@@ -550,7 +550,7 @@ test "unknown button name returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
-test "load devices/sony/dualsense.toml succeeds" {
+test "device: load devices/sony/dualsense.toml succeeds" {
     const allocator = std.testing.allocator;
     const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
@@ -564,7 +564,7 @@ test "load devices/sony/dualsense.toml succeeds" {
     try std.testing.expectEqualStrings("bt", cfg.report[1].name);
 }
 
-test "dualsense.toml report field count" {
+test "device: dualsense.toml report field count" {
     const allocator = std.testing.allocator;
     const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
@@ -577,7 +577,7 @@ test "dualsense.toml report field count" {
     try std.testing.expectEqual(@as(usize, 16), fields.map.count());
 }
 
-test "dualsense.toml commands count" {
+test "device: dualsense.toml commands count" {
     const allocator = std.testing.allocator;
     const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
@@ -588,7 +588,7 @@ test "dualsense.toml commands count" {
     try std.testing.expectEqual(@as(usize, 6), cmds.map.count());
 }
 
-test "dualsense.toml output axes and buttons count" {
+test "device: dualsense.toml output axes and buttons count" {
     const allocator = std.testing.allocator;
     const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
@@ -619,7 +619,7 @@ const emulate_toml =
     \\emulate = "xbox-360"
 ;
 
-test "emulate preset resolves vid/pid/name and axes/buttons" {
+test "device: emulate preset resolves vid/pid/name and axes/buttons" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, emulate_toml);
     defer result.deinit();
@@ -632,7 +632,7 @@ test "emulate preset resolves vid/pid/name and axes/buttons" {
     try std.testing.expect(out.buttons != null);
 }
 
-test "emulate preset: explicit vid overrides preset" {
+test "device: emulate preset: explicit vid overrides preset" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -658,7 +658,7 @@ test "emulate preset: explicit vid overrides preset" {
     try std.testing.expectEqual(@as(?i64, 0x0ce6), out.pid);
 }
 
-test "emulate preset: unknown preset returns error" {
+test "device: emulate preset: unknown preset returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -890,7 +890,7 @@ test "device: bits span > 4 bytes returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "lookup transform is rejected" {
+test "device: lookup transform is rejected" {
     const allocator = std.testing.allocator;
     const bad =
         \\[device]
@@ -910,7 +910,7 @@ test "lookup transform is rejected" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
-test "generic mode: valid config parses" {
+test "device: generic mode: valid config parses" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -943,7 +943,7 @@ test "generic mode: valid config parses" {
     try std.testing.expectEqualStrings("generic", result.value.device.mode.?);
 }
 
-test "generic mode: missing output.mapping returns error" {
+test "device: generic mode: missing output.mapping returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -964,7 +964,7 @@ test "generic mode: missing output.mapping returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "generic mode: unknown event code returns error" {
+test "device: generic mode: unknown event code returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -989,7 +989,7 @@ test "generic mode: unknown event code returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "generic mode: ABS event missing range returns error" {
+test "device: generic mode: ABS event missing range returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -1014,7 +1014,7 @@ test "generic mode: ABS event missing range returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "fuzz parseString: no panic on arbitrary input" {
+test "device: fuzz parseString: no panic on arbitrary input" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, input: []const u8) !void {
             const result = parseString(std.testing.allocator, input);

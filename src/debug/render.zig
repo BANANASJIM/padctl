@@ -973,7 +973,7 @@ fn makeTestState() GamepadState {
 
 const default_config = RenderConfig{ .has_gyro = true };
 
-test "renderFrame: contains axis values" {
+test "render: renderFrame: contains axis values" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
@@ -986,7 +986,7 @@ test "renderFrame: contains axis values" {
     try testing.expect(std.mem.indexOf(u8, out, "999") != null);
 }
 
-test "renderFrame: contains trigger values" {
+test "render: renderFrame: contains trigger values" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
@@ -997,7 +997,7 @@ test "renderFrame: contains trigger values" {
     try testing.expect(std.mem.indexOf(u8, out, "64") != null);
 }
 
-test "renderFrame: contains gyro values" {
+test "render: renderFrame: contains gyro values" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
@@ -1009,7 +1009,7 @@ test "renderFrame: contains gyro values" {
     try testing.expect(std.mem.indexOf(u8, out, "300") != null);
 }
 
-test "renderFrame: no gyro section when disabled" {
+test "render: renderFrame: no gyro section when disabled" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
@@ -1020,7 +1020,7 @@ test "renderFrame: no gyro section when disabled" {
     try testing.expect(std.mem.indexOf(u8, out, "GX") == null);
 }
 
-test "renderFrame: touchpad section when enabled" {
+test "render: renderFrame: touchpad section when enabled" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var gs = GamepadState{};
@@ -1033,7 +1033,7 @@ test "renderFrame: touchpad section when enabled" {
     try testing.expect(std.mem.indexOf(u8, out, "500") != null);
 }
 
-test "renderFrame: contains raw hex bytes" {
+test "render: renderFrame: contains raw hex bytes" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
@@ -1046,7 +1046,7 @@ test "renderFrame: contains raw hex bytes" {
     try testing.expect(std.mem.indexOf(u8, out, "ef") != null);
 }
 
-test "renderFrame: rumble_on shows rumble indicator" {
+test "render: renderFrame: rumble_on shows rumble indicator" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
@@ -1056,7 +1056,7 @@ test "renderFrame: rumble_on shows rumble indicator" {
     try testing.expect(std.mem.indexOf(u8, out, "ON") != null);
 }
 
-test "renderFrame: contains ANSI escape sequences" {
+test "render: renderFrame: contains ANSI escape sequences" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
@@ -1066,7 +1066,7 @@ test "renderFrame: contains ANSI escape sequences" {
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[") != null);
 }
 
-test "renderFrame: pressed button highlighted differently" {
+test "render: renderFrame: pressed button highlighted differently" {
     var buf_pressed: [8192]u8 = undefined;
     var buf_released: [8192]u8 = undefined;
     var fbs1 = std.io.fixedBufferStream(&buf_pressed);
@@ -1084,7 +1084,7 @@ test "renderFrame: pressed button highlighted differently" {
     try testing.expect(!std.mem.eql(u8, fbs1.getWritten(), fbs2.getWritten()));
 }
 
-test "renderFrame: extended buttons shown when configured" {
+test "render: renderFrame: extended buttons shown when configured" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var gs = GamepadState{};
@@ -1096,7 +1096,7 @@ test "renderFrame: extended buttons shown when configured" {
     try testing.expect(std.mem.indexOf(u8, out, "[Z]") != null);
 }
 
-test "renderFrame: mapped mode shows grouped outputs" {
+test "render: renderFrame: mapped mode shows grouped outputs" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
@@ -1123,7 +1123,7 @@ test "renderFrame: mapped mode shows grouped outputs" {
     try testing.expect(std.mem.indexOf(u8, out, "Test Pad") != null);
 }
 
-test "shortenEventCode: known codes" {
+test "render: shortenEventCode: known codes" {
     try testing.expectEqualStrings("S", shortenEventCode("BTN_SOUTH"));
     try testing.expectEqualStrings("HM", shortenEventCode("BTN_MODE"));
     try testing.expectEqualStrings("H1", shortenEventCode("BTN_TRIGGER_HAPPY1"));
@@ -1133,7 +1133,7 @@ test "shortenEventCode: known codes" {
     try testing.expectEqualStrings("MM", shortenEventCode("BTN_MIDDLE"));
 }
 
-test "categorizeEventCode: categories" {
+test "render: categorizeEventCode: categories" {
     try testing.expectEqual(OutputCategory.gamepad, categorizeEventCode("BTN_SOUTH"));
     try testing.expectEqual(OutputCategory.keyboard, categorizeEventCode("KEY_F13"));
     try testing.expectEqual(OutputCategory.mouse, categorizeEventCode("BTN_LEFT"));
@@ -1141,7 +1141,7 @@ test "categorizeEventCode: categories" {
     try testing.expectEqual(OutputCategory.gamepad, categorizeEventCode("BTN_TRIGGER_HAPPY1"));
 }
 
-test "Stats: packet counting and per-second rate" {
+test "render: Stats: packet counting and per-second rate" {
     var st = Stats.init(1000);
     st.recordPacket(1000);
     st.recordPacket(1100);
@@ -1155,7 +1155,7 @@ test "Stats: packet counting and per-second rate" {
     try testing.expect(st.packets_per_sec > 0);
 }
 
-test "Stats: button change tracking and ring buffer" {
+test "render: Stats: button change tracking and ring buffer" {
     var st = Stats.init(0);
     st.recordButtonChange(.A, true, 100);
     try testing.expectEqual(@as(u64, 1), st.key_press_count);
@@ -1175,7 +1175,7 @@ test "Stats: button change tracking and ring buffer" {
     try testing.expectEqual(true, ev1.pressed);
 }
 
-test "Stats: ring buffer wraps at 8" {
+test "render: Stats: ring buffer wraps at 8" {
     var st = Stats.init(0);
     // Fill 10 events, ring buffer holds last 8
     for (0..10) |i| {
@@ -1196,7 +1196,7 @@ test "Stats: ring buffer wraps at 8" {
     try testing.expectEqual(@as(?KeyEvent, null), st.eventAt(8));
 }
 
-test "renderStats: produces Stats section with data" {
+test "render: renderStats: produces Stats section with data" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};

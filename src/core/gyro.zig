@@ -87,7 +87,7 @@ fn applyCurve(ema: f32, cfg: *const GyroConfig) f32 {
 
 const testing = std.testing;
 
-test "mode=off: zero output" {
+test "gyro: mode=off: zero output" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{};
     const out = g.process(&cfg, 1000, 2000, 500);
@@ -97,7 +97,7 @@ test "mode=off: zero output" {
     try testing.expect(out.joy_y == null);
 }
 
-test "deadzone: input within deadzone returns zero" {
+test "gyro: deadzone: input within deadzone returns zero" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .deadzone = 100, .smoothing = 0.0 };
     const out = g.process(&cfg, 50, 80, 0);
@@ -105,7 +105,7 @@ test "deadzone: input within deadzone returns zero" {
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
 
-test "deadzone: input outside deadzone returns nonzero (large value)" {
+test "gyro: deadzone: input outside deadzone returns nonzero (large value)" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .deadzone = 100, .smoothing = 0.0, .sensitivity_x = 10.0, .sensitivity_y = 10.0 };
     // normalized: (30000-100)/32667 ≈ 0.915, * 10 * range ≈ 9 pixels/frame
@@ -113,7 +113,7 @@ test "deadzone: input outside deadzone returns nonzero (large value)" {
     try testing.expect(out.rel_x != 0 or g.accum_x != 0);
 }
 
-test "smoothing=0: no EMA delay (direct pass-through)" {
+test "gyro: smoothing=0: no EMA delay (direct pass-through)" {
     var g = GyroProcessor{};
     // sensitivity=1.0, max input=32767 → output ≈ 1.0 unit/frame at full deflection
     // Use large input: normalized ≈ 1.0, sensitivity=32767 → scaled = 32767*32767/32767 = 32767
@@ -123,7 +123,7 @@ test "smoothing=0: no EMA delay (direct pass-through)" {
     try testing.expect(out.rel_y > 0);
 }
 
-test "sub-pixel accumulation: small values accumulate to integer delta" {
+test "gyro: sub-pixel accumulation: small values accumulate to integer delta" {
     var g = GyroProcessor{};
     // normalized: raw=16384 (half max), normalized=0.5, curve=1 → curved=0.5
     // applyCurve = 0.5 * 32767 = 16383.5; scaled = 16383.5 * sensitivity / 32767
@@ -138,7 +138,7 @@ test "sub-pixel accumulation: small values accumulate to integer delta" {
     try testing.expect(g.accum_x >= 0.0 and g.accum_x < 1.0);
 }
 
-test "invert_x/invert_y: negates output" {
+test "gyro: invert_x/invert_y: negates output" {
     var g1 = GyroProcessor{};
     var g2 = GyroProcessor{};
     // Use full-scale input with high sensitivity to get non-zero integer output
@@ -150,7 +150,7 @@ test "invert_x/invert_y: negates output" {
     try testing.expectEqual(-out_normal.rel_y, out_invert.rel_y);
 }
 
-test "curve=1.0 linear vs curve=2.0 exponential" {
+test "gyro: curve=1.0 linear vs curve=2.0 exponential" {
     // Normalized curve: at half-scale input, curve=2 gives 0.25, curve=1 gives 0.5.
     // Verify curve=2 produces less total motion than curve=1 at half-scale.
     var g1 = GyroProcessor{};
@@ -166,7 +166,7 @@ test "curve=1.0 linear vs curve=2.0 exponential" {
     try testing.expect(total_linear > total_exp);
 }
 
-test "EMA smoothing: consecutive frames converge" {
+test "gyro: EMA smoothing: consecutive frames converge" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.5, .sensitivity_x = 1000.0, .sensitivity_y = 1000.0 };
     // Feed constant input; EMA should converge towards steady state

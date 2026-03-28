@@ -425,7 +425,7 @@ const testing = std.testing;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const uinput = @import("io/uinput.zig");
 
-test "EventLoop.addUinputFf registers fd and increments fd_count" {
+test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
@@ -439,7 +439,7 @@ test "EventLoop.addUinputFf registers fd and increments fd_count" {
     try testing.expectEqual(pfds[0], loop.pollfds[3].fd);
 }
 
-test "EventLoop: Disconnected device causes loop to exit without panic" {
+test "event_loop: EventLoop: Disconnected device causes loop to exit without panic" {
     const allocator = testing.allocator;
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
@@ -495,7 +495,7 @@ test "EventLoop: Disconnected device causes loop to exit without panic" {
     try testing.expect(!loop.running);
 }
 
-test "EventLoop.initManaged creates eventfd and timerfd" {
+test "event_loop: EventLoop.initManaged creates eventfd and timerfd" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
     try testing.expect(loop.signal_fd >= 0);
@@ -504,7 +504,7 @@ test "EventLoop.initManaged creates eventfd and timerfd" {
     try testing.expectEqual(@as(usize, 3), loop.fd_count);
 }
 
-test "EventLoop.stop wakes ppoll" {
+test "event_loop: EventLoop.stop wakes ppoll" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
     loop.stop();
@@ -513,7 +513,7 @@ test "EventLoop.stop wakes ppoll" {
     try testing.expectEqual(@as(usize, 1), ready);
 }
 
-test "EventLoop.addDevice registers fd" {
+test "event_loop: EventLoop.addDevice registers fd" {
     const allocator = testing.allocator;
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
@@ -528,7 +528,7 @@ test "EventLoop.addDevice registers fd" {
     try testing.expectEqual(mock.pipe_r, loop.pollfds[3].fd);
 }
 
-test "EventLoop.addDevice rejects overflow" {
+test "event_loop: EventLoop.addDevice rejects overflow" {
     const allocator = testing.allocator;
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
@@ -550,7 +550,7 @@ test "EventLoop.addDevice rejects overflow" {
     try testing.expectError(error.TooManyFds, loop.addDevice(extra_dev));
 }
 
-test "armTimer / disarmTimer: arm then disarm does not leave fd readable" {
+test "event_loop: armTimer / disarmTimer: arm then disarm does not leave fd readable" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
@@ -563,7 +563,7 @@ test "armTimer / disarmTimer: arm then disarm does not leave fd readable" {
     try testing.expectEqual(@as(usize, 0), ready);
 }
 
-test "armTimer: fires after timeout" {
+test "event_loop: armTimer: fires after timeout" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
@@ -580,7 +580,7 @@ test "armTimer: fires after timeout" {
     try testing.expectEqual(@as(usize, 8), n);
 }
 
-test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
+test "event_loop: EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     const allocator = testing.allocator;
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
@@ -676,7 +676,7 @@ const minimal_toml =
     \\left_x = { offset = 1, type = "i16le" }
 ;
 
-test "EventLoop mini: device frame dispatched to interpreter and output" {
+test "event_loop: EventLoop mini: device frame dispatched to interpreter and output" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
@@ -986,7 +986,7 @@ test "event_loop: config-driven FF command key — output.force_feedback.type ov
 const command = @import("core/command.zig");
 const mapping_mod = @import("config/mapping.zig");
 
-test "buildAdaptiveTriggerParams: maps left/right values with shift" {
+test "event_loop: buildAdaptiveTriggerParams: maps left/right values with shift" {
     const at = mapping_mod.AdaptiveTriggerConfig{
         .mode = "feedback",
         .right = .{ .position = 40, .strength = 180 },
@@ -1009,7 +1009,7 @@ test "buildAdaptiveTriggerParams: maps left/right values with shift" {
     try testing.expectEqual(@as(u16, 200 << 8), params[7].value);
 }
 
-test "buildAdaptiveTriggerParams: null params default to 0" {
+test "event_loop: buildAdaptiveTriggerParams: null params default to 0" {
     const at = mapping_mod.AdaptiveTriggerConfig{ .mode = "off" };
     var buf: [12]Param = undefined;
     const params = buildAdaptiveTriggerParams(&buf, &at);
@@ -1018,7 +1018,7 @@ test "buildAdaptiveTriggerParams: null params default to 0" {
     }
 }
 
-test "fillTemplate: adaptive trigger feedback template produces correct bytes" {
+test "event_loop: fillTemplate: adaptive trigger feedback template produces correct bytes" {
     const allocator = testing.allocator;
     const template = "02 0c 00 00 00 00 00 00 00 00 00 01 {r_position:u8} {r_strength:u8} 00 00 00 00 00 00 00 00 01 {l_position:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
     const at = mapping_mod.AdaptiveTriggerConfig{
@@ -1050,7 +1050,7 @@ test "fillTemplate: adaptive trigger feedback template produces correct bytes" {
     try testing.expectEqual(@as(u8, 200), result[24]);
 }
 
-test "fillTemplate: adaptive trigger off template is all zeros except report ID and flags" {
+test "event_loop: fillTemplate: adaptive trigger off template is all zeros except report ID and flags" {
     const allocator = testing.allocator;
     const template = "02 0c 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
     const result = try command.fillTemplate(allocator, template, &.{});
@@ -1064,7 +1064,7 @@ test "fillTemplate: adaptive trigger off template is all zeros except report ID 
     }
 }
 
-test "applyAdaptiveTrigger: round-trip mapping config to device write" {
+test "event_loop: applyAdaptiveTrigger: round-trip mapping config to device write" {
     const allocator = testing.allocator;
 
     const at_toml =
@@ -1109,7 +1109,7 @@ test "applyAdaptiveTrigger: round-trip mapping config to device write" {
     try testing.expectEqual(@as(u8, 255), mock_dev.write_log.items[24]); // l_strength
 }
 
-test "applyAdaptiveTrigger: unknown mode silently skips" {
+test "event_loop: applyAdaptiveTrigger: unknown mode silently skips" {
     const allocator = testing.allocator;
 
     const parsed = try device_mod.parseString(allocator, minimal_toml);
@@ -1125,7 +1125,7 @@ test "applyAdaptiveTrigger: unknown mode silently skips" {
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
 }
 
-test "applyAdaptiveTrigger: custom command_prefix routes correctly" {
+test "event_loop: applyAdaptiveTrigger: custom command_prefix routes correctly" {
     const allocator = testing.allocator;
 
     const toml_str =

@@ -309,7 +309,7 @@ pub fn resolveBtnCode(name: []const u8) error{UnknownBtnCode}!u16 {
     return error.UnknownBtnCode;
 }
 
-test "resolveAbsCode: known codes" {
+test "input_codes: resolveAbsCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x00), try resolveAbsCode("ABS_X"));
     try std.testing.expectEqual(@as(u16, 0x01), try resolveAbsCode("ABS_Y"));
     try std.testing.expectEqual(@as(u16, 0x03), try resolveAbsCode("ABS_RX"));
@@ -317,13 +317,13 @@ test "resolveAbsCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x11), try resolveAbsCode("ABS_HAT0Y"));
 }
 
-test "resolveAbsCode: unknown returns error" {
+test "input_codes: resolveAbsCode: unknown returns error" {
     try std.testing.expectError(error.UnknownAbsCode, resolveAbsCode("INVALID"));
     try std.testing.expectError(error.UnknownAbsCode, resolveAbsCode(""));
     try std.testing.expectError(error.UnknownAbsCode, resolveAbsCode("BTN_SOUTH"));
 }
 
-test "resolveBtnCode: known codes" {
+test "input_codes: resolveBtnCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x130), try resolveBtnCode("BTN_SOUTH"));
     try std.testing.expectEqual(@as(u16, 0x131), try resolveBtnCode("BTN_EAST"));
     try std.testing.expectEqual(@as(u16, 0x133), try resolveBtnCode("BTN_NORTH"));
@@ -333,12 +333,12 @@ test "resolveBtnCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x2c2), try resolveBtnCode("BTN_TRIGGER_HAPPY3"));
 }
 
-test "resolveBtnCode: unknown returns error" {
+test "input_codes: resolveBtnCode: unknown returns error" {
     try std.testing.expectError(error.UnknownBtnCode, resolveBtnCode("INVALID"));
     try std.testing.expectError(error.UnknownBtnCode, resolveBtnCode("ABS_X"));
 }
 
-test "resolveKeyCode: known codes" {
+test "input_codes: resolveKeyCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x1e), try resolveKeyCode("KEY_A"));
     try std.testing.expectEqual(@as(u16, 0x3b), try resolveKeyCode("KEY_F1"));
     try std.testing.expectEqual(@as(u16, 0x58), try resolveKeyCode("KEY_F12"));
@@ -349,14 +349,14 @@ test "resolveKeyCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x6c), try resolveKeyCode("KEY_DOWN"));
 }
 
-test "resolveKeyCode: unknown returns error" {
+test "input_codes: resolveKeyCode: unknown returns error" {
     try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode("INVALID"));
     try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode(""));
     try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode("BTN_SOUTH"));
     try std.testing.expectError(error.UnknownKeyCode, resolveKeyCode("ABS_X"));
 }
 
-test "resolveMouseCode: known codes" {
+test "input_codes: resolveMouseCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x110), try resolveMouseCode("mouse_left"));
     try std.testing.expectEqual(@as(u16, 0x111), try resolveMouseCode("mouse_right"));
     try std.testing.expectEqual(@as(u16, 0x112), try resolveMouseCode("mouse_middle"));
@@ -366,31 +366,31 @@ test "resolveMouseCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x116), try resolveMouseCode("mouse_back"));
 }
 
-test "resolveMouseCode: unknown returns error" {
+test "input_codes: resolveMouseCode: unknown returns error" {
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("INVALID"));
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode(""));
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("BTN_LEFT"));
     try std.testing.expectError(error.UnknownMouseCode, resolveMouseCode("MOUSE_LEFT"));
 }
 
-test "resolveEventCode: ABS_WHEEL returns EV_ABS" {
+test "input_codes: resolveEventCode: ABS_WHEEL returns EV_ABS" {
     const r = try resolveEventCode("ABS_WHEEL");
     try std.testing.expectEqual(@as(u16, c.EV_ABS), r.event_type);
     try std.testing.expectEqual(@as(u16, c.ABS_WHEEL), r.event_code);
 }
 
-test "resolveEventCode: BTN_GEAR_UP returns EV_KEY" {
+test "input_codes: resolveEventCode: BTN_GEAR_UP returns EV_KEY" {
     const r = try resolveEventCode("BTN_GEAR_UP");
     try std.testing.expectEqual(@as(u16, c.EV_KEY), r.event_type);
     try std.testing.expectEqual(@as(u16, c.BTN_GEAR_UP), r.event_code);
 }
 
-test "resolveEventCode: KEY_A returns EV_KEY" {
+test "input_codes: resolveEventCode: KEY_A returns EV_KEY" {
     const r = try resolveEventCode("KEY_A");
     try std.testing.expectEqual(@as(u16, c.EV_KEY), r.event_type);
     try std.testing.expectEqual(@as(u16, c.KEY_A), r.event_code);
 }
 
-test "resolveEventCode: INVALID returns error" {
+test "input_codes: resolveEventCode: INVALID returns error" {
     try std.testing.expectError(error.UnknownEventCode, resolveEventCode("INVALID"));
 }

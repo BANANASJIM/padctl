@@ -175,14 +175,14 @@ fn validateString(allocator: std.mem.Allocator, content: []const u8) ![]Validati
     return validateFile(path, allocator);
 }
 
-test "valid config: 0 errors" {
+test "validate: valid config: 0 errors" {
     const allocator = testing.allocator;
     const errors = try validateString(allocator, valid_toml);
     defer freeErrors(errors, allocator);
     try testing.expectEqual(@as(usize, 0), errors.len);
 }
 
-test "bit_index out of range: error reported" {
+test "validate: bit_index out of range: error reported" {
     const allocator = testing.allocator;
     const bad =
         \\[device]
@@ -207,7 +207,7 @@ test "bit_index out of range: error reported" {
     try testing.expect(errors.len > 0);
 }
 
-test "match overlap: error reported" {
+test "validate: match overlap: error reported" {
     const allocator = testing.allocator;
     const bad =
         \\[device]
@@ -239,7 +239,7 @@ test "match overlap: error reported" {
     try testing.expect(errors.len > 0);
 }
 
-test "unknown checksum algo: error reported" {
+test "validate: unknown checksum algo: error reported" {
     const allocator = testing.allocator;
     const bad =
         \\[device]
@@ -270,7 +270,7 @@ test "unknown checksum algo: error reported" {
     try testing.expect(found);
 }
 
-test "offset boundary exact: 60 + u32le in 64-byte report is valid" {
+test "validate: offset boundary exact: 60 + u32le in 64-byte report is valid" {
     const allocator = testing.allocator;
     const good =
         \\[device]
@@ -294,7 +294,7 @@ test "offset boundary exact: 60 + u32le in 64-byte report is valid" {
     try testing.expectEqual(@as(usize, 0), errors.len);
 }
 
-test "offset out of bounds: 61 + u32le in 64-byte report is error" {
+test "validate: offset out of bounds: 61 + u32le in 64-byte report is error" {
     const allocator = testing.allocator;
     const bad =
         \\[device]
@@ -318,7 +318,7 @@ test "offset out of bounds: 61 + u32le in 64-byte report is error" {
     try testing.expect(errors.len > 0);
 }
 
-test "validate devices/sony/dualsense.toml: 0 errors" {
+test "validate: validate devices/sony/dualsense.toml: 0 errors" {
     const allocator = testing.allocator;
     const errors = try validateFile("devices/sony/dualsense.toml", allocator);
     defer freeErrors(errors, allocator);
@@ -328,7 +328,7 @@ test "validate devices/sony/dualsense.toml: 0 errors" {
     try testing.expectEqual(@as(usize, 0), errors.len);
 }
 
-test "validate devices/nintendo/switch-pro.toml: 0 errors" {
+test "validate: validate devices/nintendo/switch-pro.toml: 0 errors" {
     const allocator = testing.allocator;
     const errors = try validateFile("devices/nintendo/switch-pro.toml", allocator);
     defer freeErrors(errors, allocator);
@@ -338,7 +338,7 @@ test "validate devices/nintendo/switch-pro.toml: 0 errors" {
     try testing.expectEqual(@as(usize, 0), errors.len);
 }
 
-test "validate devices/8bitdo/ultimate.toml: 0 errors" {
+test "validate: validate devices/8bitdo/ultimate.toml: 0 errors" {
     const allocator = testing.allocator;
     const errors = try validateFile("devices/8bitdo/ultimate.toml", allocator);
     defer freeErrors(errors, allocator);
@@ -348,7 +348,7 @@ test "validate devices/8bitdo/ultimate.toml: 0 errors" {
     try testing.expectEqual(@as(usize, 0), errors.len);
 }
 
-test "validate devices/microsoft/xbox-elite.toml: 0 errors" {
+test "validate: validate devices/microsoft/xbox-elite.toml: 0 errors" {
     const allocator = testing.allocator;
     const errors = try validateFile("devices/microsoft/xbox-elite.toml", allocator);
     defer freeErrors(errors, allocator);
@@ -358,7 +358,7 @@ test "validate devices/microsoft/xbox-elite.toml: 0 errors" {
     try testing.expectEqual(@as(usize, 0), errors.len);
 }
 
-test "undeclared interface in report: error reported" {
+test "validate: undeclared interface in report: error reported" {
     const allocator = testing.allocator;
     const bad =
         \\[device]
@@ -385,7 +385,7 @@ test "undeclared interface in report: error reported" {
     try testing.expect(found);
 }
 
-test "validate devices/flydigi/vader5.toml: 0 errors" {
+test "validate: validate devices/flydigi/vader5.toml: 0 errors" {
     const allocator = testing.allocator;
     const errors = try validateFile("devices/flydigi/vader5.toml", allocator);
     defer freeErrors(errors, allocator);

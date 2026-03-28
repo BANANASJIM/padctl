@@ -73,7 +73,7 @@ fn makeCfg(mode: []const u8, suppress_gamepad: ?bool) DpadConfig {
     return .{ .mode = mode, .suppress_gamepad = suppress_gamepad };
 }
 
-test "gamepad mode: no aux events emitted" {
+test "dpad: gamepad mode: no aux events emitted" {
     const cfg = makeCfg("gamepad", null);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -84,7 +84,7 @@ test "gamepad mode: no aux events emitted" {
     try testing.expect(!suppress_hat);
 }
 
-test "arrows mode: dpad_y < 0 -> KEY_UP press" {
+test "dpad: arrows mode: dpad_y < 0 -> KEY_UP press" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -96,7 +96,7 @@ test "arrows mode: dpad_y < 0 -> KEY_UP press" {
     try testing.expect(ev.key.pressed);
 }
 
-test "arrows mode: dpad from up to none -> KEY_UP release" {
+test "dpad: arrows mode: dpad from up to none -> KEY_UP release" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -108,7 +108,7 @@ test "arrows mode: dpad from up to none -> KEY_UP release" {
     try testing.expect(!ev.key.pressed);
 }
 
-test "arrows mode: diagonal up+right -> two key presses" {
+test "dpad: arrows mode: diagonal up+right -> two key presses" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -126,7 +126,7 @@ test "arrows mode: diagonal up+right -> two key presses" {
     try testing.expect(got_right);
 }
 
-test "suppress_gamepad: DPad button bits suppressed" {
+test "dpad: suppress_gamepad: DPad button bits suppressed" {
     const cfg = makeCfg("arrows", true);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -137,7 +137,7 @@ test "suppress_gamepad: DPad button bits suppressed" {
     try testing.expect(suppress_hat);
 }
 
-test "suppress_gamepad=false: no button suppression" {
+test "dpad: suppress_gamepad=false: no button suppression" {
     const cfg = makeCfg("arrows", false);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -147,7 +147,7 @@ test "suppress_gamepad=false: no button suppression" {
     try testing.expect(!suppress_hat);
 }
 
-test "edge detection: same state produces no events" {
+test "dpad: edge detection: same state produces no events" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
     var suppressed: u64 = 0;
@@ -157,7 +157,7 @@ test "edge detection: same state produces no events" {
     try testing.expectEqual(@as(usize, 0), aux.len);
 }
 
-test "arrows mode: all four directions" {
+test "dpad: arrows mode: all four directions" {
     const cfg = makeCfg("arrows", null);
 
     // down

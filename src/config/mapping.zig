@@ -158,7 +158,7 @@ const test_toml_basic =
     \\A = "B"
 ;
 
-test "MappingConfig parses name and remap" {
+test "mapping: MappingConfig parses name and remap" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml_basic);
     defer result.deinit();
@@ -171,7 +171,7 @@ test "MappingConfig parses name and remap" {
     try std.testing.expectEqualStrings("B", cfg.remap.?.map.get("A").?);
 }
 
-test "MappingConfig: empty config" {
+test "mapping: MappingConfig: empty config" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, "");
     defer result.deinit();
@@ -249,7 +249,7 @@ const test_toml_full =
     \\B = "KEY_F2"
 ;
 
-test "MappingConfig: full config with layers, gyro, stick, dpad" {
+test "mapping: MappingConfig: full config with layers, gyro, stick, dpad" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml_full);
     defer result.deinit();
@@ -313,14 +313,14 @@ test "MappingConfig: full config with layers, gyro, stick, dpad" {
     try validate(&cfg);
 }
 
-test "validate: missing [mapping] section returns default empty MappingConfig" {
+test "mapping: validate: missing [mapping] section returns default empty MappingConfig" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, "");
     defer result.deinit();
     try validate(&result.value);
 }
 
-test "validate: [[layer]] preserved in declaration order" {
+test "mapping: validate: [[layer]] preserved in declaration order" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -345,7 +345,7 @@ test "validate: [[layer]] preserved in declaration order" {
     try validate(&result.value);
 }
 
-test "validate: invalid activation value returns error" {
+test "mapping: validate: invalid activation value returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -358,7 +358,7 @@ test "validate: invalid activation value returns error" {
     try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
-test "validate: duplicate layer name returns error" {
+test "mapping: validate: duplicate layer name returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -374,7 +374,7 @@ test "validate: duplicate layer name returns error" {
     try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
-test "validate: hold_timeout out of range returns error" {
+test "mapping: validate: hold_timeout out of range returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -412,7 +412,7 @@ const test_toml_macro =
     \\M1 = "macro:dodge_roll"
 ;
 
-test "[[macro]] multi-entry parse: all step primitives correct" {
+test "mapping: [[macro]] multi-entry parse: all step primitives correct" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml_macro);
     defer result.deinit();
@@ -444,7 +444,7 @@ test "[[macro]] multi-entry parse: all step primitives correct" {
     try validate(&cfg);
 }
 
-test "validate: macro:name remap target references unknown macro returns error" {
+test "mapping: validate: macro:name remap target references unknown macro returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[remap]
@@ -455,7 +455,7 @@ test "validate: macro:name remap target references unknown macro returns error" 
     try std.testing.expectError(error.UnknownMacro, validate(&result.value));
 }
 
-test "validate: macro:name in layer remap references unknown macro returns error" {
+test "mapping: validate: macro:name in layer remap references unknown macro returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -470,7 +470,7 @@ test "validate: macro:name in layer remap references unknown macro returns error
     try std.testing.expectError(error.UnknownMacro, validate(&result.value));
 }
 
-test "adaptive_trigger: valid mode parses and validates" {
+test "mapping: adaptive_trigger: valid mode parses and validates" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[adaptive_trigger]
@@ -496,7 +496,7 @@ test "adaptive_trigger: valid mode parses and validates" {
     try validate(&cfg);
 }
 
-test "adaptive_trigger: invalid mode returns error" {
+test "mapping: adaptive_trigger: invalid mode returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[adaptive_trigger]
@@ -507,7 +507,7 @@ test "adaptive_trigger: invalid mode returns error" {
     try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
-test "adaptive_trigger: invalid mode in layer returns error" {
+test "mapping: adaptive_trigger: invalid mode in layer returns error" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -522,7 +522,7 @@ test "adaptive_trigger: invalid mode in layer returns error" {
     try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
-test "adaptive_trigger: per-layer valid mode validates" {
+test "mapping: adaptive_trigger: per-layer valid mode validates" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -545,7 +545,7 @@ test "adaptive_trigger: per-layer valid mode validates" {
     try std.testing.expectEqual(@as(?i64, 30), at.left.?.start);
 }
 
-test "fuzz parseString: no panic on arbitrary input" {
+test "mapping: fuzz parseString: no panic on arbitrary input" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, input: []const u8) !void {
             const result = parseString(std.testing.allocator, input);

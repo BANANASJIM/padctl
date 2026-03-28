@@ -62,7 +62,7 @@ fn findParam(params: []const Param, name: []const u8) ?u16 {
 
 const testing = std.testing;
 
-test "fillTemplate: hex literals + u8 placeholders" {
+test "command: fillTemplate: hex literals + u8 placeholders" {
     const allocator = testing.allocator;
     const result = try fillTemplate(allocator, "00 08 00 {strong:u8} {weak:u8} 00 00 00", &.{
         .{ .name = "strong", .value = 0x8000 },
@@ -72,7 +72,7 @@ test "fillTemplate: hex literals + u8 placeholders" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, result);
 }
 
-test "fillTemplate: u16le" {
+test "command: fillTemplate: u16le" {
     const allocator = testing.allocator;
     const result = try fillTemplate(allocator, "{weak:u16le}", &.{
         .{ .name = "weak", .value = 0x1234 },
@@ -81,7 +81,7 @@ test "fillTemplate: u16le" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x34, 0x12 }, result);
 }
 
-test "fillTemplate: u16be" {
+test "command: fillTemplate: u16be" {
     const allocator = testing.allocator;
     const result = try fillTemplate(allocator, "{strong:u16be}", &.{
         .{ .name = "strong", .value = 0x8000 },
@@ -90,7 +90,7 @@ test "fillTemplate: u16be" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x80, 0x00 }, result);
 }
 
-test "fillTemplate: no type defaults to u8" {
+test "command: fillTemplate: no type defaults to u8" {
     const allocator = testing.allocator;
     const result = try fillTemplate(allocator, "{strong}", &.{
         .{ .name = "strong", .value = 0x8000 },
@@ -99,35 +99,35 @@ test "fillTemplate: no type defaults to u8" {
     try testing.expectEqualSlices(u8, &[_]u8{0x80}, result);
 }
 
-test "fillTemplate: pure hex template" {
+test "command: fillTemplate: pure hex template" {
     const allocator = testing.allocator;
     const result = try fillTemplate(allocator, "de ad be ef", &.{});
     defer allocator.free(result);
     try testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, result);
 }
 
-test "fillTemplate: empty template" {
+test "command: fillTemplate: empty template" {
     const allocator = testing.allocator;
     const result = try fillTemplate(allocator, "", &.{});
     defer allocator.free(result);
     try testing.expectEqual(@as(usize, 0), result.len);
 }
 
-test "fillTemplate: unknown param name returns error" {
+test "command: fillTemplate: unknown param name returns error" {
     const allocator = testing.allocator;
     try testing.expectError(error.UnknownParam, fillTemplate(allocator, "{ghost:u8}", &.{
         .{ .name = "strong", .value = 0 },
     }));
 }
 
-test "fillTemplate: unsupported type returns error" {
+test "command: fillTemplate: unsupported type returns error" {
     const allocator = testing.allocator;
     try testing.expectError(error.UnsupportedParamType, fillTemplate(allocator, "{x:u32}", &.{
         .{ .name = "x", .value = 0 },
     }));
 }
 
-test "fillTemplate: hex byte out of range returns error" {
+test "command: fillTemplate: hex byte out of range returns error" {
     const allocator = testing.allocator;
     try testing.expectError(error.InvalidHexByte, fillTemplate(allocator, "1ff", &.{}));
 }
