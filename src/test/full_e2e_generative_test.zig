@@ -859,7 +859,10 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                             var found = false;
                             for (captured) |got| {
                                 switch (got) {
-                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) { found = true; break; },
+                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) {
+                                        found = true;
+                                        break;
+                                    },
                                     else => {},
                                 }
                             }
@@ -869,7 +872,10 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                             var found = false;
                             for (captured) |got| {
                                 switch (got) {
-                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) { found = true; break; },
+                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) {
+                                        found = true;
+                                        break;
+                                    },
                                     else => {},
                                 }
                             }
@@ -1204,7 +1210,10 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                             var found = false;
                             for (captured) |got| {
                                 switch (got) {
-                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) { found = true; break; },
+                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) {
+                                        found = true;
+                                        break;
+                                    },
                                     else => {},
                                 }
                             }
@@ -1214,7 +1223,10 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                             var found = false;
                             for (captured) |got| {
                                 switch (got) {
-                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) { found = true; break; },
+                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) {
+                                        found = true;
+                                        break;
+                                    },
                                     else => {},
                                 }
                             }
