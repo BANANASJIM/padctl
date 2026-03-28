@@ -17,7 +17,7 @@ pub fn parseFieldType(s: []const u8) ?FieldType {
     return std.meta.stringToEnum(FieldType, s);
 }
 
-fn typeMaxByTag(t: FieldType) i64 {
+pub fn typeMaxByTag(t: FieldType) i64 {
     return switch (t) {
         .u8 => 255,
         .i8 => 127,
