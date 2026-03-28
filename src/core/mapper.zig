@@ -203,8 +203,14 @@ pub const Mapper = struct {
             const pressed = (self.state.buttons & src_mask) != 0;
             const prev_pressed = (self.prev.buttons & src_mask) != 0;
             switch (target) {
-                .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {},
-                .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {},
+                .key => |code| {
+                    if (pressed != prev_pressed)
+                        aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {};
+                },
+                .mouse_button => |code| {
+                    if (pressed != prev_pressed)
+                        aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {};
+                },
                 .gamepad_button => |dst| {
                     if (pressed) {
                         const dst_idx: u6 = @intCast(@intFromEnum(dst));

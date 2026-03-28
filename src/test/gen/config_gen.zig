@@ -71,7 +71,7 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
     if (rng.boolean() and next_offset + 2 <= report_size) {
         const bg_offset = next_offset;
         const bg_size: u8 = @min(4, report_size - next_offset);
-        w.print("[report.button_group]\nsource = {{ offset = {d}, size = {d} }}\nmap = {{ ", .{ bg_offset, bg_size }) catch return fbs.getPos() catch return buf[0..0];
+        w.print("[report.button_group]\nsource = {{ offset = {d}, size = {d} }}\nmap = {{ ", .{ bg_offset, bg_size }) catch return buf[0..fbs.pos];
         const n_btns = rng.intRangeAtMost(u8, 2, @min(4, bg_size * 8));
         var btn_used: [21]bool = .{false} ** 21;
         for (0..n_btns) |i| {

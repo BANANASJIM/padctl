@@ -36,16 +36,13 @@ test "regression: all corpus cases pass" {
         var ctx = try helpers.makeMapper(case.mapping_toml, allocator);
         defer ctx.deinit();
 
-        const parsed = try mapping.parseString(allocator, case.mapping_toml);
-        defer parsed.deinit();
-
         var oracle = OracleState{};
 
         std.debug.assert(case.frames.len == case.expected_buttons.len);
 
         for (case.frames, case.expected_buttons, 0..) |frame, expected, idx| {
             const prod = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
-            const oout = mapper_oracle.apply(&oracle, frame.delta, &parsed.value, @as(u64, frame.dt_ms));
+            const oout = mapper_oracle.apply(&oracle, frame.delta, &ctx.parsed.value, @as(u64, frame.dt_ms));
 
             testing.expectEqual(expected, prod.gamepad.buttons) catch |err| {
                 std.log.err("regression '{s}' frame {d}: production={d} expected={d}", .{

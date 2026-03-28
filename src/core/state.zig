@@ -93,8 +93,10 @@ pub const GamepadState = struct {
         const left = (gs.buttons & (@as(u64, 1) << @intFromEnum(ButtonId.DPadLeft))) != 0;
         const right = (gs.buttons & (@as(u64, 1) << @intFromEnum(ButtonId.DPadRight))) != 0;
 
-        gs.dpad_x = if (right) @as(i8, 1) else if (left) @as(i8, -1) else @as(i8, 0);
-        gs.dpad_y = if (down) @as(i8, 1) else if (up) @as(i8, -1) else @as(i8, 0);
+        const dx: i8 = @as(i8, @intFromBool(right)) - @as(i8, @intFromBool(left));
+        const dy: i8 = @as(i8, @intFromBool(down)) - @as(i8, @intFromBool(up));
+        gs.dpad_x = dx;
+        gs.dpad_y = dy;
     }
 
     pub fn applyDelta(self: *GamepadState, delta: GamepadStateDelta) void {

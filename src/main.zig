@@ -639,6 +639,28 @@ pub fn main() !void {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("test/bugfix_regression_test.zig");
+    _ = @import("test/properties/config_props.zig");
+    _ = @import("test/properties/contract_props.zig");
+    _ = @import("test/properties/device_specific_props.zig");
+    _ = @import("test/properties/drt_props.zig");
+    _ = @import("test/properties/e2e_pipeline_props.zig");
+    _ = @import("test/properties/generative_mapper_props.zig");
+    _ = @import("test/properties/hidraw_dedup_props.zig");
+    _ = @import("test/properties/interpreter_props.zig");
+    _ = @import("test/properties/ipc_props.zig");
+    _ = @import("test/properties/mapper_props.zig");
+    _ = @import("test/properties/metamorphic_props.zig");
+    _ = @import("test/properties/negative_corpus_props.zig");
+    _ = @import("test/properties/regression_corpus_props.zig");
+    _ = @import("test/properties/render_props.zig");
+    _ = @import("test/properties/state_props.zig");
+    _ = @import("test/properties/supervisor_sm_props.zig");
+    _ = @import("test/properties/transform_props.zig");
+    _ = @import("test/gen/config_gen.zig");
+    _ = @import("test/gen/mapper_oracle.zig");
+    _ = @import("test/gen/sequence_gen.zig");
+    _ = @import("test/gen/shrink.zig");
+    _ = @import("test/gen/transition_id.zig");
 }
 
 // --- CLI tests ---

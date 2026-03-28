@@ -100,7 +100,7 @@ test "property: after N>8 recordButtonChange, eventCount == 8" {
 
 test "property: eventAt(0) is most recent" {
     var stats = Stats.init(0);
-    const buttons = [_]ButtonId{ .A, .B, .X, .Y, .LB, .RB, .Back, .Start, .DPadUp, .DPadDown };
+    const buttons = [_]ButtonId{ .A, .B, .X, .Y, .LB, .RB, .Select, .Start, .DPadUp, .DPadDown };
     for (buttons, 0..) |btn, i| {
         stats.recordButtonChange(btn, true, @intCast(i * 10));
     }

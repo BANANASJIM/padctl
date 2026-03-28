@@ -36,23 +36,28 @@ pub fn btnMask(id: ButtonId) u64 {
 }
 
 pub const MapperContext = struct {
-    parsed: mapping.ParseResult,
+    parsed: *mapping.ParseResult,
     mapper: Mapper,
     timer_fd: std.posix.fd_t,
+    allocator: std.mem.Allocator,
 
     pub fn deinit(self: *MapperContext) void {
         self.mapper.deinit();
         std.posix.close(self.timer_fd);
         self.parsed.deinit();
+        self.allocator.destroy(self.parsed);
     }
 };
 
 pub fn makeMapper(toml_str: []const u8, allocator: std.mem.Allocator) !MapperContext {
-    const parsed = try mapping.parseString(allocator, toml_str);
+    const parsed = try allocator.create(mapping.ParseResult);
+    errdefer allocator.destroy(parsed);
+    parsed.* = try mapping.parseString(allocator, toml_str);
+    errdefer parsed.deinit();
     const timer_fd = try std.posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
     errdefer std.posix.close(timer_fd);
     const m = try Mapper.init(&parsed.value, timer_fd, allocator);
-    return .{ .parsed = parsed, .mapper = m, .timer_fd = timer_fd };
+    return .{ .parsed = parsed, .mapper = m, .timer_fd = timer_fd, .allocator = allocator };
 }
 
 const devices_dir = "devices/";

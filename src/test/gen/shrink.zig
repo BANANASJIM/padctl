@@ -100,25 +100,25 @@ fn simplifyDeltas(frames: []Frame, ctx: *anyopaque, checkFn: CheckFn) void {
             f.delta.ay = null;
             if (!checkFn(ctx, frames)) f.delta.ay = saved.ay;
         }
-        if (f.delta.cx != null) {
-            f.delta.cx = null;
-            if (!checkFn(ctx, frames)) f.delta.cx = saved.cx;
+        if (f.delta.rx != null) {
+            f.delta.rx = null;
+            if (!checkFn(ctx, frames)) f.delta.rx = saved.rx;
         }
-        if (f.delta.cy != null) {
-            f.delta.cy = null;
-            if (!checkFn(ctx, frames)) f.delta.cy = saved.cy;
+        if (f.delta.ry != null) {
+            f.delta.ry = null;
+            if (!checkFn(ctx, frames)) f.delta.ry = saved.ry;
         }
-        if (f.delta.gx != null) {
-            f.delta.gx = null;
-            if (!checkFn(ctx, frames)) f.delta.gx = saved.gx;
+        if (f.delta.gyro_x != null) {
+            f.delta.gyro_x = null;
+            if (!checkFn(ctx, frames)) f.delta.gyro_x = saved.gyro_x;
         }
-        if (f.delta.gy != null) {
-            f.delta.gy = null;
-            if (!checkFn(ctx, frames)) f.delta.gy = saved.gy;
+        if (f.delta.gyro_y != null) {
+            f.delta.gyro_y = null;
+            if (!checkFn(ctx, frames)) f.delta.gyro_y = saved.gyro_y;
         }
-        if (f.delta.gz != null) {
-            f.delta.gz = null;
-            if (!checkFn(ctx, frames)) f.delta.gz = saved.gz;
+        if (f.delta.gyro_z != null) {
+            f.delta.gyro_z = null;
+            if (!checkFn(ctx, frames)) f.delta.gyro_z = saved.gyro_z;
         }
     }
 }
@@ -167,8 +167,8 @@ test "shrink: reduces to minimal reproducing prefix" {
 test "shrink: simplifyDeltas nulls irrelevant delta fields" {
     // failure reproduces regardless of ax value — simplify should null it
     const alwaysTrueIgnoreAx = struct {
-        fn check(_: *anyopaque, _: []const Frame) bool {
-            return true;
+        fn check(_: *anyopaque, frames: []const Frame) bool {
+            return frames.len > 0;
         }
     }.check;
 

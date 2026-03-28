@@ -66,6 +66,17 @@ pub fn apply(
     cfg: *const MappingConfig,
     dt_ms: u64,
 ) OracleOutput {
+    return applyWithLayer(os, delta, cfg, dt_ms, null);
+}
+
+/// Like apply, but use a pre-determined active layer instead of the oracle FSM.
+pub fn applyWithLayer(
+    os: *OracleState,
+    delta: GamepadStateDelta,
+    cfg: *const MappingConfig,
+    dt_ms: u64,
+    active_layer_override: ?*const LayerConfig,
+) OracleOutput {
     var aux = AuxEventList{};
 
     // flush pending tap release: clear injected buttons from previous frame
@@ -79,12 +90,14 @@ pub fn apply(
     os.gs.applyDelta(delta);
     const cur_buttons = os.gs.buttons;
 
-    // [2] layer trigger processing with tap-hold FSM
+    // [2] layer trigger processing with tap-hold FSM (only when not overridden)
     const layers = cfg.layer orelse &[0]LayerConfig{};
-    processLayers(os, layers, cur_buttons, dt_ms);
+    if (active_layer_override == null) {
+        processLayers(os, layers, cur_buttons, dt_ms);
+    }
 
-    // determine active layer config: hold ACTIVE takes priority over toggled
-    const active_cfg: ?*const LayerConfig = blk: {
+    // determine active layer config
+    const active_cfg: ?*const LayerConfig = active_layer_override orelse blk: {
         if (os.hold_phase == .active and os.hold_layer_idx < layers.len)
             break :blk &layers[os.hold_layer_idx];
         for (layers, 0..) |*lc, i| {
@@ -118,9 +131,16 @@ pub fn apply(
         const target = per_src[i] orelse continue;
         const src_mask: u64 = @as(u64, 1) << @as(u6, @intCast(i));
         const pressed = (cur_buttons & src_mask) != 0;
+        const prev_pressed = (os.prev_buttons & src_mask) != 0;
         switch (target) {
-            .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {},
-            .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {},
+            .key => |code| {
+                if (pressed != prev_pressed)
+                    aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {};
+            },
+            .mouse_button => |code| {
+                if (pressed != prev_pressed)
+                    aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {};
+            },
             .gamepad_button => |dst| {
                 if (pressed) {
                     injected_buttons |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst)));
@@ -191,11 +211,16 @@ fn processLayers(os: *OracleState, layers: []const LayerConfig, buttons: u64, dt
                     if (os.toggled[idx]) {
                         os.toggled[idx] = false;
                     } else {
-                        // block toggle-on if hold layer is active or another toggle is on
-                        const hold_blocking = os.hold_phase != .idle;
+                        // block toggle-on if hold layer is ACTIVE (not pending) or another toggle is on
+                        const hold_blocking = os.hold_phase == .active;
                         var any_toggled = false;
                         for (os.toggled) |t| any_toggled = any_toggled or t;
                         if (!hold_blocking and !any_toggled) {
+                            // Clear pending hold state (matches production layer.zig)
+                            if (os.hold_phase == .pending) {
+                                os.hold_phase = .idle;
+                                os.hold_elapsed_ms = 0;
+                            }
                             os.toggled[idx] = true;
                         }
                     }
