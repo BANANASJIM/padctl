@@ -320,7 +320,7 @@ pub fn parseInterfaceId(phys: []const u8) ?u8 {
 
 // --- tests ---
 
-test "parseInterfaceId basic" {
+test "hidraw: parseInterfaceId basic" {
     try std.testing.expectEqual(@as(?u8, 1), parseInterfaceId("usb-0000:00:14.0-1.2/input1"));
     try std.testing.expectEqual(@as(?u8, 0), parseInterfaceId("usb-0000:00:14.0-1/input0"));
     try std.testing.expectEqual(@as(?u8, 2), parseInterfaceId("input2"));
@@ -328,13 +328,13 @@ test "parseInterfaceId basic" {
     try std.testing.expectEqual(@as(?u8, null), parseInterfaceId(""));
 }
 
-test "parseInterfaceId Vader5 format" {
+test "hidraw: parseInterfaceId Vader5 format" {
     // Typical USB phys string: "usb-xhci_hcd.0.auto-1/input1"
     try std.testing.expectEqual(@as(?u8, 1), parseInterfaceId("usb-xhci_hcd.0.auto-1/input1"));
     try std.testing.expectEqual(@as(?u8, 0), parseInterfaceId("usb-xhci_hcd.0.auto-1/input0"));
 }
 
-test "discoverAllWithRoot: nonexistent dev_root returns empty" {
+test "hidraw: discoverAllWithRoot: nonexistent dev_root returns empty" {
     const allocator = std.testing.allocator;
     const paths: [][]const u8 = try HidrawDevice.discoverAllWithRoot(allocator, 0x1234, 0x5678, "/nonexistent_hidraw_root_xyz");
     defer {
@@ -344,24 +344,24 @@ test "discoverAllWithRoot: nonexistent dev_root returns empty" {
     try std.testing.expectEqual(@as(usize, 0), paths.len);
 }
 
-test "parseInterfaceId: deep multi-segment path" {
+test "hidraw: parseInterfaceId: deep multi-segment path" {
     try std.testing.expectEqual(@as(?u8, 3), parseInterfaceId("usb-0000:00:14.0-2.4/input3"));
     try std.testing.expectEqual(@as(?u8, 0), parseInterfaceId("platform/soc/usb/input0"));
 }
 
-test "parseInterfaceId: bare 'input' without number returns null" {
+test "hidraw: parseInterfaceId: bare 'input' without number returns null" {
     try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("usb/input"));
     try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("input"));
 }
 
-test "parseInterfaceId: finds last 'inputN' even when trailing segment is non-input" {
+test "hidraw: parseInterfaceId: finds last 'inputN' even when trailing segment is non-input" {
     // "event0" is not an input* segment; walk finds "input5" → 5
     try std.testing.expectEqual(@as(?u8, 5), parseInterfaceId("usb/input5/event0"));
     // no inputN anywhere → null
     try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("usb/event0/dev"));
 }
 
-test "grabAssociatedEvdev sysfs path parsing" {
+test "hidraw: grabAssociatedEvdev sysfs path parsing" {
     // Build a temp sysfs-like tree and verify grab logic finds eventK entries.
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

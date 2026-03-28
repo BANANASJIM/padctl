@@ -85,7 +85,7 @@ fn applyDeadzone(val: i16, deadzone: i16) f32 {
 
 const testing = std.testing;
 
-test "gamepad mode: process returns zero StickOutput" {
+test "stick: gamepad mode: process returns zero StickOutput" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "gamepad" };
     const out = sp.process(&cfg, 10000, -5000, 16);
@@ -95,7 +95,7 @@ test "gamepad mode: process returns zero StickOutput" {
     try testing.expectEqual(@as(i32, 0), out.hwheel);
 }
 
-test "mouse mode: deadzone suppresses output" {
+test "stick: mouse mode: deadzone suppresses output" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 1000, .sensitivity = 1.0 };
     // axis values within deadzone → no movement
@@ -104,14 +104,14 @@ test "mouse mode: deadzone suppresses output" {
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
 
-test "mouse mode: outside deadzone produces nonzero output" {
+test "stick: mouse mode: outside deadzone produces nonzero output" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 100, .sensitivity = 10.0 };
     const out = sp.process(&cfg, 32000, 0, 16);
     try testing.expect(out.rel_x != 0);
 }
 
-test "mouse mode: dt normalization scales proportionally" {
+test "stick: mouse mode: dt normalization scales proportionally" {
     var sp8 = StickProcessor{};
     var sp16 = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 100.0 };
@@ -132,7 +132,7 @@ test "mouse mode: dt normalization scales proportionally" {
     try testing.expect(diff <= 2);
 }
 
-test "mouse mode: sub-pixel accumulation precision" {
+test "stick: mouse mode: sub-pixel accumulation precision" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 1.0 };
     // Small input that accumulates across frames
@@ -147,7 +147,7 @@ test "mouse mode: sub-pixel accumulation precision" {
     try testing.expect(sp.mouse_accum_x >= 0 and sp.mouse_accum_x < 1.0);
 }
 
-test "scroll mode: accumulates to step" {
+test "stick: scroll mode: accumulates to step" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
     var steps: i32 = 0;
@@ -158,7 +158,7 @@ test "scroll mode: accumulates to step" {
     try testing.expect(steps > 0);
 }
 
-test "scroll mode: small input accumulates across frames" {
+test "stick: scroll mode: small input accumulates across frames" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 1.0 };
     // Single small-value frame should not immediately produce a step
@@ -168,7 +168,7 @@ test "scroll mode: small input accumulates across frames" {
     try testing.expect(sp.scroll_accum != 0);
 }
 
-test "dt=0: mouse delta is zero" {
+test "stick: dt=0: mouse delta is zero" {
     var sp = StickProcessor{};
     const cfg = StickConfig{ .mode = "mouse", .deadzone = 0, .sensitivity = 100.0 };
     const out = sp.process(&cfg, 32000, 32000, 0);

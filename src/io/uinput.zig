@@ -812,7 +812,7 @@ const MockOutputDevice = struct {
     fn mockClose(_: *anyopaque) void {}
 };
 
-test "ioctl constants match Linux kernel values" {
+test "uinput: ioctl constants match Linux kernel values" {
     // Linux: #define UI_SET_EVBIT _IOW('U', 100, int)  → type=0x55,nr=100,size=4 → 0x40045564
     // _IOW encodes: dir=1(write),type='U',nr,size
     // dir=1 << 30, type << 8, nr, size << 16
@@ -826,7 +826,7 @@ test "ioctl constants match Linux kernel values" {
     try std.testing.expectEqual(expected_create, UI_DEV_CREATE);
 }
 
-test "emit: same state produces no events (via mock)" {
+test "uinput: emit: same state produces no events (via mock)" {
     const allocator = std.testing.allocator;
     var mock = MockOutputDevice.init(allocator);
     defer mock.deinit();
@@ -840,7 +840,7 @@ test "emit: same state produces no events (via mock)" {
     try std.testing.expectEqual(@as(usize, 0), mock.emitted.items.len);
 }
 
-test "emit: state change recorded once" {
+test "uinput: emit: state change recorded once" {
     const allocator = std.testing.allocator;
     var mock = MockOutputDevice.init(allocator);
     defer mock.deinit();
@@ -858,7 +858,7 @@ test "emit: state change recorded once" {
     try std.testing.expectEqual(@as(i16, 100), mock.emitted.items[0].ax);
 }
 
-test "emit: button change recorded" {
+test "uinput: emit: button change recorded" {
     const allocator = std.testing.allocator;
     var mock = MockOutputDevice.init(allocator);
     defer mock.deinit();
@@ -902,13 +902,13 @@ const MockAuxDevice = struct {
     fn mockAuxClose(_: *anyopaque) void {}
 };
 
-test "AuxEvent.rel: construct and match" {
+test "uinput: AuxEvent.rel: construct and match" {
     const ev = AuxEvent{ .rel = .{ .code = c.REL_X, .value = 5 } };
     try std.testing.expectEqual(@as(u16, c.REL_X), ev.rel.code);
     try std.testing.expectEqual(@as(i32, 5), ev.rel.value);
 }
 
-test "emitAux: rel event recorded by mock" {
+test "uinput: emitAux: rel event recorded by mock" {
     const allocator = std.testing.allocator;
     var mock = MockAuxDevice.init(allocator);
     defer mock.deinit();
@@ -922,7 +922,7 @@ test "emitAux: rel event recorded by mock" {
     try std.testing.expectEqual(@as(i32, 5), mock.emitted.items[0].rel.value);
 }
 
-test "emitAux: rel value=0 not recorded" {
+test "uinput: emitAux: rel value=0 not recorded" {
     const allocator = std.testing.allocator;
     var mock = MockAuxDevice.init(allocator);
     defer mock.deinit();
@@ -944,7 +944,7 @@ test "emitAux: rel value=0 not recorded" {
     try std.testing.expectEqual(@as(i32, 0), mock.emitted.items[0].rel.value);
 }
 
-test "emitAux: REL_X and REL_Y same batch recorded in order" {
+test "uinput: emitAux: REL_X and REL_Y same batch recorded in order" {
     const allocator = std.testing.allocator;
     var mock = MockAuxDevice.init(allocator);
     defer mock.deinit();
@@ -959,7 +959,7 @@ test "emitAux: REL_X and REL_Y same batch recorded in order" {
     try std.testing.expectEqual(@as(u16, c.REL_Y), mock.emitted.items[1].rel.code);
 }
 
-test "emitAux: REL_WHEEL positive and negative values" {
+test "uinput: emitAux: REL_WHEEL positive and negative values" {
     const allocator = std.testing.allocator;
     var mock = MockAuxDevice.init(allocator);
     defer mock.deinit();
@@ -976,7 +976,7 @@ test "emitAux: REL_WHEEL positive and negative values" {
     try std.testing.expectEqual(@as(i32, -1), mock.emitted.items[1].rel.value);
 }
 
-test "emitAux: existing key event unaffected by rel addition" {
+test "uinput: emitAux: existing key event unaffected by rel addition" {
     const allocator = std.testing.allocator;
     var mock = MockAuxDevice.init(allocator);
     defer mock.deinit();
@@ -990,12 +990,12 @@ test "emitAux: existing key event unaffected by rel addition" {
     try std.testing.expect(mock.emitted.items[0].key.pressed);
 }
 
-test "ioctl constant: UI_SET_RELBIT matches kernel value" {
+test "uinput: ioctl constant: UI_SET_RELBIT matches kernel value" {
     const expected: u32 = (1 << 30) | (@as(u32, 'U') << 8) | 102 | (@as(u32, @sizeOf(c_int)) << 16);
     try std.testing.expectEqual(expected, UI_SET_RELBIT);
 }
 
-test "pollFf drain loop: empty pipe returns null without blocking" {
+test "uinput: pollFf drain loop: empty pipe returns null without blocking" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1008,7 +1008,7 @@ test "pollFf drain loop: empty pipe returns null without blocking" {
     try std.testing.expectEqual(@as(?FfEvent, null), result);
 }
 
-test "pollFf drain loop: drains multiple events and returns last EV_FF" {
+test "uinput: pollFf drain loop: drains multiple events and returns last EV_FF" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1029,7 +1029,7 @@ test "pollFf drain loop: drains multiple events and returns last EV_FF" {
     try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.?.effect_type);
 }
 
-test "pollFfFd returns the fd" {
+test "uinput: pollFfFd returns the fd" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1041,7 +1041,7 @@ test "pollFfFd returns the fd" {
     try std.testing.expectEqual(pfds[0], dev.pollFfFd());
 }
 
-test "ff_effects: initial state all zeros" {
+test "uinput: ff_effects: initial state all zeros" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1056,7 +1056,7 @@ test "ff_effects: initial state all zeros" {
     }
 }
 
-test "pollFf play: returns stored ff_effects values" {
+test "uinput: pollFf play: returns stored ff_effects values" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1078,7 +1078,7 @@ test "pollFf play: returns stored ff_effects values" {
     try std.testing.expectEqual(@as(u16, 0x8000), result.?.weak);
 }
 
-test "pollFf play stop (value=0): returns zeros" {
+test "uinput: pollFf play stop (value=0): returns zeros" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1098,7 +1098,7 @@ test "pollFf play stop (value=0): returns zeros" {
     try std.testing.expectEqual(@as(u16, 0), result.?.weak);
 }
 
-test "pollFf play: id >= 16 returns zeros (no panic)" {
+test "uinput: pollFf play: id >= 16 returns zeros (no panic)" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1117,7 +1117,7 @@ test "pollFf play: id >= 16 returns zeros (no panic)" {
     try std.testing.expectEqual(@as(u16, 0), result.?.weak);
 }
 
-test "ff_effects: erase clears slot" {
+test "uinput: ff_effects: erase clears slot" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1133,7 +1133,7 @@ test "ff_effects: erase clears slot" {
     try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[2].weak);
 }
 
-test "ff_effects: upload stores strong and weak" {
+test "uinput: ff_effects: upload stores strong and weak" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1150,7 +1150,7 @@ test "ff_effects: upload stores strong and weak" {
     try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[0].strong);
 }
 
-test "stateFieldForAxis: known axes return correct fields" {
+test "uinput: stateFieldForAxis: known axes return correct fields" {
     try std.testing.expectEqual(UinputDevice.AxisStateField.ax, try UinputDevice.stateFieldForAxis("left_x"));
     try std.testing.expectEqual(UinputDevice.AxisStateField.ay, try UinputDevice.stateFieldForAxis("left_y"));
     try std.testing.expectEqual(UinputDevice.AxisStateField.rx, try UinputDevice.stateFieldForAxis("right_x"));
@@ -1161,7 +1161,7 @@ test "stateFieldForAxis: known axes return correct fields" {
     try std.testing.expectEqual(UinputDevice.AxisStateField.dpad_y, try UinputDevice.stateFieldForAxis("dpad_y"));
 }
 
-test "stateFieldForAxis: unknown axis returns error" {
+test "uinput: stateFieldForAxis: unknown axis returns error" {
     try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis("nonexistent"));
     try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis(""));
     try std.testing.expectError(error.UnknownAxis, UinputDevice.stateFieldForAxis("LEFT_X"));
@@ -1172,7 +1172,7 @@ fn readEvents(read_fd: std.posix.fd_t, out: []c.input_event) usize {
     return bytes / @sizeOf(c.input_event);
 }
 
-test "UinputDevice.emit: axis diff writes correct input_events via pipe" {
+test "uinput: UinputDevice.emit: axis diff writes correct input_events via pipe" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1206,7 +1206,7 @@ test "UinputDevice.emit: axis diff writes correct input_events via pipe" {
     try std.testing.expectEqual(@as(u16, c.SYN_REPORT), events[2].code);
 }
 
-test "UinputDevice.emit: no change produces no write" {
+test "uinput: UinputDevice.emit: no change produces no write" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1227,7 +1227,7 @@ test "UinputDevice.emit: no change produces no write" {
     try std.testing.expectEqual(@as(usize, 0), n);
 }
 
-test "UinputDevice.emit: button press/release generates EV_KEY events" {
+test "uinput: UinputDevice.emit: button press/release generates EV_KEY events" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1262,7 +1262,7 @@ test "UinputDevice.emit: button press/release generates EV_KEY events" {
     try std.testing.expectEqual(@as(i32, 0), events[0].value);
 }
 
-test "UinputDevice.emit: dpad hat generates ABS_HAT0X/Y events" {
+test "uinput: UinputDevice.emit: dpad hat generates ABS_HAT0X/Y events" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1287,7 +1287,7 @@ test "UinputDevice.emit: dpad hat generates ABS_HAT0X/Y events" {
     try std.testing.expectEqual(@as(i32, -1), events[1].value);
 }
 
-test "TouchpadDevice.emit: finger down generates MT protocol events" {
+test "uinput: TouchpadDevice.emit: finger down generates MT protocol events" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1320,7 +1320,7 @@ test "TouchpadDevice.emit: finger down generates MT protocol events" {
     try std.testing.expectEqual(@as(i32, 200), events[3].value);
 }
 
-test "TouchpadDevice.emit: finger lift sends tracking_id=-1" {
+test "uinput: TouchpadDevice.emit: finger lift sends tracking_id=-1" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1354,7 +1354,7 @@ test "TouchpadDevice.emit: finger lift sends tracking_id=-1" {
     try std.testing.expectEqual(@as(i32, -1), events[1].value);
 }
 
-test "TouchpadDevice.emit: dual finger produces events for both slots" {
+test "uinput: TouchpadDevice.emit: dual finger produces events for both slots" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1388,7 +1388,7 @@ test "TouchpadDevice.emit: dual finger produces events for both slots" {
     try std.testing.expect(saw_slot1);
 }
 
-test "GenericUinputDevice.emitGeneric: differential events via pipe" {
+test "uinput: GenericUinputDevice.emitGeneric: differential events via pipe" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1423,7 +1423,7 @@ test "GenericUinputDevice.emitGeneric: differential events via pipe" {
     try std.testing.expectEqual(@as(i32, 1), gs.prev_values[1]);
 }
 
-test "GenericUinputDevice.emitGeneric: no change produces no write" {
+test "uinput: GenericUinputDevice.emitGeneric: no change produces no write" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);

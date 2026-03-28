@@ -184,61 +184,61 @@ fn containsPathTraversal(s: []const u8) bool {
 
 const testing = std.testing;
 
-test "parseCommand: SWITCH global" {
+test "control_socket: parseCommand: SWITCH global" {
     const cmd = parseCommand("SWITCH fps\n");
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("fps", cmd.name);
 }
 
-test "parseCommand: SWITCH per-device" {
+test "control_socket: parseCommand: SWITCH per-device" {
     const cmd = parseCommand("SWITCH racing --device hidraw0\n");
     try testing.expectEqual(CommandTag.switch_device, cmd.tag);
     try testing.expectEqualStrings("racing", cmd.name);
     try testing.expectEqualStrings("hidraw0", cmd.device_id);
 }
 
-test "parseCommand: STATUS" {
+test "control_socket: parseCommand: STATUS" {
     const cmd = parseCommand("STATUS\n");
     try testing.expectEqual(CommandTag.status, cmd.tag);
 }
 
-test "parseCommand: LIST" {
+test "control_socket: parseCommand: LIST" {
     const cmd = parseCommand("LIST\n");
     try testing.expectEqual(CommandTag.list, cmd.tag);
 }
 
-test "parseCommand: DEVICES" {
+test "control_socket: parseCommand: DEVICES" {
     const cmd = parseCommand("DEVICES\n");
     try testing.expectEqual(CommandTag.devices, cmd.tag);
 }
 
-test "parseCommand: unknown" {
+test "control_socket: parseCommand: unknown" {
     const cmd = parseCommand("FOOBAR\n");
     try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
-test "parseCommand: empty" {
+test "control_socket: parseCommand: empty" {
     const cmd = parseCommand("\n");
     try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
-test "parseCommand: case insensitive" {
+test "control_socket: parseCommand: case insensitive" {
     const cmd = parseCommand("switch FPS\n");
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("FPS", cmd.name);
 }
 
-test "parseCommand: SWITCH missing name" {
+test "control_socket: parseCommand: SWITCH missing name" {
     const cmd = parseCommand("SWITCH\n");
     try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
-test "parseCommand: SWITCH --device missing id" {
+test "control_socket: parseCommand: SWITCH --device missing id" {
     const cmd = parseCommand("SWITCH fps --device\n");
     try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
-test "parseCommand: path traversal rejected" {
+test "control_socket: parseCommand: path traversal rejected" {
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH ../etc/passwd\n").tag);
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH foo/bar\n").tag);
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH a\\b\n").tag);
@@ -252,7 +252,7 @@ fn testSocketpair() ![2]posix.fd_t {
     return fds;
 }
 
-test "ControlSocket: socketpair read/write" {
+test "control_socket: ControlSocket: socketpair read/write" {
     const fds = try testSocketpair();
     defer posix.close(fds[0]);
     defer posix.close(fds[1]);
@@ -268,7 +268,7 @@ test "ControlSocket: socketpair read/write" {
     try testing.expectEqualStrings("fps", cmd.name);
 }
 
-test "ControlSocket: init rejects overly long unix socket path" {
+test "control_socket: ControlSocket: init rejects overly long unix socket path" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -385,36 +385,36 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
 
 // --- tests ---
 
-test "extractHexField: hex value" {
+test "scan: extractHexField: hex value" {
     const toml_str = "vid = 0x37d7\npid = 0x2401\n";
     try std.testing.expectEqual(@as(?u16, 0x37d7), extractHexField(toml_str, "vid"));
     try std.testing.expectEqual(@as(?u16, 0x2401), extractHexField(toml_str, "pid"));
 }
 
-test "extractHexField: decimal value" {
+test "scan: extractHexField: decimal value" {
     const toml_str = "vid = 1000\npid = 512\n";
     try std.testing.expectEqual(@as(?u16, 1000), extractHexField(toml_str, "vid"));
     try std.testing.expectEqual(@as(?u16, 512), extractHexField(toml_str, "pid"));
 }
 
-test "extractHexField: missing key" {
+test "scan: extractHexField: missing key" {
     try std.testing.expectEqual(@as(?u16, null), extractHexField("name = \"foo\"\n", "vid"));
 }
 
-test "extractHexField: quoted value not parsed" {
+test "scan: extractHexField: quoted value not parsed" {
     try std.testing.expectEqual(@as(?u16, null), extractHexField("vid = \"0x1234\"\n", "vid"));
 }
 
-test "extractHexField: uppercase hex" {
+test "scan: extractHexField: uppercase hex" {
     try std.testing.expectEqual(@as(?u16, 0x1a86), extractHexField("vid = 0x1A86\n", "vid"));
 }
 
-test "extractHexField: ignores commented-out lines" {
+test "scan: extractHexField: ignores commented-out lines" {
     try std.testing.expectEqual(@as(?u16, null), extractHexField("# vid = 0x1234\n", "vid"));
     try std.testing.expectEqual(@as(?u16, 0x5678), extractHexField("# vid = 0x1234\nvid = 0x5678\n", "vid"));
 }
 
-test "findConfig: matches VID/PID with correct interface" {
+test "scan: findConfig: matches VID/PID with correct interface" {
     const allocator = std.testing.allocator;
     // vader5.toml: vid=0x37d7 pid=0x2401, interface=1
     const path = findConfig(allocator, "devices", 0x37d7, 0x2401, 1) catch null;
@@ -423,12 +423,12 @@ test "findConfig: matches VID/PID with correct interface" {
     try std.testing.expect(std.mem.endsWith(u8, path.?, ".toml"));
 }
 
-test "findConfig: no match returns error" {
+test "scan: findConfig: no match returns error" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.NotFound, findConfig(allocator, "devices", 0xffff, 0xffff, null));
 }
 
-test "findConfig: vader4-pro matches with correct interface" {
+test "scan: findConfig: vader4-pro matches with correct interface" {
     const allocator = std.testing.allocator;
     // vader4-pro-04b4-2412.toml: vid=0x04b4 pid=0x2412, interface=2
     const path = findConfig(allocator, "devices", 0x04b4, 0x2412, 2) catch null;
@@ -436,48 +436,48 @@ test "findConfig: vader4-pro matches with correct interface" {
     try std.testing.expect(path != null);
 }
 
-test "findConfig: vader4-pro rejects wrong interface" {
+test "scan: findConfig: vader4-pro rejects wrong interface" {
     const allocator = std.testing.allocator;
     // vader4-pro config requires interface 2; interface 0 should not match
     try std.testing.expectError(error.NotFound, findConfig(allocator, "devices", 0x04b4, 0x2412, 0));
 }
 
-test "configHasInterfaceId: single section match" {
+test "scan: configHasInterfaceId: single section match" {
     const toml = "[[device.interface]]\nid = 2\nclass = \"hid\"\n";
     try std.testing.expectEqual(@as(?bool, true), configHasInterfaceId(toml, 2));
     try std.testing.expectEqual(@as(?bool, false), configHasInterfaceId(toml, 1));
 }
 
-test "configHasInterfaceId: no section returns null" {
+test "scan: configHasInterfaceId: no section returns null" {
     const toml = "[device]\nname = \"foo\"\nvid = 0x1234\n";
     try std.testing.expectEqual(@as(?bool, null), configHasInterfaceId(toml, 0));
 }
 
-test "configHasInterfaceId: multiple sections" {
+test "scan: configHasInterfaceId: multiple sections" {
     const toml = "[[device.interface]]\nid = 0\nclass = \"vendor\"\n\n[[device.interface]]\nid = 2\nclass = \"hid\"\n";
     try std.testing.expectEqual(@as(?bool, true), configHasInterfaceId(toml, 2));
     try std.testing.expectEqual(@as(?bool, true), configHasInterfaceId(toml, 0));
     try std.testing.expectEqual(@as(?bool, false), configHasInterfaceId(toml, 1));
 }
 
-test "matchInterfaceId: no constraint returns null" {
+test "scan: matchInterfaceId: no constraint returns null" {
     const toml = "[device]\nname = \"foo\"\n";
     try std.testing.expectEqual(@as(?bool, null), matchInterfaceId(toml, 1));
     try std.testing.expectEqual(@as(?bool, null), matchInterfaceId(toml, null));
 }
 
-test "matchInterfaceId: with constraint and known iface" {
+test "scan: matchInterfaceId: with constraint and known iface" {
     const toml = "[[device.interface]]\nid = 2\n";
     try std.testing.expectEqual(@as(?bool, true), matchInterfaceId(toml, 2));
     try std.testing.expectEqual(@as(?bool, false), matchInterfaceId(toml, 0));
 }
 
-test "matchInterfaceId: with constraint and null iface returns false" {
+test "scan: matchInterfaceId: with constraint and null iface returns false" {
     const toml = "[[device.interface]]\nid = 2\n";
     try std.testing.expectEqual(@as(?bool, false), matchInterfaceId(toml, null));
 }
 
-test "freeEntries: empty slice is a no-op" {
+test "scan: freeEntries: empty slice is a no-op" {
     const empty: []ScanEntry = &.{};
     freeEntries(std.testing.allocator, empty);
 }

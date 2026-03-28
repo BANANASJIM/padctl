@@ -99,40 +99,40 @@ pub fn runInitSequence(
 
 // --- tests ---
 
-test "parseHexBytes basic" {
+test "init: parseHexBytes basic" {
     const allocator = std.testing.allocator;
     const bytes = try parseHexBytes(allocator, "5aa5 0102 03");
     defer allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x5a, 0xa5, 0x01, 0x02, 0x03 }, bytes);
 }
 
-test "parseHexBytes no spaces" {
+test "init: parseHexBytes no spaces" {
     const allocator = std.testing.allocator;
     const bytes = try parseHexBytes(allocator, "deadbeef");
     defer allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, bytes);
 }
 
-test "parseHexBytes empty" {
+test "init: parseHexBytes empty" {
     const allocator = std.testing.allocator;
     const bytes = try parseHexBytes(allocator, "");
     defer allocator.free(bytes);
     try std.testing.expectEqual(@as(usize, 0), bytes.len);
 }
 
-test "parseHexBytes invalid char returns error" {
+test "init: parseHexBytes invalid char returns error" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidHex, parseHexBytes(allocator, "5xaa"));
 }
 
-test "parseHexBytes odd length returns error" {
+test "init: parseHexBytes odd length returns error" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidHex, parseHexBytes(allocator, "5a0"));
 }
 
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 
-test "runInitSequence: sends command and matches response_prefix" {
+test "init: runInitSequence: sends command and matches response_prefix" {
     const allocator = std.testing.allocator;
 
     // response: 0x5a, 0xa5, 0x00 — prefix matches [0x5a, 0xa5]
@@ -152,7 +152,7 @@ test "runInitSequence: sends command and matches response_prefix" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x5a, 0xa5, 0x01, 0x01 }, mock.write_log.items);
 }
 
-test "runInitSequence: exhausted retries logs warning and continues" {
+test "init: runInitSequence: exhausted retries logs warning and continues" {
     const allocator = std.testing.allocator;
 
     // No frames — every read returns Again → warns but does not fail
@@ -168,7 +168,7 @@ test "runInitSequence: exhausted retries logs warning and continues" {
     try runInitSequence(allocator, dev, init_cfg);
 }
 
-test "runInitSequence: enable command sent after commands" {
+test "init: runInitSequence: enable command sent after commands" {
     const allocator = std.testing.allocator;
 
     // Two reads: one for the main command, one for enable
@@ -188,7 +188,7 @@ test "runInitSequence: enable command sent after commands" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x01, 0x02, 0x02 }, mock.write_log.items);
 }
 
-test "runInitSequence: wrong prefix after retries logs warning and continues" {
+test "init: runInitSequence: wrong prefix after retries logs warning and continues" {
     const allocator = std.testing.allocator;
 
     // Response has wrong prefix — warns but does not fail

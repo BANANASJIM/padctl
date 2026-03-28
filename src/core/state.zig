@@ -170,7 +170,7 @@ pub fn generateRandomDelta(rng: std.Random) GamepadStateDelta {
 
 // --- tests ---
 
-test "applyDelta: null fields leave state unchanged" {
+test "state: applyDelta: null fields leave state unchanged" {
     var s = GamepadState{ .ax = 10, .ay = 20, .buttons = 0xFF };
     s.applyDelta(.{});
     try std.testing.expectEqual(@as(i16, 10), s.ax);
@@ -178,7 +178,7 @@ test "applyDelta: null fields leave state unchanged" {
     try std.testing.expectEqual(@as(u64, 0xFF), s.buttons);
 }
 
-test "applyDelta: full overwrite" {
+test "state: applyDelta: full overwrite" {
     var s = GamepadState{};
     s.applyDelta(.{
         .ax = 100,
@@ -210,7 +210,7 @@ test "applyDelta: full overwrite" {
     try std.testing.expectEqual(@as(i16, -30), s.accel_z);
 }
 
-test "applyDelta: partial overwrite leaves other fields unchanged" {
+test "state: applyDelta: partial overwrite leaves other fields unchanged" {
     var s = GamepadState{ .ax = 5, .ay = 6, .rx = 7, .buttons = 0xF0 };
     s.applyDelta(.{ .ax = 99, .buttons = 0x0F });
     try std.testing.expectEqual(@as(i16, 99), s.ax);
@@ -219,14 +219,14 @@ test "applyDelta: partial overwrite leaves other fields unchanged" {
     try std.testing.expectEqual(@as(u64, 0x0F), s.buttons);
 }
 
-test "diff: identical states produce empty delta" {
+test "state: diff: identical states produce empty delta" {
     const s = GamepadState{ .ax = 10, .buttons = 0xFF };
     const d = s.diff(s);
     try std.testing.expectEqual(@as(?i16, null), d.ax);
     try std.testing.expectEqual(@as(?u64, null), d.buttons);
 }
 
-test "diff: changed fields appear in delta" {
+test "state: diff: changed fields appear in delta" {
     const prev = GamepadState{ .ax = 10, .ay = 20 };
     const curr = GamepadState{ .ax = 50, .ay = 20, .lt = 128 };
     const d = curr.diff(prev);
@@ -235,7 +235,7 @@ test "diff: changed fields appear in delta" {
     try std.testing.expectEqual(@as(?u8, 128), d.lt);
 }
 
-test "applyDelta: touchpad fields" {
+test "state: applyDelta: touchpad fields" {
     var s = GamepadState{};
     s.applyDelta(.{ .touch0_x = 1000, .touch0_y = -500, .touch0_active = true });
     try std.testing.expectEqual(@as(i16, 1000), s.touch0_x);
@@ -245,7 +245,7 @@ test "applyDelta: touchpad fields" {
     try std.testing.expectEqual(false, s.touch1_active);
 }
 
-test "diff: touchpad fields appear in delta" {
+test "state: diff: touchpad fields appear in delta" {
     const prev = GamepadState{};
     const curr = GamepadState{ .touch0_x = 100, .touch1_active = true };
     const d = curr.diff(prev);
@@ -255,7 +255,7 @@ test "diff: touchpad fields appear in delta" {
     try std.testing.expectEqual(@as(?bool, null), d.touch0_active);
 }
 
-test "applyDelta: battery_level field" {
+test "state: applyDelta: battery_level field" {
     var s = GamepadState{};
     try std.testing.expectEqual(@as(u8, 0), s.battery_level);
     s.applyDelta(.{ .battery_level = 7 });
@@ -264,7 +264,7 @@ test "applyDelta: battery_level field" {
     try std.testing.expectEqual(@as(u8, 7), s.battery_level);
 }
 
-test "diff: battery_level appears in delta when changed" {
+test "state: diff: battery_level appears in delta when changed" {
     const prev = GamepadState{};
     const curr = GamepadState{ .battery_level = 10 };
     const d = curr.diff(prev);
@@ -274,7 +274,7 @@ test "diff: battery_level appears in delta when changed" {
     try std.testing.expectEqual(@as(?u8, null), same.battery_level);
 }
 
-test "property: applyDelta(a, diff(b, a)) == b" {
+test "state: property: applyDelta(a, diff(b, a)) == b" {
     var prng = std.Random.DefaultPrng.init(42);
     const rng = prng.random();
     for (0..1000) |_| {
@@ -291,7 +291,7 @@ test "property: applyDelta(a, diff(b, a)) == b" {
     }
 }
 
-test "property: diff(s, s) produces all-null delta" {
+test "state: property: diff(s, s) produces all-null delta" {
     var prng = std.Random.DefaultPrng.init(99);
     const rng = prng.random();
     for (0..1000) |_| {
@@ -304,14 +304,14 @@ test "property: diff(s, s) produces all-null delta" {
     }
 }
 
-test "synthesizeDpadAxes: no buttons → 0,0" {
+test "state: synthesizeDpadAxes: no buttons → 0,0" {
     var gs = GamepadState{};
     gs.synthesizeDpadAxes();
     try std.testing.expectEqual(@as(i8, 0), gs.dpad_x);
     try std.testing.expectEqual(@as(i8, 0), gs.dpad_y);
 }
 
-test "synthesizeDpadAxes: cardinal directions" {
+test "state: synthesizeDpadAxes: cardinal directions" {
     const T = std.testing;
     const cases = [_]struct { btn: ButtonId, dx: i8, dy: i8 }{
         .{ .btn = .DPadUp, .dx = 0, .dy = -1 },
@@ -328,7 +328,7 @@ test "synthesizeDpadAxes: cardinal directions" {
     }
 }
 
-test "synthesizeDpadAxes: diagonal combinations" {
+test "state: synthesizeDpadAxes: diagonal combinations" {
     const T = std.testing;
     const cases = [_]struct { btns: []const ButtonId, dx: i8, dy: i8 }{
         .{ .btns = &.{ .DPadUp, .DPadRight }, .dx = 1, .dy = -1 },

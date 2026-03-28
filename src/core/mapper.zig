@@ -444,7 +444,7 @@ fn makeMapper(cfg: *const MappingConfig, allocator: std.mem.Allocator) !Mapper {
     return Mapper.init(cfg, std.posix.STDIN_FILENO, allocator);
 }
 
-test "no layer no remap: apply passes through unchanged" {
+test "mapper: no layer no remap: apply passes through unchanged" {
     const allocator = testing.allocator;
     const parsed = try makeMapping("", allocator);
     defer parsed.deinit();
@@ -458,7 +458,7 @@ test "no layer no remap: apply passes through unchanged" {
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
 
-test "base remap disabled: source button suppressed" {
+test "mapper: base remap disabled: source button suppressed" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[remap]
@@ -475,7 +475,7 @@ test "base remap disabled: source button suppressed" {
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
 
-test "base remap key: source -> KEY_F13 aux event" {
+test "mapper: base remap key: source -> KEY_F13 aux event" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[remap]
@@ -500,7 +500,7 @@ test "base remap key: source -> KEY_F13 aux event" {
     }
 }
 
-test "base remap gamepad_button: A -> B" {
+test "mapper: base remap gamepad_button: A -> B" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[remap]
@@ -520,7 +520,7 @@ test "base remap gamepad_button: A -> B" {
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
 
-test "layer remap overrides base: base A->B, layer A->C" {
+test "mapper: layer remap overrides base: base A->B, layer A->C" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[remap]
@@ -558,7 +558,7 @@ test "layer remap overrides base: base A->B, layer A->C" {
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << x_idx)) != 0);
 }
 
-test "suppress accumulates: base suppress A + layer suppress B" {
+test "mapper: suppress accumulates: base suppress A + layer suppress B" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[remap]
@@ -590,7 +590,7 @@ test "suppress accumulates: base suppress A + layer suppress B" {
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << b_idx));
 }
 
-test "inject last-write wins: layer inject overrides base inject for same button" {
+test "mapper: inject last-write wins: layer inject overrides base inject for same button" {
     const allocator = testing.allocator;
     // base: A->X, layer: A->Y — layer's inject for A's target wins
     const parsed = try makeMapping(
@@ -624,7 +624,7 @@ test "inject last-write wins: layer inject overrides base inject for same button
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << y_idx)) != 0);
 }
 
-test "prev frame masking: suppress produces correct diff" {
+test "mapper: prev frame masking: suppress produces correct diff" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[remap]
@@ -650,7 +650,7 @@ test "prev frame masking: suppress produces correct diff" {
     try testing.expectEqual(@as(u64, 0), ev2.prev.buttons & a_mask);
 }
 
-test "onTimerExpired: PENDING -> ACTIVE activates layer" {
+test "mapper: onTimerExpired: PENDING -> ACTIVE activates layer" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]
@@ -683,7 +683,7 @@ test "onTimerExpired: PENDING -> ACTIVE activates layer" {
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << b_idx)) != 0);
 }
 
-test "layer gyro override: active layer gyro config used" {
+test "mapper: layer gyro override: active layer gyro config used" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[gyro]
@@ -714,7 +714,7 @@ test "layer gyro override: active layer gyro config used" {
     try testing.expectApproxEqAbs(@as(f32, 100.0), gcfg.sensitivity_x, 1e-4);
 }
 
-test "layer dpad override: active layer dpad config used" {
+test "mapper: layer dpad override: active layer dpad config used" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[dpad]
@@ -743,7 +743,7 @@ test "layer dpad override: active layer dpad config used" {
     try testing.expectEqual(@as(?bool, true), dcfg.suppress_gamepad);
 }
 
-test "gamepad_button tap: injected this frame, released next frame" {
+test "mapper: gamepad_button tap: injected this frame, released next frame" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]
@@ -776,7 +776,7 @@ test "gamepad_button tap: injected this frame, released next frame" {
     try testing.expect(m.pending_tap_release == null);
 }
 
-test "dt_ms propagation: stick mouse output scales with dt" {
+test "mapper: dt_ms propagation: stick mouse output scales with dt" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[stick.right]
@@ -819,7 +819,7 @@ test "dt_ms propagation: stick mouse output scales with dt" {
     try testing.expect(diff <= 2);
 }
 
-test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
+test "mapper: dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[dpad]
@@ -840,26 +840,26 @@ test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
 }
 
-test "checkGyroActivate: null always true" {
+test "mapper: checkGyroActivate: null always true" {
     try testing.expect(checkGyroActivate(null, 0));
     try testing.expect(checkGyroActivate(null, 0xFFFFFFFF));
 }
 
-test "checkGyroActivate: always always true" {
+test "mapper: checkGyroActivate: always always true" {
     try testing.expect(checkGyroActivate("always", 0));
 }
 
-test "checkGyroActivate: hold_RB pressed" {
+test "mapper: checkGyroActivate: hold_RB pressed" {
     const rb_idx: u6 = @intCast(@intFromEnum(ButtonId.RB));
     const rb_mask: u64 = @as(u64, 1) << rb_idx;
     try testing.expect(checkGyroActivate("hold_RB", rb_mask));
 }
 
-test "checkGyroActivate: hold_RB not pressed" {
+test "mapper: checkGyroActivate: hold_RB not pressed" {
     try testing.expect(!checkGyroActivate("hold_RB", 0));
 }
 
-test "checkGyroActivate: unknown button name returns false" {
+test "mapper: checkGyroActivate: unknown button name returns false" {
     try testing.expect(!checkGyroActivate("hold_UNKNOWN", 0xFFFFFFFF));
 }
 
@@ -934,7 +934,7 @@ test "mapper: AuxEventList empty slice returns zero length" {
     try testing.expectEqual(@as(usize, 0), list.slice().len);
 }
 
-test "gyro activate: inactive frame no REL events and processor reset" {
+test "mapper: gyro activate: inactive frame no REL events and processor reset" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[gyro]
@@ -961,7 +961,7 @@ test "gyro activate: inactive frame no REL events and processor reset" {
     try testing.expectApproxEqAbs(@as(f32, 0.0), m.gyro_proc.ema_y, 1e-5);
 }
 
-test "gyro activate: active when RB held, inactive when released" {
+test "mapper: gyro activate: active when RB held, inactive when released" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[gyro]
@@ -993,7 +993,7 @@ test "gyro activate: active when RB held, inactive when released" {
     try testing.expectEqual(@as(usize, 0), ev_inactive.aux.len);
 }
 
-test "gyro joystick mode: overrides emit_state.rx/ry, suppresses original axes" {
+test "mapper: gyro joystick mode: overrides emit_state.rx/ry, suppresses original axes" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[gyro]
@@ -1024,7 +1024,7 @@ test "gyro joystick mode: overrides emit_state.rx/ry, suppresses original axes" 
     }
 }
 
-test "gyro joystick mode: null joy_x does not touch rx" {
+test "mapper: gyro joystick mode: null joy_x does not touch rx" {
     const allocator = testing.allocator;
     // mode=off → process() returns joy_x=null, joy_y=null
     const parsed = try makeMapping(
@@ -1042,7 +1042,7 @@ test "gyro joystick mode: null joy_x does not touch rx" {
     try testing.expectEqual(@as(i16, -1234), ev.gamepad.ry);
 }
 
-test "gyro mouse mode: joy_x/y do not affect emit_state axes" {
+test "mapper: gyro mouse mode: joy_x/y do not affect emit_state axes" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[gyro]

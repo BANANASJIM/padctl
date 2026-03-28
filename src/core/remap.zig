@@ -47,41 +47,41 @@ pub fn resolveTarget(raw: []const u8) !RemapTargetResolved {
 
 // --- tests ---
 
-test "resolveTarget: macro:dodge_roll -> RemapTargetResolved.macro" {
+test "remap: resolveTarget: macro:dodge_roll -> RemapTargetResolved.macro" {
     const target = try resolveTarget("macro:dodge_roll");
     try std.testing.expectEqualStrings("dodge_roll", target.macro);
 }
 
-test "resolveTarget: KEY_F13 -> key 183" {
+test "remap: resolveTarget: KEY_F13 -> key 183" {
     const target = try resolveTarget("KEY_F13");
     try std.testing.expectEqual(@as(u16, 183), target.key);
 }
 
-test "resolveTarget: BTN_LEFT -> mouse_button 0x110" {
+test "remap: resolveTarget: BTN_LEFT -> mouse_button 0x110" {
     const target = try resolveTarget("BTN_LEFT");
     try std.testing.expectEqual(@as(u16, 0x110), target.mouse_button);
 }
 
-test "resolveTarget: mouse_left -> mouse_button 0x110" {
+test "remap: resolveTarget: mouse_left -> mouse_button 0x110" {
     const target = try resolveTarget("mouse_left");
     try std.testing.expectEqual(@as(u16, 0x110), target.mouse_button);
 }
 
-test "resolveTarget: A -> gamepad_button .A" {
+test "remap: resolveTarget: A -> gamepad_button .A" {
     const target = try resolveTarget("A");
     try std.testing.expectEqual(ButtonId.A, target.gamepad_button);
 }
 
-test "resolveTarget: B -> gamepad_button .B" {
+test "remap: resolveTarget: B -> gamepad_button .B" {
     const target = try resolveTarget("B");
     try std.testing.expectEqual(ButtonId.B, target.gamepad_button);
 }
 
-test "resolveTarget: disabled -> .disabled" {
+test "remap: resolveTarget: disabled -> .disabled" {
     const target = try resolveTarget("disabled");
     try std.testing.expectEqual(RemapTargetResolved.disabled, target);
 }
 
-test "resolveTarget: unknown string -> error.UnknownRemapTarget" {
+test "remap: resolveTarget: unknown string -> error.UnknownRemapTarget" {
     try std.testing.expectError(error.UnknownRemapTarget, resolveTarget("unknown_garbage"));
 }
