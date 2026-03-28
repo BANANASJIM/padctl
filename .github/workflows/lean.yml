@@ -1,0 +1,21 @@
+name: lean
+on: [push, pull_request]
+jobs:
+  lean:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      - name: Build Lean spec
+        working-directory: formal/lean
+        run: lake build
+      - name: Verify zero sorry
+        working-directory: formal/lean
+        run: |
+          if grep -r 'sorry' Padctl/ --include='*.lean' | grep -v '^\s*--'; then
+            echo "ERROR: sorry found in proofs"
+            exit 1
+          fi
