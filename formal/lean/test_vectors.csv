@@ -1,0 +1,128 @@
+# TRANSFORM
+# op,input,tMax,expected
+negate,0,255,0
+negate,1,255,-1
+negate,127,127,-127
+negate,-127,127,127
+negate,1,127,-1
+negate,-128,127,127
+negate,-256,255,255
+negate,100,255,-100
+abs,0,255,0
+abs,50,255,50
+abs,-50,255,50
+abs,127,127,127
+abs,-127,127,127
+abs,-128,127,127
+abs,-256,255,255
+clamp,-200,-100,100,-100
+clamp,-100,-100,100,-100
+clamp,0,-100,100,0
+clamp,100,-100,100,100
+clamp,200,-100,100,100
+deadzone,0,10,0
+deadzone,5,10,0
+deadzone,9,10,0
+deadzone,10,10,10
+deadzone,-5,10,0
+deadzone,-10,10,-10
+deadzone,-11,10,-11
+scale,0,255,-100,100,-100
+scale,255,255,-100,100,100
+scale,127,255,-100,100,-1
+scale,128,255,-100,100,0
+# CHAIN
+# input,tMax,op1,op2,...,expected
+50,255,negate,clamp:-100:100,-50
+5,255,scale:-100:100,deadzone:10,-97
+-80,255,abs,clamp:0:50,50
+42,255,,42
+# READFIELD
+# field_type,offset,hex_bytes,expected
+FieldType.u8,0,0
+FieldType.u8,1,127
+FieldType.u8,2,128
+FieldType.u8,3,255
+FieldType.i8,0,0
+FieldType.i8,1,127
+FieldType.i8,2,-128
+FieldType.i8,3,-1
+FieldType.u16le,0,0
+FieldType.u16le,2,32767
+FieldType.u16le,4,32768
+FieldType.u16le,6,65535
+FieldType.i16le,0,0
+FieldType.i16le,2,32767
+FieldType.i16le,4,-32768
+FieldType.i16le,6,-1
+FieldType.u16be,0,0
+FieldType.u16be,2,32767
+FieldType.u16be,4,32768
+FieldType.u16be,6,65535
+FieldType.i16be,0,0
+FieldType.i16be,2,32767
+FieldType.i16be,4,-32768
+FieldType.i16be,6,-1
+# EXTRACTBITS
+# byteOff,startBit,bitCount,hex_bytes,expected
+0,0,0,0
+0,0,1,0
+0,2,1,1
+0,0,4,4
+0,0,8,180
+0,6,4,10
+2,0,8,255
+3,0,8,0
+# SIGNEXTEND
+# value,bitCount,expected
+0,8,0
+127,8,127
+128,8,-128
+255,8,-1
+0,16,0
+32767,16,32767
+32768,16,-32768
+65535,16,-1
+0,1,0
+1,1,-1
+# ASSEMBLE
+# raw,suppress,inject,expected
+15,5,0,10
+15,0,16,31
+10,15,5,5
+0,0,0,0
+15,15,15,15
+15,0,0,15
+255,15,240,240
+# DPAD_SYNTH
+# buttons,expected_dx,expected_dy
+0,0,0
+16384,0,-1
+32768,0,1
+65536,-1,0
+131072,1,0
+49152,0,0
+196608,0,0
+147456,1,-1
+# CHECKSUM
+# algo,start,stop,offset,hex_bytes,expected_bool
+sum8,0,3,3,1
+sum8,0,3,3,0
+xor,0,2,2,1
+xor,0,2,2,0
+# BUTTON_DECODE
+# srcOff,srcSize,entries,hex_bytes,expected
+0,1,0:0|2:4,17
+0,1,0:0|7:7,129
+0,1,0:0,0
+# LAYER_FSM
+# action,description,tapHold_before,tapHold_after
+press,idle_to_pending,none,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false }
+timer,pending_to_active,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false },some { layerIdx := 0, phase := TapHoldPhase.active, layerActivated := true }
+release,active_to_idle,some { layerIdx := 0, phase := TapHoldPhase.active, layerActivated := true },none
+press,pending_noop,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false },some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false }
+# REMAP
+# buttons,prevButtons,entries,suppress,inject,aux_count
+1,0,0>g4,1,16,0
+1,0,0>disabled,1,0,0
+1,0,0>k30,1,0,1
