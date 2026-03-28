@@ -34,10 +34,22 @@ test "property: interpreter robustness — random packets never crash" {
             for (0..1000) |_| {
                 random.bytes(pkt);
                 const iface: u8 = @intCast(report.interface);
-                _ = interp.processReport(iface, pkt) catch |err| switch (err) {
-                    error.ChecksumMismatch => {},
-                    error.MalformedConfig => {},
+                const result = interp.processReport(iface, pkt) catch |err| switch (err) {
+                    error.ChecksumMismatch => continue,
+                    error.MalformedConfig => continue,
                 };
+                const delta = result orelse continue;
+                // Invariant: axis values within i16 range.
+                if (delta.ax) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                if (delta.ay) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                if (delta.rx) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                if (delta.ry) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                if (delta.gyro_x) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                if (delta.gyro_y) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                if (delta.gyro_z) |v| try testing.expect(v >= std.math.minInt(i16) and v <= std.math.maxInt(i16));
+                // Invariant: trigger values within u8 range.
+                if (delta.lt) |v| try testing.expect(v <= std.math.maxInt(u8));
+                if (delta.rt) |v| try testing.expect(v <= std.math.maxInt(u8));
             }
         }
     }

@@ -3,6 +3,14 @@
 // This reimplements field extraction and transform chain independently of the
 // production interpreter.  Bugs in production code will not be present here
 // because the implementations share no code paths.
+//
+// CONSCIOUS COMPROMISE: CompiledField/CompiledReport/CompiledButtonGroup are
+// imported from production.  This means DRT catches runtime extraction bugs
+// (wrong read logic, wrong transform math) but NOT config compilation bugs
+// (e.g., wrong offset or type_tag assigned during compileReport).  A bug that
+// produces a wrong CompiledField would go undetected here because both oracle
+// and production operate on the same compiled representation.
+// See drt_props.zig for the corresponding note.
 
 const std = @import("std");
 const interp_mod = @import("../core/interpreter.zig");

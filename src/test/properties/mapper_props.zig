@@ -40,7 +40,16 @@ test "property: random input deltas never crash mapper" {
 
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
-        _ = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16);
+        // Invariant: aux key/mouse codes must be non-zero (no code 0 in Linux input).
+        for (ev.aux.slice()) |aux| {
+            switch (aux) {
+                .key => |k| try testing.expect(k.code > 0),
+                .mouse_button => |mb| try testing.expect(mb.code > 0),
+                .rel => {},
+            }
+        }
+        _ = ev.gamepad.buttons;
     }
 }
 
@@ -149,7 +158,15 @@ test "property: random button remap pairs — no crash" {
         var m = &ctx.mapper;
 
         const delta = state_mod.generateRandomDelta(rng);
-        _ = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16);
+        for (ev.aux.slice()) |aux| {
+            switch (aux) {
+                .key => |k| try testing.expect(k.code > 0),
+                .mouse_button => |mb| try testing.expect(mb.code > 0),
+                .rel => {},
+            }
+        }
+        _ = ev.gamepad.buttons;
     }
 }
 
@@ -220,9 +237,13 @@ test "property: empty config — passthrough no crash" {
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
         const ev = try m.apply(delta, 16);
-        // no remaps → no aux events from button remapping
-        // (gyro/stick may still produce none since mode=off by default)
-        _ = ev;
+        // No remaps → gamepad output equals input (passthrough).
+        if (delta.buttons) |b| try testing.expectEqual(b, ev.gamepad.buttons);
+        if (delta.ax) |v| try testing.expectEqual(v, ev.gamepad.ax);
+        if (delta.ay) |v| try testing.expectEqual(v, ev.gamepad.ay);
+        if (delta.lt) |v| try testing.expectEqual(v, ev.gamepad.lt);
+        if (delta.rt) |v| try testing.expectEqual(v, ev.gamepad.rt);
+        try testing.expectEqual(@as(usize, 0), ev.aux.len);
     }
 }
 
@@ -241,7 +262,15 @@ test "property: empty layer array — no crash" {
 
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
-        _ = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16);
+        for (ev.aux.slice()) |aux| {
+            switch (aux) {
+                .key => |k| try testing.expect(k.code > 0),
+                .mouse_button => |mb| try testing.expect(mb.code > 0),
+                .rel => {},
+            }
+        }
+        _ = ev.gamepad.buttons;
     }
 }
 
