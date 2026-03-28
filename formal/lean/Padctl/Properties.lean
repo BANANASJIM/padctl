@@ -42,18 +42,18 @@ theorem scale_range (a b : Int) (tMax : Nat) (x : Int)
   · -- Lower bound: x * (b-a) / tMax ≥ 0, so + a ≥ a
     have h1 : (0 : Int) ≤ b - a := by omega
     have h2 : (0 : Int) ≤ x * (b - a) := Int.mul_nonneg hx0 h1
-    have h3 : (0 : Int) < (tMax : Int) := by omega
-    have h4 : (0 : Int) ≤ x * (b - a) / (tMax : Int) := Int.ediv_nonneg h2 (Int.le_of_lt h3)
+    have h3 : (0 : Int) ≤ (tMax : Int) := by omega
+    have h4 : (0 : Int) ≤ (x * (b - a)).tdiv (tMax : Int) := Int.tdiv_nonneg h2 h3
     omega
   · -- Upper bound: x * (b-a) / tMax ≤ b - a
     have h1 : (0 : Int) ≤ b - a := by omega
     have h3 : (0 : Int) < (tMax : Int) := by omega
     have h5 : x * (b - a) ≤ (tMax : Int) * (b - a) :=
       Int.mul_le_mul_of_nonneg_right hxm h1
-    have h6 : x * (b - a) / (tMax : Int) ≤ (tMax : Int) * (b - a) / (tMax : Int) :=
-      Int.ediv_le_ediv h3 h5
+    have h6 : (x * (b - a)).tdiv (tMax : Int) ≤ ((tMax : Int) * (b - a)).tdiv (tMax : Int) :=
+      Int.tdiv_le_tdiv h3 h5
     have h7 : (tMax : Int) ≠ 0 := by omega
-    rw [Int.mul_ediv_cancel_left (b - a) h7] at h6
+    rw [Int.mul_tdiv_cancel_left (b - a) h7] at h6
     omega
 
 -- P6: deadzone preserves large values
