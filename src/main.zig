@@ -136,6 +136,7 @@ const Cli = struct {
     doc_gen_output: []const u8 = "docs/src/devices",
     install_opts: ?cli.install.InstallOptions = null,
     uninstall_opts: ?cli.install.InstallOptions = null,
+    setup_test_udev: bool = false,
     scan: bool = false,
     scan_config_dir: ?[]const u8 = null,
     list_mappings: bool = false,
@@ -207,6 +208,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 }
             }
             parsed_cli.uninstall_opts = opts;
+        } else if (std.mem.eql(u8, arg, "setup-test-udev")) {
+            parsed_cli.setup_test_udev = true;
         } else if (std.mem.eql(u8, arg, "scan")) {
             parsed_cli.scan = true;
             while (args.next()) |sub_arg| {
@@ -458,6 +461,12 @@ pub fn main() !void {
             std.log.err("uninstall failed: {}", .{err});
             std.process.exit(1);
         };
+        std.process.exit(0);
+    }
+
+    // setup-test-udev: write udev rule for UHID test devices and reload
+    if (parsed.setup_test_udev) {
+        cli.install.setupTestUdev();
         std.process.exit(0);
     }
 

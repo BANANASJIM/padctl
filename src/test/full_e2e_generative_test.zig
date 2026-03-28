@@ -110,6 +110,20 @@ fn checkUinput() !void {
     posix.close(fd);
 }
 
+// setupTestUdev ensures UHID-created hidraw nodes are world-readable.
+// It runs `sudo -n ./zig-out/bin/padctl setup-test-udev` (NOPASSWD in sudoers).
+// Safe to call multiple times; fails silently if sudo is unavailable.
+fn setupTestUdev() void {
+    var argv = [_][]const u8{ "sudo", "-n", "./zig-out/bin/padctl", "setup-test-udev" };
+    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawnAndWait() catch {};
+    // Give udevd time to process the new rule
+    std.Thread.sleep(200 * std.time.ns_per_ms);
+}
+
 fn uhidCreate(fd: posix.fd_t, vid: u16, pid: u16, rd_data: []const u8) !void {
     var ev = std.mem.zeroes(UhidCreate2Event);
     ev.type = UHID_CREATE2;
@@ -147,8 +161,10 @@ fn uhidDestroy(fd: posix.fd_t) void {
 
 // --- HID descriptor generator ---
 
-fn makeGenericRd(report_size: usize) [32]u8 {
-    var rd: [32]u8 = undefined;
+const GenericRd = struct { data: [32]u8, len: usize };
+
+fn makeGenericRd(report_size: usize) GenericRd {
+    var rd: [32]u8 = std.mem.zeroes([32]u8);
     var pos: usize = 0;
     rd[pos] = 0x05;
     pos += 1;
@@ -175,7 +191,7 @@ fn makeGenericRd(report_size: usize) [32]u8 {
     rd[pos] = 0xFF;
     pos += 1;
     rd[pos] = 0x00;
-    pos += 1;
+    pos += 1; // Logical Maximum (255)
     rd[pos] = 0x75;
     pos += 1;
     rd[pos] = 0x08;
@@ -199,13 +215,45 @@ fn makeGenericRd(report_size: usize) [32]u8 {
     pos += 1; // Input (Data, Var, Abs)
     rd[pos] = 0xC0;
     pos += 1; // End Collection
-    @memset(rd[pos..], 0);
-    return rd;
+    return .{ .data = rd, .len = pos };
 }
 
 // --- Device scanning ---
 
+// findHidraw locates a hidraw node by VID/PID.
+// For UHID virtual devices the sysfs path embeds the VID:PID in the directory
+// name (BBBB:VVVV:PPPP.*), so we scan that first to avoid needing read
+// permission on root-owned hidraw nodes before udev has processed the rule.
 fn findHidraw(allocator: std.mem.Allocator, vid: u16, pid: u16) !?[]u8 {
+    // Primary: scan sysfs UHID directory — works even when hidraw is root-owned.
+    // Entry names have the form BBBB:VVVV:PPPP.XXXX; hidraw subdirectory holds the node name.
+    {
+        var uhid_dir = std.fs.openDirAbsolute("/sys/devices/virtual/misc/uhid", .{ .iterate = true }) catch null;
+        if (uhid_dir) |*d| {
+            defer d.close();
+            var it = d.iterate();
+            while (it.next() catch null) |entry| {
+                if (entry.kind != .directory and entry.kind != .sym_link) continue;
+                // Name format: BBBB:VVVV:PPPP.XXXX
+                const name = entry.name;
+                if (name.len < 14) continue;
+                // Extract VVVV and PPPP (characters 5–8 and 10–13)
+                const ev = std.fmt.parseInt(u16, name[5..9], 16) catch continue;
+                const ep = std.fmt.parseInt(u16, name[10..14], 16) catch continue;
+                if (ev != vid or ep != pid) continue;
+                // Found matching entry; get hidraw node name from hidraw/ subdir
+                const hr_path = try std.fmt.allocPrint(allocator, "/sys/devices/virtual/misc/uhid/{s}/hidraw", .{name});
+                defer allocator.free(hr_path);
+                var hr_dir = std.fs.openDirAbsolute(hr_path, .{ .iterate = true }) catch continue;
+                defer hr_dir.close();
+                var hr_it = hr_dir.iterate();
+                if (hr_it.next() catch null) |hr_entry| {
+                    return try std.fmt.allocPrint(allocator, "/dev/{s}", .{hr_entry.name});
+                }
+            }
+        }
+    }
+    // Fallback: scan /dev/hidrawN via ioctl (works when udev has granted access).
     var i: u8 = 0;
     while (i < 64) : (i += 1) {
         const path = try std.fmt.allocPrint(allocator, "/dev/hidraw{d}", .{i});
@@ -429,6 +477,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
     const allocator = testing.allocator;
 
     try checkUinput();
+    setupTestUdev();
 
     var paths = try helpers.collectTomlPaths(allocator);
     defer paths.deinit(allocator);
@@ -500,10 +549,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         }
 
         const rd = makeGenericRd(report_size);
-        var rd_len: usize = 32;
-        while (rd_len > 0 and rd[rd_len - 1] == 0) rd_len -= 1;
-        if (rd_len == 0) rd_len = 20;
-        try uhidCreate(uhid_fd, test_vid, test_pid, rd[0..rd_len]);
+        try uhidCreate(uhid_fd, test_vid, test_pid, rd.data[0..rd.len]);
         std.Thread.sleep(150 * std.time.ns_per_ms);
 
         // Find hidraw
@@ -530,7 +576,6 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
 
         // Open hidraw device
         const hidraw = try allocator.create(HidrawDevice);
-        errdefer allocator.destroy(hidraw);
         hidraw.* = HidrawDevice.init(allocator);
         hidraw.open(hidraw_path) catch |err| {
             std.debug.print("SKIP hidraw open failed for {s}: {}\n", .{ config_path, err });
@@ -538,8 +583,12 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
             continue;
         };
 
-        const device_ios = try allocator.alloc(DeviceIO, 1);
+        const device_ios = allocator.alloc(DeviceIO, 1) catch {
+            hidraw.deviceIO().close();
+            continue;
+        };
         device_ios[0] = hidraw.deviceIO();
+        // device_ios[0].close() now owns hidraw and will free it.
 
         // Create EventLoop
         var loop = try EventLoop.initManaged();
@@ -687,6 +736,9 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         loop.deinit();
 
         // DRT 4: liveness — hard assert
+        if (events_received == 0) {
+            std.debug.print("FAIL [{s}] liveness: 0 events received for {d} frames\n", .{ config_path, frames_verified });
+        }
         try testing.expect(events_received > 0);
 
         total_frames += frames_verified;
@@ -706,6 +758,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
     const allocator = testing.allocator;
 
     try checkUinput();
+    setupTestUdev();
 
     var prng = std.Random.DefaultPrng.init(0xE2E0_CAFE);
     const rng = prng.random();
@@ -780,10 +833,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         }
 
         const rd = makeGenericRd(report_size);
-        var rd_len: usize = 32;
-        while (rd_len > 0 and rd[rd_len - 1] == 0) rd_len -= 1;
-        if (rd_len == 0) rd_len = 20;
-        try uhidCreate(uhid_fd, uhid_vid, uhid_pid, rd[0..rd_len]);
+        try uhidCreate(uhid_fd, uhid_vid, uhid_pid, rd.data[0..rd.len]);
         std.Thread.sleep(150 * std.time.ns_per_ms);
 
         // Find hidraw for our UHID device
@@ -810,7 +860,6 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
 
         // Open hidraw device
         const hidraw = try allocator.create(HidrawDevice);
-        errdefer allocator.destroy(hidraw);
         hidraw.* = HidrawDevice.init(allocator);
         hidraw.open(hidraw_path) catch |err| {
             std.debug.print("SKIP hidraw open failed [ci={d}]: {}\n", .{ ci, err });
@@ -818,8 +867,12 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             continue;
         };
 
-        const device_ios = try allocator.alloc(DeviceIO, 1);
+        const device_ios = allocator.alloc(DeviceIO, 1) catch {
+            hidraw.deviceIO().close();
+            continue;
+        };
         device_ios[0] = hidraw.deviceIO();
+        // device_ios[0].close() now owns hidraw and will free it.
 
         // 6. Create EventLoop and wire up pipeline
         var loop = try EventLoop.initManaged();
@@ -926,13 +979,15 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
 
             // M1: axis value check
             if (ev_slice.len > 0) {
-                if (oracle_out.gamepad.ax) |expected_ax| {
+                {
+                    const expected_ax: i32 = oracle_out.gamepad.ax;
                     if (getAbsValue(ev_slice, 0x00)) |actual| {
                         _ = expected_ax;
                         _ = actual;
                     }
                 }
-                if (oracle_out.gamepad.ay) |expected_ay| {
+                {
+                    const expected_ay: i32 = oracle_out.gamepad.ay;
                     if (getAbsValue(ev_slice, 0x01)) |actual| {
                         _ = expected_ay;
                         _ = actual;
@@ -954,6 +1009,9 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         loop.deinit();
 
         // DRT 4: liveness — hard assert
+        if (events_received == 0) {
+            std.debug.print("FAIL [gen-ci={d}] liveness: 0 events received for {d} frames\n", .{ ci, frames_verified });
+        }
         try testing.expect(events_received > 0);
 
         total_frames += frames_verified;

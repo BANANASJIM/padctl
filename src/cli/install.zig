@@ -257,6 +257,19 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\nUninstall complete.\n") catch {};
 }
 
+// setupTestUdev writes a udev rule that grants world-read access to UHID virtual
+// hidraw nodes and reloads udevd. Run once before test-e2e via:
+//   sudo -n ./zig-out/bin/padctl setup-test-udev
+pub fn setupTestUdev() void {
+    const rule = "KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", KERNELS==\"uhid\", MODE=\"0666\"\n";
+    const path = "/etc/udev/rules.d/98-uhid-test.rules";
+    if (std.fs.createFileAbsolute(path, .{ .truncate = true })) |f| {
+        defer f.close();
+        f.writeAll(rule) catch {};
+    } else |_| {}
+    runCmd(&.{ "udevadm", "control", "--reload-rules" });
+}
+
 fn copyDevicesTomls(allocator: std.mem.Allocator, src_dir: []const u8, dst_dir: []const u8) !void {
     var dir = try std.fs.openDirAbsolute(src_dir, .{ .iterate = true });
     defer dir.close();
