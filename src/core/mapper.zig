@@ -1165,3 +1165,123 @@ test "mapper: toggle layer switch resets processors" {
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_y);
     try testing.expectEqual(@as(f32, 0), m.stick_right.mouse_accum_y);
 }
+
+// --- REL event code and sign verification ---
+
+test "mapper: gyro mouse REL events carry REL_X/REL_Y codes" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Positive gyro input → REL_X and REL_Y events with matching codes and positive values.
+    const ev = try m.apply(.{ .gyro_x = 20000, .gyro_y = 20000 }, 16);
+
+    var rel_x_value: ?i32 = null;
+    var rel_y_value: ?i32 = null;
+    for (ev.aux.slice()) |e| switch (e) {
+        .rel => |r| {
+            if (r.code == REL_X) rel_x_value = r.value;
+            if (r.code == REL_Y) rel_y_value = r.value;
+        },
+        else => {},
+    };
+
+    try testing.expect(rel_x_value != null);
+    try testing.expect(rel_y_value != null);
+    try testing.expect(rel_x_value.? > 0);
+    try testing.expect(rel_y_value.? > 0);
+}
+
+test "mapper: gyro mouse REL sign follows gyro input sign" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const ev = try m.apply(.{ .gyro_x = -20000, .gyro_y = -20000 }, 16);
+
+    var rel_x_value: ?i32 = null;
+    var rel_y_value: ?i32 = null;
+    for (ev.aux.slice()) |e| switch (e) {
+        .rel => |r| {
+            if (r.code == REL_X) rel_x_value = r.value;
+            if (r.code == REL_Y) rel_y_value = r.value;
+        },
+        else => {},
+    };
+
+    try testing.expect(rel_x_value != null);
+    try testing.expect(rel_y_value != null);
+    try testing.expect(rel_x_value.? < 0);
+    try testing.expect(rel_y_value.? < 0);
+}
+
+test "mapper: stick scroll REL_WHEEL and REL_HWHEEL codes verified" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[stick.right]
+        \\mode = "scroll"
+        \\deadzone = 0
+        \\sensitivity = 100.0
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    var wheel_value: i32 = 0;
+    var hwheel_value: i32 = 0;
+    for (0..30) |_| {
+        const ev = try m.apply(.{ .rx = 32000, .ry = 32000 }, 16);
+        for (ev.aux.slice()) |e| switch (e) {
+            .rel => |r| {
+                if (r.code == REL_WHEEL) wheel_value += r.value;
+                if (r.code == REL_HWHEEL) hwheel_value += r.value;
+            },
+            else => {},
+        };
+    }
+
+    try testing.expect(wheel_value > 0);
+    try testing.expect(hwheel_value > 0);
+}
+
+test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[stick.right]
+        \\mode = "scroll"
+        \\deadzone = 0
+        \\sensitivity = 100.0
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    var wheel_value: i32 = 0;
+    for (0..30) |_| {
+        const ev = try m.apply(.{ .rx = 0, .ry = -32000 }, 16);
+        for (ev.aux.slice()) |e| switch (e) {
+            .rel => |r| if (r.code == REL_WHEEL) {
+                wheel_value += r.value;
+            },
+            else => {},
+        };
+    }
+
+    try testing.expect(wheel_value < 0);
+}

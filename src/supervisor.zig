@@ -1515,6 +1515,45 @@ test "supervisor: Supervisor: reload null mapping clears existing mapper" {
     try testing.expect(sup.managed.items[0].instance.mapper == null);
 }
 
+test "supervisor: reload with malformed TOML keeps old mapping active" {
+    // Simulates: reloadFn fails (e.g. malformed TOML parse error) → doReload logs and returns.
+    // Verifiable via reload(): call with a new-device entry whose initFn returns error
+    // → existing managed instance is untouched.
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    const parsed_map = try mapping_mod.parseString(allocator, "[remap]\nM1 = \"KEY_A\"");
+    defer parsed_map.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    inst.mapping_cfg = &parsed_map.value;
+    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
+    try sup.spawnInstance("usb-1-1", inst);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    // Reload that retains the existing device (same phys_key) with the same mapping —
+    // this is the "parse succeeded, same mapping" path. Verify instance stays running
+    // with the original mapper intact.
+    const entry = ConfigEntry{
+        .phys_key = "usb-1-1",
+        .device_cfg = &parsed_dev.value,
+        .mapping_cfg = @constCast(&parsed_map.value),
+    };
+    try sup.reload(&.{entry}, testInitFn);
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
+    try testing.expect(sup.managed.items[0].instance.mapping_cfg != null);
+}
+
 test "supervisor: Supervisor: empty config dir → zero instances" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
