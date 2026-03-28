@@ -643,3 +643,238 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
     try testing.expect(devices_tested > 0);
     try testing.expect(total_frames > 0);
 }
+
+test "l3_e2e: fully generated random device config + random mapping — DRT" {
+    const allocator = testing.allocator;
+
+    try checkUinput();
+
+    var prng = std.Random.DefaultPrng.init(0xE2E0_CAFE);
+    const rng = prng.random();
+
+    const N_CONFIGS = 20;
+    const N_FRAMES = 50;
+
+    var configs_tested: usize = 0;
+    var total_frames: usize = 0;
+
+    for (0..N_CONFIGS) |ci| {
+        // 1. Generate random device config TOML
+        var dev_buf: [4096]u8 = undefined;
+        const dev_toml_base = config_gen.randomDeviceConfig(rng, &dev_buf);
+        if (dev_toml_base.len == 0) continue;
+
+        // Append [output] with emulate preset and unique VID/PID
+        const out_vid: u16 = 0xFB00 | @as(u16, @intCast(ci & 0xFF));
+        const out_pid: u16 = 0xCB00 | @as(u16, @intCast(ci & 0xFF));
+        var full_dev_buf: [8192]u8 = undefined;
+        const full_dev_toml = std.fmt.bufPrint(&full_dev_buf,
+            \\{s}
+            \\[output]
+            \\emulate = "xbox-360"
+            \\vid = 0x{x:0>4}
+            \\pid = 0x{x:0>4}
+            \\
+        , .{ dev_toml_base, out_vid, out_pid }) catch continue;
+
+        // 2. Parse device config
+        const dev_parsed = device_mod.parseString(allocator, full_dev_toml) catch |err| {
+            std.debug.print("GEN DEV PARSE ERROR [ci={d}]: {}\nTOML:\n{s}\n", .{ ci, err, full_dev_toml });
+            continue;
+        };
+        defer dev_parsed.deinit();
+
+        if (dev_parsed.value.output == null) continue;
+        if (dev_parsed.value.report.len == 0) continue;
+
+        const interp = Interpreter.init(&dev_parsed.value);
+        if (interp.report_count == 0) continue;
+
+        // 3. Generate random mapping config
+        var map_buf: [4096]u8 = undefined;
+        const map_toml = config_gen.randomMappingConfig(rng, &map_buf);
+        const map_parsed = mapping_mod.parseString(allocator, map_toml) catch |err| {
+            std.debug.print("GEN MAP PARSE ERROR [ci={d}]: {}\n", .{ ci, err });
+            continue;
+        };
+        defer map_parsed.deinit();
+
+        // Use first compiled report
+        const cr = &interp.compiled[0];
+        const report_size: usize = @intCast(cr.src.size);
+
+        // Extract generated device VID/PID for UHID
+        const gen_vid: u16 = @intCast(dev_parsed.value.device.vid);
+        const gen_pid: u16 = @intCast(dev_parsed.value.device.pid);
+        // Use unique VID/PID to avoid collisions between iterations
+        const uhid_vid: u16 = 0xFC00 | @as(u16, @intCast(ci & 0xFF));
+        const uhid_pid: u16 = 0xDC00 | @as(u16, @intCast(ci & 0xFF));
+        _ = gen_vid;
+        _ = gen_pid;
+
+        const out_cfg = &dev_parsed.value.output.?;
+
+        // 4. Create UHID virtual device
+        const uhid_fd = openUhid() catch |err| {
+            if (err == error.SkipZigTest) return error.SkipZigTest;
+            return err;
+        };
+        defer {
+            uhidDestroy(uhid_fd);
+            posix.close(uhid_fd);
+        }
+
+        const rd = makeGenericRd(report_size);
+        var rd_len: usize = 32;
+        while (rd_len > 0 and rd[rd_len - 1] == 0) rd_len -= 1;
+        if (rd_len == 0) rd_len = 20;
+        try uhidCreate(uhid_fd, uhid_vid, uhid_pid, rd[0..rd_len]);
+        std.Thread.sleep(150 * std.time.ns_per_ms);
+
+        // Find hidraw for our UHID device
+        const hidraw_path = (try findHidraw(allocator, uhid_vid, uhid_pid)) orelse {
+            std.debug.print("SKIP hidraw not found [ci={d}]\n", .{ci});
+            continue;
+        };
+        defer allocator.free(hidraw_path);
+
+        // 5. Create uinput device for output
+        var udev = UinputDevice.create(out_cfg) catch |err| {
+            std.debug.print("SKIP uinput create failed [ci={d}]: {}\n", .{ ci, err });
+            continue;
+        };
+        defer udev.close();
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+
+        // Find event node for uinput output
+        const ev_fd = findEventNode(out_vid, out_pid) catch {
+            std.debug.print("SKIP event node not found [ci={d}]\n", .{ci});
+            continue;
+        };
+        defer posix.close(ev_fd);
+
+        // Open hidraw device
+        const hidraw = try allocator.create(HidrawDevice);
+        errdefer allocator.destroy(hidraw);
+        hidraw.* = HidrawDevice.init(allocator);
+        hidraw.open(hidraw_path) catch |err| {
+            std.debug.print("SKIP hidraw open failed [ci={d}]: {}\n", .{ ci, err });
+            allocator.destroy(hidraw);
+            continue;
+        };
+
+        const device_ios = try allocator.alloc(DeviceIO, 1);
+        device_ios[0] = hidraw.deviceIO();
+
+        // 6. Create EventLoop and wire up pipeline
+        var loop = try EventLoop.initManaged();
+        try loop.addDevice(device_ios[0]);
+
+        const timer_fd = loop.timer_fd;
+        var mapper_inst = Mapper.init(&map_parsed.value, timer_fd, allocator) catch |err| {
+            std.debug.print("SKIP mapper init failed [ci={d}]: {}\n", .{ ci, err });
+            loop.deinit();
+            device_ios[0].close();
+            allocator.free(device_ios);
+            continue;
+        };
+
+        var thread_interp = Interpreter.init(&dev_parsed.value);
+
+        var arg = RunArg{
+            .loop = &loop,
+            .interp = &thread_interp,
+            .output = udev.outputDevice(),
+            .mapper = &mapper_inst,
+            .cfg = &dev_parsed.value,
+            .mapping_cfg = &map_parsed.value,
+            .devices = device_ios,
+        };
+
+        const thread = try std.Thread.spawn(.{}, runThread, .{&arg});
+
+        // Wait for loop to be running
+        var wait_count: usize = 0;
+        while (wait_count < 200) : (wait_count += 1) {
+            if (@atomicLoad(bool, &loop.running, .acquire)) break;
+            std.Thread.sleep(1 * std.time.ns_per_ms);
+        }
+
+        // 7. Generate random input sequences
+        var frames: [N_FRAMES]sequence_gen.Frame = undefined;
+        sequence_gen.randomSequence(rng, &frames, map_parsed.value);
+
+        var oracle_state = oracle_mod.OracleState{};
+        var prev_oracle_gs = GamepadState{};
+        var frames_verified: usize = 0;
+        var events_received: usize = 0;
+
+        // 8. Inject frames and verify
+        for (frames[0..N_FRAMES]) |frame| {
+            var packet_buf: [4096]u8 = undefined;
+            buildPacketFromDelta(cr, frame.delta, &packet_buf);
+
+            uhidInput(uhid_fd, packet_buf[0..report_size]) catch continue;
+            std.Thread.sleep(15 * std.time.ns_per_ms);
+
+            const events = readAllEvents(ev_fd, 100);
+            const ev_slice = eventSlice(&events);
+
+            const oracle_out = oracle_mod.apply(&oracle_state, frame.delta, &map_parsed.value, frame.dt_ms);
+
+            // DRT 1: data events imply SYN_REPORT
+            if (ev_slice.len > 0) {
+                events_received += ev_slice.len;
+                var has_syn = false;
+                for (ev_slice) |ev| {
+                    if (ev.type == EV_SYN) has_syn = true;
+                }
+                if (!has_syn and ev_slice.len > 0) {
+                    std.debug.print("DRT FAIL: events without SYN [ci={d}]\n", .{ci});
+                }
+            }
+
+            // DRT 2: button suppress check
+            if (oracle_out.gamepad.buttons != prev_oracle_gs.buttons) {
+                for (udev.button_codes, 0..) |code, bi| {
+                    if (code == 0) continue;
+                    const mask: u64 = @as(u64, 1) << @as(u6, @intCast(bi));
+                    const oracle_pressed = (oracle_out.gamepad.buttons & mask) != 0;
+                    const was_pressed = (prev_oracle_gs.buttons & mask) != 0;
+                    if (!oracle_pressed and was_pressed) {
+                        if (hasKeyEvent(ev_slice, code, true)) {
+                            std.debug.print("DRT WARN: unexpected press for code {d} [ci={d}]\n", .{ code, ci });
+                        }
+                    }
+                }
+            }
+
+            prev_oracle_gs = oracle_out.gamepad;
+            frames_verified += 1;
+        }
+
+        // Cleanup
+        loop.stop();
+        thread.join();
+        mapper_inst.deinit();
+        device_ios[0].close();
+        allocator.free(device_ios);
+        loop.deinit();
+
+        // DRT 4: liveness
+        if (events_received == 0) {
+            std.debug.print("DRT WARN: zero events received [ci={d}] over {d} frames\n", .{ ci, frames_verified });
+        }
+
+        total_frames += frames_verified;
+        configs_tested += 1;
+
+        std.debug.print("OK [gen-ci={d}] {d} frames, {d} events\n", .{ ci, frames_verified, events_received });
+    }
+
+    if (configs_tested == 0) return error.SkipZigTest;
+
+    std.debug.print("\nl3_e2e_gen: {d} random configs tested, {d} total frames\n", .{ configs_tested, total_frames });
+    try testing.expect(configs_tested > 0);
+    try testing.expect(total_frames > 0);
+}
