@@ -2,7 +2,7 @@
 //
 // Reimplements button remap, layer selection, dpad mode, and prev-frame masking
 // without sharing any logic with mapper.zig.  Shared type imports only (TP5).
-// Floating-point/timing subsystems (gyro, stick, macro, tap) are NOT replicated;
+// Floating-point/timing subsystems (gyro, stick, macro) are NOT replicated;
 // use property constraints for those.
 
 const std = @import("std");
@@ -44,27 +44,34 @@ pub const OracleState = struct {
     prev_buttons: u64 = 0,
     prev_dpad_x: i8 = 0,
     prev_dpad_y: i8 = 0,
-    active_layer: ?usize = null,
-    layer_held: bool = false,
+    // Hold layer FSM
+    hold_phase: enum { idle, pending, active } = .idle,
+    hold_layer_idx: usize = 0,
+    hold_elapsed_ms: u64 = 0,
+    // Toggle layers (up to 8)
     toggled: [8]bool = .{false} ** 8,
+    // Injected buttons to clear next frame (tap release)
     pending_tap_release: ?u64 = null,
 };
 
 pub const OracleOutput = struct {
     gamepad: GamepadState,
     aux: AuxEventList,
+    prev_buttons: u64,
 };
 
 pub fn apply(
     os: *OracleState,
     delta: GamepadStateDelta,
     cfg: *const MappingConfig,
+    dt_ms: u64,
 ) OracleOutput {
     var aux = AuxEventList{};
 
-    // flush pending tap release from previous frame
+    // flush pending tap release: clear injected buttons from previous frame
+    var carry_injected: u64 = 0;
     if (os.pending_tap_release) |mask| {
-        os.gs.buttons &= ~mask; // clear injected button
+        carry_injected = mask; // will be subtracted from injected in emit
         os.pending_tap_release = null;
     }
 
@@ -72,15 +79,19 @@ pub fn apply(
     os.gs.applyDelta(delta);
     const cur_buttons = os.gs.buttons;
 
-    // [2] layer trigger processing (simplified: no tap-hold timer, immediate hold)
+    // [2] layer trigger processing with tap-hold FSM
     const layers = cfg.layer orelse &[0]LayerConfig{};
-    processLayers(os, layers, cur_buttons);
+    processLayers(os, layers, cur_buttons, dt_ms);
 
-    // determine active layer config
-    const active_cfg: ?*const LayerConfig = if (os.active_layer) |idx|
-        if (idx < layers.len) &layers[idx] else null
-    else
-        null;
+    // determine active layer config: hold ACTIVE takes priority over toggled
+    const active_cfg: ?*const LayerConfig = blk: {
+        if (os.hold_phase == .active and os.hold_layer_idx < layers.len)
+            break :blk &layers[os.hold_layer_idx];
+        for (layers, 0..) |*lc, i| {
+            if (i < os.toggled.len and os.toggled[i]) break :blk lc;
+        }
+        break :blk null;
+    };
 
     // [3] dpad processing
     const dpad_cfg = if (active_cfg) |lc| lc.dpad orelse cfg.dpad else cfg.dpad;
@@ -120,6 +131,9 @@ pub fn apply(
         }
     }
 
+    // subtract carry_injected (tap release from previous frame)
+    injected_buttons &= ~carry_injected;
+
     // [7] assemble emit state
     var emit = os.gs;
     emit.buttons = (cur_buttons & ~suppressed_buttons) | injected_buttons;
@@ -128,15 +142,17 @@ pub fn apply(
         emit.dpad_y = 0;
     }
 
+    const saved_prev = os.prev_buttons;
+
     // update prev-frame state
     os.prev_buttons = cur_buttons;
     os.prev_dpad_x = os.gs.dpad_x;
     os.prev_dpad_y = os.gs.dpad_y;
 
-    return .{ .gamepad = emit, .aux = aux };
+    return .{ .gamepad = emit, .aux = aux, .prev_buttons = saved_prev };
 }
 
-fn processLayers(os: *OracleState, layers: []const LayerConfig, buttons: u64) void {
+fn processLayers(os: *OracleState, layers: []const LayerConfig, buttons: u64, dt_ms: u64) void {
     for (layers, 0..) |*lc, idx| {
         const trigger_mask = btnMaskByName(lc.trigger);
         if (trigger_mask == 0) continue;
@@ -145,28 +161,44 @@ fn processLayers(os: *OracleState, layers: []const LayerConfig, buttons: u64) vo
 
         if (std.mem.eql(u8, lc.activation, "hold")) {
             if (pressed and !was_pressed) {
-                // mutual exclusion: only activate if no other layer active
-                if (os.active_layer == null) {
-                    os.active_layer = idx;
-                    os.layer_held = true;
+                // mutual exclusion: ignore if another layer is PENDING or ACTIVE
+                if (os.hold_phase != .idle) continue;
+                os.hold_phase = .pending;
+                os.hold_layer_idx = idx;
+                os.hold_elapsed_ms = 0;
+            } else if (pressed and was_pressed and os.hold_phase == .pending and os.hold_layer_idx == idx) {
+                // accumulate time while holding
+                const threshold: u64 = @intCast(@max(0, lc.hold_timeout orelse 200));
+                os.hold_elapsed_ms += dt_ms;
+                if (os.hold_elapsed_ms >= threshold) {
+                    os.hold_phase = .active;
                 }
             } else if (!pressed and was_pressed) {
-                if (os.active_layer == idx and os.layer_held) {
-                    os.active_layer = null;
-                    os.layer_held = false;
+                if (os.hold_phase == .pending and os.hold_layer_idx == idx) {
+                    // tap: inject trigger button for one frame then release
+                    os.pending_tap_release = trigger_mask;
+                    os.hold_phase = .idle;
+                    os.hold_elapsed_ms = 0;
+                } else if (os.hold_phase == .active and os.hold_layer_idx == idx) {
+                    os.hold_phase = .idle;
+                    os.hold_elapsed_ms = 0;
                 }
             }
         } else {
             // toggle: fires on release
             if (!pressed and was_pressed) {
-                if (os.active_layer == idx) {
-                    // toggle off
-                    os.toggled[idx] = false;
-                    os.active_layer = null;
-                } else if (os.active_layer == null) {
-                    // toggle on
-                    os.toggled[idx] = true;
-                    os.active_layer = idx;
+                if (idx < os.toggled.len) {
+                    if (os.toggled[idx]) {
+                        os.toggled[idx] = false;
+                    } else {
+                        // block toggle-on if hold layer is active or another toggle is on
+                        const hold_blocking = os.hold_phase != .idle;
+                        var any_toggled = false;
+                        for (os.toggled) |t| any_toggled = any_toggled or t;
+                        if (!hold_blocking and !any_toggled) {
+                            os.toggled[idx] = true;
+                        }
+                    }
                 }
             }
         }
@@ -225,7 +257,6 @@ fn processDpad(
 // --- Property constraint for gyro (not replicated) ---
 
 pub fn checkGyroProperty(delta: GamepadStateDelta, output: OracleOutput) bool {
-    // If gyro data present and output has REL events, direction should be consistent
     const gx = delta.gyro_x orelse return true;
     _ = output;
     _ = gx;
@@ -246,7 +277,7 @@ test "mapper_oracle: passthrough no remap" {
     defer parsed.deinit();
 
     const a_mask = btnMask(.A);
-    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expect((out.gamepad.buttons & a_mask) != 0);
     try testing.expectEqual(@as(usize, 0), out.aux.len);
 }
@@ -260,7 +291,7 @@ test "mapper_oracle: base remap A->KEY_F13" {
     defer parsed.deinit();
 
     const a_mask = btnMask(.A);
-    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     // A suppressed
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & a_mask);
     // KEY_F13 aux event
@@ -280,13 +311,13 @@ test "mapper_oracle: base remap A->B gamepad button" {
 
     const a_mask = btnMask(.A);
     const b_mask = btnMask(.B);
-    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & a_mask);
     try testing.expect((out.gamepad.buttons & b_mask) != 0);
     try testing.expectEqual(@as(usize, 0), out.aux.len);
 }
 
-test "mapper_oracle: layer hold activates remap" {
+test "mapper_oracle: layer hold activates remap after timer" {
     var os = OracleState{};
     const parsed = try parseCfg(
         \\[remap]
@@ -307,13 +338,42 @@ test "mapper_oracle: layer hold activates remap" {
     const x_mask = btnMask(.X);
     const b_mask = btnMask(.B);
 
-    // press LT to activate layer
-    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value);
-    // press A while layer active
-    const out = apply(&os, .{ .buttons = lt_mask | a_mask }, &parsed.value);
+    // press LT — goes PENDING, layer NOT active yet
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 0);
+    try testing.expectEqual(os.hold_phase, .pending);
+
+    // advance timer past threshold (200ms default)
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 201);
+    try testing.expectEqual(os.hold_phase, .active);
+
+    // press A while layer active — should use layer remap (X)
+    const out = apply(&os, .{ .buttons = lt_mask | a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & a_mask);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & b_mask);
     try testing.expect((out.gamepad.buttons & x_mask) != 0);
+}
+
+test "mapper_oracle: layer hold tap (release while PENDING)" {
+    var os = OracleState{};
+    const parsed = try parseCfg(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+    );
+    defer parsed.deinit();
+
+    const lt_mask = btnMask(.LT);
+
+    // press LT — PENDING
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 0);
+    try testing.expectEqual(os.hold_phase, .pending);
+
+    // release before timeout — tap, layer never activates
+    _ = apply(&os, .{ .buttons = 0 }, &parsed.value, 50);
+    try testing.expectEqual(os.hold_phase, .idle);
+    // tap injects LT for one frame (pending_tap_release set)
+    try testing.expect(os.pending_tap_release != null);
 }
 
 test "mapper_oracle: layer toggle on/off" {
@@ -333,24 +393,24 @@ test "mapper_oracle: layer toggle on/off" {
     const a_mask = btnMask(.A);
 
     // press Select
-    _ = apply(&os, .{ .buttons = sel_mask }, &parsed.value);
+    _ = apply(&os, .{ .buttons = sel_mask }, &parsed.value, 0);
     // release Select -> toggle on
-    _ = apply(&os, .{ .buttons = 0 }, &parsed.value);
-    try testing.expectEqual(@as(?usize, 0), os.active_layer);
+    _ = apply(&os, .{ .buttons = 0 }, &parsed.value, 0);
+    try testing.expect(os.toggled[0]);
 
     // press A -> should be remapped to KEY_F1
-    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & a_mask);
     try testing.expect(out.aux.len > 0);
     try testing.expectEqual(@as(u16, 0x3b), out.aux.get(0).key.code); // KEY_F1
 
     // toggle off: press + release Select again
-    _ = apply(&os, .{ .buttons = sel_mask }, &parsed.value);
-    _ = apply(&os, .{ .buttons = 0 }, &parsed.value);
-    try testing.expect(os.active_layer == null);
+    _ = apply(&os, .{ .buttons = sel_mask }, &parsed.value, 0);
+    _ = apply(&os, .{ .buttons = 0 }, &parsed.value, 0);
+    try testing.expect(!os.toggled[0]);
 
     // press A -> no remap now
-    const out2 = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out2 = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expect((out2.gamepad.buttons & a_mask) != 0);
     try testing.expectEqual(@as(usize, 0), out2.aux.len);
 }
@@ -365,7 +425,7 @@ test "mapper_oracle: dpad arrows mode" {
     defer parsed.deinit();
 
     // dpad left
-    const out = apply(&os, .{ .dpad_x = -1 }, &parsed.value);
+    const out = apply(&os, .{ .dpad_x = -1 }, &parsed.value, 0);
     try testing.expectEqual(@as(i8, 0), out.gamepad.dpad_x);
     var found_left = false;
     for (out.aux.slice()) |ev| {
@@ -383,7 +443,7 @@ test "mapper_oracle: suppress clears button from output" {
     defer parsed.deinit();
 
     const a_mask = btnMask(.A);
-    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & a_mask);
     try testing.expectEqual(@as(usize, 0), out.aux.len);
 }
@@ -399,11 +459,11 @@ test "mapper_oracle: prev-frame mask no spurious release" {
     const a_mask = btnMask(.A);
 
     // frame 1: A pressed, suppressed
-    const ev1 = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const ev1 = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), ev1.gamepad.buttons & a_mask);
 
     // frame 2: A still pressed, still suppressed — no spurious events
-    const ev2 = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const ev2 = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & a_mask);
     try testing.expectEqual(@as(usize, 0), ev2.aux.len);
 }
@@ -417,7 +477,7 @@ test "mapper_oracle: mouse_button remap" {
     defer parsed.deinit();
 
     const m1_mask = btnMask(.M1);
-    const out = apply(&os, .{ .buttons = m1_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = m1_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & m1_mask);
     try testing.expectEqual(@as(usize, 1), out.aux.len);
     try testing.expectEqual(@as(u16, 0x110), out.aux.get(0).mouse_button.code);
@@ -445,9 +505,11 @@ test "mapper_oracle: layer remap overrides base for same button" {
     const x_mask = btnMask(.X);
     const y_mask = btnMask(.Y);
 
-    // activate layer
-    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value);
-    const out = apply(&os, .{ .buttons = lt_mask | a_mask }, &parsed.value);
+    // press LT, advance past threshold
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 0);
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 201);
+
+    const out = apply(&os, .{ .buttons = lt_mask | a_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & x_mask);
     try testing.expect((out.gamepad.buttons & y_mask) != 0);
 }
@@ -469,14 +531,17 @@ test "mapper_oracle: hold layer release deactivates" {
     const a_mask = btnMask(.A);
     const b_mask = btnMask(.B);
 
-    // press LT
-    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value);
-    try testing.expectEqual(@as(?usize, 0), os.active_layer);
+    // press LT then advance past threshold
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 0);
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 201);
+    try testing.expectEqual(os.hold_phase, .active);
+
     // release LT
-    _ = apply(&os, .{ .buttons = 0 }, &parsed.value);
-    try testing.expect(os.active_layer == null);
+    _ = apply(&os, .{ .buttons = 0 }, &parsed.value, 0);
+    try testing.expectEqual(os.hold_phase, .idle);
+
     // A should no longer be remapped
-    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value);
+    const out = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
     try testing.expect((out.gamepad.buttons & a_mask) != 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & b_mask);
 }
@@ -501,8 +566,9 @@ test "mapper_oracle: suppress accumulates base + layer" {
     const a_mask = btnMask(.A);
     const b_mask = btnMask(.B);
 
-    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value);
-    const out = apply(&os, .{ .buttons = lt_mask | a_mask | b_mask }, &parsed.value);
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 0);
+    _ = apply(&os, .{ .buttons = lt_mask }, &parsed.value, 201);
+    const out = apply(&os, .{ .buttons = lt_mask | a_mask | b_mask }, &parsed.value, 0);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & a_mask);
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & b_mask);
 }
@@ -515,8 +581,24 @@ test "mapper_oracle: dpad gamepad mode passthrough" {
     );
     defer parsed.deinit();
 
-    const out = apply(&os, .{ .dpad_x = 1, .dpad_y = -1 }, &parsed.value);
+    const out = apply(&os, .{ .dpad_x = 1, .dpad_y = -1 }, &parsed.value, 0);
     try testing.expectEqual(@as(i8, 1), out.gamepad.dpad_x);
     try testing.expectEqual(@as(i8, -1), out.gamepad.dpad_y);
     try testing.expectEqual(@as(usize, 0), out.aux.len);
+}
+
+test "mapper_oracle: prev_buttons in output" {
+    var os = OracleState{};
+    const parsed = try parseCfg("");
+    defer parsed.deinit();
+
+    const a_mask = btnMask(.A);
+
+    // frame 1: A pressed; prev was 0
+    const out1 = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
+    try testing.expectEqual(@as(u64, 0), out1.prev_buttons);
+
+    // frame 2: A still pressed; prev_buttons should now be a_mask
+    const out2 = apply(&os, .{ .buttons = a_mask }, &parsed.value, 0);
+    try testing.expect((out2.prev_buttons & a_mask) != 0);
 }
