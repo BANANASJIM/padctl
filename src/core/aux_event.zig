@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const AuxEvent = union(enum) {
     key: struct { code: u16, pressed: bool },
     mouse_button: struct { code: u16, pressed: bool },
@@ -15,6 +17,7 @@ pub const AuxEventList = struct {
     }
 
     pub fn get(self: *const AuxEventList, i: usize) AuxEvent {
+        std.debug.assert(i < self.len);
         return self.buffer[i];
     }
 

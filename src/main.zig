@@ -765,7 +765,7 @@ test "main: unknown report does not call output.emit" {
     try testing.expectEqual(@as(usize, 0), out.diffs.items.len);
 }
 
-test "pipeline: signalfd stop — no fd leak" {
+test "main: signalfd stop — no fd leak" {
     const allocator = testing.allocator;
 
     const parsed = try config.device.parseString(allocator, pipeline_toml);

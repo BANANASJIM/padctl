@@ -69,7 +69,7 @@ fn makeIf1Sample() [32]u8 {
 
 // --- Layer 1: raw bytes → GamepadState ---
 
-test "Vader5 IF1: axes, button A, lt" {
+test "interpreter_e2e: Vader5 IF1 — axes, button A, lt" {
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, vader5_toml);
     defer parsed.deinit();
@@ -87,7 +87,7 @@ test "Vader5 IF1: axes, button A, lt" {
     try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
 }
 
-test "Vader5 IF1: load from file and process" {
+test "interpreter_e2e: Vader5 IF1 — load from file and process" {
     const allocator = testing.allocator;
     const parsed = try device_mod.parseFile(allocator, "devices/flydigi/vader5.toml");
     defer parsed.deinit();
@@ -105,7 +105,7 @@ test "Vader5 IF1: load from file and process" {
     try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
 }
 
-test "Vader5 IF1: checksum mismatch suppresses emit" {
+test "interpreter_e2e: Vader5 IF1 — checksum mismatch suppresses emit" {
     const allocator = testing.allocator;
     const toml_with_cs =
         \\[device]

@@ -62,7 +62,7 @@ test "auto: all field names map to known FieldTag" {
     if (paths.items.len == 0) return;
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         // Skip generic-mode devices — field names are arbitrary
@@ -95,7 +95,7 @@ test "auto: all button_group keys are valid ButtonId" {
     if (paths.items.len == 0) return;
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         // Skip generic-mode devices — button names are arbitrary
