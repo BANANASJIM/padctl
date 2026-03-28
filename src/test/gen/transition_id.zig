@@ -157,7 +157,7 @@ pub fn classify(
 
     // Gyro
     if (cfg.gyro) |g| {
-        if (std.mem.eql(u8, g.mode, "mouse")) {
+        if (std.mem.eql(u8, g.mode, "mouse") or std.mem.eql(u8, g.mode, "joystick")) {
             if (delta.gyro_x != null or delta.gyro_y != null)
                 tracker.mark(.gyro_activated)
             else

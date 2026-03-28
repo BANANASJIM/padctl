@@ -15,11 +15,10 @@ fn btnMask(id: ButtonId) u64 {
 }
 
 pub fn randomSequence(rng: std.Random, frames: []Frame, cfg: ?mapping.MappingConfig) void {
-    // Compose random scenario templates into the frame buffer
     var pos: usize = 0;
-    var acc: u64 = 0; // accumulated pressed buttons
+    var acc: u64 = 0;
     while (pos < frames.len) {
-        const scenario = rng.intRangeAtMost(u8, 0, 9);
+        const scenario = rng.intRangeAtMost(u8, 0, 15);
         const remaining = frames.len - pos;
         const written = switch (scenario) {
             0 => genIdle(frames[pos..], rng, remaining),
@@ -32,6 +31,12 @@ pub fn randomSequence(rng: std.Random, frames: []Frame, cfg: ?mapping.MappingCon
             7 => genRapidToggle(frames[pos..], rng, remaining, cfg),
             8 => genAllButtons(frames[pos..], rng, remaining),
             9 => genStress(frames[pos..], rng, remaining),
+            10 => genButtonHeldAcrossLayerSwitch(frames[pos..], rng, remaining, cfg, &acc),
+            11 => genBoundaryValues(frames[pos..], rng, remaining),
+            12 => genTouchTransition(frames[pos..], rng, remaining),
+            13 => genDpadDirectionChange(frames[pos..], rng, remaining, &acc),
+            14 => genTriggerBoundary(frames[pos..], rng, remaining),
+            15 => genDualLayer(frames[pos..], rng, remaining, cfg, &acc),
             else => unreachable,
         };
         pos += written;
@@ -164,11 +169,25 @@ fn genLayerToggle(frames: []Frame, rng: std.Random, max: usize, cfg: ?mapping.Ma
 fn genAxisSweep(frames: []Frame, rng: std.Random, max: usize) usize {
     const n = @min(20, max);
     if (n == 0) return 0;
-    _ = rng;
+    // Gap 12: sweep randomly chosen axis including gyro
+    const axis_choice = rng.intRangeAtMost(u8, 0, 8);
     const step: i32 = @divTrunc(65535, @as(i32, @intCast(n)));
     for (frames[0..n], 0..) |*f, i| {
         const val: i16 = @intCast(@as(i32, -32768) + step * @as(i32, @intCast(i)));
-        f.* = .{ .delta = .{ .ax = val }, .dt_ms = 16 };
+        var d = GamepadStateDelta{};
+        switch (axis_choice) {
+            0 => d.ax = val,
+            1 => d.ay = val,
+            2 => d.rx = val,
+            3 => d.ry = val,
+            4 => d.lt = @intCast(@as(u16, @bitCast(val)) >> 8),
+            5 => d.rt = @intCast(@as(u16, @bitCast(val)) >> 8),
+            6 => d.gyro_x = val,
+            7 => d.gyro_y = val,
+            8 => d.gyro_z = val,
+            else => unreachable,
+        }
+        f.* = .{ .delta = d, .dt_ms = 16 };
     }
     return n;
 }
@@ -204,6 +223,93 @@ fn genStress(frames: []Frame, rng: std.Random, max: usize) usize {
         f.dt_ms = rng.intRangeAtMost(u16, 1, 100);
     }
     return n;
+}
+
+// Gap 13: press A -> activate layer -> release A
+fn genButtonHeldAcrossLayerSwitch(frames: []Frame, rng: std.Random, max: usize, cfg: ?mapping.MappingConfig, acc: *u64) usize {
+    if (max < 4) return genIdle(frames, rng, max);
+    const trigger = holdLayerTrigger(cfg) orelse return genIdle(frames, rng, max);
+    const btn = randomButton(rng);
+    acc.* |= btn;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // press button
+    acc.* |= trigger;
+    frames[1] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // activate layer while button held
+    frames[2] = .{ .delta = .{}, .dt_ms = 16 };
+    acc.* &= ~(btn | trigger);
+    frames[3] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // release both
+    return 4;
+}
+
+// Gap 13: boundary values for axes
+fn genBoundaryValues(frames: []Frame, rng: std.Random, max: usize) usize {
+    const vals = [_]i16{ 0, 1, -1, 32767, -32768 };
+    const n = @min(vals.len, max);
+    if (n == 0) return 0;
+    _ = rng;
+    for (frames[0..n], 0..) |*f, i| {
+        f.* = .{ .delta = .{ .ax = vals[i], .ay = vals[i], .rx = vals[i], .ry = vals[i] }, .dt_ms = 16 };
+    }
+    return n;
+}
+
+// Gap 13: touch active -> inactive transitions
+fn genTouchTransition(frames: []Frame, rng: std.Random, max: usize) usize {
+    if (max < 4) return genIdle(frames, rng, max);
+    frames[0] = .{ .delta = .{ .touch0_active = true, .touch0_x = 100, .touch0_y = 200 }, .dt_ms = 16 };
+    frames[1] = .{ .delta = .{ .touch0_x = 150, .touch0_y = 250 }, .dt_ms = 16 };
+    frames[2] = .{ .delta = .{ .touch0_active = false }, .dt_ms = 16 };
+    frames[3] = .{ .delta = .{}, .dt_ms = 16 };
+    return 4;
+}
+
+// Gap 13: dpad direction change without neutral
+fn genDpadDirectionChange(frames: []Frame, rng: std.Random, max: usize, acc: *u64) usize {
+    if (max < 3) return genIdle(frames, rng, max);
+    const up = btnMask(.DPadUp);
+    const right = btnMask(.DPadRight);
+    acc.* |= up;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // Up
+    acc.* = (acc.* & ~up) | right;
+    frames[1] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // Right (no neutral)
+    acc.* &= ~right;
+    frames[2] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 }; // release
+    return 3;
+}
+
+// Gap 13: trigger boundary values
+fn genTriggerBoundary(frames: []Frame, rng: std.Random, max: usize) usize {
+    const vals = [_]u8{ 0, 1, 254, 255 };
+    const n = @min(vals.len, max);
+    if (n == 0) return 0;
+    _ = rng;
+    for (frames[0..n], 0..) |*f, i| {
+        f.* = .{ .delta = .{ .lt = vals[i], .rt = vals[i] }, .dt_ms = 16 };
+    }
+    return n;
+}
+
+// Gap 13: toggle layer on, then hold another layer
+fn genDualLayer(frames: []Frame, rng: std.Random, max: usize, cfg: ?mapping.MappingConfig, acc: *u64) usize {
+    if (max < 6) return genIdle(frames, rng, max);
+    const toggle_t = toggleLayerTrigger(cfg) orelse return genIdle(frames, rng, max);
+    const hold_t = holdLayerTrigger(cfg) orelse return genIdle(frames, rng, max);
+    if (toggle_t == hold_t) return genIdle(frames, rng, max);
+    // Toggle on
+    acc.* |= toggle_t;
+    frames[0] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
+    acc.* &= ~toggle_t;
+    frames[1] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
+    // Hold layer
+    acc.* |= hold_t;
+    frames[2] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
+    frames[3] = .{ .delta = .{}, .dt_ms = 16 };
+    acc.* &= ~hold_t;
+    frames[4] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 16 };
+    // Toggle off
+    acc.* |= toggle_t;
+    frames[5] = .{ .delta = .{ .buttons = acc.* }, .dt_ms = 8 };
+    acc.* &= ~toggle_t;
+    return 6;
 }
 
 fn randomButton(rng: std.Random) u64 {
