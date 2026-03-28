@@ -25,41 +25,28 @@ fn runHarness(
     const rng = prng.random();
 
     var pass: usize = 0;
-    var skip: usize = 0;
 
     for (0..n_configs) |_| {
         var map_buf: [4096]u8 = undefined;
         const map_toml = config_gen.randomMappingConfig(rng, &map_buf);
-        if (map_toml.len == 0) {
-            skip += 1;
-            continue;
-        }
+        if (map_toml.len == 0) continue; // generator returned empty — skip
 
-        var ctx = helpers.makeMapper(map_toml, allocator) catch {
-            skip += 1;
-            continue;
-        };
+        var ctx = try helpers.makeMapper(map_toml, allocator);
         defer ctx.deinit();
 
-        mapping.validate(&ctx.parsed.value) catch {
-            skip += 1;
-            continue;
-        };
+        try mapping.validate(&ctx.parsed.value);
 
         var frames_buf: [200]Frame = undefined;
         const frames = frames_buf[0..@min(n_frames, frames_buf.len)];
         sequence_gen.randomSequence(rng, frames, ctx.parsed.value);
 
         for (frames) |frame| {
-            // Fuzz: apply must not crash, panic, or return error.
             _ = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
         }
         pass += 1;
     }
 
-    // At least some configs should have passed
     try testing.expect(pass > 0);
-    try testing.expect(skip < n_configs);
 }
 
 fn compareAux(oracle_aux: *const mapper_oracle.AuxEventList, prod_aux: *const @import("../../core/aux_event.zig").AuxEventList) !void {
@@ -327,28 +314,26 @@ test "generative: real device configs x compatible mapping x random sequences" {
     var tested: usize = 0;
 
     for (paths.items) |path| {
-        const dev_parsed = device_mod.parseFile(allocator, path) catch continue;
+        const dev_parsed = try device_mod.parseFile(allocator, path);
         defer dev_parsed.deinit();
 
         // Generate a mapping compatible with this device's buttons.
         var map_buf: [4096]u8 = undefined;
         const map_toml = config_gen.generateCompatibleMapping(rng, &dev_parsed.value, &map_buf);
-        if (map_toml.len == 0) continue;
+        if (map_toml.len == 0) continue; // generator produced nothing for this device — skip
 
-        const map_parsed = mapping.parseString(allocator, map_toml) catch continue;
+        const map_parsed = try mapping.parseString(allocator, map_toml);
         defer map_parsed.deinit();
-        mapping.validate(&map_parsed.value) catch continue;
+        try mapping.validate(&map_parsed.value);
 
-        var mc = helpers.makeMapper(map_toml, allocator) catch continue;
+        var mc = try helpers.makeMapper(map_toml, allocator);
         defer mc.deinit();
 
-        // Run 100 frames per device config.
         var frames_buf: [100]Frame = undefined;
         sequence_gen.randomSequence(rng, &frames_buf, map_parsed.value);
 
         for (frames_buf) |frame| {
-            // Fuzz: apply must not crash, panic, or return error.
-            _ = mc.mapper.apply(frame.delta, @as(u32, frame.dt_ms)) catch continue;
+            _ = try mc.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
         }
         tested += 1;
     }

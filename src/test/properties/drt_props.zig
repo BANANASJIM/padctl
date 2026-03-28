@@ -81,7 +81,7 @@ test "DRT: production interpreter matches reference oracle on random packets" {
     const random = rng.random();
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         const cfg = &parsed.value;
@@ -109,7 +109,7 @@ test "DRT: production interpreter matches reference oracle on random packets" {
                 // logic is actually exercised (not silently skipped every time).
                 if (cr.checksum != null) injectChecksum(cr, pkt);
 
-                const prod_delta = interp.processReport(iface, pkt) catch continue;
+                const prod_delta = try interp.processReport(iface, pkt);
                 const delta = prod_delta orelse continue;
                 tested_count += 1;
 
@@ -246,7 +246,7 @@ test "DRT: structured random packets — valid field values at correct offsets" 
     const random = rng.random();
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         const cfg = &parsed.value;
@@ -293,7 +293,7 @@ test "DRT: structured random packets — valid field values at correct offsets" 
                 // Inject checksum so extraction logic is exercised.
                 if (cr.checksum != null) injectChecksum(cr, pkt);
 
-                const prod_delta = interp.processReport(iface, pkt) catch continue;
+                const prod_delta = try interp.processReport(iface, pkt);
                 const delta = prod_delta orelse continue;
                 tested_count += 1;
 

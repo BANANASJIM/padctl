@@ -20,7 +20,7 @@ test "property: interpreter robustness — random packets never crash" {
     const random = rng.random();
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         const cfg = &parsed.value;

@@ -151,9 +151,9 @@ test "property: random button remap pairs — no crash" {
         const dst = targets[rng.intRangeAtMost(usize, 0, targets.len - 1)];
 
         var buf: [256]u8 = undefined;
-        const toml_str = std.fmt.bufPrint(&buf, "[remap]\n{s} = \"{s}\"\n", .{ src, dst }) catch continue;
+        const toml_str = try std.fmt.bufPrint(&buf, "[remap]\n{s} = \"{s}\"\n", .{ src, dst });
 
-        var ctx = makeMapper(toml_str, allocator) catch continue;
+        var ctx = try makeMapper(toml_str, allocator);
         defer ctx.deinit();
         var m = &ctx.mapper;
 

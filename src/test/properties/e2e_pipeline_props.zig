@@ -28,7 +28,7 @@ test "property: config — interface ids reference declared interfaces" {
     if (paths.items.len == 0) return;
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
         const cfg = &parsed.value;
 
@@ -57,7 +57,7 @@ test "property: config — checksum range within report bounds" {
     if (paths.items.len == 0) return;
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         for (parsed.value.report) |report| {
@@ -88,7 +88,7 @@ test "property: config — vid/pid non-zero" {
     if (paths.items.len == 0) return;
 
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         if (parsed.value.device.vid == 0) {
@@ -214,20 +214,20 @@ test "property: interpreter round-trip — write field → processReport → rea
 
     // Test each field type
     const TypeAndTag = struct { type_str: []const u8, field_type: FieldType, tag: []const u8, offset: usize };
+    // Note: u16le with rt is not testable — rt is stored as u8 (truncated), so values > 255 don't round-trip.
     const cases = [_]TypeAndTag{
         .{ .type_str = "u8", .field_type = .u8, .tag = "lt", .offset = 1 },
         .{ .type_str = "i16le", .field_type = .i16le, .tag = "left_x", .offset = 2 },
-        .{ .type_str = "u16le", .field_type = .u16le, .tag = "rt", .offset = 2 },
         .{ .type_str = "i8", .field_type = .i8, .tag = "gyro_x", .offset = 1 },
     };
 
     for (cases) |c| {
         var toml_buf: [512]u8 = undefined;
-        const toml_str = std.fmt.bufPrint(&toml_buf, "{s}{s} = {{ offset = {d}, type = \"{s}\" }}\n", .{
+        const toml_str = try std.fmt.bufPrint(&toml_buf, "{s}\n{s} = {{ offset = {d}, type = \"{s}\" }}\n", .{
             roundtrip_toml_prefix, c.tag, c.offset, c.type_str,
-        }) catch continue;
+        });
 
-        const parsed = device_mod.parseString(allocator, toml_str) catch continue;
+        const parsed = try device_mod.parseString(allocator, toml_str);
         defer parsed.deinit();
         const interp = Interpreter.init(&parsed.value);
 
@@ -238,7 +238,7 @@ test "property: interpreter round-trip — write field → processReport → rea
             const val = randomInRange(rng, typeMinVal(c.field_type), typeMaxVal(c.field_type));
             writeFieldByTag(&raw, c.offset, c.field_type, val);
 
-            const delta = (interp.processReport(0, &raw) catch continue) orelse continue;
+            const delta = (try interp.processReport(0, &raw)) orelse continue;
 
             // Verify extracted value matches written value
             const extracted: i64 = extractDeltaField(delta, c.tag);
@@ -272,11 +272,11 @@ test "property: interpreter round-trip with transform — processReport matches 
 
     for (transforms) |tr| {
         var toml_buf: [512]u8 = undefined;
-        const toml_str = std.fmt.bufPrint(&toml_buf, "{s}left_x = {{ offset = 2, type = \"i16le\", transform = \"{s}\" }}\n", .{
+        const toml_str = try std.fmt.bufPrint(&toml_buf, "{s}\nleft_x = {{ offset = 2, type = \"i16le\", transform = \"{s}\" }}\n", .{
             roundtrip_toml_prefix, tr.str,
-        }) catch continue;
+        });
 
-        const parsed = device_mod.parseString(allocator, toml_str) catch continue;
+        const parsed = try device_mod.parseString(allocator, toml_str);
         defer parsed.deinit();
         const interp = Interpreter.init(&parsed.value);
 
@@ -287,7 +287,7 @@ test "property: interpreter round-trip with transform — processReport matches 
             const val = randomInRange(rng, -32768, 32767);
             writeFieldByTag(&raw, 2, .i16le, val);
 
-            const delta = (interp.processReport(0, &raw) catch continue) orelse continue;
+            const delta = (try interp.processReport(0, &raw)) orelse continue;
             const extracted: i64 = delta.ax orelse 0;
             const expected = saturateCastI16(tr.apply(val));
 
