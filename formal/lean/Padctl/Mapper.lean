@@ -229,6 +229,7 @@ structure ApplyResult where
   mapperState : MapperState
   gamepad : GamepadState
   auxEvents : List AuxEvent
+  maskedPrev : GamepadState
   deriving Repr
 
 def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelta)
@@ -259,7 +260,7 @@ def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelt
   let inject := baseRes.injectMask ||| layerRes.injectMask
   let allAux := dpadRes.auxEvents ++ baseRes.auxEvents ++ layerRes.auxEvents
 
-  -- [7] assemble emit state
+  -- [7] assemble emit state + prev-frame masking
   let emitButtons := assembleButtons buttons suppress inject
   let emitGs : GamepadState := {
     newGs with
@@ -268,4 +269,16 @@ def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelt
     dpad_y := dpadRes.dpadY
   }
 
-  { mapperState := s2, gamepad := emitGs, auxEvents := allAux }
+  -- prev-frame masking: apply same suppress/inject to prevButtons so that
+  -- downstream diff does not produce spurious release events for suppressed buttons
+  let maskedPrevButtons := assembleButtons s2.prevButtons suppress inject
+  let maskedPrevDpadX := if dpadRes.suppressDpadHat then 0 else gs.dpad_x
+  let maskedPrevDpadY := if dpadRes.suppressDpadHat then 0 else gs.dpad_y
+  let maskedPrev : GamepadState := {
+    gs with
+    buttons := maskedPrevButtons
+    dpad_x := maskedPrevDpadX
+    dpad_y := maskedPrevDpadY
+  }
+
+  { mapperState := s2, gamepad := emitGs, auxEvents := allAux, maskedPrev := maskedPrev }
