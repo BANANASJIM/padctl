@@ -119,6 +119,10 @@ const AuxCapture = struct {
         for (events) |ev| {
             self.buf[self.head & 255] = ev;
             self.head +%= 1;
+            // Advance tail if buffer is full (drop oldest)
+            if (self.head -% self.tail > 256) {
+                self.tail = self.head -% 256;
+            }
         }
     }
 
