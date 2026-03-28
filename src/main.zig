@@ -144,6 +144,7 @@ const Cli = struct {
     status_cmd: bool = false,
     devices_cmd: bool = false,
     socket_path: []const u8 = cli.socket_client.DEFAULT_SOCKET_PATH,
+    socket_explicit: bool = false,
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -295,6 +296,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     device_id = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                    parsed_cli.socket_explicit = true;
                 } else {
                     std.log.err("unknown switch argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
@@ -306,6 +308,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             while (args.next()) |sub_arg| {
                 if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                    parsed_cli.socket_explicit = true;
                 } else {
                     std.log.err("unknown status argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
@@ -316,6 +319,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             while (args.next()) |sub_arg| {
                 if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                    parsed_cli.socket_explicit = true;
                 } else {
                     std.log.err("unknown devices argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
@@ -429,6 +433,11 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer parsed.deinit();
+
+    var sock_path_buf: [256]u8 = undefined;
+    if (!parsed.socket_explicit) {
+        parsed.socket_path = cli.socket_client.resolveSocketPath(&sock_path_buf);
+    }
 
     // install subcommand
     if (parsed.install_opts) |opts| {

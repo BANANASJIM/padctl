@@ -19,7 +19,7 @@ const mapping_discovery = @import("config/mapping_discovery.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
-pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
+const socket_client = @import("cli/socket_client.zig");
 
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
@@ -166,7 +166,9 @@ pub const Supervisor = struct {
 
         const inotify_result = initInotify(allocator);
 
-        const sock = ControlSocket.init(allocator, DEFAULT_SOCKET_PATH) catch |err| blk: {
+        var sock_path_buf: [256]u8 = undefined;
+        const sock_path = socket_client.resolveSocketPath(&sock_path_buf);
+        const sock = ControlSocket.init(allocator, sock_path) catch |err| blk: {
             std.log.warn("control socket unavailable: {}", .{err});
             break :blk null;
         };
