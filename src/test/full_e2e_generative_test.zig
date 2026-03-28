@@ -119,7 +119,9 @@ fn setupTestUdev() void {
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
-    _ = child.spawnAndWait() catch {};
+    _ = child.spawnAndWait() catch |err| {
+        std.debug.print("setupTestUdev failed: {}\n", .{err});
+    };
     // Give udevd time to process the new rule
     std.Thread.sleep(200 * std.time.ns_per_ms);
 }
@@ -347,6 +349,13 @@ fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
             .scale => blk: {
                 const span = tr.b - tr.a;
                 if (span == 0) break :blk v;
+                // Forward transform: raw_val * (b - a) / t_max + a
+                // Inverse: (v - a) * t_max / (b - a)
+                // For signed types, use the full range [-t_max-1, t_max] for negative values.
+                const is_signed = switch (chain.type_tag) {
+                    .i8, .i16le, .i16be, .i32le, .i32be => true,
+                    else => false,
+                };
                 const t_max: i128 = switch (chain.type_tag) {
                     .u8 => 255,
                     .i8 => 127,
@@ -356,6 +365,10 @@ fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
                     .i32le, .i32be => 2147483647,
                 };
                 const shifted: i128 = @as(i128, v) - tr.a;
+                if (is_signed and shifted < 0) {
+                    // Negative range uses t_max+1 denominator for symmetric inversion
+                    break :blk @intCast(@divTrunc(shifted * (t_max + 1), span));
+                }
                 break :blk @intCast(@divTrunc(shifted * t_max, span));
             },
             // abs, clamp, deadzone: not cleanly invertible — pass through
@@ -530,6 +543,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
     const rng = prng.random();
 
     var devices_tested: usize = 0;
+    var devices_skipped: usize = 0;
     var total_frames: usize = 0;
 
     for (paths.items) |config_path| {
@@ -540,17 +554,29 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         defer parsed.deinit();
 
         // Skip configs without output (can't create uinput)
-        if (parsed.value.output == null) continue;
+        if (parsed.value.output == null) {
+            devices_skipped += 1;
+            continue;
+        }
 
         // Skip generic mode devices
         if (parsed.value.device.mode) |m| {
-            if (std.mem.eql(u8, m, "generic")) continue;
+            if (std.mem.eql(u8, m, "generic")) {
+                devices_skipped += 1;
+                continue;
+            }
         }
 
         // Use first report as the main input report
-        if (parsed.value.report.len == 0) continue;
+        if (parsed.value.report.len == 0) {
+            devices_skipped += 1;
+            continue;
+        }
         const interp = Interpreter.init(&parsed.value);
-        if (interp.report_count == 0) continue;
+        if (interp.report_count == 0) {
+            devices_skipped += 1;
+            continue;
+        }
 
         // Generate compatible mapping
         var mapping_buf: [4096]u8 = undefined;
@@ -594,6 +620,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         // Find hidraw
         const hidraw_path = (try findHidraw(allocator, test_vid, test_pid)) orelse {
             std.debug.print("SKIP hidraw not found for {s}\n", .{config_path});
+            devices_skipped += 1;
             continue;
         };
         defer allocator.free(hidraw_path);
@@ -601,6 +628,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         // Create uinput device
         var udev = UinputDevice.create(out_cfg) catch |err| {
             std.debug.print("SKIP uinput create failed for {s}: {}\n", .{ config_path, err });
+            devices_skipped += 1;
             continue;
         };
         defer udev.close();
@@ -609,6 +637,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         // Find event node for uinput output
         const ev_fd = findEventNode(out_vid, out_pid) catch {
             std.debug.print("SKIP event node not found for {s}\n", .{config_path});
+            devices_skipped += 1;
             continue;
         };
         defer posix.close(ev_fd);
@@ -619,11 +648,13 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         hidraw.open(hidraw_path) catch |err| {
             std.debug.print("SKIP hidraw open failed for {s}: {}\n", .{ config_path, err });
             allocator.destroy(hidraw);
+            devices_skipped += 1;
             continue;
         };
 
         const device_ios = allocator.alloc(DeviceIO, 1) catch {
             hidraw.deviceIO().close();
+            devices_skipped += 1;
             continue;
         };
         device_ios[0] = hidraw.deviceIO();
@@ -641,6 +672,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
             loop.deinit();
             device_ios[0].close();
             allocator.free(device_ios);
+            devices_skipped += 1;
             continue;
         };
 
@@ -676,6 +708,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         var prev_oracle_gs = GamepadState{};
         var frames_verified: usize = 0;
         var events_received: usize = 0;
+        var press_misses: usize = 0;
 
         // Persistent packet buffer — accumulates state across frames
         var persistent_packet: [4096]u8 = undefined;
@@ -737,29 +770,33 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                     // M2: if oracle says pressed (transition from 0→1), verify press event present
                     if (oracle_pressed and !was_pressed and ev_slice.len > 0) {
                         if (!hasKeyEvent(ev_slice, code, true)) {
-                            std.debug.print("DRT WARN: expected press for code {d} not found in {s}\n", .{ code, config_path });
+                            press_misses += 1;
                         }
                     }
                 }
             }
 
-            // M1: axis value DRT — compare ABS_X / ABS_Y against oracle
+            // M1: axis value DRT — compare all axes against oracle (tolerance=1 for rounding)
             if (ev_slice.len > 0) {
-                if (getAbsValue(ev_slice, 0x00)) |actual_ax| {
-                    const expected_ax: i32 = oracle_out.gamepad.ax;
-                    if (actual_ax != expected_ax) {
-                        std.debug.print("DRT INFO: ABS_X mismatch: expected {d}, got {d}\n", .{ expected_ax, actual_ax });
-                    }
+                if (getAbsValue(ev_slice, 0x00)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.ax) > 1) return error.TestUnexpectedResult;
                 }
-                if (getAbsValue(ev_slice, 0x01)) |actual_ay| {
-                    const expected_ay: i32 = oracle_out.gamepad.ay;
-                    if (actual_ay != expected_ay) {
-                        std.debug.print("DRT INFO: ABS_Y mismatch: expected {d}, got {d}\n", .{ expected_ay, actual_ay });
-                    }
+                if (getAbsValue(ev_slice, 0x01)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.ay) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x03)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.rx) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x04)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.ry) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x02)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.lt) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x05)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.rt) > 1) return error.TestUnexpectedResult;
                 }
             }
-
-            // DRT 3: liveness — accumulated over all frames
 
             prev_oracle_gs = oracle_out.gamepad;
             frames_verified += 1;
@@ -780,6 +817,12 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         }
         try testing.expect(events_received > 0);
 
+        // M2: button press completeness — all expected presses must arrive
+        if (press_misses > 0) {
+            std.debug.print("FAIL [{s}] button press misses: {d}\n", .{ config_path, press_misses });
+        }
+        try testing.expectEqual(@as(usize, 0), press_misses);
+
         total_frames += frames_verified;
         devices_tested += 1;
 
@@ -788,7 +831,11 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
 
     if (devices_tested == 0) return error.SkipZigTest;
 
-    std.debug.print("\nl3_e2e: {d} devices tested, {d} total frames\n", .{ devices_tested, total_frames });
+    // Fix 3: minimum coverage — at least half of configs must actually run
+    try testing.expect(devices_tested >= paths.items.len / 2);
+    try testing.expect(devices_skipped < devices_tested);
+
+    std.debug.print("\nl3_e2e: {d} devices tested, {d} skipped, {d} total frames\n", .{ devices_tested, devices_skipped, total_frames });
     try testing.expect(devices_tested > 0);
     try testing.expect(total_frames > 0);
 }
@@ -806,13 +853,17 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
     const N_FRAMES = 50;
 
     var configs_tested: usize = 0;
+    var configs_skipped: usize = 0;
     var total_frames: usize = 0;
 
     for (0..N_CONFIGS) |ci| {
         // 1. Generate random device config TOML
         var dev_buf: [4096]u8 = undefined;
         const dev_toml_base = config_gen.randomDeviceConfig(rng, &dev_buf);
-        if (dev_toml_base.len == 0) continue;
+        if (dev_toml_base.len == 0) {
+            configs_skipped += 1;
+            continue;
+        }
 
         // Append [output] with emulate preset and unique VID/PID
         const out_vid: u16 = 0xFB00 | @as(u16, @intCast(ci & 0xFF));
@@ -825,23 +876,36 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             \\vid = 0x{x:0>4}
             \\pid = 0x{x:0>4}
             \\
-        , .{ dev_toml_base, out_vid, out_pid }) catch continue;
+        , .{ dev_toml_base, out_vid, out_pid }) catch {
+            configs_skipped += 1;
+            continue;
+        };
 
         // 2. Parse device config
         const dev_parsed = try device_mod.parseString(allocator, full_dev_toml);
         defer dev_parsed.deinit();
 
-        if (dev_parsed.value.output == null) continue;
-        if (dev_parsed.value.report.len == 0) continue;
+        if (dev_parsed.value.output == null) {
+            configs_skipped += 1;
+            continue;
+        }
+        if (dev_parsed.value.report.len == 0) {
+            configs_skipped += 1;
+            continue;
+        }
 
         const interp = Interpreter.init(&dev_parsed.value);
-        if (interp.report_count == 0) continue;
+        if (interp.report_count == 0) {
+            configs_skipped += 1;
+            continue;
+        }
 
         // 3. Generate random mapping config
         var map_buf: [4096]u8 = undefined;
         const map_toml = config_gen.generateCompatibleMapping(rng, &dev_parsed.value, &map_buf);
         const map_parsed = mapping_mod.parseString(allocator, map_toml) catch |err| {
             std.debug.print("GEN MAP PARSE ERROR [ci={d}]: {}\n", .{ ci, err });
+            configs_skipped += 1;
             continue;
         };
         defer map_parsed.deinit();
@@ -878,6 +942,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         // Find hidraw for our UHID device
         const hidraw_path = (try findHidraw(allocator, uhid_vid, uhid_pid)) orelse {
             std.debug.print("SKIP hidraw not found [ci={d}]\n", .{ci});
+            configs_skipped += 1;
             continue;
         };
         defer allocator.free(hidraw_path);
@@ -885,6 +950,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         // 5. Create uinput device for output
         var udev = UinputDevice.create(out_cfg) catch |err| {
             std.debug.print("SKIP uinput create failed [ci={d}]: {}\n", .{ ci, err });
+            configs_skipped += 1;
             continue;
         };
         defer udev.close();
@@ -893,6 +959,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         // Find event node for uinput output
         const ev_fd = findEventNode(out_vid, out_pid) catch {
             std.debug.print("SKIP event node not found [ci={d}]\n", .{ci});
+            configs_skipped += 1;
             continue;
         };
         defer posix.close(ev_fd);
@@ -903,11 +970,13 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         hidraw.open(hidraw_path) catch |err| {
             std.debug.print("SKIP hidraw open failed [ci={d}]: {}\n", .{ ci, err });
             allocator.destroy(hidraw);
+            configs_skipped += 1;
             continue;
         };
 
         const device_ios = allocator.alloc(DeviceIO, 1) catch {
             hidraw.deviceIO().close();
+            configs_skipped += 1;
             continue;
         };
         device_ios[0] = hidraw.deviceIO();
@@ -923,6 +992,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             loop.deinit();
             device_ios[0].close();
             allocator.free(device_ios);
+            configs_skipped += 1;
             continue;
         };
 
@@ -955,6 +1025,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         var prev_oracle_gs = GamepadState{};
         var frames_verified: usize = 0;
         var events_received: usize = 0;
+        var press_misses: usize = 0;
 
         // Persistent packet buffer
         var persistent_packet: [4096]u8 = undefined;
@@ -1010,27 +1081,31 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                     }
                     if (oracle_pressed and !was_pressed and ev_slice.len > 0) {
                         if (!hasKeyEvent(ev_slice, code, true)) {
-                            std.debug.print("DRT WARN: expected press for code {d} not found [ci={d}]\n", .{ code, ci });
+                            press_misses += 1;
                         }
                     }
                 }
             }
 
-            // M1: axis value check
+            // M1: axis value DRT — compare all axes against oracle (tolerance=1 for rounding)
             if (ev_slice.len > 0) {
-                {
-                    const expected_ax: i32 = oracle_out.gamepad.ax;
-                    if (getAbsValue(ev_slice, 0x00)) |actual| {
-                        _ = expected_ax;
-                        _ = actual;
-                    }
+                if (getAbsValue(ev_slice, 0x00)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.ax) > 1) return error.TestUnexpectedResult;
                 }
-                {
-                    const expected_ay: i32 = oracle_out.gamepad.ay;
-                    if (getAbsValue(ev_slice, 0x01)) |actual| {
-                        _ = expected_ay;
-                        _ = actual;
-                    }
+                if (getAbsValue(ev_slice, 0x01)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.ay) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x03)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.rx) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x04)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.ry) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x02)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.lt) > 1) return error.TestUnexpectedResult;
+                }
+                if (getAbsValue(ev_slice, 0x05)) |actual| {
+                    if (@abs(actual - oracle_out.gamepad.rt) > 1) return error.TestUnexpectedResult;
                 }
             }
 
@@ -1053,6 +1128,12 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         }
         try testing.expect(events_received > 0);
 
+        // M2: button press completeness
+        if (press_misses > 0) {
+            std.debug.print("FAIL [gen-ci={d}] button press misses: {d}\n", .{ ci, press_misses });
+        }
+        try testing.expectEqual(@as(usize, 0), press_misses);
+
         total_frames += frames_verified;
         configs_tested += 1;
 
@@ -1061,7 +1142,9 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
 
     if (configs_tested == 0) return error.SkipZigTest;
 
-    std.debug.print("\nl3_e2e_gen: {d} random configs tested, {d} total frames\n", .{ configs_tested, total_frames });
+    // Fix 6: coverage assertion for random configs
     try testing.expect(configs_tested > 0);
-    try testing.expect(total_frames > 0);
+    try testing.expect(configs_skipped < N_CONFIGS / 2);
+
+    std.debug.print("\nl3_e2e_gen: {d} random configs tested, {d} skipped, {d} total frames\n", .{ configs_tested, configs_skipped, total_frames });
 }
