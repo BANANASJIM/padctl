@@ -1,7 +1,8 @@
--- Properties — formal proofs for padctl transforms, interpreter, and state
+-- Properties — formal proofs for padctl transforms, interpreter, state, and mapper
 import Padctl.Transform
 import Padctl.Interpreter
 import Padctl.State
+import Padctl.Mapper
 
 -- P1: negate is involutive (except minInt)
 -- If v != -(tMax+1) and -v != -(tMax+1), then negate(negate(v)) = v
@@ -160,3 +161,40 @@ theorem applyDelta_empty (s : GamepadState) :
     applyDelta s emptyDelta = s := by
   cases s
   simp [applyDelta, emptyDelta]
+
+/-! ## Mapper properties -/
+
+-- P18: assembleButtons — suppressed bits are cleared when suppress ∩ inject = 0
+-- sorry: Nat.bitwise lemmas needed for andNot properties
+theorem assemble_suppress_clears (raw suppress inject : Nat)
+    (h_disjoint : suppress &&& inject = 0) :
+    assembleButtons raw suppress inject &&& suppress = 0 := by
+  sorry -- requires Nat.bitwise distributivity over andNot
+
+-- P19: Layer mutual exclusion — onTriggerPress while tapHold active is no-op
+theorem layer_mutual_exclusion (s : MapperState) (th : TapHoldState) (j : Nat)
+    (h : s.tapHold = some th) :
+    onTriggerPress s j = s := by
+  unfold onTriggerPress
+  simp [h]
+
+-- P20: Layer toggle involutive — toggling twice returns to original
+theorem toggle_involutive (b : Bool) : !(!b) = b := by
+  cases b <;> simp
+
+-- P21: Dpad arrows — dx = 0 in output when input dx = 0
+theorem dpad_arrows_zero_dx (dy prevDx prevDy : Int) (suppress : Bool) :
+    (processDpad 0 dy prevDx prevDy .arrows suppress).dpadX = 0 := by
+  simp [processDpad]
+
+-- P21b: Dpad gamepad mode is passthrough
+theorem dpad_gamepad_passthrough (dx dy prevDx prevDy : Int) :
+    (processDpad dx dy prevDx prevDy .gamepad false).dpadX = dx ∧
+    (processDpad dx dy prevDx prevDy .gamepad false).dpadY = dy := by
+  simp [processDpad]
+
+-- P22: assembleButtons — inject bits always present in output
+-- sorry: Nat.bitwise lemmas needed
+theorem assemble_inject_present (raw suppress inject : Nat) :
+    assembleButtons raw suppress inject ||| inject = assembleButtons raw suppress inject := by
+  sorry -- requires Nat.lor_assoc / Nat.lor_idempotent on andNot

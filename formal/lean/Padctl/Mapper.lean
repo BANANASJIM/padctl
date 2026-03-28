@@ -35,7 +35,6 @@ structure TapHoldState where
   layerIdx : Nat
   phase : TapHoldPhase := .pending
   layerActivated : Bool := false
-  elapsedMs : Nat := 0
   deriving DecidableEq, Repr
 
 structure MapperState where
@@ -57,23 +56,6 @@ def onTimerExpired (s : MapperState) : MapperState :=
   | some th =>
     if th.phase == .pending then
       { s with tapHold := some { th with phase := .active, layerActivated := true } }
-    else s
-  | none => s
-
--- Advance elapsed time; transition pending → active when holdTimeout reached
-def advanceTimer (s : MapperState) (dtMs : Nat) (layers : List LayerConfig) : MapperState :=
-  match s.tapHold with
-  | some th =>
-    if th.phase == .pending then
-      let elapsed := th.elapsedMs + dtMs
-      let timeout := match layers[th.layerIdx]? with
-        | some cfg => LayerConfig.holdTimeout cfg
-        | none => 200
-      if elapsed >= timeout then
-        { s with tapHold := some { th with phase := .active, layerActivated := true,
-                                           elapsedMs := elapsed } }
-      else
-        { s with tapHold := some { th with elapsedMs := elapsed } }
     else s
   | none => s
 
@@ -126,16 +108,9 @@ private def processLayerTriggersAux (layers : List LayerConfig) (acc : MapperSta
         else acc
     processLayerTriggersAux rest acc' (idx + 1)
 
--- Ensure toggled list has at least n elements (pad with false)
-private def padToggled (toggled : List Bool) (n : Nat) : List Bool :=
-  if toggled.length >= n then toggled
-  else toggled ++ List.replicate (n - toggled.length) false
-
 def processLayerTriggers (s : MapperState) (buttons : Nat) (layers : List LayerConfig)
     : MapperState :=
-  let tog := padToggled s.toggled layers.length
-  let s' := { s with buttons, prevButtons := s.buttons, toggled := tog }
-  processLayerTriggersAux layers s' 0
+  processLayerTriggersAux layers { s with buttons, prevButtons := s.buttons } 0
 
 /-! ## Remap — matching src/core/remap.zig -/
 
@@ -248,49 +223,43 @@ structure MapperConfig where
   dpadSuppressGamepad : Bool := false
   deriving Repr
 
--- Merge base + layer remaps: layer entries override base for the same source.
--- Matches Zig per_src_inject last-write-wins semantics.
-def mergeRemaps (base layer : List RemapEntry) : List RemapEntry :=
-  let layerSources := layer.map (·.source)
-  let baseFiltered := base.filter (fun e => !layerSources.contains e.source)
-  baseFiltered ++ layer
-
 /-! ## Full apply pipeline — matching mapper.zig apply() steps [1]-[7] -/
 
 structure ApplyResult where
   mapperState : MapperState
   gamepad : GamepadState
   auxEvents : List AuxEvent
-  maskedPrev : GamepadState
   deriving Repr
 
 def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelta)
-    (config : MapperConfig) (dtMs : Nat := 0) : ApplyResult :=
+    (config : MapperConfig) : ApplyResult :=
   -- [1] merge delta
   let newGs := applyDelta gs delta
   let buttons := newGs.buttons
 
-  -- [2] layer trigger processing + timer advancement
-  let s1 := processLayerTriggers s buttons config.layers
-  let s2 := advanceTimer s1 dtMs config.layers
+  -- [2] layer trigger processing
+  let s2 := processLayerTriggers s buttons config.layers
 
   -- [3] dpad processing
   let dpadRes := processDpad newGs.dpad_x newGs.dpad_y gs.dpad_x gs.dpad_y
       config.dpadMode config.dpadSuppressGamepad
 
-  -- [4]+[5] two-pass remap: layer entries override base for the same source
-  let layerRemaps := match getActiveLayer s2 config.layers with
-    | some idx => config.layerRemaps.getD idx []
-    | none => []
-  let mergedRemaps := mergeRemaps config.baseRemaps layerRemaps
-  let remapRes := applyRemaps buttons s2.prevButtons mergedRemaps
+  -- [4] base remap
+  let baseRes := applyRemaps buttons s2.prevButtons config.baseRemaps
+
+  -- [5] layer remap (OR-accumulate)
+  let layerRes := match getActiveLayer s2 config.layers with
+    | some idx => match config.layerRemaps.getD idx [] with
+      | [] => RemapResult.empty
+      | remaps => applyRemaps buttons s2.prevButtons remaps
+    | none => RemapResult.empty
 
   -- [6] combine suppress/inject
-  let suppress := remapRes.suppressMask
-  let inject := remapRes.injectMask
-  let allAux := dpadRes.auxEvents ++ remapRes.auxEvents
+  let suppress := baseRes.suppressMask ||| layerRes.suppressMask
+  let inject := baseRes.injectMask ||| layerRes.injectMask
+  let allAux := dpadRes.auxEvents ++ baseRes.auxEvents ++ layerRes.auxEvents
 
-  -- [7] assemble emit state + prev-frame masking
+  -- [7] assemble emit state
   let emitButtons := assembleButtons buttons suppress inject
   let emitGs : GamepadState := {
     newGs with
@@ -299,16 +268,4 @@ def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelt
     dpad_y := dpadRes.dpadY
   }
 
-  -- prev-frame masking: apply same suppress/inject to prevButtons so that
-  -- downstream diff does not produce spurious release events for suppressed buttons
-  let maskedPrevButtons := assembleButtons s2.prevButtons suppress inject
-  let maskedPrevDpadX := if dpadRes.suppressDpadHat then 0 else gs.dpad_x
-  let maskedPrevDpadY := if dpadRes.suppressDpadHat then 0 else gs.dpad_y
-  let maskedPrev : GamepadState := {
-    gs with
-    buttons := maskedPrevButtons
-    dpad_x := maskedPrevDpadX
-    dpad_y := maskedPrevDpadY
-  }
-
-  { mapperState := s2, gamepad := emitGs, auxEvents := allAux, maskedPrev := maskedPrev }
+  { mapperState := s2, gamepad := emitGs, auxEvents := allAux }
