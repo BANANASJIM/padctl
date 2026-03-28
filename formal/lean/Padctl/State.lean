@@ -101,12 +101,36 @@ def diff (a b : GamepadState) : GamepadStateDelta :=
     touch1_active := if a.touch1_active ≠ b.touch1_active then some a.touch1_active else none
     battery_level := if a.battery_level ≠ b.battery_level then some a.battery_level else none }
 
+-- ButtonId matching Zig ButtonId enum (all 33 members)
+inductive ButtonId where
+  | south | east | north | west
+  | lsb | rsb | back | start | guide | misc
+  | lt | rt | lb | rb
+  | dpadUp | dpadDown | dpadLeft | dpadRight
+  | lt2 | rt2
+  | paddle1 | paddle2 | paddle3 | paddle4
+  | touchpadButton
+  | misc2 | misc3 | misc4 | misc5 | misc6
+  | misc7 | misc8 | misc9
+  deriving DecidableEq, Repr
+
+def ButtonId.toNat : ButtonId → Nat
+  | .south => 0 | .east => 1 | .north => 2 | .west => 3
+  | .lsb => 4 | .rsb => 5 | .back => 6 | .start => 7
+  | .guide => 8 | .misc => 9
+  | .lt => 10 | .rt => 11 | .lb => 12 | .rb => 13
+  | .dpadUp => 14 | .dpadDown => 15 | .dpadLeft => 16 | .dpadRight => 17
+  | .lt2 => 18 | .rt2 => 19
+  | .paddle1 => 20 | .paddle2 => 21 | .paddle3 => 22 | .paddle4 => 23
+  | .touchpadButton => 24
+  | .misc2 => 25 | .misc3 => 26 | .misc4 => 27 | .misc5 => 28 | .misc6 => 29
+  | .misc7 => 30 | .misc8 => 31 | .misc9 => 32
+
 -- Dpad button bit positions matching Zig ButtonId enum
--- DPadUp=14, DPadDown=15, DPadLeft=16, DPadRight=17
-def dpadUpBit : Nat := 14
-def dpadDownBit : Nat := 15
-def dpadLeftBit : Nat := 16
-def dpadRightBit : Nat := 17
+def dpadUpBit : Nat := ButtonId.toNat .dpadUp
+def dpadDownBit : Nat := ButtonId.toNat .dpadDown
+def dpadLeftBit : Nat := ButtonId.toNat .dpadLeft
+def dpadRightBit : Nat := ButtonId.toNat .dpadRight
 
 def testBit (n : Nat) (bit : Nat) : Bool := (n / (2 ^ bit)) % 2 == 1
 

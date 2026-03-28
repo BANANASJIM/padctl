@@ -86,14 +86,18 @@ private def crc32Byte (crc : UInt32) (b : UInt8) : UInt32 :=
     if c &&& 1 == 1 then (c >>> 1) ^^^ 0xEDB88320 else c >>> 1
   step (step (step (step (step (step (step (step c0)))))))
 
-def crc32 (raw : ByteArray) (start stop : Nat) : UInt32 :=
+def crc32 (raw : ByteArray) (start stop : Nat) (seed : Option UInt8 := none) : UInt32 :=
   let init : UInt32 := 0xFFFFFFFF
+  let afterSeed := match seed with
+    | some s => crc32Byte init s
+    | none => init
   let result := (List.range (stop - start)).foldl (fun acc i =>
     if start + i < raw.size then crc32Byte acc raw[start + i]!
-    else acc) init
+    else acc) afterSeed
   result ^^^ 0xFFFFFFFF
 
-def verifyChecksum (raw : ByteArray) (algo : ChecksumAlgo) (rangeStart rangeEnd : Nat) (offset : Nat) : Bool :=
+def verifyChecksum (raw : ByteArray) (algo : ChecksumAlgo) (rangeStart rangeEnd : Nat)
+    (offset : Nat) (seed : Option UInt8 := none) : Bool :=
   if offset + 3 >= raw.size then
     match algo with
     | .crc32 => false
@@ -108,7 +112,7 @@ def verifyChecksum (raw : ByteArray) (algo : ChecksumAlgo) (rangeStart rangeEnd 
     | .crc32 =>
       let expected := raw[offset]!.toNat + raw[offset + 1]!.toNat * 256 +
                       raw[offset + 2]!.toNat * 65536 + raw[offset + 3]!.toNat * 16777216
-      (crc32 raw rangeStart rangeEnd).toNat == expected
+      (crc32 raw rangeStart rangeEnd seed).toNat == expected
 
 -- Report matching (models checkMatch)
 def checkMatch (raw : ByteArray) (offset : Nat) (expected : ByteArray) : Bool :=
