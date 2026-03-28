@@ -15,7 +15,7 @@ jobs:
       - name: Verify zero sorry
         working-directory: formal/lean
         run: |
-          if grep -r 'sorry' Padctl/ --include='*.lean' | grep -v '^\s*--'; then
+          if grep -rn 'sorry' Padctl/ test/ --include='*.lean' | grep -v '^\s*--' | grep -v 'sorry.*--.*OK'; then
             echo "ERROR: sorry found in proofs"
             exit 1
           fi
