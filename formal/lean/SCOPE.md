@@ -30,11 +30,13 @@ sub-pixel accumulation. The model captures only the suppress flag
 (`checkStickSuppressGamepad`) which determines whether gamepad axes are zeroed.
 **Reason**: Same as gyro — float-heavy path with trivial control flow.
 
-### Macro player FSM internals
-The full macro player has delay/keydown/keyup steps with timing. The model captures:
-trigger on rising edge, cancel on layer change (emit pending releases).
-**Reason**: The macro player is a straightforward FSM with no subtle invariants beyond
-"cancel releases all held keys" which is modeled.
+### Macro player FSM internals (partial)
+The model includes the full step dispatch (stepMacro with tap/down/up/delay/pauseForRelease),
+timer expiration, trigger release notification, and cancel-with-pending-releases.
+**Excluded**: timing accuracy (real-time deadlines) and the looping continuation behavior
+(Zig loops synchronous steps; Lean steps once).
+**Reason**: The correctness-critical invariants (step ordering, cancel releases all held keys)
+are fully modeled. Real-time deadlines and loop iteration are OS/runtime concerns.
 
 ### Output device (uinput) creation
 All uinput fd management, capability registration, and SYN_REPORT framing.
