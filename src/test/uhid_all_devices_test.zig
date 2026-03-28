@@ -513,6 +513,10 @@ test "uhid: all devices — random packet round-trip" {
     try runAllDevicesRandom();
 }
 
+test "uhid: all devices — structured random field values" {
+    try runAllDevicesStructured();
+}
+
 fn runAllDevicesMode(mode: PacketMode, use_uhid: bool) !void {
     const allocator = testing.allocator;
     var paths = try helpers.collectTomlPaths(allocator);
@@ -624,6 +628,111 @@ fn runAllDevicesRandom() !void {
                 // Pure interpreter verify (random packets via UHID are less useful)
                 pureInterpreterVerify(path, &interp, cr, packet_buf[0..size], "random") catch |err| {
                     std.debug.print("FAIL random: {s} report '{s}'\n", .{ path, cr.src.name });
+                    return err;
+                };
+                tested += 1;
+            }
+        }
+    }
+    try testing.expect(tested > 0);
+}
+
+// Build a packet with valid per-field random values within each field's type range.
+// Unlike pure random bytes, this exercises the happy path: all fields decode successfully.
+fn buildStructuredPacket(cr: *const CompiledReport, rng: std.Random, buf: []u8) void {
+    const size: usize = @intCast(cr.src.size);
+    @memset(buf[0..size], 0);
+
+    // Fix match bytes first.
+    if (cr.src.match) |m| {
+        const off: usize = @intCast(m.offset);
+        for (m.expect, 0..) |byte, i| buf[off + i] = @intCast(byte);
+    }
+
+    // Write a random valid value for every standard field.
+    for (cr.fields[0..cr.field_count]) |*cf| {
+        if (cf.mode == .standard) {
+            const lo = typeMinValue(cf.type_tag);
+            const hi = typeMaxValue(cf.type_tag);
+            // Pick random i64 in [lo, hi] using uniform distribution.
+            const range: u64 = @intCast(hi - lo);
+            const val: i64 = lo + @as(i64, @intCast(rng.intRangeAtMost(u64, 0, range)));
+            writeFieldValue(buf, cf.offset, cf.type_tag, val);
+        } else {
+            // bits mode: write a random value that fits in bit_count bits.
+            if (cf.bit_count == 0) continue;
+            const max_val: u32 = if (cf.bit_count >= 32) std.math.maxInt(u32) else (@as(u32, 1) << @intCast(cf.bit_count)) - 1;
+            const raw: u32 = rng.intRangeAtMost(u32, 0, max_val);
+            const shifted = @as(u64, raw) << @intCast(cf.start_bit);
+            const needed: u8 = (@as(u8, cf.start_bit) + @as(u8, cf.bit_count) + 7) / 8;
+            for (0..needed) |i| {
+                buf[cf.byte_offset + i] |= @intCast((shifted >> @intCast(i * 8)) & 0xFF);
+            }
+        }
+    }
+
+    // Random button_group bits.
+    if (cr.button_group) |*cbg| {
+        for (cbg.entries[0..cbg.count]) |entry| {
+            if (rng.boolean()) {
+                const byte_idx = entry.bit_idx / 8;
+                const bit_pos: u3 = @intCast(entry.bit_idx % 8);
+                buf[cbg.src_off + byte_idx] |= @as(u8, 1) << bit_pos;
+            }
+        }
+    }
+
+    // Recompute checksum last (must come after all field writes).
+    if (cr.checksum) |cs| {
+        switch (cs.algo) {
+            .sum8 => {
+                var sum: u8 = 0;
+                for (buf[cs.range_start..cs.range_end]) |b| sum +%= b;
+                buf[cs.expect_off] = sum;
+            },
+            .xor => {
+                var xv: u8 = 0;
+                for (buf[cs.range_start..cs.range_end]) |b| xv ^= b;
+                buf[cs.expect_off] = xv;
+            },
+            .crc32 => {
+                var crc = std.hash.crc.Crc32IsoHdlc.init();
+                if (cs.seed) |seed| crc.update(&[_]u8{@intCast(seed & 0xff)});
+                crc.update(buf[cs.range_start..cs.range_end]);
+                std.mem.writeInt(u32, buf[cs.expect_off..][0..4], crc.final(), .little);
+            },
+        }
+    }
+}
+
+fn runAllDevicesStructured() !void {
+    const allocator = testing.allocator;
+    var paths = try helpers.collectTomlPaths(allocator);
+    defer paths.deinit(allocator);
+
+    if (paths.items.len == 0) return;
+
+    var prng = std.Random.DefaultPrng.init(0x5EED_5AFED);
+    const rng = prng.random();
+
+    var tested: usize = 0;
+    for (paths.items) |path| {
+        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        defer parsed.deinit();
+
+        const interp = Interpreter.init(&parsed.value);
+
+        for (interp.compiled[0..interp.report_count]) |*cr| {
+            const size: usize = @intCast(cr.src.size);
+
+            // 8 structured-random packets per report — more than pure-random to
+            // exercise valid-range happy paths not covered by zero/max/min.
+            for (0..8) |_| {
+                var packet_buf: [4096]u8 = undefined;
+                buildStructuredPacket(cr, rng, &packet_buf);
+
+                pureInterpreterVerify(path, &interp, cr, packet_buf[0..size], "structured") catch |err| {
+                    std.debug.print("FAIL structured: {s} report '{s}'\n", .{ path, cr.src.name });
                     return err;
                 };
                 tested += 1;

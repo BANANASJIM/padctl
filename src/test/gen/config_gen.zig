@@ -1,9 +1,10 @@
 const std = @import("std");
 const device = @import("../../config/device.zig");
 const mapping = @import("../../config/mapping.zig");
+const state = @import("../../core/state.zig");
 
 const FieldTag = @import("../../core/interpreter.zig").FieldTag;
-const ButtonId = @import("../../core/state.zig").ButtonId;
+const ButtonId = state.ButtonId;
 
 // --- Device config generation ---
 
@@ -155,6 +156,72 @@ pub fn randomMappingConfig(rng: std.Random, buf: []u8) []const u8 {
         w.print("\n[gyro]\nmode = \"{s}\"\n", .{gm}) catch {};
         if (std.mem.eql(u8, gm, "mouse") and rng.boolean()) {
             w.writeAll("activate = \"hold_RB\"\n") catch {};
+        }
+    }
+
+    return buf[0..fbs.pos];
+}
+
+// --- Compatible mapping generation for real device configs ---
+
+// Collect button names declared in a device config's button_groups (across all reports).
+// Returns slice into `out` (up to out.len entries).
+pub fn collectDeviceButtonNames(cfg: *const device.DeviceConfig, out: [][]const u8) []const []const u8 {
+    var n: usize = 0;
+    for (cfg.report) |*rc| {
+        const bg = rc.button_group orelse continue;
+        var it = bg.map.map.iterator();
+        while (it.next()) |entry| {
+            if (n >= out.len) break;
+            // Validate it's a known ButtonId before adding.
+            if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*) == null) continue;
+            out[n] = entry.key_ptr.*;
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+// Generate a mapping TOML that is compatible with the given device config.
+// Sources in [remap] and layer triggers are drawn only from buttons that
+// actually exist in the device's button_group maps.
+// Falls back to randomMappingConfig if the device declares no buttons.
+pub fn generateCompatibleMapping(rng: std.Random, cfg: *const device.DeviceConfig, buf: []u8) []const u8 {
+    var name_buf: [32][]const u8 = undefined;
+    const btn_names = collectDeviceButtonNames(cfg, &name_buf);
+
+    // Not enough buttons → fall back to generic random mapping.
+    if (btn_names.len < 2) return randomMappingConfig(rng, buf);
+
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+
+    // Base remaps: pick 1–3 source buttons the device actually has.
+    const n_remaps = rng.intRangeAtMost(usize, 1, @min(3, btn_names.len));
+    w.writeAll("[remap]\n") catch return buf[0..0];
+    var src_used: [32]bool = .{false} ** 32;
+    for (0..n_remaps) |_| {
+        const si = pickUnused(rng, src_used[0..btn_names.len], btn_names.len);
+        const ti = rng.intRangeAtMost(usize, 0, remap_targets.len - 1);
+        w.print("{s} = \"{s}\"\n", .{ btn_names[si], remap_targets[ti] }) catch break;
+    }
+
+    // Optional layer: 0–1, trigger must be a real device button.
+    if (rng.boolean() and btn_names.len >= 1) {
+        const ti = rng.intRangeAtMost(usize, 0, btn_names.len - 1);
+        const activation: []const u8 = if (rng.boolean()) "hold" else "toggle";
+        w.print("\n[[layer]]\nname = \"fn\"\ntrigger = \"{s}\"\nactivation = \"{s}\"\n", .{ btn_names[ti], activation }) catch {};
+        if (std.mem.eql(u8, activation, "hold") and rng.boolean()) {
+            w.print("hold_timeout = {d}\n", .{rng.intRangeAtMost(u16, 100, 500)}) catch {};
+        }
+        // Layer remap: 1–2 entries from device buttons.
+        w.writeAll("[layer.remap]\n") catch {};
+        const n_lr = rng.intRangeAtMost(usize, 1, @min(2, btn_names.len));
+        var lsrc_used: [32]bool = .{false} ** 32;
+        for (0..n_lr) |_| {
+            const lsi = pickUnused(rng, lsrc_used[0..btn_names.len], btn_names.len);
+            const lti = rng.intRangeAtMost(usize, 0, remap_targets.len - 1);
+            w.print("{s} = \"{s}\"\n", .{ btn_names[lsi], remap_targets[lti] }) catch break;
         }
     }
 

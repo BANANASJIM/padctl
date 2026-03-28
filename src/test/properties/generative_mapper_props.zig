@@ -8,6 +8,7 @@ const mapper_oracle = @import("../gen/mapper_oracle.zig");
 const transition_id = @import("../gen/transition_id.zig");
 const shrink_mod = @import("../gen/shrink.zig");
 const mapping = @import("../../config/mapping.zig");
+const device_mod = @import("../../config/device.zig");
 const state_mod = @import("../../core/state.zig");
 
 const Mapper = helpers.Mapper;
@@ -434,4 +435,94 @@ test "generative: simultaneous buttons + layer remap" {
     const oout = mapper_oracle.apply(&oracle, .{ .buttons = lt | a | b }, &parsed.value, 0);
     try testing.expectEqual(oout.gamepad.buttons, prod.gamepad.buttons);
     try compareAux(&oout.aux, &prod.aux);
+}
+
+// --- Real device config × generative mapping × random sequence ---
+
+test "generative: real device configs x compatible mapping x random sequences" {
+    const allocator = testing.allocator;
+    var paths = try helpers.collectTomlPaths(allocator);
+    defer paths.deinit(allocator);
+
+    if (paths.items.len == 0) return; // no device configs present — skip silently
+
+    var prng = std.Random.DefaultPrng.init(0xDEAD_C0DE_F00D);
+    const rng = prng.random();
+
+    var tracker = transition_id.CoverageTracker{};
+    var tested: usize = 0;
+
+    for (paths.items) |path| {
+        const dev_parsed = device_mod.parseFile(allocator, path) catch continue;
+        defer dev_parsed.deinit();
+
+        // Generate a mapping compatible with this device's buttons.
+        var map_buf: [4096]u8 = undefined;
+        const map_toml = config_gen.generateCompatibleMapping(rng, &dev_parsed.value, &map_buf);
+        if (map_toml.len == 0) continue;
+
+        const map_parsed = mapping.parseString(allocator, map_toml) catch continue;
+        defer map_parsed.deinit();
+        mapping.validate(&map_parsed.value) catch continue;
+
+        var mc = helpers.makeMapper(map_toml, allocator) catch continue;
+        defer mc.deinit();
+
+        var oracle = OracleState{};
+
+        // Build a shrink context for divergence reporting.
+        var sctx = ShrinkCtx{ .allocator = allocator, .toml_buf = undefined, .toml_len = map_toml.len };
+        @memcpy(sctx.toml_buf[0..map_toml.len], map_toml);
+
+        // Run 100 frames per device config.
+        var frames_buf: [100]Frame = undefined;
+        sequence_gen.randomSequence(rng, &frames_buf, map_parsed.value);
+
+        for (frames_buf) |frame| {
+            const prev_oracle = oracle;
+
+            // Fire hold-layer timer when oracle is about to cross pending→active.
+            if (oracle.hold_phase == .pending and frame.dt_ms > 0) {
+                const layers = map_parsed.value.layer orelse &[0]mapping.LayerConfig{};
+                if (oracle.hold_layer_idx < layers.len) {
+                    const lc = &layers[oracle.hold_layer_idx];
+                    const threshold: u64 = @intCast(@max(0, lc.hold_timeout orelse 200));
+                    if (oracle.hold_elapsed_ms + @as(u64, frame.dt_ms) >= threshold) {
+                        const trigger_mask = btnMaskByName(lc.trigger);
+                        const cur_buttons = if (frame.delta.buttons) |b| b else oracle.gs.buttons;
+                        if (trigger_mask != 0 and (cur_buttons & trigger_mask) != 0 and (oracle.prev_buttons & trigger_mask) != 0) {
+                            _ = mc.mapper.layer.onTimerExpired();
+                        }
+                    }
+                }
+            }
+
+            const prod_out = mc.mapper.apply(frame.delta, @as(u32, frame.dt_ms)) catch continue;
+            const oracle_out = mapper_oracle.apply(&oracle, frame.delta, &map_parsed.value, @as(u64, frame.dt_ms));
+
+            const btn_ok = oracle_out.gamepad.buttons == prod_out.gamepad.buttons;
+            const dx_ok = oracle_out.gamepad.dpad_x == prod_out.gamepad.dpad_x;
+            const dy_ok = oracle_out.gamepad.dpad_y == prod_out.gamepad.dpad_y;
+
+            if (!btn_ok or !dx_ok or !dy_ok) {
+                const min_frames = shrink_mod.shrinkSequence(allocator, &frames_buf, &sctx, shrinkCheck) catch &frames_buf;
+                defer if (min_frames.ptr != frames_buf[0..].ptr) allocator.free(min_frames);
+                logMinimalCase(map_toml, min_frames);
+            }
+
+            try testing.expectEqual(oracle_out.gamepad.buttons, prod_out.gamepad.buttons);
+            try testing.expectEqual(oracle_out.gamepad.dpad_x, prod_out.gamepad.dpad_x);
+            try testing.expectEqual(oracle_out.gamepad.dpad_y, prod_out.gamepad.dpad_y);
+            try compareAux(&oracle_out.aux, &prod_out.aux);
+
+            transition_id.classify(&tracker, &prev_oracle, &oracle, frame.delta, &map_parsed.value);
+        }
+        tested += 1;
+    }
+
+    try testing.expect(tested > 0);
+    const cov = tracker.coverage();
+    if (cov.seen < cov.total) {
+        std.log.warn("generative real-configs: transition coverage: {d}/{d}", .{ cov.seen, cov.total });
+    }
 }
