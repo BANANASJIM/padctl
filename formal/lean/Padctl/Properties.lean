@@ -30,13 +30,31 @@ theorem abs_nonneg (v : Int) (tMax : Nat) (h : v ≠ Int.negSucc tMax) :
   simp [h]
 
 -- P5: scale output range (unsigned input x ∈ [0, tMax], a ≤ b)
--- sorry: requires Int.tdiv monotonicity auxiliary lemma
 theorem scale_range (a b : Int) (tMax : Nat) (x : Int)
     (htMax : 0 < tMax) (hab : a ≤ b)
     (hx0 : 0 ≤ x) (hxm : x ≤ tMax) :
     a ≤ applyTransform (.scale a b) x tMax ∧
     applyTransform (.scale a b) x tMax ≤ b := by
-  sorry -- Int.tdiv monotonicity: x*(b-a)/tMax ∈ [0, b-a] when x ∈ [0, tMax]
+  unfold applyTransform
+  have htMax_ne : (tMax : Nat) ≠ 0 := by omega
+  simp [htMax_ne]
+  constructor
+  · -- Lower bound: x * (b-a) / tMax ≥ 0, so + a ≥ a
+    have h1 : (0 : Int) ≤ b - a := by omega
+    have h2 : (0 : Int) ≤ x * (b - a) := Int.mul_nonneg hx0 h1
+    have h3 : (0 : Int) < (tMax : Int) := by omega
+    have h4 : (0 : Int) ≤ x * (b - a) / (tMax : Int) := Int.ediv_nonneg h2 (Int.le_of_lt h3)
+    omega
+  · -- Upper bound: x * (b-a) / tMax ≤ b - a
+    have h1 : (0 : Int) ≤ b - a := by omega
+    have h3 : (0 : Int) < (tMax : Int) := by omega
+    have h5 : x * (b - a) ≤ (tMax : Int) * (b - a) :=
+      Int.mul_le_mul_of_nonneg_right hxm h1
+    have h6 : x * (b - a) / (tMax : Int) ≤ (tMax : Int) * (b - a) / (tMax : Int) :=
+      Int.ediv_le_ediv h3 h5
+    have h7 : (tMax : Int) ≠ 0 := by omega
+    rw [Int.mul_ediv_cancel_left (b - a) h7] at h6
+    omega
 
 -- P6: deadzone preserves large values
 theorem deadzone_preserves (threshold : Nat) (v : Int) (h : ¬(v.natAbs < threshold)) :
@@ -165,11 +183,23 @@ theorem applyDelta_empty (s : GamepadState) :
 /-! ## Mapper properties -/
 
 -- P18: assembleButtons — suppressed bits are cleared when suppress ∩ inject = 0
--- sorry: Nat.bitwise lemmas needed for andNot properties
 theorem assemble_suppress_clears (raw suppress inject : Nat)
     (h_disjoint : suppress &&& inject = 0) :
     assembleButtons raw suppress inject &&& suppress = 0 := by
-  sorry -- requires Nat.bitwise distributivity over andNot
+  unfold assembleButtons Nat.andNot
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_and, Nat.testBit_or, Nat.zero_testBit]
+  have hbw : (Nat.bitwise (fun x y => x && !y) raw suppress).testBit i =
+    (raw.testBit i && !suppress.testBit i) :=
+    Nat.testBit_bitwise (by decide) raw suppress i
+  rw [hbw]
+  have h_bit : suppress.testBit i = true → inject.testBit i = false := by
+    intro hs
+    have h := congrArg (·.testBit i) h_disjoint
+    simp [Nat.testBit_and, Nat.zero_testBit] at h
+    exact h hs
+  cases hs : suppress.testBit i <;> simp [h_bit, hs]
 
 -- P19: Layer mutual exclusion — onTriggerPress while tapHold active is no-op
 theorem layer_mutual_exclusion (s : MapperState) (th : TapHoldState) (j : Nat)
@@ -194,7 +224,7 @@ theorem dpad_gamepad_passthrough (dx dy prevDx prevDy : Int) :
   simp [processDpad]
 
 -- P22: assembleButtons — inject bits always present in output
--- sorry: Nat.bitwise lemmas needed
 theorem assemble_inject_present (raw suppress inject : Nat) :
     assembleButtons raw suppress inject ||| inject = assembleButtons raw suppress inject := by
-  sorry -- requires Nat.lor_assoc / Nat.lor_idempotent on andNot
+  unfold assembleButtons
+  rw [Nat.or_assoc, Nat.or_self]
