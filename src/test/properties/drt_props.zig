@@ -19,6 +19,7 @@ const ref = @import("../reference_interp.zig");
 const helpers = @import("../helpers.zig");
 
 const Interpreter = interp_mod.Interpreter;
+const CompiledReport = interp_mod.CompiledReport;
 const MAX_FIELDS = interp_mod.MAX_FIELDS;
 
 // Dpad hat-switch decode: 0=N,1=NE,2=E,3=SE,4=S,5=SW,6=W,7=NW, 8+=neutral
@@ -33,7 +34,7 @@ fn saturate(comptime T: type, v: i64) T {
 }
 
 // Inject a valid checksum into pkt so verifyChecksumCompiled passes.
-fn injectChecksum(cr: *const interp_mod.CompiledReport, pkt: []u8) void {
+fn injectChecksum(cr: *const CompiledReport, pkt: []u8) void {
     const cs = cr.checksum orelse return;
     const data = pkt[cs.range_start..cs.range_end];
     switch (cs.algo) {
@@ -58,6 +59,16 @@ fn injectChecksum(cr: *const interp_mod.CompiledReport, pkt: []u8) void {
             std.mem.writeInt(u32, pkt[cs.expect_off..][0..4], computed, .little);
         },
     }
+}
+
+// Reference hat decode — independent of production.
+// HID hat: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8+=neutral
+fn hatDecode(hat: i64) struct { x: i8, y: i8 } {
+    if (hat >= 0 and hat < 8) {
+        const idx: usize = @intCast(hat);
+        return .{ .x = HAT_X[idx], .y = HAT_Y[idx] };
+    }
+    return .{ .x = 0, .y = 0 };
 }
 
 test "DRT: production interpreter matches reference oracle on random packets" {
@@ -193,6 +204,27 @@ test "DRT: production interpreter matches reference oracle on random packets" {
                         },
                         .unknown => {},
                     }
+                }
+
+                // Dpad coverage: compare each dpad field against reference hat decode.
+                for (cr.fields[0..cr.field_count]) |*cf| {
+                    if (cf.tag != .dpad) continue;
+                    const hat_raw: i64 = switch (cf.mode) {
+                        .standard => ref.readField(pkt, cf.offset, cf.type_tag),
+                        .bits => blk: {
+                            const u = ref.readBits(pkt, cf.byte_offset, cf.start_bit, cf.bit_count);
+                            break :blk if (cf.is_signed)
+                                @as(i64, ref.signExtend(u, cf.bit_count))
+                            else
+                                @as(i64, u);
+                        },
+                    };
+                    const hat_val = ref.runChain(hat_raw, cf);
+                    const expected = hatDecode(hat_val);
+                    try testing.expect(delta.dpad_x != null);
+                    try testing.expect(delta.dpad_y != null);
+                    try testing.expectEqual(expected.x, delta.dpad_x.?);
+                    try testing.expectEqual(expected.y, delta.dpad_y.?);
                 }
             }
             // Every report must have been tested at least once.  Without this,
