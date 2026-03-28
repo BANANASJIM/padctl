@@ -12,7 +12,12 @@ pub const FieldType = interp_mod.FieldType;
 pub const CompiledField = interp_mod.CompiledField;
 pub const CompiledReport = interp_mod.CompiledReport;
 
-const ref = @import("reference_interp.zig");
+pub const FieldTag = interp_mod.FieldTag;
+
+pub const FieldResult = struct {
+    tag: FieldTag,
+    val: i64,
+};
 
 const ORACLE_PATH = "formal/lean/.lake/build/bin/oracle";
 
@@ -112,6 +117,13 @@ pub const LeanOracle = struct {
         };
     }
 
+    pub fn querySignExtend(self: *LeanOracle, value: u32, bit_count: u6) !i64 {
+        var cmd_buf: [128]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "SIGNEXTEND {d} {d}", .{ value, @as(u8, bit_count) }) catch return error.BufOverflow;
+        const result = try self.sendRecv(cmd);
+        return parseInt(result);
+    }
+
     pub fn queryAssemble(self: *LeanOracle, raw: u64, suppress: u64, inject: u64) !u64 {
         var cmd_buf: [128]u8 = undefined;
         const cmd = std.fmt.bufPrint(&cmd_buf, "ASSEMBLE {d} {d} {d}", .{ raw, suppress, inject }) catch return error.BufOverflow;
@@ -120,7 +132,7 @@ pub const LeanOracle = struct {
     }
 };
 
-pub fn extractFieldsViaLean(oracle: *LeanOracle, cr: *const CompiledReport, raw: []const u8, out: []ref.FieldResult) !usize {
+pub fn extractFieldsViaLean(oracle: *LeanOracle, cr: *const CompiledReport, raw: []const u8, out: []FieldResult) !usize {
     var hex_buf: [2048]u8 = undefined;
     const hex = bytesToHex(raw, &hex_buf);
 
@@ -135,7 +147,7 @@ pub fn extractFieldsViaLean(oracle: *LeanOracle, cr: *const CompiledReport, raw:
             .bits => blk: {
                 const raw_u32 = try oracle.queryBits(cf.byte_offset, cf.start_bit, cf.bit_count, hex);
                 const raw_val: i64 = if (cf.is_signed)
-                    @as(i64, ref.signExtend(raw_u32, cf.bit_count))
+                    try oracle.querySignExtend(raw_u32, cf.bit_count)
                 else
                     @as(i64, raw_u32);
                 break :blk if (cf.has_transform) try runChainViaLean(oracle, raw_val, cf) else raw_val;
@@ -158,20 +170,20 @@ fn runChainViaLean(oracle: *LeanOracle, initial: i64, cf: *const CompiledField) 
             chain_buf[pos] = ',';
             pos += 1;
         }
-        const seg = formatTransformOp(tr, chain_buf[pos..]);
+        const seg = try formatTransformOp(tr, chain_buf[pos..]);
         pos += seg;
     }
     if (pos == 0) return initial;
     return oracle.queryChain(chain_buf[0..pos], initial, t_max);
 }
 
-fn formatTransformOp(tr: interp_mod.CompiledTransform, buf: []u8) usize {
+fn formatTransformOp(tr: interp_mod.CompiledTransform, buf: []u8) !usize {
     const s = switch (tr.op) {
-        .negate => std.fmt.bufPrint(buf, "negate", .{}) catch return 0,
-        .abs => std.fmt.bufPrint(buf, "abs", .{}) catch return 0,
-        .scale => std.fmt.bufPrint(buf, "scale({d},{d})", .{ tr.a, tr.b }) catch return 0,
-        .clamp => std.fmt.bufPrint(buf, "clamp({d},{d})", .{ tr.a, tr.b }) catch return 0,
-        .deadzone => std.fmt.bufPrint(buf, "deadzone({d})", .{tr.a}) catch return 0,
+        .negate => try std.fmt.bufPrint(buf, "negate", .{}),
+        .abs => try std.fmt.bufPrint(buf, "abs", .{}),
+        .scale => try std.fmt.bufPrint(buf, "scale({d},{d})", .{ tr.a, tr.b }),
+        .clamp => try std.fmt.bufPrint(buf, "clamp({d},{d})", .{ tr.a, tr.b }),
+        .deadzone => try std.fmt.bufPrint(buf, "deadzone({d})", .{tr.a}),
     };
     return s.len;
 }

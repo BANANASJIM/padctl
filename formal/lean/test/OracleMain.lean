@@ -602,6 +602,13 @@ private def handleCommand (parts : List String) (stdout : IO.FS.Stream) : IO Uni
       stdout.putStrLn s!"RESULT {intToString dx} {intToString dy}"
     | none => stdout.putStrLn "ERROR bad args"
 
+  | ["SIGNEXTEND", valStr, bitCountStr] => do
+    match parseNat valStr, parseNat bitCountStr with
+    | some val, some bitCount =>
+      let result := signExtend val bitCount
+      stdout.putStrLn s!"RESULT {intToString result}"
+    | _, _ => stdout.putStrLn "ERROR bad args"
+
   | ["CHECKSUM", algoStr, startStr, endStr, offStr, hexStr] => do
     match parseChecksumAlgo algoStr, parseNat startStr, parseNat endStr, parseNat offStr,
           hexToBytes hexStr with
