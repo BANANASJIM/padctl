@@ -96,6 +96,7 @@ pub const testing_support = struct {
     pub const supervisor_sm_props = @import("test/properties/supervisor_sm_props.zig");
     pub const negative_corpus_props = @import("test/properties/negative_corpus_props.zig");
     pub const generative_mapper_props = @import("test/properties/generative_mapper_props.zig");
+    pub const regression_corpus_props = @import("test/properties/regression_corpus_props.zig");
     pub const reference_interp = @import("test/reference_interp.zig");
     pub const gen = @import("test/gen/gen.zig");
 };

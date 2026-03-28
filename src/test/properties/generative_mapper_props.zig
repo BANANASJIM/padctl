@@ -6,6 +6,7 @@ const config_gen = @import("../gen/config_gen.zig");
 const sequence_gen = @import("../gen/sequence_gen.zig");
 const mapper_oracle = @import("../gen/mapper_oracle.zig");
 const transition_id = @import("../gen/transition_id.zig");
+const shrink_mod = @import("../gen/shrink.zig");
 const mapping = @import("../../config/mapping.zig");
 const state_mod = @import("../../core/state.zig");
 
@@ -14,6 +15,52 @@ const GamepadStateDelta = state_mod.GamepadStateDelta;
 const Frame = sequence_gen.Frame;
 const OracleState = mapper_oracle.OracleState;
 const CoverageTracker = transition_id.CoverageTracker;
+
+// --- Shrink support ---
+
+// Context for the shrink check callback.
+const ShrinkCtx = struct {
+    allocator: std.mem.Allocator,
+    /// TOML string (owned by the context, fixed buffer — length stored here).
+    toml_buf: [4096]u8,
+    toml_len: usize,
+};
+
+// Check whether frames still diverge when replayed from a fresh mapper + oracle.
+fn shrinkCheck(raw_ctx: *anyopaque, frames: []const Frame) bool {
+    const ctx: *ShrinkCtx = @alignCast(@ptrCast(raw_ctx));
+    const toml = ctx.toml_buf[0..ctx.toml_len];
+
+    const parsed = mapping.parseString(ctx.allocator, toml) catch return false;
+    defer parsed.deinit();
+
+    var mc = helpers.makeMapper(toml, ctx.allocator) catch return false;
+    defer mc.deinit();
+
+    var oracle = OracleState{};
+
+    for (frames) |frame| {
+        const prod = mc.mapper.apply(frame.delta, @as(u32, frame.dt_ms)) catch return false;
+        const oout = mapper_oracle.apply(&oracle, frame.delta, &parsed.value, @as(u64, frame.dt_ms));
+
+        if (oout.gamepad.buttons != prod.gamepad.buttons) return true;
+        if (oout.gamepad.dpad_x != prod.gamepad.dpad_x) return true;
+        if (oout.gamepad.dpad_y != prod.gamepad.dpad_y) return true;
+    }
+    return false;
+}
+
+fn logMinimalCase(toml: []const u8, min_frames: []const Frame) void {
+    std.log.err("=== MINIMAL REPRODUCING CASE ===", .{});
+    std.log.err("mapping_toml:\n{s}", .{toml});
+    std.log.err("frames ({d}):", .{min_frames.len});
+    for (min_frames, 0..) |f, i| {
+        std.log.err("  [{d}] dt={d} buttons={?} ax={?} ay={?}", .{
+            i, f.dt_ms, f.delta.buttons, f.delta.ax, f.delta.ay,
+        });
+    }
+    std.log.err("================================", .{});
+}
 
 fn btnMaskByName(name: []const u8) u64 {
     const id = std.meta.stringToEnum(state_mod.ButtonId, name) orelse return 0;
@@ -64,6 +111,10 @@ fn runHarness(
         const frames = frames_buf[0..@min(n_frames, frames_buf.len)];
         sequence_gen.randomSequence(rng, frames, parsed.value);
 
+        // Build shrink context once per config (contains TOML copy + allocator).
+        var sctx = ShrinkCtx{ .allocator = allocator, .toml_buf = undefined, .toml_len = map_toml.len };
+        @memcpy(sctx.toml_buf[0..map_toml.len], map_toml);
+
         for (frames) |frame| {
             const prev_oracle = oracle;
 
@@ -88,6 +139,22 @@ fn runHarness(
 
             const prod_out = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
             const oracle_out = mapper_oracle.apply(&oracle, frame.delta, &parsed.value, @as(u64, frame.dt_ms));
+
+            // On divergence: shrink the full sequence, log the minimal case, then assert.
+            const btn_ok = oracle_out.gamepad.buttons == prod_out.gamepad.buttons;
+            const dx_ok = oracle_out.gamepad.dpad_x == prod_out.gamepad.dpad_x;
+            const dy_ok = oracle_out.gamepad.dpad_y == prod_out.gamepad.dpad_y;
+
+            if (!btn_ok or !dx_ok or !dy_ok) {
+                const min_frames = shrink_mod.shrinkSequence(
+                    allocator,
+                    frames,
+                    &sctx,
+                    shrinkCheck,
+                ) catch frames; // on OOM fall back to original
+                defer if (min_frames.ptr != frames.ptr) allocator.free(min_frames);
+                logMinimalCase(map_toml, min_frames);
+            }
 
             // Deterministic: button output (suppress + inject)
             try testing.expectEqual(oracle_out.gamepad.buttons, prod_out.gamepad.buttons);
