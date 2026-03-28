@@ -152,6 +152,20 @@ const btn_table = [_]CodeEntry{
     .{ .name = "BTN_TRIGGER_HAPPY38", .code = c.BTN_TRIGGER_HAPPY38 },
     .{ .name = "BTN_TRIGGER_HAPPY39", .code = c.BTN_TRIGGER_HAPPY39 },
     .{ .name = "BTN_TRIGGER_HAPPY40", .code = c.BTN_TRIGGER_HAPPY40 },
+    // Touch/stylus
+    .{ .name = "BTN_TOOL_PEN", .code = c.BTN_TOOL_PEN },
+    .{ .name = "BTN_TOOL_RUBBER", .code = c.BTN_TOOL_RUBBER },
+    .{ .name = "BTN_TOOL_BRUSH", .code = c.BTN_TOOL_BRUSH },
+    .{ .name = "BTN_TOOL_PENCIL", .code = c.BTN_TOOL_PENCIL },
+    .{ .name = "BTN_TOOL_AIRBRUSH", .code = c.BTN_TOOL_AIRBRUSH },
+    .{ .name = "BTN_TOOL_FINGER", .code = c.BTN_TOOL_FINGER },
+    .{ .name = "BTN_TOOL_MOUSE", .code = c.BTN_TOOL_MOUSE },
+    .{ .name = "BTN_TOOL_LENS", .code = c.BTN_TOOL_LENS },
+    .{ .name = "BTN_TOOL_QUINTTAP", .code = c.BTN_TOOL_QUINTTAP },
+    .{ .name = "BTN_TOUCH", .code = c.BTN_TOUCH },
+    .{ .name = "BTN_TOOL_DOUBLETAP", .code = c.BTN_TOOL_DOUBLETAP },
+    .{ .name = "BTN_TOOL_TRIPLETAP", .code = c.BTN_TOOL_TRIPLETAP },
+    .{ .name = "BTN_TOOL_QUADTAP", .code = c.BTN_TOOL_QUADTAP },
 };
 
 const key_table = [_]CodeEntry{

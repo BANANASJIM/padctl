@@ -331,6 +331,39 @@ fn writeFieldValue(buf: []u8, offset: usize, t: FieldType, value: i64) void {
 }
 
 const FieldTag = interp_mod.FieldTag;
+const CompiledTransformChain = interp_mod.CompiledTransformChain;
+const TransformOp = interp_mod.TransformOp;
+
+// Apply inverse of the transform chain so that production forward-transform yields val.
+// Processes transforms in reverse order; skips abs/clamp/deadzone (not invertible).
+fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
+    var v = val;
+    var i: usize = chain.len;
+    while (i > 0) {
+        i -= 1;
+        const tr = chain.items[i];
+        v = switch (tr.op) {
+            .negate => if (v == std.math.minInt(i64)) std.math.maxInt(i64) else -v,
+            .scale => blk: {
+                const span = tr.b - tr.a;
+                if (span == 0) break :blk v;
+                const t_max: i128 = switch (chain.type_tag) {
+                    .u8 => 255,
+                    .i8 => 127,
+                    .u16le, .u16be => 65535,
+                    .i16le, .i16be => 32767,
+                    .u32le, .u32be => 4294967295,
+                    .i32le, .i32be => 2147483647,
+                };
+                const shifted: i128 = @as(i128, v) - tr.a;
+                break :blk @intCast(@divTrunc(shifted * t_max, span));
+            },
+            // abs, clamp, deadzone: not cleanly invertible — pass through
+            .abs, .clamp, .deadzone => v,
+        };
+    }
+    return v;
+}
 
 fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf: []u8) void {
     // Overlay non-null delta fields onto buf (caller must provide persistent state).
@@ -338,7 +371,9 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
     for (cr.fields[0..cr.field_count]) |*cf| {
         const val = getDeltaFieldForTag(delta, cf.tag) orelse continue;
         if (cf.mode == .standard) {
-            writeFieldValue(buf, cf.offset, cf.type_tag, val);
+            // Apply inverse transforms so production forward-transform yields val.
+            const raw_val = if (cf.has_transform) applyInverseTransforms(val, &cf.transforms) else val;
+            writeFieldValue(buf, cf.offset, cf.type_tag, raw_val);
         } else {
             // bits mode
             const raw: u32 = @intCast(@as(u64, @bitCast(@as(i64, val))) & ((@as(u64, 1) << @intCast(cf.bit_count)) - 1));
@@ -353,6 +388,10 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
     // Write button_group bits
     if (cr.button_group) |*cbg| {
         if (delta.buttons) |buttons| {
+            // Clear source bytes first so released buttons don't persist.
+            for (0..cbg.src_size) |i| {
+                buf[cbg.src_off + i] = 0;
+            }
             for (cbg.entries[0..cbg.count]) |entry| {
                 const mask: u64 = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(entry.btn_id)));
                 if (buttons & mask != 0) {
