@@ -229,7 +229,7 @@ pub const UsbrawDevice = struct {
 
 // --- Tests ---
 
-test "RingBuffer push/pop basic" {
+test "usbraw: RingBuffer push/pop basic" {
     var rb: RingBuffer = .{};
     const data = [_]u8{ 0x01, 0x02, 0x03 };
     rb.push(&data);
@@ -239,13 +239,13 @@ test "RingBuffer push/pop basic" {
     try std.testing.expectEqualSlices(u8, &data, out[0..3]);
 }
 
-test "RingBuffer empty pop returns 0" {
+test "usbraw: RingBuffer empty pop returns 0" {
     var rb: RingBuffer = .{};
     var out: [64]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), rb.pop(&out));
 }
 
-test "RingBuffer full overflow drops oldest" {
+test "usbraw: RingBuffer full overflow drops oldest" {
     var rb: RingBuffer = .{};
     // Fill all 64 slots with distinguishable content
     var i: u8 = 0;
@@ -263,7 +263,7 @@ test "RingBuffer full overflow drops oldest" {
     try std.testing.expectEqual(@as(u8, 1), out[0]);
 }
 
-test "RingBuffer wraps around correctly" {
+test "usbraw: RingBuffer wraps around correctly" {
     var rb: RingBuffer = .{};
     const a = [_]u8{0xAA};
     const b = [_]u8{0xBB};
@@ -277,7 +277,7 @@ test "RingBuffer wraps around correctly" {
     try std.testing.expectEqual(@as(usize, 0), rb.count);
 }
 
-test "RingBuffer concurrent push/pop" {
+test "usbraw: RingBuffer concurrent push/pop" {
     var ring = RingBuffer{};
 
     const producer = try std.Thread.spawn(.{}, struct {

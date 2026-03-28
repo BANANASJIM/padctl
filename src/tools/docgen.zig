@@ -290,7 +290,7 @@ const test_toml =
     \\max_effects = 16
 ;
 
-test "generateDevicePage contains VID:PID" {
+test "docgen: generateDevicePage contains VID:PID" {
     const allocator = std.testing.allocator;
     const parsed = try device.parseString(allocator, test_toml);
     defer parsed.deinit();
@@ -304,7 +304,7 @@ test "generateDevicePage contains VID:PID" {
     try std.testing.expect(std.mem.indexOf(u8, out, "0x054c:0x0ce6") != null);
 }
 
-test "generateDevicePage field table row count" {
+test "docgen: generateDevicePage field table row count" {
     const allocator = std.testing.allocator;
     const parsed = try device.parseString(allocator, test_toml);
     defer parsed.deinit();
@@ -340,7 +340,7 @@ test "generateDevicePage field table row count" {
     try std.testing.expectEqual(field_count, row_count);
 }
 
-test "generateDevicePage button section row count" {
+test "docgen: generateDevicePage button section row count" {
     const allocator = std.testing.allocator;
     const parsed = try device.parseString(allocator, test_toml);
     defer parsed.deinit();
@@ -376,7 +376,7 @@ test "generateDevicePage button section row count" {
     try std.testing.expectEqual(btn_count, row_count);
 }
 
-test "generateDevicePage no WASM section when absent" {
+test "docgen: generateDevicePage no WASM section when absent" {
     const allocator = std.testing.allocator;
     const parsed = try device.parseString(allocator, test_toml);
     defer parsed.deinit();
@@ -390,7 +390,7 @@ test "generateDevicePage no WASM section when absent" {
     try std.testing.expect(std.mem.indexOf(u8, out, "WASM") == null);
 }
 
-test "outputFilename derives vendor-slug" {
+test "docgen: outputFilename derives vendor-slug" {
     const allocator = std.testing.allocator;
     const fname = try outputFilename(allocator, "devices/sony/dualsense.toml", "Sony DualSense");
     defer allocator.free(fname);

@@ -632,7 +632,7 @@ test {
 
 const testing = std.testing;
 
-test "parseHexBytes via init_seq" {
+test "main: parseHexBytes via init_seq" {
     // Smoke-test that init_seq is reachable from main
     const allocator = testing.allocator;
     const bytes = try init_seq.parseHexBytes(allocator, "5aa5 01");
@@ -663,7 +663,7 @@ const pipeline_toml =
     \\left_x = { offset = 1, type = "i16le" }
 ;
 
-test "pipeline: known frame dispatched to output" {
+test "main: known frame dispatched to output" {
     const allocator = testing.allocator;
 
     const parsed = try config.device.parseString(allocator, pipeline_toml);
@@ -709,7 +709,7 @@ test "pipeline: known frame dispatched to output" {
     try testing.expectEqual(@as(?i16, 750), out.diffs.items[0].ax);
 }
 
-test "pipeline: unknown report does not call output.emit" {
+test "main: unknown report does not call output.emit" {
     const allocator = testing.allocator;
 
     const parsed = try config.device.parseString(allocator, pipeline_toml);

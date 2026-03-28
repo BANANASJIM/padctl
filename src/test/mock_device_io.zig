@@ -98,7 +98,7 @@ pub const MockDeviceIO = struct {
 
 // --- tests ---
 
-test "MockDeviceIO read returns frames in order then Again" {
+test "mock: DeviceIO read returns frames in order then Again" {
     const allocator = std.testing.allocator;
     const frame1 = &[_]u8{ 0x5a, 0xa5, 0xef };
     const frame2 = &[_]u8{ 0x01, 0x02 };
@@ -119,7 +119,7 @@ test "MockDeviceIO read returns frames in order then Again" {
     try std.testing.expectError(DeviceIO.ReadError.Again, io.read(&buf));
 }
 
-test "MockDeviceIO write logs data" {
+test "mock: DeviceIO write logs data" {
     const allocator = std.testing.allocator;
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
@@ -130,7 +130,7 @@ test "MockDeviceIO write logs data" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x02, 0x03, 0x04 }, mock.write_log.items);
 }
 
-test "MockDeviceIO pollfd returns pipe_r" {
+test "mock: DeviceIO pollfd returns pipe_r" {
     const allocator = std.testing.allocator;
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
@@ -141,7 +141,7 @@ test "MockDeviceIO pollfd returns pipe_r" {
     try std.testing.expectEqual(posix.POLL.IN, pfd.events);
 }
 
-test "MockDeviceIO signal makes pipe_r readable" {
+test "mock: DeviceIO signal makes pipe_r readable" {
     const allocator = std.testing.allocator;
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
@@ -153,7 +153,7 @@ test "MockDeviceIO signal makes pipe_r readable" {
     try std.testing.expectEqual(@as(usize, 1), ready);
 }
 
-test "MockDeviceIO injectDisconnect returns Disconnected" {
+test "mock: DeviceIO injectDisconnect returns Disconnected" {
     const allocator = std.testing.allocator;
     const frame = &[_]u8{0x01};
     var mock = try MockDeviceIO.init(allocator, &.{frame});
@@ -168,7 +168,7 @@ test "MockDeviceIO injectDisconnect returns Disconnected" {
     try std.testing.expectError(DeviceIO.ReadError.Disconnected, io.read(&buf));
 }
 
-test "MockDeviceIO read truncates frame to buffer size" {
+test "mock: DeviceIO read truncates frame to buffer size" {
     const allocator = std.testing.allocator;
     var big_frame: [70]u8 = undefined;
     for (&big_frame, 0..) |*b, i| b.* = @intCast(i % 256);

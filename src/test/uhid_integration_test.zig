@@ -142,7 +142,7 @@ fn findHidraw(vid: u16, pid: u16) !?[64]u8 {
 
 // --- Test 1: UHID virtual device appears as hidraw ---
 
-test "UHID virtual device appears as hidraw" {
+test "uhid: virtual device appears as hidraw" {
     const uhid_fd = try openUhid();
     defer {
         uhidDestroy(uhid_fd);
@@ -201,7 +201,7 @@ const simple_toml =
     \\right_y = { offset = 3, type = "u8" }
 ;
 
-test "UHID full pipeline: hidraw read through interpreter" {
+test "uhid: full pipeline hidraw read through interpreter" {
     const allocator = testing.allocator;
 
     const uhid_fd = try openUhid();

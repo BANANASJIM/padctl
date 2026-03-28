@@ -17,7 +17,7 @@ pub const Macro = struct {
 
 const testing = std.testing;
 
-test "MacroStep variants" {
+test "macro: MacroStep variants" {
     const tap: MacroStep = .{ .tap = "B" };
     const down: MacroStep = .{ .down = "A" };
     const up: MacroStep = .{ .up = "KEY_LEFTSHIFT" };
@@ -31,7 +31,7 @@ test "MacroStep variants" {
     _ = pause;
 }
 
-test "Macro: empty steps is valid" {
+test "macro: empty steps is valid" {
     const m = Macro{ .name = "noop", .steps = &.{} };
     try testing.expectEqualStrings("noop", m.name);
     try testing.expectEqual(@as(usize, 0), m.steps.len);

@@ -129,7 +129,7 @@ fn dummyQueue(allocator: std.mem.Allocator) TimerQueue {
     return TimerQueue.init(allocator, -1);
 }
 
-test "tap step: press then release emitted" {
+test "macro_player: tap step press then release emitted" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{.{ .tap = "KEY_B" }};
     const m = Macro{ .name = "t", .steps = &steps };
@@ -151,7 +151,7 @@ test "tap step: press then release emitted" {
     }
 }
 
-test "down + up steps: held then released" {
+test "macro_player: down + up steps held then released" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .{ .down = "KEY_LEFTSHIFT" }, .{ .up = "KEY_LEFTSHIFT" } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -173,7 +173,7 @@ test "down + up steps: held then released" {
     }
 }
 
-test "delay: arms timer queue, returns not-done" {
+test "macro_player: delay arms timer queue returns not-done" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .{ .tap = "KEY_A" }, .{ .delay = 50 }, .{ .tap = "KEY_B" } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -195,7 +195,7 @@ test "delay: arms timer queue, returns not-done" {
     try testing.expectEqual(@as(usize, 2), aux2.len);
 }
 
-test "pause_for_release: halts until notifyTriggerReleased" {
+test "macro_player: pause_for_release halts until notifyTriggerReleased" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .pause_for_release, .{ .tap = "KEY_A" } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -216,7 +216,7 @@ test "pause_for_release: halts until notifyTriggerReleased" {
     try testing.expectEqual(@as(usize, 2), aux2.len);
 }
 
-test "emitPendingReleases: down without up emits release" {
+test "macro_player: emitPendingReleases down without up emits release" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .{ .down = "KEY_LEFTSHIFT" }, .{ .delay = 100 } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -236,7 +236,7 @@ test "emitPendingReleases: down without up emits release" {
     }
 }
 
-test "two players advance step_index independently" {
+test "macro_player: two players advance step_index independently" {
     const allocator = testing.allocator;
     const steps_a = [_]MacroStep{ .{ .tap = "KEY_A" }, .{ .tap = "KEY_B" } };
     const steps_b = [_]MacroStep{.{ .tap = "KEY_C" }};
