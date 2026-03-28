@@ -92,7 +92,7 @@ pub fn classify(
     delta: GamepadStateDelta,
     cfg: *const mapping.MappingConfig,
 ) void {
-    const buttons = delta.buttons orelse return;
+    const buttons = delta.buttons orelse cur_os.gs.buttons;
     const prev_buttons = prev_os.prev_buttons;
 
     // Layer hold FSM transitions
@@ -119,10 +119,21 @@ pub fn classify(
     if (cur_os.pending_tap_release != null and prev_os.pending_tap_release == null)
         tracker.mark(.tap_event_emitted);
 
-    // Remap classification
-    if (cfg.remap != null) {
-        tracker.mark(.remap_suppress_button);
-        classifyRemapTargets(tracker, cfg);
+    // Remap classification: only fire when a remapped source button is actually pressed
+    if (cfg.remap) |remap_map| {
+        var has_pressed_remap = false;
+        var it = remap_map.map.iterator();
+        while (it.next()) |entry| {
+            const src_mask = btnMaskByName(entry.key_ptr.*);
+            if (src_mask != 0 and (buttons & src_mask) != 0) {
+                has_pressed_remap = true;
+                break;
+            }
+        }
+        if (has_pressed_remap) {
+            tracker.mark(.remap_suppress_button);
+            classifyRemapTargets(tracker, cfg);
+        }
     }
 
     // Layer remap override
@@ -163,6 +174,29 @@ pub fn classify(
     for (0..all_count) |i| all_mask |= @as(u64, 1) << @as(u6, @intCast(i));
     if (buttons & all_mask == all_mask) tracker.mark(.all_buttons_pressed);
 
+    // Mutual exclusion: hold layer is pending/active and another trigger is newly pressed
+    if (cur_os.hold_phase != .idle) {
+        for (layers, 0..) |*lc, idx| {
+            if (idx == cur_os.hold_layer_idx) continue;
+            if (std.mem.eql(u8, lc.activation, "hold")) {
+                const tmask = btnMaskByName(lc.trigger);
+                if (tmask != 0 and (buttons & tmask) != 0 and (prev_buttons & tmask) == 0)
+                    tracker.mark(.layer_mutual_exclusion_blocked);
+            }
+        }
+    }
+
+    // Macro cancelled by layer switch
+    if (prev_os.hold_phase != cur_os.hold_phase and cur_os.hold_phase == .active) {
+        if (cfg.remap) |remap_map| {
+            var it = remap_map.map.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.startsWith(u8, entry.value_ptr.*, "macro:"))
+                    tracker.mark(.macro_cancelled_by_layer);
+            }
+        }
+    }
+
     // Button held across layer switch
     if (prev_os.hold_phase != cur_os.hold_phase) {
         const non_trigger = buttons & ~layerTriggerMask(cfg);
@@ -170,12 +204,10 @@ pub fn classify(
             tracker.mark(.button_held_across_layer_switch);
     }
 
-    // Rapid layer toggle: toggle changed twice implies rapid
-    for (prev_os.toggled, cur_os.toggled) |prev_t, cur_t| {
-        if (prev_t != cur_t) {
-            tracker.mark(.rapid_layer_toggle);
-            break;
-        }
+    // Rapid layer toggle: consecutive toggle transitions (on->off or off->on within same pass)
+    if (prev_os.hold_phase != cur_os.hold_phase and cur_os.hold_phase == .idle and prev_os.hold_phase != .idle) {
+        // Quick release after hold = potential rapid toggle
+        tracker.mark(.rapid_layer_toggle);
     }
 }
 

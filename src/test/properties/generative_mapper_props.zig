@@ -15,6 +15,11 @@ const Frame = sequence_gen.Frame;
 const OracleState = mapper_oracle.OracleState;
 const CoverageTracker = transition_id.CoverageTracker;
 
+fn btnMaskByName(name: []const u8) u64 {
+    const id = std.meta.stringToEnum(state_mod.ButtonId, name) orelse return 0;
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+}
+
 fn runHarness(
     allocator: std.mem.Allocator,
     n_configs: usize,
@@ -62,7 +67,26 @@ fn runHarness(
         for (frames) |frame| {
             const prev_oracle = oracle;
 
-            const prod_out = ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms)) catch continue;
+            // Pre-check: will the oracle cross pending→active on this frame?
+            // The oracle transitions when: button still held, phase==pending, elapsed+dt >= threshold.
+            // Fire the production timer BEFORE apply() so both sides activate in sync.
+            if (oracle.hold_phase == .pending and frame.dt_ms > 0) {
+                const layers = parsed.value.layer orelse &[0]mapping.LayerConfig{};
+                if (oracle.hold_layer_idx < layers.len) {
+                    const lc = &layers[oracle.hold_layer_idx];
+                    const threshold: u64 = @intCast(@max(0, lc.hold_timeout orelse 200));
+                    if (oracle.hold_elapsed_ms + @as(u64, frame.dt_ms) >= threshold) {
+                        // Also verify trigger is still held (oracle checks pressed and was_pressed)
+                        const trigger_mask = btnMaskByName(lc.trigger);
+                        const cur_buttons = if (frame.delta.buttons) |b| b else oracle.gs.buttons;
+                        if (trigger_mask != 0 and (cur_buttons & trigger_mask) != 0 and (oracle.prev_buttons & trigger_mask) != 0) {
+                            _ = ctx.mapper.layer.onTimerExpired();
+                        }
+                    }
+                }
+            }
+
+            const prod_out = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
             const oracle_out = mapper_oracle.apply(&oracle, frame.delta, &parsed.value, @as(u64, frame.dt_ms));
 
             // Deterministic: button output (suppress + inject)
@@ -216,6 +240,8 @@ test "generative: layer hold -> pending -> active -> deactivate" {
 
     // pending -> active (advance past timeout)
     prev = oracle;
+    // Fire production timer BEFORE apply so layer is active for remap processing
+    _ = ctx.mapper.layer.onTimerExpired();
     _ = ctx.mapper.apply(.{ .buttons = lt }, 101) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 101);
     transition_id.classify(&tracker, &prev, &oracle, .{ .buttons = lt }, &parsed.value);
@@ -332,6 +358,7 @@ test "generative: simultaneous buttons + layer remap" {
     // Activate layer
     _ = ctx.mapper.apply(.{ .buttons = lt }, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 0);
+    _ = ctx.mapper.layer.onTimerExpired();
     _ = ctx.mapper.apply(.{ .buttons = lt }, 51) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 51);
 
