@@ -427,10 +427,10 @@ private def emitLayerFSMVectors : IO Unit := do
   let s1 := onTriggerPress s0 0
   println s!"press,idle_to_pending,{repr s0.tapHold},{repr s1.tapHold}"
   -- pending → timer expired → active
-  let s2 := onTimerExpired s1
+  let s2 := onTapHoldTimerExpired s1
   println s!"timer,pending_to_active,{repr s1.tapHold},{repr s2.tapHold}"
   -- active → release → idle
-  let s3 := onTriggerRelease s2
+  let (s3, _tapEvt) := onTriggerRelease s2
   println s!"release,active_to_idle,{repr s2.tapHold},{repr s3.tapHold}"
   -- press while already pending → no-op
   let s4 := onTriggerPress s1 1
@@ -456,9 +456,199 @@ private def emitRemapVectors : IO Unit := do
   let result3 := applyRemaps buttons prev remaps3
   println s!"{buttons},{prev},0>k30,{result3.suppressMask},{result3.injectMask},{result3.auxEvents.length}"
 
+/-! ## Parsing helpers for interactive mode -/
+
+private def hexDigitVal (c : Char) : Option Nat :=
+  if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat)
+  else if 'a' ≤ c && c ≤ 'f' then some (c.toNat - 'a'.toNat + 10)
+  else if 'A' ≤ c && c ≤ 'F' then some (c.toNat - 'A'.toNat + 10)
+  else none
+
+private def hexToByteList : List Char → Option (List UInt8)
+  | [] => some []
+  | [_] => none
+  | hi :: lo :: rest => do
+    let h ← hexDigitVal hi
+    let l ← hexDigitVal lo
+    let tail ← hexToByteList rest
+    return UInt8.ofNat (h * 16 + l) :: tail
+
+private def hexToBytes (s : String) : Option ByteArray := do
+  let bytes ← hexToByteList s.toList
+  return ⟨bytes.toArray⟩
+
+private def parseInt (s : String) : Option Int :=
+  if s.isEmpty then .none
+  else
+    let chars := s.toList
+    match chars with
+    | '-' :: rest =>
+      match (String.ofList rest).toNat? with
+      | some n => some (-(n : Int))
+      | none => .none
+    | _ =>
+      match s.toNat? with
+      | some n => some (Int.ofNat n)
+      | none => .none
+
+private def parseNat (s : String) : Option Nat := s.toNat?
+
+private def parseFieldType (s : String) : Option FieldType :=
+  match s with
+  | "u8"    => some .u8    | "i8"    => some .i8
+  | "u16le" => some .u16le | "i16le" => some .i16le
+  | "u16be" => some .u16be | "i16be" => some .i16be
+  | "u32le" => some .u32le | "i32le" => some .i32le
+  | "u32be" => some .u32be | "i32be" => some .i32be
+  | _ => none
+
+private def extractParens (s : String) (prefix_ : String) : Option String :=
+  if s.startsWith prefix_ && s.endsWith ")" then
+    some ((s.drop prefix_.length).dropEnd 1).toString
+  else none
+
+private def parseTransformOp (s : String) : Option TransformOp :=
+  if s == "negate" then some .negate
+  else if s == "abs" then some .abs
+  else match extractParens s "scale(" with
+  | some inner =>
+    match inner.splitOn "," with
+    | [aStr, bStr] => do
+      let a ← parseInt aStr
+      let b ← parseInt bStr
+      return .scale a b
+    | _ => none
+  | none => match extractParens s "clamp(" with
+  | some inner =>
+    match inner.splitOn "," with
+    | [loStr, hiStr] => do
+      let lo ← parseInt loStr
+      let hi ← parseInt hiStr
+      return .clamp lo hi
+    | _ => none
+  | none => match extractParens s "deadzone(" with
+  | some inner =>
+    match inner.toNat? with
+    | some n => some (.deadzone n)
+    | none => none
+  | none => none
+
+private def parseChecksumAlgo (s : String) : Option ChecksumAlgo :=
+  match s with
+  | "sum8"  => some .sum8
+  | "xor"   => some .xor
+  | "crc32" => some .crc32
+  | _ => none
+
+/-! ## Interactive mode -/
+
+-- Split on commas, but not inside parentheses
+private def splitTopLevel (s : String) : List String :=
+  let (acc, cur, _) := s.foldl (fun (acc, cur, depth) c =>
+    if c == '(' then (acc, cur.push c, depth + 1)
+    else if c == ')' then (acc, cur.push c, if depth > 0 then depth - 1 else 0)
+    else if c == ',' && depth == 0 then (acc ++ [cur], "", 0)
+    else (acc, cur.push c, depth)
+  ) ([], "", 0)
+  acc ++ [cur]
+
+private def handleCommand (parts : List String) (stdout : IO.FS.Stream) : IO Unit :=
+  match parts with
+  | ["TRANSFORM", opStr, inputStr, tMaxStr] => do
+    match parseTransformOp opStr, parseInt inputStr, parseNat tMaxStr with
+    | some op, some input, some tMax =>
+      let result := applyTransform op input tMax
+      stdout.putStrLn s!"RESULT {intToString result}"
+    | _, _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["CHAIN", opsStr, inputStr, tMaxStr] => do
+    match parseInt inputStr, parseNat tMaxStr with
+    | some input, some tMax =>
+      let opNames := splitTopLevel opsStr
+      let ops := opNames.filterMap parseTransformOp
+      if ops.length != opNames.length then
+        stdout.putStrLn "ERROR bad transform op"
+      else
+        let result := runTransformChain input ops tMax
+        stdout.putStrLn s!"RESULT {intToString result}"
+    | _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["FIELD", ftStr, offStr, hexStr] => do
+    match parseFieldType ftStr, parseNat offStr, hexToBytes hexStr with
+    | some ft, some off, some bytes =>
+      match readField bytes off ft with
+      | some v => stdout.putStrLn s!"RESULT {intToString v}"
+      | none   => stdout.putStrLn "ERROR out of bounds"
+    | _, _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["BITS", byteOffStr, startBitStr, bitCountStr, hexStr] => do
+    match parseNat byteOffStr, parseNat startBitStr, parseNat bitCountStr, hexToBytes hexStr with
+    | some byteOff, some startBit, some bitCount, some bytes =>
+      let result := extractBits bytes byteOff startBit bitCount
+      stdout.putStrLn s!"RESULT {result}"
+    | _, _, _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["ASSEMBLE", rawStr, suppressStr, injectStr] => do
+    match parseNat rawStr, parseNat suppressStr, parseNat injectStr with
+    | some raw, some suppress, some inject =>
+      let result := assembleButtons raw suppress inject
+      stdout.putStrLn s!"RESULT {result}"
+    | _, _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["DPAD_HAT", valStr] => do
+    match parseNat valStr with
+    | some v =>
+      let (dx, dy) := decodeDpadHat v
+      stdout.putStrLn s!"RESULT {intToString dx} {intToString dy}"
+    | none => stdout.putStrLn "ERROR bad args"
+
+  | ["SIGNEXTEND", valStr, bitCountStr] => do
+    match parseNat valStr, parseNat bitCountStr with
+    | some val, some bitCount =>
+      let result := signExtend val bitCount
+      stdout.putStrLn s!"RESULT {intToString result}"
+    | _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["CHECKSUM", algoStr, startStr, endStr, offStr, hexStr] => do
+    match parseChecksumAlgo algoStr, parseNat startStr, parseNat endStr, parseNat offStr,
+          hexToBytes hexStr with
+    | some algo, some rs, some re, some off, some bytes =>
+      let result := verifyChecksum bytes algo rs re off
+      stdout.putStrLn s!"RESULT {if result then "true" else "false"}"
+    | _, _, _, _, _ => stdout.putStrLn "ERROR bad args"
+
+  | ["CHECKSUM", algoStr, startStr, endStr, offStr, seedStr, hexStr] => do
+    match parseChecksumAlgo algoStr, parseNat startStr, parseNat endStr, parseNat offStr,
+          parseNat seedStr, hexToBytes hexStr with
+    | some algo, some rs, some re, some off, some seed, some bytes =>
+      let result := verifyChecksum bytes algo rs re off (some (UInt8.ofNat seed))
+      stdout.putStrLn s!"RESULT {if result then "true" else "false"}"
+    | _, _, _, _, _, _ => stdout.putStrLn "ERROR bad args"
+
+  | _ => stdout.putStrLn "ERROR unknown command"
+
+private partial def interactiveLoop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do
+  let line ← stdin.getLine
+  if line.isEmpty then return
+  let trimmed := line.trimAscii.toString
+  if trimmed.isEmpty then interactiveLoop stdin stdout
+  else
+    let parts := trimmed.splitOn " "
+    match parts.head? with
+    | some "QUIT" => return
+    | _ =>
+      handleCommand parts stdout
+      stdout.flush
+      interactiveLoop stdin stdout
+
+private def interactiveMode : IO Unit := do
+  let stdin ← IO.getStdin
+  let stdout ← IO.getStdout
+  interactiveLoop stdin stdout
+
 /-! ## Main -/
 
-def main : IO Unit := do
+private def generateVectors : IO Unit := do
   emitTransformVectors
   emitChainVectors
   emitReadFieldVectors
@@ -472,3 +662,9 @@ def main : IO Unit := do
   emitLayerFSMVectors
   emitRemapVectors
   IO.eprintln "oracle: all self-checks passed"
+
+def main (args : List String) : IO Unit := do
+  if args.contains "--interactive" then
+    interactiveMode
+  else
+    generateVectors

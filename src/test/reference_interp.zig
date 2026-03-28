@@ -1,4 +1,5 @@
 // reference_interp.zig — intentionally naive oracle for DRT.
+// Legacy — will be removed once Lean oracle is the sole DRT source.
 //
 // This reimplements field extraction and transform chain independently of the
 // production interpreter.  Bugs in production code will not be present here
