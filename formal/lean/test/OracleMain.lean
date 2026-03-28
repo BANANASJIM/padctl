@@ -427,7 +427,7 @@ private def emitLayerFSMVectors : IO Unit := do
   let s1 := onTriggerPress s0 0
   println s!"press,idle_to_pending,{repr s0.tapHold},{repr s1.tapHold}"
   -- pending → timer expired → active
-  let s2 := onTimerExpired s1
+  let s2 := onTapHoldTimerExpired s1
   println s!"timer,pending_to_active,{repr s1.tapHold},{repr s2.tapHold}"
   -- active → release → idle
   let (s3, _tapEvt) := onTriggerRelease s2
