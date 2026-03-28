@@ -578,7 +578,7 @@ fn runAllDevicesRandom() !void {
 
     var tested: usize = 0;
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         const interp = Interpreter.init(&parsed.value);
@@ -717,7 +717,7 @@ fn runAllDevicesStructured() !void {
 
     var tested: usize = 0;
     for (paths.items) |path| {
-        const parsed = device_mod.parseFile(allocator, path) catch continue;
+        const parsed = try device_mod.parseFile(allocator, path);
         defer parsed.deinit();
 
         const interp = Interpreter.init(&parsed.value);

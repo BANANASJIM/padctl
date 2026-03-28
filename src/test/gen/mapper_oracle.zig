@@ -240,6 +240,7 @@ fn collectRemap(
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse continue;
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
         suppressed.* |= @as(u64, 1) << src_idx;
+        // Unknown targets skipped — matches production mapper.zig behaviour.
         const target = remap_mod.resolveTarget(entry.value_ptr.*) catch continue;
         per_src[@intCast(src_idx)] = target;
     }
