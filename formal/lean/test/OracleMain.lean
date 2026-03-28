@@ -107,6 +107,17 @@ private def emitTransformVectors : IO Unit := do
       println s!"{op},{intToString input},{tMax},{intToString scaleA},{intToString scaleB},{intToString result}"
       if result != expected then
         throw (IO.userError s!"SELF-CHECK FAILED: scale({intToString input}) = {intToString result}, expected {intToString expected}")
+  -- Negative scale inputs (ediv vs tdiv divergence cases): a=0, b=100, tMax=127
+  let nsA : Int := 0
+  let nsB : Int := 100
+  for (input, tMax, expected) in [
+    ((-7 : Int),  (127 : Nat), (-5 : Int)),   -- tdiv(-700, 127) + 0
+    (-128,         127,        -100)            -- tdiv(-12800, 127) + 0
+  ] do
+    let result := applyTransform (.scale nsA nsB) input tMax
+    println s!"scale,{intToString input},{tMax},{intToString nsA},{intToString nsB},{intToString result}"
+    if result != expected then
+      throw (IO.userError s!"SELF-CHECK FAILED: scale({intToString input}, tMax={tMax}, a={nsA}, b={nsB}) = {intToString result}, expected {intToString expected}")
 
 /-! ## Transform chain vectors -/
 
@@ -122,9 +133,14 @@ private def emitChainVectors : IO Unit := do
   -- chain: abs then clamp
   let v3 := runTransformChain (-80) [.abs, .clamp 0 50] 255
   println s!"-80,255,abs,clamp:0:50,{intToString v3}"
+  -- chain: negate then scale (creates negative input to scale — ediv vs tdiv)
+  let v4 := runTransformChain 7 [.negate, .scale 0 100] 127
+  println s!"7,127,negate,scale:0:100,{intToString v4}"
+  if v4 != -5 then
+    throw (IO.userError s!"SELF-CHECK FAILED: chain negate,scale(0,100) of 7 = {intToString v4}, expected -5")
   -- empty chain
-  let v4 := runTransformChain 42 [] 255
-  println s!"42,255,,{intToString v4}"
+  let v5 := runTransformChain 42 [] 255
+  println s!"42,255,,{intToString v5}"
 
 /-! ## Field read vectors -/
 
@@ -182,6 +198,50 @@ private def emitReadFieldVectors : IO Unit := do
     (6, FieldType.i16be,    -1)
   ] do
     match readField raw3 off ft with
+    | some v =>
+      println s!"{repr ft},{off},{intToString v}"
+      if v != expected then
+        throw (IO.userError s!"readField mismatch: {repr ft} at {off} got {intToString v}, expected {intToString expected}")
+    | none => throw (IO.userError s!"readField none: {repr ft} at {off}")
+
+  -- u32le / i32le
+  let raw4 := ByteArray.mk #[0x00, 0x00, 0x00, 0x00,
+                              0xFF, 0xFF, 0xFF, 0x7F,
+                              0x00, 0x00, 0x00, 0x80,
+                              0xFF, 0xFF, 0xFF, 0xFF]
+  for (off, ft, expected) in [
+    (0,  FieldType.u32le,          (0 : Int)),
+    (4,  FieldType.u32le,  2147483647),       -- 0x7FFFFFFF
+    (8,  FieldType.u32le,  2147483648),       -- 0x80000000
+    (12, FieldType.u32le,  4294967295),       -- 0xFFFFFFFF
+    (0,  FieldType.i32le,          0),
+    (4,  FieldType.i32le,  2147483647),       -- INT32_MAX
+    (8,  FieldType.i32le, -2147483648),       -- INT32_MIN
+    (12, FieldType.i32le,         -1)
+  ] do
+    match readField raw4 off ft with
+    | some v =>
+      println s!"{repr ft},{off},{intToString v}"
+      if v != expected then
+        throw (IO.userError s!"readField mismatch: {repr ft} at {off} got {intToString v}, expected {intToString expected}")
+    | none => throw (IO.userError s!"readField none: {repr ft} at {off}")
+
+  -- u32be / i32be
+  let raw5 := ByteArray.mk #[0x00, 0x00, 0x00, 0x00,
+                              0x7F, 0xFF, 0xFF, 0xFF,
+                              0x80, 0x00, 0x00, 0x00,
+                              0xFF, 0xFF, 0xFF, 0xFF]
+  for (off, ft, expected) in [
+    (0,  FieldType.u32be,          (0 : Int)),
+    (4,  FieldType.u32be,  2147483647),
+    (8,  FieldType.u32be,  2147483648),
+    (12, FieldType.u32be,  4294967295),
+    (0,  FieldType.i32be,          0),
+    (4,  FieldType.i32be,  2147483647),
+    (8,  FieldType.i32be, -2147483648),
+    (12, FieldType.i32be,         -1)
+  ] do
+    match readField raw5 off ft with
     | some v =>
       println s!"{repr ft},{off},{intToString v}"
       if v != expected then

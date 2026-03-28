@@ -2,7 +2,7 @@
 import Padctl.Types
 
 -- Zig: val * (b - a) / t_max + a  (divTrunc semantics)
--- Int.div in Lean 4 is tdiv (truncation toward zero), matching Zig @divTrunc.
+-- We use Int.tdiv explicitly to match Zig's @divTrunc semantics.
 def applyTransform (op : TransformOp) (val : Int) (tMax : Nat) : Int :=
   match op with
   | .negate =>
@@ -13,7 +13,7 @@ def applyTransform (op : TransformOp) (val : Int) (tMax : Nat) : Int :=
     else val.natAbs
   | .scale a b =>
     if tMax == 0 then val
-    else val * (b - a) / tMax + a
+    else (val * (b - a)).tdiv tMax + a
   | .clamp lo hi => max lo (min hi val)
   | .deadzone threshold =>
     if val.natAbs < threshold then 0 else val
