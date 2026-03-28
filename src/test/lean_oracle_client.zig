@@ -27,6 +27,10 @@ pub const LeanOracle = struct {
     read_buf: [4096]u8 = undefined,
 
     pub fn init() !LeanOracle {
+        // Check binary exists before spawning — fork succeeds but exec fails
+        // in child, causing EPIPE on parent write instead of a clean error.
+        std.fs.cwd().access(ORACLE_PATH, .{}) catch return error.FileNotFound;
+
         var child = std.process.Child.init(
             &.{ ORACLE_PATH, "--interactive" },
             std.heap.page_allocator,
