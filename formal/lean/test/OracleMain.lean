@@ -367,6 +367,35 @@ private def emitChecksumVectors : IO Unit := do
   -- xor fail
   let raw4 := ByteArray.mk #[0xAA, 0x55, 0x00]
   println s!"xor,0,2,2,{boolToString (verifyChecksum raw4 .xor 0 2 2)}"
+  -- crc32: "123456789" → 0xCBF43926
+  let crcData := ByteArray.mk #[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39]
+  let crcExpected : UInt32 := 0xCBF43926
+  let crcResult := crc32 crcData 0 9
+  println s!"crc32,0,9,computed={crcResult.toNat},expected={crcExpected.toNat},{boolToString (crcResult == crcExpected)}"
+  if crcResult != crcExpected then
+    throw (IO.userError s!"CRC32 check vector failed: got {crcResult.toNat}, expected {crcExpected.toNat}")
+  -- crc32 verify via verifyChecksum: append LE bytes of CRC to data
+  let crcLE := ByteArray.mk #[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+                               0x26, 0x39, 0xF4, 0xCB]
+  let crcVerify := verifyChecksum crcLE .crc32 0 9 9
+  println s!"crc32_verify,0,9,9,{boolToString crcVerify}"
+  if !crcVerify then
+    throw (IO.userError "CRC32 verifyChecksum failed for known-good data")
+
+/-! ## Hat switch decode vectors -/
+
+private def emitHatDecodeVectors : IO Unit := do
+  println "# HAT_DECODE"
+  println "# hatValue,expected_dx,expected_dy"
+  let expected : List (Nat × Int × Int) :=
+    [(0, 0, -1), (1, 1, -1), (2, 1, 0), (3, 1, 1),
+     (4, 0, 1), (5, -1, 1), (6, -1, 0), (7, -1, -1),
+     (8, 0, 0), (15, 0, 0)]
+  for (hat, edx, edy) in expected do
+    let (dx, dy) := decodeDpadHat hat
+    println s!"{hat},{intToString dx},{intToString dy}"
+    if dx != edx || dy != edy then
+      throw (IO.userError s!"decodeDpadHat({hat}) = ({intToString dx},{intToString dy}), expected ({intToString edx},{intToString edy})")
 
 /-! ## Button decode vectors -/
 
@@ -438,6 +467,7 @@ def main : IO Unit := do
   emitAssembleVectors
   emitDpadVectors
   emitChecksumVectors
+  emitHatDecodeVectors
   emitButtonDecodeVectors
   emitLayerFSMVectors
   emitRemapVectors

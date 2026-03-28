@@ -223,6 +223,23 @@ theorem dpad_gamepad_passthrough (dx dy prevDx prevDy : Int) :
     (processDpad dx dy prevDx prevDy .gamepad false).dpadY = dy := by
   simp [processDpad]
 
+-- P23: decodeDpadHat exhaustive — all 9 cases produce valid (dx, dy) pairs
+-- Hat values 0-7 each produce a unique direction; 8+ produce neutral
+theorem dpadHat_exhaustive :
+    decodeDpadHat 0 = (0, -1) ∧ decodeDpadHat 1 = (1, -1) ∧
+    decodeDpadHat 2 = (1, 0) ∧ decodeDpadHat 3 = (1, 1) ∧
+    decodeDpadHat 4 = (0, 1) ∧ decodeDpadHat 5 = (-1, 1) ∧
+    decodeDpadHat 6 = (-1, 0) ∧ decodeDpadHat 7 = (-1, -1) ∧
+    decodeDpadHat 8 = (0, 0) := by decide
+
+-- P24: decodeDpadHat opposing directions cancel (up/down: hat 0 vs hat 4)
+theorem dpadHat_opposing_y :
+    (decodeDpadHat 0).2 = -(decodeDpadHat 4).2 := by decide
+
+-- P25: decodeDpadHat opposing directions cancel (left/right: hat 6 vs hat 2)
+theorem dpadHat_opposing_x :
+    (decodeDpadHat 6).1 = -(decodeDpadHat 2).1 := by decide
+
 -- P22: assembleButtons — inject bits always present in output
 theorem assemble_inject_present (raw suppress inject : Nat) :
     assembleButtons raw suppress inject ||| inject = assembleButtons raw suppress inject := by
