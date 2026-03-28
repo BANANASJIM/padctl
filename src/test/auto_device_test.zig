@@ -7,7 +7,6 @@ const state = @import("../core/state.zig");
 const ButtonId = state.ButtonId;
 const helpers = @import("helpers.zig");
 const collectTomlPaths = helpers.collectTomlPaths;
-const freeTomlPaths = helpers.freeTomlPaths;
 
 // Metadata/raw fields that intentionally map to .unknown
 const field_ignore_list = [_][]const u8{
@@ -32,7 +31,7 @@ fn isIgnoredField(name: []const u8) bool {
 test "auto: all device configs parse and validate" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     if (paths.items.len == 0) return; // devices/ not found
 
@@ -58,7 +57,7 @@ test "auto: all device configs parse and validate" {
 test "auto: all field names map to known FieldTag" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     if (paths.items.len == 0) return;
 
@@ -91,7 +90,7 @@ test "auto: all field names map to known FieldTag" {
 test "auto: all button_group keys are valid ButtonId" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     if (paths.items.len == 0) return;
 

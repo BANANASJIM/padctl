@@ -9,7 +9,7 @@ const helpers = @import("../helpers.zig");
 test "property: config self-consistency — field bounds within report size" {
     const allocator = testing.allocator;
     var paths = try helpers.collectTomlPaths(allocator);
-    defer helpers.freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     if (paths.items.len == 0) return;
 

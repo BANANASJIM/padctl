@@ -194,6 +194,24 @@ pub fn build(b: *std.Build) void {
     integ_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(integ_tests).step);
 
+    // uhid_all_devices: L2 config-driven UHID simulation for all device configs
+    const alldev_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/uhid_all_devices_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    alldev_mod.addImport("toml", toml_mod);
+    alldev_mod.addImport("src", src_mod);
+    const alldev_tests = b.addTest(.{ .root_module = alldev_mod });
+    if (use_libusb) {
+        alldev_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        alldev_tests.addIncludePath(b.path("compat"));
+    }
+    alldev_tests.linkLibC();
+    integration_step.dependOn(&b.addRunArtifact(alldev_tests).step);
+
     // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");
     const e2e_mod = b.createModule(.{

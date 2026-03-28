@@ -10,14 +10,13 @@ const validate_mod = @import("../tools/validate.zig");
 const docgen_mod = @import("../tools/docgen.zig");
 const helpers = @import("helpers.zig");
 const collectTomlPaths = helpers.collectTomlPaths;
-const freeTomlPaths = helpers.freeTomlPaths;
 
 // --- 1. validate: all device configs pass with 0 errors ---
 
 test "E2E validate: all device configs produce 0 errors" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
     try testing.expect(paths.items.len >= 13);
 
     for (paths.items) |path| {
@@ -220,7 +219,7 @@ test "E2E parseFile: sony/dualsense.toml" {
 test "validate: all device TOMLs have non-empty name" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     for (paths.items) |path| {
         const parsed = try device_mod.parseFile(allocator, path);
@@ -232,7 +231,7 @@ test "validate: all device TOMLs have non-empty name" {
 test "validate: all device TOMLs have at least one report" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     for (paths.items) |path| {
         const parsed = try device_mod.parseFile(allocator, path);

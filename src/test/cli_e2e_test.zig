@@ -11,7 +11,6 @@ const config_edit = @import("../cli/config/edit.zig");
 const config_test_mod = @import("../cli/config/test.zig");
 const helpers = @import("helpers.zig");
 const collectTomlPaths = helpers.collectTomlPaths;
-const freeTomlPaths = helpers.freeTomlPaths;
 
 // --- 1. Install: directory structure paths ---
 
@@ -158,7 +157,7 @@ test "scan matching: vader5.toml present in devices/" {
 test "scan matching: all device files parse for vid/pid lookup" {
     const allocator = testing.allocator;
     var paths = try collectTomlPaths(allocator);
-    defer freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
     try testing.expect(paths.items.len >= 13);
 
     for (paths.items) |p| {

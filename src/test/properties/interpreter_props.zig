@@ -12,7 +12,7 @@ const FieldType = interpreter_mod.FieldType;
 test "property: interpreter robustness — random packets never crash" {
     const allocator = testing.allocator;
     var paths = try helpers.collectTomlPaths(allocator);
-    defer helpers.freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     try testing.expect(paths.items.len >= 13);
 
