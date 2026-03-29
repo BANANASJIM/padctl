@@ -210,10 +210,57 @@ fn findHidraw(allocator: std.mem.Allocator, vid: u16, pid: u16) !?[]u8 {
     return null;
 }
 
-// Scan /dev/input/event0..63, use EVIOCGID to match VID/PID of the uinput device.
+fn udevadmSettle() void {
+    var argv = [_][]const u8{ "udevadm", "settle", "--timeout=5" };
+    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawnAndWait() catch {
+        std.Thread.sleep(200 * std.time.ns_per_ms);
+    };
+}
+
 fn findEventNode(vid: u16, pid: u16) !posix.fd_t {
-    var i: u8 = 0;
-    while (i < 64) : (i += 1) {
+    // Primary: scan sysfs (world-readable) to find event node by VID/PID.
+    var vid_buf: [8]u8 = undefined;
+    var pid_buf: [8]u8 = undefined;
+    var dir = std.fs.openDirAbsolute("/sys/class/input", .{ .iterate = true }) catch
+        return findEventNodeFallback(vid, pid);
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "event")) continue;
+        var vp: [64]u8 = undefined;
+        const vpath = std.fmt.bufPrint(&vp, "{s}/device/id/vendor", .{entry.name}) catch continue;
+        const vlen = dir.openFile(vpath, .{}) catch continue;
+        defer vlen.close();
+        const vn = vlen.read(&vid_buf) catch continue;
+        if (vn < 4) continue;
+        const ev = std.fmt.parseInt(u16, std.mem.trimRight(u8, vid_buf[0..vn], "\n\r "), 16) catch continue;
+        const ppath = std.fmt.bufPrint(&vp, "{s}/device/id/product", .{entry.name}) catch continue;
+        const plen = dir.openFile(ppath, .{}) catch continue;
+        defer plen.close();
+        const pn = plen.read(&pid_buf) catch continue;
+        if (pn < 4) continue;
+        const ep = std.fmt.parseInt(u16, std.mem.trimRight(u8, pid_buf[0..pn], "\n\r "), 16) catch continue;
+        if (ev != vid or ep != pid) continue;
+        var dev_path_buf: [48]u8 = undefined;
+        const dev_path = std.fmt.bufPrint(&dev_path_buf, "/dev/input/{s}", .{entry.name}) catch continue;
+        const delays = [_]u64{ 0, 100, 200, 500, 1000 };
+        for (delays) |delay_ms| {
+            if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+            const fd = posix.open(dev_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+            return fd;
+        }
+        return error.EventNodeNotFound;
+    }
+    return findEventNodeFallback(vid, pid);
+}
+
+fn findEventNodeFallback(vid: u16, pid: u16) !posix.fd_t {
+    var i: u16 = 0;
+    while (i < 256) : (i += 1) {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/input/event{d}", .{i}) catch continue;
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
@@ -276,7 +323,7 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
     }
 
     try uhidCreate(uhid_fd, TEST_VID, TEST_PID, &test_rd);
-    std.Thread.sleep(150 * std.time.ns_per_ms);
+    udevadmSettle();
 
     const hidraw_path = (try findHidraw(allocator, TEST_VID, TEST_PID)) orelse return error.SkipZigTest;
     defer allocator.free(hidraw_path);
@@ -286,7 +333,7 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
 
     var udev = try UinputDevice.create(&parsed.value.output.?);
     defer udev.close();
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    udevadmSettle();
 
     const ev_fd = findEventNode(OUT_VID, OUT_PID) catch return error.SkipZigTest;
     defer posix.close(ev_fd);
@@ -375,7 +422,7 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
 
     var udev = try UinputDevice.create(&parsed.value.output.?);
     defer udev.close();
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    udevadmSettle();
 
     const ev_fd = findEventNode(OUT_VID, OUT_PID) catch return error.SkipZigTest;
     defer posix.close(ev_fd);
@@ -481,7 +528,7 @@ test "T-E2E-3: report with bad match byte produces no output event" {
 
     var udev = try UinputDevice.create(&parsed.value.output.?);
     defer udev.close();
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    udevadmSettle();
 
     const ev_fd = findEventNode(OUT_VID, OUT_PID) catch return error.SkipZigTest;
     defer posix.close(ev_fd);

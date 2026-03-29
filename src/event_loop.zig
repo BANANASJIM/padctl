@@ -221,7 +221,7 @@ pub const EventLoop = struct {
 
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         self.running = true;
-        var buf: [64]u8 = undefined;
+        var buf: [512]u8 = undefined;
 
         // Apply adaptive trigger config at startup (one-shot send)
         if (ctx.allocator) |alloc| {

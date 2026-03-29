@@ -261,7 +261,11 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 // hidraw nodes and reloads udevd. Run once before test-e2e via:
 //   sudo -n ./zig-out/bin/padctl setup-test-udev
 pub fn setupTestUdev() void {
-    const rule = "KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", KERNELS==\"uhid\", MODE=\"0666\"\n";
+    const rule =
+        \\KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="uhid", MODE="0666"
+        \\SUBSYSTEM=="input", KERNEL=="event*", ATTRS{id/bustype}=="0006", MODE="0666"
+        \\
+    ;
     const path = "/etc/udev/rules.d/98-uhid-test.rules";
     if (std.fs.createFileAbsolute(path, .{ .truncate = true })) |f| {
         defer f.close();

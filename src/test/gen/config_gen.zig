@@ -40,13 +40,20 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
         \\
     , .{ vid, pid, report_size }) catch return buf[0..0];
 
-    // Generate 3-8 fields with non-overlapping offsets
+    // Generate 3-8 fields with non-overlapping offsets.
+    // Always emit at least one primary gamepad axis (left_x/left_y/right_x/right_y)
+    // so that injected packets produce visible uinput events.
     const n_fields = rng.intRangeAtMost(u8, 3, @min(8, @as(u8, @intCast(field_tags.len))));
     var used: [21]bool = .{false} ** 21;
     var next_offset: u8 = 1; // skip match byte
 
-    for (0..n_fields) |_| {
-        const idx = pickUnused(rng, &used, field_tags.len);
+    for (0..n_fields) |fi| {
+        const idx = if (fi == 0) blk: {
+            // First field: force one of left_x(0), left_y(1), right_x(2), right_y(3)
+            const forced = rng.intRangeAtMost(usize, 0, 3);
+            used[forced] = true;
+            break :blk forced;
+        } else pickUnused(rng, &used, field_tags.len);
         const tag = field_tags[idx];
         const type_idx = rng.intRangeAtMost(usize, 0, field_types.len - 1);
         const type_str = field_types[type_idx];
@@ -74,8 +81,8 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
         }
     }
 
-    // Optional button_group
-    if (rng.boolean() and next_offset + 2 <= report_size) {
+    // Always generate button_group to ensure liveness (button events)
+    if (next_offset + 2 <= report_size) {
         const bg_offset = next_offset;
         const bg_size: u8 = @min(4, report_size - next_offset);
         w.print("[report.button_group]\nsource = {{ offset = {d}, size = {d} }}\nmap = {{ ", .{ bg_offset, bg_size }) catch return buf[0..fbs.pos];
