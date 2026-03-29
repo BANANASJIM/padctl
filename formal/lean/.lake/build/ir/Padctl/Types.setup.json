@@ -1,0 +1,7 @@
+{"plugins": [],
+ "package": "padctl",
+ "options": {"autoImplicit": false},
+ "name": "Padctl.Types",
+ "isModule": false,
+ "importArts": {},
+ "dynlibs": []}

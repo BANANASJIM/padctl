@@ -1,0 +1,9 @@
+{"plugins": [],
+ "package": "padctl",
+ "options": {"autoImplicit": false},
+ "name": "Padctl.State",
+ "isModule": false,
+ "importArts":
+ {"Padctl.Types":
+  ["/home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean/Padctl/Types.olean"]},
+ "dynlibs": []}

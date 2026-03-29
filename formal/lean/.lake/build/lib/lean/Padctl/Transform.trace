@@ -1,0 +1,32 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs":
+ {"o": ["e3890db4318f64ae.olean"],
+  "i": "788bfd44514102a7.ilean",
+  "c": "e0dbd7bd04da74d2.c"},
+ "log":
+ [{"message":
+   ".> LEAN_PATH=/home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/bin/lean /home/jim_z/Dev/padctl/formal/lean/Padctl/Transform.lean -o /home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean/Padctl/Transform.olean -i /home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean/Padctl/Transform.ilean -c /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Transform.c --setup /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Transform.setup.json --json",
+   "level": "trace"}],
+ "inputs":
+ [["Padctl.Transform:deps",
+   [["deps",
+     [["padctl/Padctl:extraDep", [["@padctl:extraDep", "00000000000006bb"]]],
+      ["imports",
+       [["Padctl.Types transitive imports (legacy)", "00000000000006bb"],
+        ["Padctl.Types:importAllArts", "1a981fbe1cc5d34a"]]]]],
+    ["libs",
+     [["import dynlibs", "00000000000006bb"],
+      ["package external libraries", "00000000000006bb"],
+      ["module dynlibs", "00000000000006bb"],
+      ["module plugins", "00000000000006bb"]]]]],
+  ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+   "60bb08ef22408c8a"],
+  ["/home/jim_z/Dev/padctl/formal/lean/Padctl/Transform.lean",
+   "f4ddf887d25248a0"],
+  ["options", [["-DautoImplicit=false", "4a85acb881fd49d0"]]],
+  ["isModule: false", "feefd2a0d3a1847e"],
+  ["Module.name: Padctl.Transform", "5bb7cc9b240cffa0"],
+  ["Package.id?: (some padctl)", "eabb2e54b7219324"],
+  ["Module.leanArgs: #[]", "00000000000006bb"]],
+ "depHash": "e4f4f6ba4bbeae56"}

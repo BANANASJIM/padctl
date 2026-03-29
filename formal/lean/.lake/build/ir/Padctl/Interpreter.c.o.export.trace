@@ -1,0 +1,18 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs": "4b4195fb7ee56e7f.o",
+ "log":
+ [{"message":
+   ".> /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/bin/clang -c -o /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.c.o.export /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.c -I /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/include -fstack-clash-protection -fdata-sections -ffunction-sections -fPIC -fvisibility=hidden -Wno-unused-command-line-argument --sysroot /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0 -nostdinc -isystem /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/include/clang -O3 -DNDEBUG -DLEAN_EXPORTING",
+   "level": "trace"}],
+ "inputs":
+ [["Padctl.Interpreter:c",
+   [["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.c",
+     "fe2cd73ec19b5797"],
+    ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+     "60bb08ef22408c8a"]]],
+  ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+   "60bb08ef22408c8a"],
+  ["traceArgs: #[-O3, -DNDEBUG, -DLEAN_EXPORTING]", "c1efb66122fb2b9a"],
+  ["x86_64-unknown-linux-gnu", "53a0e8937c307c28"]],
+ "depHash": "8b9e5821bd14a9c4"}

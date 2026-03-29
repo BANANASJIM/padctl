@@ -1,0 +1,1 @@
+{"decls":{},"directImports":[["Padctl.Types",false,false,false],["Padctl.Transform",false,false,false],["Padctl.Interpreter",false,false,false],["Padctl.State",false,false,false],["Padctl.Mapper",false,false,false],["Padctl.Properties",false,false,false]],"module":"Padctl","references":{},"version":5}

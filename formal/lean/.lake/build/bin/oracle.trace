@@ -1,0 +1,27 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs": "2be0668ad1031e2c",
+ "log":
+ [{"message":
+   ".> /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/bin/clang -o /home/jim_z/Dev/padctl/formal/lean/.lake/build/bin/oracle /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/test/OracleMain.c.o.export /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Types.c.o.export /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Transform.c.o.export /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.c.o.export /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/State.c.o.export /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Mapper.c.o.export -L /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/lib/lean --sysroot /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0 -L /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/lib -L /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/lib/glibc -lc -lc_nonshared -Wl,--as-needed -l:ld.so -Wl,--no-as-needed -lpthread_nonshared -Wl,--as-needed -Wl,-Bstatic -lgmp -lunwind -luv -Wl,-Bdynamic -Wl,--no-as-needed -fuse-ld=lld -Wl,--start-group -lleancpp -lLean -Wl,--end-group -lStd -Wl,--start-group -lInit -lleanrt -Wl,--end-group -Wl,-Bstatic -lc++ -lc++abi -Wl,-Bdynamic -lLake -Wl,--as-needed -lgmp -luv -lpthread -ldl -lrt -Wl,--no-as-needed -Wl,--gc-sections -lm -ldl -pthread",
+   "level": "trace"}],
+ "inputs":
+ [["linkObjs",
+   [["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/test/OracleMain.c.o.export",
+     "2c21b4b08ca778ff"],
+    ["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Types.c.o.export",
+     "d952912ce5ea90ba"],
+    ["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Transform.c.o.export",
+     "68a882aa2dd9d7ab"],
+    ["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.c.o.export",
+     "4b4195fb7ee56e7f"],
+    ["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/State.c.o.export",
+     "7a2122c50587b6f5"],
+    ["/home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Mapper.c.o.export",
+     "1661aeda22420d69"]]],
+  ["linkLibs", "00000000000006bb"],
+  ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+   "60bb08ef22408c8a"],
+  ["traceArgs: #[]", "00000000000006bb"],
+  ["x86_64-unknown-linux-gnu", "53a0e8937c307c28"]],
+ "depHash": "b6b92a7bdbfc396a"}

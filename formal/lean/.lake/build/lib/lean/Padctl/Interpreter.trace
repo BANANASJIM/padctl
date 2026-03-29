@@ -1,0 +1,32 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs":
+ {"o": ["55940ea863b36718.olean"],
+  "i": "562d06493dfaeb17.ilean",
+  "c": "fe2cd73ec19b5797.c"},
+ "log":
+ [{"message":
+   ".> LEAN_PATH=/home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean /home/jim_z/.elan/toolchains/leanprover--lean4---v4.29.0/bin/lean /home/jim_z/Dev/padctl/formal/lean/Padctl/Interpreter.lean -o /home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean/Padctl/Interpreter.olean -i /home/jim_z/Dev/padctl/formal/lean/.lake/build/lib/lean/Padctl/Interpreter.ilean -c /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.c --setup /home/jim_z/Dev/padctl/formal/lean/.lake/build/ir/Padctl/Interpreter.setup.json --json",
+   "level": "trace"}],
+ "inputs":
+ [["Padctl.Interpreter:deps",
+   [["deps",
+     [["padctl/Padctl:extraDep", [["@padctl:extraDep", "00000000000006bb"]]],
+      ["imports",
+       [["Padctl.Types transitive imports (legacy)", "00000000000006bb"],
+        ["Padctl.Types:importAllArts", "1a981fbe1cc5d34a"]]]]],
+    ["libs",
+     [["import dynlibs", "00000000000006bb"],
+      ["package external libraries", "00000000000006bb"],
+      ["module dynlibs", "00000000000006bb"],
+      ["module plugins", "00000000000006bb"]]]]],
+  ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+   "60bb08ef22408c8a"],
+  ["/home/jim_z/Dev/padctl/formal/lean/Padctl/Interpreter.lean",
+   "541e5296e5da65fb"],
+  ["options", [["-DautoImplicit=false", "4a85acb881fd49d0"]]],
+  ["isModule: false", "feefd2a0d3a1847e"],
+  ["Module.name: Padctl.Interpreter", "115f472dcb96150f"],
+  ["Package.id?: (some padctl)", "eabb2e54b7219324"],
+  ["Module.leanArgs: #[]", "00000000000006bb"]],
+ "depHash": "1cb037fc1bcb67af"}
