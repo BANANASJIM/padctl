@@ -18,3 +18,8 @@ spike/
 hooks/
 .gitattributes
 docs/book/
+formal/lean/.lake/
+formal/states/
+formal/*.jar
+formal/*_TTrace_*
+formal/*.cfg
