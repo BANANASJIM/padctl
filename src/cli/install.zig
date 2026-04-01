@@ -9,12 +9,13 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\
         \\[Service]
         \\Type=simple
-        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/
+        \\ExecStart={s}/bin/padctl
         \\Restart=on-failure
         \\RestartSec=3
         \\ProtectSystem=strict
         \\ProtectHome=true
         \\PrivateTmp=true
+        \\RuntimeDirectory=padctl
         \\NoNewPrivileges=true
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
@@ -22,7 +23,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\[Install]
         \\WantedBy=multi-user.target
         \\
-    , .{ prefix, prefix });
+    , .{prefix});
 }
 
 pub const InstallOptions = struct {
@@ -597,7 +598,7 @@ test "install: generateServiceContent uses prefix" {
     const content = try generateServiceContent(allocator, "/usr/local");
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "/usr/local/bin/padctl") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "/usr/local/share/padctl/devices/") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "RuntimeDirectory=padctl") != null);
     try testing.expect(std.mem.indexOf(u8, content, "/usr/bin/padctl") == null);
 }
 
