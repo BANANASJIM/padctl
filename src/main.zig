@@ -408,22 +408,6 @@ fn deletePidFile(path: []const u8) void {
     std.fs.deleteFileAbsolute(path) catch {};
 }
 
-/// Returns the first dir in `dirs` that contains at least one .toml file (recursively).
-/// Returns null if no dir has any .toml files.
-fn findTomlDir(dirs: []const []const u8) ?[]const u8 {
-    for (dirs) |dir| {
-        var d = std.fs.openDirAbsolute(dir, .{ .iterate = true }) catch continue;
-        defer d.close();
-        var walker = d.walk(std.heap.page_allocator) catch continue;
-        defer walker.deinit();
-        while (walker.next() catch break) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".toml"))
-                return dir;
-        }
-    }
-    return null;
-}
-
 fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]const u8) void {
     var sup = Supervisor.init(allocator) catch |err| {
         std.log.err("failed to init supervisor: {}", .{err});
@@ -444,6 +428,25 @@ fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]c
     defer if (pid_file) |pf| deletePidFile(pf);
 
     sup.serve(dir_path);
+}
+
+fn runFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, pid_file: ?[]const u8) void {
+    var sup = Supervisor.init(allocator) catch |err| {
+        std.log.err("failed to init supervisor: {}", .{err});
+        std.process.exit(1);
+    };
+    defer sup.deinit();
+
+    sup.startFromDirs(dirs);
+
+    if (sup.managed.items.len == 0) {
+        std.log.info("no devices found in config dirs, waiting for hot-plug", .{});
+    }
+
+    if (pid_file) |pf| writePidFile(pf);
+    defer if (pid_file) |pf| deletePidFile(pf);
+
+    sup.serveMulti(dirs);
 }
 
 pub fn main() !void {
@@ -626,7 +629,7 @@ pub fn main() !void {
         return;
     }
 
-    // Bare invocation: XDG three-layer search
+    // Bare invocation: XDG three-layer search — scan ALL accessible config dirs
     if (parsed.config_path == null) {
         const dirs = config.paths.resolveDeviceConfigDirs(allocator) catch |err| {
             std.log.err("failed to resolve XDG config dirs: {}", .{err});
@@ -634,14 +637,14 @@ pub fn main() !void {
         };
         defer config.paths.freeConfigDirs(allocator, dirs);
 
-        if (findTomlDir(dirs)) |dir| {
-            runFromDir(allocator, dir, parsed.pid_file);
-            return;
+        if (dirs.len == 0) {
+            std.log.err("no device config dirs found; use --config or --config-dir", .{});
+            printHelp();
+            std.process.exit(1);
         }
 
-        std.log.err("no device configs found in XDG paths; use --config or --config-dir", .{});
-        printHelp();
-        std.process.exit(1);
+        runFromDirs(allocator, dirs, parsed.pid_file);
+        return;
     }
 
     const config_path = parsed.config_path.?;
@@ -853,31 +856,28 @@ test "main: signalfd stop — no fd leak" {
     try testing.expectEqual(@as(usize, 0), out.diffs.items.len);
 }
 
-test "findTomlDir: skips empty dir, finds dir with toml in subdir" {
+test "runFromDirs: startFromDirs scans all dirs, not just first" {
+    // Verifies that startFromDirs iterates every dir rather than stopping at the first.
+    // With no real hidraw devices both dirs will yield zero instances, but the call
+    // must not error out after processing only dir1.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(root);
 
-    // dir1 exists but is empty
     const dir1 = try std.fs.path.join(testing.allocator, &.{ root, "dir1" });
     defer testing.allocator.free(dir1);
     try std.fs.makeDirAbsolute(dir1);
 
-    // dir2 has a .toml file in a subdirectory
     const dir2 = try std.fs.path.join(testing.allocator, &.{ root, "dir2" });
     defer testing.allocator.free(dir2);
     try std.fs.makeDirAbsolute(dir2);
-    const vendor_dir = try std.fs.path.join(testing.allocator, &.{ dir2, "vendor" });
-    defer testing.allocator.free(vendor_dir);
-    try std.fs.makeDirAbsolute(vendor_dir);
-    const toml_path = try std.fs.path.join(testing.allocator, &.{ vendor_dir, "device.toml" });
-    defer testing.allocator.free(toml_path);
-    const f = try std.fs.createFileAbsolute(toml_path, .{});
-    f.close();
+
+    var sup = try Supervisor.initForTest(testing.allocator);
+    defer sup.deinit();
 
     const dirs = [_][]const u8{ dir1, dir2 };
-    const result = findTomlDir(&dirs);
-    try testing.expectEqualStrings(dir2, result.?);
+    sup.startFromDirs(&dirs); // must not stop after dir1
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
