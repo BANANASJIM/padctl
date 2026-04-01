@@ -1,4 +1,5 @@
 const std = @import("std");
+const paths = @import("../config/paths.zig");
 
 fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
@@ -184,10 +185,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: devices directory not found near executable or current working directory\n") catch {};
     }
 
-    // 4. Generate 99-padctl.rules
+    // 4. Generate 99-padctl.rules from all config dirs
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
     defer allocator.free(rules_path);
-    try generateUdevRules(allocator, share_dir, rules_path);
+    const config_dirs = try paths.resolveDeviceConfigDirs(allocator);
+    defer paths.freeConfigDirs(allocator, config_dirs);
+    try generateUdevRulesFromDirs(allocator, config_dirs, rules_path);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
@@ -282,6 +285,7 @@ fn copyDevicesTomls(allocator: std.mem.Allocator, src_dir: []const u8, dst_dir: 
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
+        if (std.mem.startsWith(u8, entry.path, "example/")) continue;
 
         const rel = entry.path;
         const rel_dir = std.fs.path.dirname(rel);
@@ -312,26 +316,49 @@ const UdevEntry = struct {
     pid: u16,
 };
 
-fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rules_path: []const u8) !void {
+fn generateUdevRulesFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, rules_path: []const u8) !void {
     var entries = std.ArrayList(UdevEntry){};
     defer {
         for (entries.items) |e| allocator.free(e.name);
         entries.deinit(allocator);
     }
 
-    var dir = std.fs.openDirAbsolute(devices_dir, .{ .iterate = true }) catch return;
-    defer dir.close();
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
+    for (dirs) |devices_dir| {
+        var dir = std.fs.openDirAbsolute(devices_dir, .{ .iterate = true }) catch continue;
+        defer dir.close();
+        var walker = dir.walk(allocator) catch continue;
+        defer walker.deinit();
 
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
+        while (walker.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
+            if (std.mem.startsWith(u8, entry.path, "example/")) continue;
 
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ devices_dir, entry.path });
-        defer allocator.free(path);
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ devices_dir, entry.path });
+            defer allocator.free(path);
 
-        extractVidPid(allocator, path, &entries) catch continue;
+            extractVidPid(allocator, path, &entries) catch continue;
+        }
+    }
+
+    // Deduplicate by vid:pid
+    var i: usize = 0;
+    while (i < entries.items.len) {
+        var j: usize = i + 1;
+        var dup = false;
+        while (j < entries.items.len) {
+            if (entries.items[i].vid == entries.items[j].vid and entries.items[i].pid == entries.items[j].pid) {
+                dup = true;
+                break;
+            }
+            j += 1;
+        }
+        if (dup) {
+            allocator.free(entries.items[j].name);
+            _ = entries.swapRemove(j);
+        } else {
+            i += 1;
+        }
     }
 
     var buf = std.ArrayList(u8){};
@@ -355,6 +382,11 @@ fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rule
     try f.writeAll(buf.items);
 }
 
+fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rules_path: []const u8) !void {
+    const dirs = [_][]const u8{devices_dir};
+    return generateUdevRulesFromDirs(allocator, &dirs, rules_path);
+}
+
 fn isFieldKey(line: []const u8, key: []const u8) bool {
     if (!std.mem.startsWith(u8, line, key)) return false;
     if (line.len == key.len) return true;
@@ -372,10 +404,20 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
     var name: []const u8 = std.fs.path.stem(path);
     var vid: ?u16 = null;
     var pid: ?u16 = null;
+    var in_device_section = false;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        // Track TOML sections — only extract from [device]
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            in_device_section = std.mem.startsWith(u8, trimmed, "[device]");
+            continue;
+        }
+
+        if (!in_device_section) continue;
+
         if (isFieldKey(trimmed, "name")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
                 const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
@@ -505,6 +547,48 @@ test "install: extractVidPid ignores pid_controller field" {
     try testing.expectEqual(@as(usize, 1), entries.items.len);
     try testing.expectEqual(@as(u16, 0x1234), entries.items[0].vid);
     try testing.expectEqual(@as(u16, 0x5678), entries.items[0].pid);
+}
+
+test "install: extractVidPid ignores [output] section vid/pid" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const toml_content =
+        \\[device]
+        \\name = "Flydigi Vader 5 Pro"
+        \\vid = 0x37d7
+        \\pid = 0x2401
+        \\
+        \\[output]
+        \\name = "Xbox Elite Series 2"
+        \\vid = 0x045e
+        \\pid = 0x0b00
+    ;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/vader5.toml", .{tmp_path});
+    defer allocator.free(toml_path);
+    {
+        var file = try std.fs.createFileAbsolute(toml_path, .{});
+        defer file.close();
+        try file.writeAll(toml_content);
+    }
+
+    var entries = std.ArrayList(UdevEntry){};
+    defer {
+        for (entries.items) |e| allocator.free(e.name);
+        entries.deinit(allocator);
+    }
+    try extractVidPid(allocator, toml_path, &entries);
+
+    try testing.expectEqual(@as(usize, 1), entries.items.len);
+    try testing.expectEqual(@as(u16, 0x37d7), entries.items[0].vid);
+    try testing.expectEqual(@as(u16, 0x2401), entries.items[0].pid);
+    try testing.expectEqualStrings("Flydigi Vader 5 Pro", entries.items[0].name);
 }
 
 test "install: generateServiceContent uses prefix" {
