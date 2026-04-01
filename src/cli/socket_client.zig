@@ -4,13 +4,9 @@ const linux = std.os.linux;
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
-/// Resolve the socket path at runtime. Non-root: $XDG_RUNTIME_DIR/padctl/padctl.sock.
-/// Returns a slice into `buf` or a static string.
+/// Resolve the socket path. Always returns the system socket path — padctl runs as a system service.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
-    if (std.os.linux.getuid() == 0) return DEFAULT_SOCKET_PATH;
-    if (std.posix.getenv("XDG_RUNTIME_DIR")) |xdg| {
-        return std.fmt.bufPrint(buf, "{s}/padctl/padctl.sock", .{xdg}) catch DEFAULT_SOCKET_PATH;
-    }
+    _ = buf;
     return DEFAULT_SOCKET_PATH;
 }
 
@@ -65,6 +61,12 @@ pub fn formatSwitch(buf: []u8, name: []const u8, device_id: ?[]const u8) []const
 // --- tests ---
 
 const testing = std.testing;
+
+test "resolveSocketPath: always returns default system path" {
+    var buf: [256]u8 = undefined;
+    const path = resolveSocketPath(&buf);
+    try testing.expectEqualStrings("/run/padctl/padctl.sock", path);
+}
 
 test "formatSwitch: global" {
     var buf: [256]u8 = undefined;
