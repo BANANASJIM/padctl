@@ -408,6 +408,22 @@ fn deletePidFile(path: []const u8) void {
     std.fs.deleteFileAbsolute(path) catch {};
 }
 
+/// Returns the first dir in `dirs` that contains at least one .toml file (recursively).
+/// Returns null if no dir has any .toml files.
+fn findTomlDir(dirs: []const []const u8) ?[]const u8 {
+    for (dirs) |dir| {
+        var d = std.fs.openDirAbsolute(dir, .{ .iterate = true }) catch continue;
+        defer d.close();
+        var walker = d.walk(std.heap.page_allocator) catch continue;
+        defer walker.deinit();
+        while (walker.next() catch break) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".toml"))
+                return dir;
+        }
+    }
+    return null;
+}
+
 fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]const u8) void {
     var sup = Supervisor.init(allocator) catch |err| {
         std.log.err("failed to init supervisor: {}", .{err});
@@ -618,8 +634,7 @@ pub fn main() !void {
         };
         defer config.paths.freeConfigDirs(allocator, dirs);
 
-        for (dirs) |dir| {
-            std.fs.accessAbsolute(dir, .{}) catch continue;
+        if (findTomlDir(dirs)) |dir| {
             runFromDir(allocator, dir, parsed.pid_file);
             return;
         }
@@ -836,4 +851,33 @@ test "main: signalfd stop — no fd leak" {
     thread.join();
     // If we reach here without crash, fds are properly managed (GPA would catch leaks)
     try testing.expectEqual(@as(usize, 0), out.diffs.items.len);
+}
+
+test "findTomlDir: skips empty dir, finds dir with toml in subdir" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    // dir1 exists but is empty
+    const dir1 = try std.fs.path.join(testing.allocator, &.{ root, "dir1" });
+    defer testing.allocator.free(dir1);
+    try std.fs.makeDirAbsolute(dir1);
+
+    // dir2 has a .toml file in a subdirectory
+    const dir2 = try std.fs.path.join(testing.allocator, &.{ root, "dir2" });
+    defer testing.allocator.free(dir2);
+    try std.fs.makeDirAbsolute(dir2);
+    const vendor_dir = try std.fs.path.join(testing.allocator, &.{ dir2, "vendor" });
+    defer testing.allocator.free(vendor_dir);
+    try std.fs.makeDirAbsolute(vendor_dir);
+    const toml_path = try std.fs.path.join(testing.allocator, &.{ vendor_dir, "device.toml" });
+    defer testing.allocator.free(toml_path);
+    const f = try std.fs.createFileAbsolute(toml_path, .{});
+    f.close();
+
+    const dirs = [_][]const u8{ dir1, dir2 };
+    const result = findTomlDir(&dirs);
+    try testing.expectEqualStrings(dir2, result.?);
 }
