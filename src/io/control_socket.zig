@@ -38,7 +38,7 @@ pub const ControlSocket = struct {
         try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
         errdefer std.fs.deleteFileAbsolute(path) catch {};
 
-        const rc = linux.chmod(path_z.ptr, 0o660);
+        const rc = linux.chmod(path_z.ptr, 0o666);
         if (linux.E.init(rc) != .SUCCESS) return error.ChmodFailed;
 
         try posix.listen(fd, 4);
