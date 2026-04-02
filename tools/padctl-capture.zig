@@ -5,6 +5,17 @@ const linux = std.os.linux;
 const analyse_mod = @import("analyse");
 const toml_gen = @import("toml_gen");
 const hidraw_mod = @import("hidraw_mod");
+const toml = @import("toml");
+
+// Minimal structs for parsing [device.init] from a device TOML config.
+const InitConfig = struct {
+    commands: []const []const u8 = &.{},
+    response_prefix: []const i64 = &.{},
+    enable: ?[]const u8 = null,
+    report_size: ?i64 = null,
+};
+const DeviceSection = struct { init: ?InitConfig = null };
+const CaptureDeviceConfig = struct { device: DeviceSection };
 
 const Frame = analyse_mod.Frame;
 
@@ -22,6 +33,7 @@ const Cli = struct {
     interface_id: u8 = 0,
     duration_s: u32 = 30,
     output: ?[]const u8 = null,
+    config_path: ?[]const u8 = null,
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
@@ -48,6 +60,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             cli.duration_s = try std.fmt.parseInt(u32, trimmed, 10);
         } else if (std.mem.eql(u8, arg, "--output")) {
             cli.output = args.next() orelse return error.MissingArgValue;
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            cli.config_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             std.process.exit(0);
@@ -66,6 +80,9 @@ fn printHelp() void {
         \\Device selection (one required):
         \\  --device /dev/hidrawN    Open specific hidraw node
         \\  --vid 0xVVVV --pid 0xPPPP [--interface N]  Discover by VID/PID
+        \\
+        \\Init:
+        \\  --config <path>          Device TOML config; runs [device.init] before recording
         \\
         \\Recording:
         \\  --duration <N>[s]        Recording duration in seconds (default: 30)
@@ -142,6 +159,86 @@ fn queryDeviceName(allocator: std.mem.Allocator, fd: posix.fd_t) ![]u8 {
     return allocator.dupe(u8, if (name.len > 0) name else "Unknown HID Device");
 }
 
+/// Parse a hex string like "5aa5 0102 03" into bytes (skipping spaces).
+fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < hex.len) {
+        if (hex[i] == ' ') { i += 1; continue; }
+        if (i + 1 >= hex.len) return error.InvalidHex;
+        const hi = std.fmt.charToDigit(hex[i], 16) catch return error.InvalidHex;
+        const lo = std.fmt.charToDigit(hex[i + 1], 16) catch return error.InvalidHex;
+        try out.append(allocator, (hi << 4) | lo);
+        i += 2;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Send bytes (zero-padded to report_size) and wait for a response matching prefix.
+fn sendAndAwaitPrefix(fd: posix.fd_t, bytes: []const u8, report_size: usize, prefix: []const u8) !void {
+    var pad_buf: [64]u8 = .{0} ** 64;
+    const send_len = @min(@max(bytes.len, report_size), pad_buf.len);
+    const copy_len = @min(bytes.len, pad_buf.len);
+    @memcpy(pad_buf[0..copy_len], bytes[0..copy_len]);
+    _ = try posix.write(fd, pad_buf[0..send_len]);
+
+    if (prefix.len == 0) {
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+        return;
+    }
+    var read_buf: [64]u8 = undefined;
+    var attempt: u8 = 0;
+    while (attempt < 50) : (attempt += 1) {
+        var pfds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+        const n = posix.poll(&pfds, 100) catch break;
+        if (n == 0 or pfds[0].revents & posix.POLL.IN == 0) {
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        }
+        const nb = posix.read(fd, &read_buf) catch break;
+        if (std.mem.startsWith(u8, read_buf[0..nb], prefix)) return;
+    }
+    std.log.debug("init command got no ack, continuing", .{});
+}
+
+/// Run the [device.init] sequence from a device config TOML file.
+fn runInitFromConfig(allocator: std.mem.Allocator, fd: posix.fd_t, config_path: []const u8) !void {
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024);
+    defer allocator.free(content);
+
+    var parser = toml.Parser(CaptureDeviceConfig).init(allocator);
+    defer parser.deinit();
+    var parsed = try parser.parseString(content);
+    defer parsed.deinit();
+
+    const init_cfg = parsed.value.device.init orelse {
+        std.log.info("no [device.init] in config, skipping", .{});
+        return;
+    };
+
+    const prefix = blk: {
+        var buf = try allocator.alloc(u8, init_cfg.response_prefix.len);
+        for (init_cfg.response_prefix, 0..) |b, j| buf[j] = @intCast(b);
+        break :blk buf;
+    };
+    defer allocator.free(prefix);
+
+    const report_size: usize = if (init_cfg.report_size) |rs| @intCast(rs) else 0;
+
+    for (init_cfg.commands) |cmd| {
+        const bytes = try parseHexBytes(allocator, cmd);
+        defer allocator.free(bytes);
+        try sendAndAwaitPrefix(fd, bytes, report_size, prefix);
+    }
+    if (init_cfg.enable) |enable_cmd| {
+        const bytes = try parseHexBytes(allocator, enable_cmd);
+        defer allocator.free(bytes);
+        try sendAndAwaitPrefix(fd, bytes, report_size, prefix);
+    }
+    std.log.info("init: sent {d} commands", .{init_cfg.commands.len + @as(usize, if (init_cfg.enable != null) 1 else 0)});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -175,11 +272,19 @@ pub fn main() !void {
         break :blk try std.fmt.bufPrint(&path_buf, "{s}", .{p});
     };
 
-    const fd = posix.open(device_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| {
+    const accmode: posix.ACCMODE = if (cli.config_path != null) .RDWR else .RDONLY;
+    const fd = posix.open(device_path, .{ .ACCMODE = accmode, .NONBLOCK = true }, 0) catch |err| {
         std.log.err("cannot open {s}: {}", .{ device_path, err });
         std.process.exit(1);
     };
     defer posix.close(fd);
+
+    if (cli.config_path) |cfg| {
+        runInitFromConfig(allocator, fd, cfg) catch |err| {
+            std.log.err("init sequence failed: {}", .{err});
+            std.process.exit(1);
+        };
+    }
 
     // Gather device info for TOML header
     var info_struct: HidrawDevinfo = undefined;

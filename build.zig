@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     capture_mod.addImport("analyse", capture_analyse_mod);
     capture_mod.addImport("toml_gen", capture_toml_gen_mod);
     capture_mod.addImport("hidraw_mod", io_hidraw_mod);
+    capture_mod.addImport("toml", toml_mod);
     const capture_exe = b.addExecutable(.{ .name = "padctl-capture", .root_module = capture_mod });
     capture_exe.linkLibC();
     b.installArtifact(capture_exe);
