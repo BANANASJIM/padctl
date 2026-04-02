@@ -270,7 +270,7 @@ fn readInterfaceIdFromSysfs(basename_s: []const u8) ?u8 {
     var b: [8]u8 = undefined;
     const n = f.read(&b) catch return null;
     const trimmed = std.mem.trim(u8, b[0..n], " \t\n\r");
-    return std.fmt.parseInt(u8, trimmed, 10) catch null;
+    return std.fmt.parseInt(u8, trimmed, 16) catch null;
 }
 
 /// Read HID_PHYS value from sysfs uevent file for a hidraw node.

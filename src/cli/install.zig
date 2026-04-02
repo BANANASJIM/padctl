@@ -9,7 +9,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\
         \\[Service]
         \\Type=simple
-        \\ExecStart={s}/bin/padctl
+        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/
         \\Restart=on-failure
         \\RestartSec=3
         \\ProtectSystem=strict
@@ -23,7 +23,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\[Install]
         \\WantedBy=multi-user.target
         \\
-    , .{prefix});
+    , .{ prefix, prefix });
 }
 
 pub const InstallOptions = struct {
@@ -189,9 +189,15 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 4. Generate 99-padctl.rules from all config dirs
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
     defer allocator.free(rules_path);
-    const config_dirs = try paths.resolveDeviceConfigDirs(allocator);
-    defer paths.freeConfigDirs(allocator, config_dirs);
-    try generateUdevRulesFromDirs(allocator, config_dirs, rules_path);
+    var all_dirs: std.ArrayList([]const u8) = .{};
+    defer all_dirs.deinit(allocator);
+    try all_dirs.append(allocator, share_dir);
+    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
+    if (config_dirs) |dirs| {
+        defer paths.freeConfigDirs(allocator, dirs);
+        for (dirs) |d| try all_dirs.append(allocator, d);
+    }
+    try generateUdevRulesFromDirs(allocator, all_dirs.items, rules_path);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};

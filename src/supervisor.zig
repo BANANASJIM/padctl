@@ -955,6 +955,15 @@ pub const Supervisor = struct {
                     continue;
                 };
 
+                // Check already-managed instances across dirs before local seen map
+                const already_managed = for (self.managed.items) |m| {
+                    if (std.mem.eql(u8, m.phys_key, phys)) break true;
+                } else false;
+                if (already_managed) {
+                    self.allocator.free(phys);
+                    continue;
+                }
+
                 const gop = try seen.getOrPut(phys);
                 if (gop.found_existing) {
                     self.allocator.free(phys);
