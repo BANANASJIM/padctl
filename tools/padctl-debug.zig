@@ -341,6 +341,7 @@ pub fn main() !void {
 
     var gs = GamepadState{};
     var mapped_gs = GamepadState{};
+    var aux_display = render.AuxDisplayState{};
     var raw_buf: [256]u8 = undefined;
     var last_raw_storage: [256]u8 = undefined;
     var last_raw_len: usize = 0;
@@ -424,6 +425,53 @@ pub fn main() !void {
                                 if (m.apply(delta, 16)) |out| {
                                     mapped_gs = out.gamepad;
                                     mapped_gs.synthesizeDpadAxes();
+                                    // Process aux events
+                                    aux_display.mouse_dx = 0;
+                                    aux_display.mouse_dy = 0;
+                                    aux_display.scroll_v = 0;
+                                    aux_display.scroll_h = 0;
+                                    for (out.aux.slice()) |ev| {
+                                        switch (ev) {
+                                            .rel => |r| {
+                                                if (r.code == 0) aux_display.mouse_dx += r.value
+                                                else if (r.code == 1) aux_display.mouse_dy += r.value
+                                                else if (r.code == 8) aux_display.scroll_v += r.value
+                                                else if (r.code == 6) aux_display.scroll_h += r.value;
+                                            },
+                                            .key => |k| {
+                                                const now_ms = std.time.milliTimestamp();
+                                                aux_display.last_keys[aux_display.key_write_pos] = .{
+                                                    .code = k.code,
+                                                    .pressed = k.pressed,
+                                                    .timestamp_ms = now_ms,
+                                                };
+                                                aux_display.key_write_pos = (aux_display.key_write_pos + 1) % 8;
+                                                aux_display.key_total += 1;
+                                            },
+                                            .mouse_button => |mb| {
+                                                const bit: u3 = switch (mb.code) {
+                                                    0x110 => 0,
+                                                    0x111 => 1,
+                                                    0x112 => 2,
+                                                    0x113 => 3,
+                                                    0x114 => 4,
+                                                    else => continue,
+                                                };
+                                                if (mb.pressed) {
+                                                    aux_display.mouse_buttons |= @as(u8, 1) << bit;
+                                                } else {
+                                                    aux_display.mouse_buttons &= ~(@as(u8, 1) << bit);
+                                                }
+                                            },
+                                        }
+                                    }
+                                    // Update active layer name
+                                    const configs = m.config.layer orelse &.{};
+                                    if (m.layer.getActive(configs)) |lc| {
+                                        aux_display.active_layer = lc.name;
+                                    } else {
+                                        aux_display.active_layer = null;
+                                    }
                                 } else |_| {}
                             }
                         }
@@ -472,6 +520,7 @@ pub fn main() !void {
             last_render = now;
             fbs.reset();
             render_cfg.stats = if (show_stats) &stats else null;
+            render_cfg.aux = if (view_mode == .mapped and mapper != null) &aux_display else null;
             const display_gs = if (view_mode == .mapped and mapper != null) &mapped_gs else &gs;
             render.renderFrame(writer, display_gs, last_raw_storage[0..last_raw_len], rumble_on, render_cfg, view_mode) catch {};
             _ = posix.write(stdout_fd, fbs.getWritten()) catch {};

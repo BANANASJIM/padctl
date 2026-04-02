@@ -192,6 +192,35 @@ pub const OutputInfo = struct {
     mapping_file: []const u8 = "",
 };
 
+pub const KeyDisplay = struct {
+    code: u16 = 0,
+    pressed: bool = false,
+    timestamp_ms: i64 = 0,
+};
+
+pub const AuxDisplayState = struct {
+    mouse_dx: i32 = 0,
+    mouse_dy: i32 = 0,
+    scroll_v: i32 = 0,
+    scroll_h: i32 = 0,
+    mouse_buttons: u8 = 0, // bit 0=left,1=right,2=middle,3=side,4=extra
+    last_keys: [8]KeyDisplay = [_]KeyDisplay{.{}} ** 8,
+    key_write_pos: u8 = 0,
+    key_total: u64 = 0,
+    active_layer: ?[]const u8 = null,
+
+    pub fn keyCount(self: *const AuxDisplayState) u8 {
+        return @intCast(@min(self.key_total, 8));
+    }
+
+    // i=0 is most recent
+    pub fn keyAt(self: *const AuxDisplayState, i: u8) ?KeyDisplay {
+        if (i >= self.keyCount()) return null;
+        const slot = (self.key_write_pos -% 1 -% i) % 8;
+        return self.last_keys[slot];
+    }
+};
+
 pub const button_id_count = std.meta.fields(ButtonId).len;
 
 pub const RenderConfig = struct {
@@ -206,6 +235,7 @@ pub const RenderConfig = struct {
     button_labels: [button_id_count]?[]const u8 = .{null} ** button_id_count,
     mapped_buttons: ?[]const MappedButton = null,
     stats: ?*const Stats = null,
+    aux: ?*const AuxDisplayState = null,
 
     pub fn hasExtButtons(self: RenderConfig) bool {
         return self.has_c or self.has_z or self.has_lm or self.has_rm or self.has_o;
@@ -610,6 +640,10 @@ fn renderMappedMode(
         try renderRightCol(writer, gs, config, right_lines[0..right_count], extra_row);
     }
 
+    if (config.aux) |aux| {
+        try renderAuxSection(writer, aux);
+    }
+
     try renderTail(writer, gs, raw, rumble_on, config, .mapped);
 }
 
@@ -795,6 +829,117 @@ fn renderRightCol(
         }
     } else {
         try closeRow(writer, CR_START + 2);
+    }
+}
+
+fn keyCodeName(code: u16, buf: []u8) []const u8 {
+    // Common key codes → short names
+    const map = .{
+        .{ @as(u16, 1), "ESC" },
+        .{ @as(u16, 28), "ENT" },
+        .{ @as(u16, 14), "BSP" },
+        .{ @as(u16, 15), "TAB" },
+        .{ @as(u16, 29), "LC" },
+        .{ @as(u16, 42), "LSH" },
+        .{ @as(u16, 54), "RSH" },
+        .{ @as(u16, 56), "LA" },
+        .{ @as(u16, 57), "SPC" },
+        .{ @as(u16, 58), "CAP" },
+        .{ @as(u16, 59), "F1" },
+        .{ @as(u16, 60), "F2" },
+        .{ @as(u16, 61), "F3" },
+        .{ @as(u16, 62), "F4" },
+        .{ @as(u16, 63), "F5" },
+        .{ @as(u16, 64), "F6" },
+        .{ @as(u16, 65), "F7" },
+        .{ @as(u16, 66), "F8" },
+        .{ @as(u16, 67), "F9" },
+        .{ @as(u16, 68), "F10" },
+        .{ @as(u16, 87), "F11" },
+        .{ @as(u16, 88), "F12" },
+        .{ @as(u16, 183), "F13" },
+        .{ @as(u16, 184), "F14" },
+        .{ @as(u16, 185), "F15" },
+        .{ @as(u16, 186), "F16" },
+        .{ @as(u16, 97), "RC" },
+        .{ @as(u16, 100), "RA" },
+        .{ @as(u16, 125), "LM" },
+        .{ @as(u16, 126), "RM" },
+    };
+    inline for (map) |entry| {
+        if (code == entry[0]) return entry[1];
+    }
+    const n = std.fmt.bufPrint(buf, "{d}", .{code}) catch buf[0..1];
+    return n;
+}
+
+fn renderAuxSection(writer: anytype, aux: *const AuxDisplayState) !void {
+    try sectionHeader(writer, "Mouse/Keyboard");
+
+    // Line 1: mouse movement + scroll + layer
+    {
+        try writer.writeAll("│ Mouse: dx=");
+        try writer.print("{d:>4}", .{aux.mouse_dx});
+        try writer.writeAll("  dy=");
+        try writer.print("{d:>4}", .{aux.mouse_dy});
+        try writer.writeAll("   Scroll: v=");
+        try writer.print("{d}", .{aux.scroll_v});
+        try writer.writeAll("  h=");
+        try writer.print("{d}", .{aux.scroll_h});
+        var col: usize = 2 + 11 + 4 + 5 + 4 + 13 + digitCount(@abs(aux.scroll_v)) + (if (aux.scroll_v < 0) @as(usize, 1) else 0) + 4 + digitCount(@abs(aux.scroll_h)) + (if (aux.scroll_h < 0) @as(usize, 1) else 0);
+        const layer_str = aux.active_layer orelse "base";
+        const layer_label = "  Layer: ";
+        try writer.writeAll(layer_label);
+        try writer.writeAll(layer_str);
+        col += layer_label.len + layer_str.len;
+        try closeRow(writer, col);
+    }
+
+    // Line 2: mouse buttons
+    {
+        try writer.writeAll("│ ");
+        var col: usize = 2;
+        const btn_labels = [_][]const u8{ "L", "R", "M", "S", "E" };
+        for (btn_labels, 0..) |lbl, i| {
+            const pressed = (aux.mouse_buttons >> @intCast(i)) & 1 != 0;
+            if (pressed) {
+                try writer.print(GREEN ++ "[{s}]" ++ RESET, .{lbl});
+            } else {
+                try writer.print(DIM ++ "[{s}]" ++ RESET, .{lbl});
+            }
+            try writer.writeAll(" ");
+            col += lbl.len + 3;
+        }
+        try closeRow(writer, col);
+    }
+
+    // Line 3: recent key events
+    {
+        try writer.writeAll("│ Keys: ");
+        var col: usize = 8;
+        const count = aux.keyCount();
+        if (count == 0) {
+            try writer.writeAll(DIM ++ "(none)" ++ RESET);
+            col += 6;
+        } else {
+            var i: u8 = 0;
+            while (i < count) : (i += 1) {
+                const kd = aux.keyAt(i) orelse break;
+                var name_buf: [8]u8 = undefined;
+                const name = keyCodeName(kd.code, &name_buf);
+                const arrow: []const u8 = if (kd.pressed) "↓" else "↑";
+                // arrow is 3 bytes (UTF-8) but 1 visible char
+                const visible_len = 1 + name.len + 1; // arrow + name + space
+                if (col + visible_len > W - 2) break;
+                if (kd.pressed) {
+                    try writer.print(YELLOW ++ "{s}{s}" ++ RESET ++ " ", .{ arrow, name });
+                } else {
+                    try writer.print(DIM ++ "{s}{s}" ++ RESET ++ " ", .{ arrow, name });
+                }
+                col += visible_len;
+            }
+        }
+        try closeRow(writer, col);
     }
 }
 
