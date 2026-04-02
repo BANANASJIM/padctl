@@ -507,6 +507,9 @@ pub const Supervisor = struct {
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
+                m.instance.ensureAuxForMapping(map_copy) catch |err| {
+                    std.log.warn("ensureAuxForMapping: {}", .{err});
+                };
                 restartManagedThread(m) catch |err| {
                     m.instance.mapper = old_mapper;
                     m.instance.mapping_cfg = old_mapping_cfg;
@@ -697,6 +700,9 @@ pub const Supervisor = struct {
         if (m.instance.mapper) |*old| old.deinit();
         m.instance.mapper = new_mapper;
         m.instance.mapping_cfg = &parsed_ptr.value;
+        m.instance.ensureAuxForMapping(&parsed_ptr.value) catch |err| {
+            std.log.warn("ensureAuxForMapping: {}", .{err});
+        };
         restartManagedThread(m) catch |err| {
             if (m.instance.mapper) |*mapper| {
                 mapper.deinit();
@@ -972,7 +978,7 @@ pub const Supervisor = struct {
                 // seen now owns phys bytes via the key slot
 
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, null) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
                     // reclaim phys from seen
@@ -1282,7 +1288,7 @@ pub const Supervisor = struct {
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, null) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
             return;

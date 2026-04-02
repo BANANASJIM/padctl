@@ -655,7 +655,7 @@ pub fn main() !void {
     };
     defer device_cfg.deinit();
 
-    var inst = DeviceInstance.init(allocator, &device_cfg.value) catch |err| {
+    var inst = DeviceInstance.init(allocator, &device_cfg.value, null) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };

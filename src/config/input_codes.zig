@@ -168,7 +168,7 @@ const btn_table = [_]CodeEntry{
     .{ .name = "BTN_TOOL_QUADTAP", .code = c.BTN_TOOL_QUADTAP },
 };
 
-const key_table = [_]CodeEntry{
+pub const key_table = [_]CodeEntry{
     .{ .name = "KEY_ESC", .code = c.KEY_ESC },
     .{ .name = "KEY_1", .code = c.KEY_1 },
     .{ .name = "KEY_2", .code = c.KEY_2 },

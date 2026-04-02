@@ -1,7 +1,112 @@
 const std = @import("std");
 const toml = @import("toml");
+const input_codes = @import("input_codes.zig");
 pub const MacroStep = @import("../core/macro.zig").MacroStep;
 pub const Macro = @import("../core/macro.zig").Macro;
+
+pub const DerivedAuxCaps = struct {
+    needs_rel: bool = false, // REL_X/Y/WHEEL/HWHEEL (gyro mouse, stick mouse/scroll)
+    needs_keyboard: bool = false, // KEY_* remaps, dpad arrows
+    // bitmask: bit0=BTN_LEFT bit1=BTN_RIGHT bit2=BTN_MIDDLE bit3=BTN_SIDE bit4=BTN_EXTRA
+    mouse_buttons: u8 = 0,
+
+    pub fn needsAux(self: DerivedAuxCaps) bool {
+        return self.needs_rel or self.needs_keyboard or self.mouse_buttons != 0;
+    }
+};
+
+pub fn deriveAuxFromMapping(cfg: *const MappingConfig) DerivedAuxCaps {
+    var caps = DerivedAuxCaps{};
+
+    if (cfg.gyro) |g| {
+        if (std.mem.eql(u8, g.mode, "mouse")) caps.needs_rel = true;
+    }
+
+    if (cfg.stick) |sp| {
+        scanStick(&caps, sp.left);
+        scanStick(&caps, sp.right);
+    }
+
+    if (cfg.dpad) |d| {
+        if (std.mem.eql(u8, d.mode, "arrows")) caps.needs_keyboard = true;
+    }
+
+    if (cfg.remap) |*remap| scanRemapTargets(&caps, remap);
+
+    if (cfg.layer) |layers| {
+        for (layers) |*layer| {
+            if (layer.gyro) |g| {
+                if (std.mem.eql(u8, g.mode, "mouse")) caps.needs_rel = true;
+            }
+            scanStick(&caps, layer.stick_left);
+            scanStick(&caps, layer.stick_right);
+            if (layer.dpad) |d| {
+                if (std.mem.eql(u8, d.mode, "arrows")) caps.needs_keyboard = true;
+            }
+            if (layer.remap) |*remap| scanRemapTargets(&caps, remap);
+        }
+    }
+
+    return caps;
+}
+
+fn scanStick(caps: *DerivedAuxCaps, stick: ?StickConfig) void {
+    const s = stick orelse return;
+    if (std.mem.eql(u8, s.mode, "mouse") or std.mem.eql(u8, s.mode, "scroll"))
+        caps.needs_rel = true;
+}
+
+fn scanRemapTargets(caps: *DerivedAuxCaps, remap: *const toml.HashMap([]const u8)) void {
+    var it = remap.map.iterator();
+    while (it.next()) |entry| {
+        const target = entry.value_ptr.*;
+        if (std.mem.startsWith(u8, target, "KEY_")) {
+            caps.needs_keyboard = true;
+        } else if (std.mem.eql(u8, target, "mouse_left") or std.mem.eql(u8, target, "BTN_LEFT")) {
+            caps.mouse_buttons |= 1;
+        } else if (std.mem.eql(u8, target, "mouse_right") or std.mem.eql(u8, target, "BTN_RIGHT")) {
+            caps.mouse_buttons |= 2;
+        } else if (std.mem.eql(u8, target, "mouse_middle") or std.mem.eql(u8, target, "BTN_MIDDLE")) {
+            caps.mouse_buttons |= 4;
+        } else if (std.mem.eql(u8, target, "mouse_side") or std.mem.eql(u8, target, "BTN_SIDE")) {
+            caps.mouse_buttons |= 8;
+        } else if (std.mem.eql(u8, target, "mouse_extra") or std.mem.eql(u8, target, "BTN_EXTRA")) {
+            caps.mouse_buttons |= 16;
+        }
+    }
+}
+
+// Maximum EV_KEY codes that buildAuxKeyCodes may produce: all key_table entries (97) + 5 mouse buttons
+pub const AUX_KEY_CODES_MAX = 104;
+
+/// Build a key_codes slice for AuxDevice.create() from derived caps.
+/// buf must be at least AUX_KEY_CODES_MAX elements.
+pub fn buildAuxKeyCodes(caps: DerivedAuxCaps, buf: []u16) []u16 {
+    var n: usize = 0;
+    if (caps.needs_keyboard) {
+        for (input_codes.key_table) |entry| {
+            buf[n] = entry.code;
+            n += 1;
+        }
+        // include arrow keys for dpad "arrows" mode (already in key_table, but also dpad arrows mode)
+    }
+    const mouse_codes = [_]struct { mask: u8, name: []const u8 }{
+        .{ .mask = 1, .name = "mouse_left" },
+        .{ .mask = 2, .name = "mouse_right" },
+        .{ .mask = 4, .name = "mouse_middle" },
+        .{ .mask = 8, .name = "mouse_side" },
+        .{ .mask = 16, .name = "mouse_extra" },
+    };
+    for (mouse_codes) |mc| {
+        if (caps.mouse_buttons & mc.mask != 0) {
+            if (input_codes.resolveMouseCode(mc.name)) |code| {
+                buf[n] = code;
+                n += 1;
+            } else |_| {}
+        }
+    }
+    return buf[0..n];
+}
 
 pub const GyroConfig = struct {
     mode: []const u8 = "off",
@@ -543,6 +648,66 @@ test "mapping: adaptive_trigger: per-layer valid mode validates" {
     const at = result.value.layer.?[0].adaptive_trigger.?;
     try std.testing.expectEqualStrings("weapon", at.mode);
     try std.testing.expectEqual(@as(?i64, 30), at.left.?.start);
+}
+
+test "deriveAuxFromMapping: empty mapping needs no aux" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, "");
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(!caps.needsAux());
+}
+
+test "deriveAuxFromMapping: gyro mouse needs_rel" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "mouse"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.needs_rel);
+    try std.testing.expect(caps.needsAux());
+}
+
+test "deriveAuxFromMapping: remap KEY_F13 needs_keyboard" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M1 = "KEY_F13"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.needs_keyboard);
+    try std.testing.expect(caps.needsAux());
+}
+
+test "deriveAuxFromMapping: remap mouse_left sets mouse_buttons bit" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M2 = "mouse_left"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.mouse_buttons & 1 != 0);
+    try std.testing.expect(caps.needsAux());
+}
+
+test "deriveAuxFromMapping: layer stick mouse needs_rel" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\
+        \\[layer.stick_right]
+        \\mode = "mouse"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.needs_rel);
+    try std.testing.expect(caps.needsAux());
 }
 
 test "mapping: fuzz parseString: no panic on arbitrary input" {

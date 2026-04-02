@@ -19,7 +19,8 @@ const Interpreter = @import("core/interpreter.zig").Interpreter;
 const Mapper = @import("core/mapper.zig").Mapper;
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const InterfaceConfig = @import("config/device.zig").InterfaceConfig;
-const MappingConfig = @import("config/mapping.zig").MappingConfig;
+const mapping_mod = @import("config/mapping.zig");
+const MappingConfig = mapping_mod.MappingConfig;
 const init_seq = @import("init.zig");
 const GamepadState = @import("core/state.zig").GamepadState;
 const FfEvent = uinput.FfEvent;
@@ -89,7 +90,9 @@ pub const DeviceInstance = struct {
     poll_timeout_ms: ?u32 = null,
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
-    pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig) !DeviceInstance {
+    /// init_mapping: optional MappingConfig used to auto-derive aux capabilities when
+    /// [output.aux] is absent from the device config.
+    pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig, init_mapping: ?*const MappingConfig) !DeviceInstance {
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
 
@@ -143,7 +146,17 @@ pub const DeviceInstance = struct {
                 try loop.addUinputFf(uinput_dev.?.pollFfFd());
             }
             if (out_cfg.aux != null) {
+                // Explicit [output.aux] in device config — create with empty key_codes.
+                // (Key registration handled via auto-derive path for correctness.)
                 aux_dev = try AuxDevice.create(&.{});
+            } else if (init_mapping) |mcfg| {
+                // Auto-derive: create AuxDevice iff the mapping actually needs it.
+                const caps = mapping_mod.deriveAuxFromMapping(mcfg);
+                if (caps.needsAux()) {
+                    var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
+                    const key_codes = mapping_mod.buildAuxKeyCodes(caps, &buf);
+                    aux_dev = try AuxDevice.create(key_codes);
+                }
             }
             if (out_cfg.touchpad) |*tp_cfg| {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
@@ -214,6 +227,19 @@ pub const DeviceInstance = struct {
             };
             if (self.loop.disconnected) break;
         }
+    }
+
+    /// Create AuxDevice if mapping needs it and device has an output section but no explicit
+    /// [output.aux]. Safe to call only when the run() thread is NOT running.
+    pub fn ensureAuxForMapping(self: *DeviceInstance, mcfg: *const MappingConfig) !void {
+        if (self.aux_dev != null) return; // already have one
+        const out_cfg = self.device_cfg.output orelse return;
+        if (out_cfg.aux != null) return; // explicit override handles it
+        const caps = mapping_mod.deriveAuxFromMapping(mcfg);
+        if (!caps.needsAux()) return;
+        var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
+        const key_codes = mapping_mod.buildAuxKeyCodes(caps, &buf);
+        self.aux_dev = try AuxDevice.create(key_codes);
     }
 
     /// Signal the event loop to stop. run() returns after the current ppoll.
