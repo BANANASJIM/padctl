@@ -42,23 +42,29 @@ padctl scan
 
 Lists all connected HID devices and shows whether a matching device config was found for each.
 
-## Run with a Device
-
-```sh
-# Single config
-sudo padctl --config /usr/share/padctl/devices/sony/dualsense.toml
-
-# All configs in a directory (auto multi-device)
-sudo padctl --config-dir /usr/share/padctl/devices/
-```
-
 ## Run as Service
 
 ```sh
 sudo systemctl enable --now padctl.service
 ```
 
-The service runs padctl in daemon mode, managing all matched devices with hotplug support.
+The service runs padctl in daemon mode, scanning all config directories (user, system, and builtin) with automatic hotplug support.
+
+Check the daemon is running:
+
+```sh
+padctl status
+```
+
+## Run Manually
+
+```sh
+# Single config
+sudo padctl --config /usr/share/padctl/devices/sony/dualsense.toml
+
+# All configs in a directory
+sudo padctl --config-dir /usr/share/padctl/devices/
+```
 
 ## Validate a Config
 
@@ -76,12 +82,12 @@ padctl --doc-gen --config devices/sony/dualsense.toml
 
 ## udev Permissions
 
-padctl needs access to `/dev/hidraw*` and `/dev/uinput`. The `padctl install` command installs udev rules automatically. For manual installs:
+padctl needs access to `/dev/hidraw*` and `/dev/uinput`. The `padctl install` command generates and installs udev rules automatically from device configs.
+
+If you need to regenerate rules after adding custom device configs:
 
 ```sh
-sudo cp install/99-padctl.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo padctl install
 ```
 
 The udev rules use `TAG+="uaccess"` to grant the logged-in user access to supported devices without requiring root.
