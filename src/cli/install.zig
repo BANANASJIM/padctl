@@ -189,12 +189,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 4. Generate 99-padctl.rules from all config dirs
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
     defer allocator.free(rules_path);
+    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
+    defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
     var all_dirs: std.ArrayList([]const u8) = .{};
     defer all_dirs.deinit(allocator);
     try all_dirs.append(allocator, share_dir);
-    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
     if (config_dirs) |dirs| {
-        defer paths.freeConfigDirs(allocator, dirs);
         for (dirs) |d| try all_dirs.append(allocator, d);
     }
     try generateUdevRulesFromDirs(allocator, all_dirs.items, rules_path);
