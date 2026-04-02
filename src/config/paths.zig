@@ -31,14 +31,23 @@ pub fn resolveMappingConfigDirs(allocator: Allocator) ![][]const u8 {
 }
 
 fn resolveSubdirDirs(allocator: Allocator, subdir: []const u8) ![][]const u8 {
-    const user = try userConfigDir(allocator);
-    errdefer allocator.free(user);
+    const user_dir = userConfigDir(allocator) catch |err| switch (err) {
+        error.NoHomeDir => {
+            var dirs = try allocator.alloc([]u8, 2);
+            errdefer allocator.free(dirs);
+            dirs[0] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ systemConfigDir(), subdir });
+            errdefer allocator.free(dirs[0]);
+            dirs[1] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dataDir(), subdir });
+            return @ptrCast(dirs);
+        },
+        else => return err,
+    };
+    defer allocator.free(user_dir);
 
     var dirs = try allocator.alloc([]u8, 3);
     errdefer allocator.free(dirs);
 
-    dirs[0] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ user, subdir });
-    allocator.free(user);
+    dirs[0] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ user_dir, subdir });
     errdefer allocator.free(dirs[0]);
 
     dirs[1] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ systemConfigDir(), subdir });

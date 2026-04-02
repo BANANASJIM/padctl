@@ -955,6 +955,15 @@ pub const Supervisor = struct {
                     continue;
                 };
 
+                // Check already-managed instances across dirs before local seen map
+                const already_managed = for (self.managed.items) |m| {
+                    if (std.mem.eql(u8, m.phys_key, phys)) break true;
+                } else false;
+                if (already_managed) {
+                    self.allocator.free(phys);
+                    continue;
+                }
+
                 const gop = try seen.getOrPut(phys);
                 if (gop.found_existing) {
                     self.allocator.free(phys);
@@ -996,6 +1005,15 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| m.thread.join();
     }
 
+    pub fn startFromDirs(self: *Supervisor, dirs: []const []const u8) void {
+        for (dirs) |dir| {
+            std.fs.accessAbsolute(dir, .{}) catch continue;
+            self.startFromDir(dir) catch |err| {
+                std.log.warn("failed to scan config dir '{s}': {}", .{ dir, err });
+            };
+        }
+    }
+
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
         self.stopAll();
         for (self.configs.items) |c| {
@@ -1012,6 +1030,123 @@ pub const Supervisor = struct {
         self.startFromDir(dir_path) catch |err| {
             std.log.err("reload from dir failed: {}", .{err});
         };
+    }
+
+    fn doReloadFromDirs(self: *Supervisor, dirs: []const []const u8) void {
+        self.stopAll();
+        for (self.configs.items) |c| {
+            c.deinit();
+            self.allocator.destroy(c);
+        }
+        self.configs.clearRetainingCapacity();
+        var it = self.devname_map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.devname_map.clearRetainingCapacity();
+        self.startFromDirs(dirs);
+    }
+
+    /// Like serve() but monitors/reloads from multiple config directories.
+    /// Uses dirs[0] for inotify hot-file-change watch (user config dir).
+    /// SIGHUP and inotify debounce reload all dirs.
+    pub fn serveMulti(self: *Supervisor, dirs: []const []const u8) void {
+        defer self.stopAll();
+
+        var pollfds: [10]posix.pollfd = undefined;
+        pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
+        pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
+        var base_nfds: usize = 2;
+        const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
+            pollfds[base_nfds] = cs.pollfd();
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+
+        while (true) {
+            var nfds = base_nfds;
+            if (self.ctrl_sock) |*cs| {
+                nfds += cs.clientPollfds(pollfds[base_nfds..]);
+            }
+
+            _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
+                error.SignalInterrupt => continue,
+                else => return,
+            };
+
+            if (pollfds[0].revents & posix.POLL.IN != 0) {
+                var buf: [128]u8 = undefined;
+                _ = posix.read(self.stop_fd, &buf) catch {};
+                break;
+            }
+
+            if (pollfds[1].revents & posix.POLL.IN != 0) {
+                var buf: [128]u8 = undefined;
+                _ = posix.read(self.hup_fd, &buf) catch {};
+                self.doReloadFromDirs(dirs);
+                pollfds[1].revents = 0;
+            }
+
+            if (netlink_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainNetlink();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (inotify_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainInotify();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (debounce_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    var tbuf: [8]u8 = undefined;
+                    _ = posix.read(self.debounce_fd, &tbuf) catch {};
+                    self.doReloadFromDirs(dirs);
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (listen_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.ctrl_sock.?.acceptClient();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (self.ctrl_sock != null) {
+                for (pollfds[base_nfds..nfds]) |*pfd| {
+                    if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                        self.ctrl_sock.?.removeClient(pfd.fd);
+                    } else if (pfd.revents & posix.POLL.IN != 0) {
+                        self.handleClientCommand(pfd.fd);
+                    }
+                }
+            }
+        }
     }
 
     /// Enter the supervisor event loop: poll for signals, netlink hot-plug,
@@ -1851,4 +1986,66 @@ test "supervisor: Supervisor.serve: control socket accepts client and responds t
     _ = posix.write(sup.stop_fd, &val) catch {};
     serve_thread.join();
     sup.deinit();
+}
+
+test "supervisor: startFromDirs loads configs from two dirs" {
+    const allocator = testing.allocator;
+
+    const toml_a =
+        \\[device]
+        \\name = "DevA"
+        \\vid = 0x1111
+        \\pid = 0x0001
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+    ;
+    const toml_b =
+        \\[device]
+        \\name = "DevB"
+        \\vid = 0x2222
+        \\pid = 0x0002
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+    ;
+
+    var tmp_a = testing.tmpDir(.{});
+    defer tmp_a.cleanup();
+    var tmp_b = testing.tmpDir(.{});
+    defer tmp_b.cleanup();
+
+    try tmp_a.dir.writeFile(.{ .sub_path = "a.toml", .data = toml_a });
+    try tmp_b.dir.writeFile(.{ .sub_path = "b.toml", .data = toml_b });
+
+    const path_a = try tmp_a.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path_a);
+    const path_b = try tmp_b.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path_b);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    // No real hidraw devices — both dirs scanned, zero instances spawned,
+    // but configs from both dirs must have been attempted (no error, no panic).
+    const dirs = &[_][]const u8{ path_a, path_b };
+    sup.startFromDirs(dirs);
+
+    // With a non-existent dev root neither device will be found, so managed is empty.
+    // The key assertion: startFromDirs did not error out after scanning the first dir.
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }

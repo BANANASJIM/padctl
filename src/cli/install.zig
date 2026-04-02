@@ -15,6 +15,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\ProtectSystem=strict
         \\ProtectHome=true
         \\PrivateTmp=true
+        \\RuntimeDirectory=padctl
         \\NoNewPrivileges=true
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
@@ -188,9 +189,15 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 4. Generate 99-padctl.rules from all config dirs
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
     defer allocator.free(rules_path);
-    const config_dirs = try paths.resolveDeviceConfigDirs(allocator);
-    defer paths.freeConfigDirs(allocator, config_dirs);
-    try generateUdevRulesFromDirs(allocator, config_dirs, rules_path);
+    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
+    defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
+    var all_dirs: std.ArrayList([]const u8) = .{};
+    defer all_dirs.deinit(allocator);
+    try all_dirs.append(allocator, share_dir);
+    if (config_dirs) |dirs| {
+        for (dirs) |d| try all_dirs.append(allocator, d);
+    }
+    try generateUdevRulesFromDirs(allocator, all_dirs.items, rules_path);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
@@ -597,7 +604,7 @@ test "install: generateServiceContent uses prefix" {
     const content = try generateServiceContent(allocator, "/usr/local");
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "/usr/local/bin/padctl") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "/usr/local/share/padctl/devices/") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "RuntimeDirectory=padctl") != null);
     try testing.expect(std.mem.indexOf(u8, content, "/usr/bin/padctl") == null);
 }
 

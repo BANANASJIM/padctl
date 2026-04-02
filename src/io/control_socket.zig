@@ -33,12 +33,12 @@ pub const ControlSocket = struct {
         var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         if (path_z.len > addr.path.len - 1) return error.PathTooLong;
-        @memcpy(addr.path[0 .. path_z.len - 1], path_z[0 .. path_z.len - 1]);
+        @memcpy(addr.path[0..path_z.len], path_z[0..path_z.len]);
 
         try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
         errdefer std.fs.deleteFileAbsolute(path) catch {};
 
-        const rc = linux.chmod(path_z.ptr, 0o660);
+        const rc = linux.chmod(path_z.ptr, 0o666);
         if (linux.E.init(rc) != .SUCCESS) return error.ChmodFailed;
 
         try posix.listen(fd, 4);
@@ -266,6 +266,24 @@ test "control_socket: ControlSocket: socketpair read/write" {
     const cmd = parseCommand(buf[0..n]);
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("fps", cmd.name);
+}
+
+test "control_socket: ControlSocket: init creates socket at exact full path" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const socket_path = try std.fs.path.join(allocator, &.{ root, "padctl.sock" });
+    defer allocator.free(socket_path);
+
+    var cs = try ControlSocket.init(allocator, socket_path);
+    defer cs.deinit();
+
+    // The socket file must exist at the EXACT full path (not truncated).
+    try std.fs.accessAbsolute(socket_path, .{});
 }
 
 test "control_socket: ControlSocket: init rejects overly long unix socket path" {

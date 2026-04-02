@@ -257,7 +257,20 @@ pub fn readInterfaceId(path: []const u8) ?u8 {
             return parseInterfaceId(line["HID_PHYS=".len..]);
         }
     }
-    return null;
+    return readInterfaceIdFromSysfs(basename_s);
+}
+
+fn readInterfaceIdFromSysfs(basename_s: []const u8) ?u8 {
+    var pb: [256]u8 = undefined;
+    const p = std.fmt.bufPrint(&pb, "/sys/class/hidraw/{s}/device/..", .{basename_s}) catch return null;
+    var dir = std.fs.openDirAbsolute(p, .{}) catch return null;
+    defer dir.close();
+    const f = dir.openFile("bInterfaceNumber", .{}) catch return null;
+    defer f.close();
+    var b: [8]u8 = undefined;
+    const n = f.read(&b) catch return null;
+    const trimmed = std.mem.trim(u8, b[0..n], " \t\n\r");
+    return std.fmt.parseInt(u8, trimmed, 16) catch null;
 }
 
 /// Read HID_PHYS value from sysfs uevent file for a hidraw node.

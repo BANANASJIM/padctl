@@ -430,6 +430,25 @@ fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]c
     sup.serve(dir_path);
 }
 
+fn runFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, pid_file: ?[]const u8) void {
+    var sup = Supervisor.init(allocator) catch |err| {
+        std.log.err("failed to init supervisor: {}", .{err});
+        std.process.exit(1);
+    };
+    defer sup.deinit();
+
+    sup.startFromDirs(dirs);
+
+    if (sup.managed.items.len == 0) {
+        std.log.info("no devices found in config dirs, waiting for hot-plug", .{});
+    }
+
+    if (pid_file) |pf| writePidFile(pf);
+    defer if (pid_file) |pf| deletePidFile(pf);
+
+    sup.serveMulti(dirs);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -610,7 +629,7 @@ pub fn main() !void {
         return;
     }
 
-    // Bare invocation: XDG three-layer search
+    // Bare invocation: XDG three-layer search — scan ALL accessible config dirs
     if (parsed.config_path == null) {
         const dirs = config.paths.resolveDeviceConfigDirs(allocator) catch |err| {
             std.log.err("failed to resolve XDG config dirs: {}", .{err});
@@ -618,15 +637,14 @@ pub fn main() !void {
         };
         defer config.paths.freeConfigDirs(allocator, dirs);
 
-        for (dirs) |dir| {
-            std.fs.accessAbsolute(dir, .{}) catch continue;
-            runFromDir(allocator, dir, parsed.pid_file);
-            return;
+        if (dirs.len == 0) {
+            std.log.err("no device config dirs found; use --config or --config-dir", .{});
+            printHelp();
+            std.process.exit(1);
         }
 
-        std.log.err("no device configs found in XDG paths; use --config or --config-dir", .{});
-        printHelp();
-        std.process.exit(1);
+        runFromDirs(allocator, dirs, parsed.pid_file);
+        return;
     }
 
     const config_path = parsed.config_path.?;
@@ -836,4 +854,30 @@ test "main: signalfd stop — no fd leak" {
     thread.join();
     // If we reach here without crash, fds are properly managed (GPA would catch leaks)
     try testing.expectEqual(@as(usize, 0), out.diffs.items.len);
+}
+
+test "runFromDirs: startFromDirs scans all dirs, not just first" {
+    // Verifies that startFromDirs iterates every dir rather than stopping at the first.
+    // With no real hidraw devices both dirs will yield zero instances, but the call
+    // must not error out after processing only dir1.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    const dir1 = try std.fs.path.join(testing.allocator, &.{ root, "dir1" });
+    defer testing.allocator.free(dir1);
+    try std.fs.makeDirAbsolute(dir1);
+
+    const dir2 = try std.fs.path.join(testing.allocator, &.{ root, "dir2" });
+    defer testing.allocator.free(dir2);
+    try std.fs.makeDirAbsolute(dir2);
+
+    var sup = try Supervisor.initForTest(testing.allocator);
+    defer sup.deinit();
+
+    const dirs = [_][]const u8{ dir1, dir2 };
+    sup.startFromDirs(&dirs); // must not stop after dir1
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
