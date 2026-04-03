@@ -54,6 +54,7 @@ pub const Mapper = struct {
     active_macros: std.ArrayList(MacroPlayer),
     timer_queue: TimerQueue,
     next_token: u32,
+    warned_unknown_remap: bool,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
         return .{
@@ -72,6 +73,7 @@ pub const Mapper = struct {
             .active_macros = .{},
             .timer_queue = TimerQueue.init(allocator, timer_fd),
             .next_token = 1,
+            .warned_unknown_remap = false,
         };
     }
 
@@ -186,13 +188,13 @@ pub const Mapper = struct {
 
         // [4] base remap: collect suppress mask + per-source inject targets
         if (self.config.remap) |remap_map| {
-            collectRemapMap(remap_map, &self.suppressed_buttons, &per_src_inject);
+            collectRemapMap(remap_map, &self.suppressed_buttons, &per_src_inject, &self.warned_unknown_remap);
         }
 
         // [5] layer remap: OR-accumulate suppress, last-write-wins for inject
         if (self.layer.getActive(configs)) |active| {
             if (active.remap) |layer_remap| {
-                collectRemapMap(layer_remap, &self.suppressed_buttons, &per_src_inject);
+                collectRemapMap(layer_remap, &self.suppressed_buttons, &per_src_inject, &self.warned_unknown_remap);
             }
         }
 
@@ -395,17 +397,24 @@ fn collectRemapMap(
     remap_map: toml.HashMap([]const u8),
     suppressed: *u64,
     per_src_inject: []?RemapTargetResolved,
+    warned: *bool,
 ) void {
     var it = remap_map.map.iterator();
     while (it.next()) |entry| {
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse {
-            std.log.warn("unknown remap source: {s}", .{entry.key_ptr.*});
+            if (!warned.*) {
+                std.log.warn("unknown remap source: {s}", .{entry.key_ptr.*});
+                warned.* = true;
+            }
             continue;
         };
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
         suppressed.* |= @as(u64, 1) << src_idx;
         const target = resolveTarget(entry.value_ptr.*) catch {
-            std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
+            if (!warned.*) {
+                std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
+                warned.* = true;
+            }
             continue;
         };
         per_src_inject[@intCast(src_idx)] = target;

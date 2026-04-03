@@ -236,10 +236,10 @@ pub const DeviceInstance = struct {
                 if (Mapper.init(new, self.loop.timer_fd, self.allocator)) |nm| {
                     if (self.mapper) |*m| m.deinit();
                     self.mapper = nm;
+                    self.mapping_cfg = new;
                 } else |err| {
                     std.log.err("mapping hot-swap failed: {}", .{err});
                 }
-                self.mapping_cfg = new;
                 self.rebuildAuxIfChanged(new, old_mcfg) catch |err| {
                     std.log.err("aux rebuild after mapping swap failed: {}", .{err});
                 };
@@ -292,7 +292,12 @@ pub const DeviceInstance = struct {
         if (new_caps.needsAux() or self.device_cfg.output.?.aux != null) {
             var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
             const key_codes = mapping_mod.buildAuxKeyCodes(new_caps, &buf);
-            self.aux_dev = try AuxDevice.create(key_codes);
+            if (AuxDevice.create(key_codes)) |dev| {
+                self.aux_dev = dev;
+            } else |err| {
+                std.log.warn("aux device rebuild failed: {}, old device closed", .{err});
+                return err;
+            }
         }
     }
 
