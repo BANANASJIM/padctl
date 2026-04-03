@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# openplan-check-permission — PreToolUse hook for write path enforcement
+# stdin:  {"tool_name": "Write", "tool_input": {"file_path": "..."}}
+# stdout: {"allow": true} | {"allow": false, "message": "..."}
+# env:    OPENPLAN_ROLE — current role name
+
+# shellcheck source=hooks/lib/common.sh
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_lib="$_script_dir/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT}/hooks/lib/common.sh"
+if [ -f "$_lib" ]; then
+    . "$_lib"
+else
+    # common.sh unavailable: allow and let other gates decide
+    echo '{"allow": true}'; exit 0
+fi
+
+input=$(cat)
+tool_name=$(printf '%s' "$input" | jq -r '.tool_name')
+file_path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // ""')
+
+# non-write tools: pass through
+case "$tool_name" in
+    Write|Edit|MultiEdit) ;;
+    *) echo '{"allow": true}'; exit 0 ;;
+esac
+
+# no file_path: cannot check
+[ -z "$file_path" ] && echo '{"allow": true}' && exit 0
+
+role="${OPENPLAN_ROLE:-}"
+if [ -z "$role" ]; then
+    echo '{"allow": false, "message": "OPENPLAN_ROLE not set — cannot verify write permission"}'
+    exit 0
+fi
+
+# normalize path: resolve symlinks, remove .., strip leading ./
+if [ -e "$file_path" ]; then
+    norm=$(realpath "$file_path" 2>/dev/null || echo "$file_path")
+    # make relative to repo root (cwd)
+    repo_root="$(pwd)"
+    norm="${norm#"$repo_root/"}"
+else
+    norm=$(realpath -m --relative-to=. "$file_path" 2>/dev/null || echo "$file_path")
+    norm="${norm#./}"
+fi
+
+# reject path traversal
+if [[ "$norm" == *".."* ]]; then
+    echo "{\"allow\": false, \"message\": \"Path traversal detected: $file_path\"}"
+    exit 0
+fi
+
+# parse openplan.jsonc write paths for role
+write_paths=""
+if command -v op_strip_jsonc >/dev/null 2>&1 && [ -f openplan.jsonc ]; then
+    write_paths=$(op_strip_jsonc openplan.jsonc | jq -r --arg r "$role" '.roles[$r].write[]? // empty' 2>/dev/null || true)
+fi
+
+# no role config: fallback to hardcoded defaults
+if [ -z "$write_paths" ]; then
+    case "$role" in
+        researcher)   _defaults=$'research/\ndeviations/' ;;
+        doc-writer)   _defaults=$'design/\ndecisions/\nengineering/\nplanning/\nconventions/\ndeviations/\n_templates/' ;;
+        reviewer)     _defaults=$'review/\ndeviations/' ;;
+        advisor)      _defaults=$'_agent/advisor/\n_agent/state/\nresearch/' ;;
+        gardener)     _defaults=$'_agent/gardener/' ;;
+        implementer)  _defaults=$'src/\nlib/\ntests/' ;;
+        spec-writer)  _defaults=$'openspec/' ;;
+        *)            _defaults="" ;;
+    esac
+    write_paths="$_defaults"
+fi
+
+# unknown role with no config: allow
+if [ -z "$write_paths" ]; then
+    echo '{"allow": true}' ; exit 0
+fi
+
+while IFS= read -r allowed; do
+    [ -z "$allowed" ] && continue
+    if [[ "$norm" == "$allowed"* ]]; then
+        echo '{"allow": true}'; exit 0
+    fi
+done <<< "$write_paths"
+
+# denied
+allowed_list=$(printf '%s' "$write_paths" | tr '\n' ' ')
+printf '{"allow": false, "message": "Role %s cannot write to %s. Allowed: %s"}\n' \
+    "$role" "$file_path" "$allowed_list"

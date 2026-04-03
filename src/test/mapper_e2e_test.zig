@@ -20,6 +20,7 @@ const GamepadStateDelta = state_mod.GamepadStateDelta;
 const REL_X = h.REL_X;
 const REL_Y = h.REL_Y;
 const BTN_LEFT = h.BTN_LEFT;
+const BTN_FORWARD: u16 = 0x115;
 const KEY_UP = h.KEY_UP;
 const KEY_DOWN = h.KEY_DOWN;
 const KEY_LEFT = h.KEY_LEFT;
@@ -549,4 +550,81 @@ test "e2e: layer remap fall-through — button not in layer remap uses base rema
         }
     }
     try testing.expect(found_f13);
+}
+
+// --- 8. mouse_forward / mouse_back remap ---
+
+test "e2e: remap to mouse_forward produces BTN_FORWARD aux event" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\M1 = "mouse_forward"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .buttons = btnMask(.M1) }, 16);
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.M1));
+
+    var found_forward = false;
+    for (ev.aux.slice()) |e| {
+        switch (e) {
+            .mouse_button => |mb| if (mb.code == BTN_FORWARD and mb.pressed) {
+                found_forward = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_forward);
+}
+
+// --- 9. dpad layer mode switch ---
+
+test "e2e: layer active — dpad mode switches to arrows" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[dpad]
+        \\mode = "gamepad"
+        \\
+        \\[[layer]]
+        \\name = "nav"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.dpad]
+        \\mode = "arrows"
+        \\suppress_gamepad = true
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+    const configs = ctx.parsed.value.layer.?;
+
+    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTimerExpired();
+
+    // dpad_y = -1 → KEY_UP (arrows mode active via layer)
+    const ev_up = try m.apply(.{ .dpad_y = -1 }, 16);
+    var found_key_up = false;
+    for (ev_up.aux.slice()) |e| {
+        switch (e) {
+            .key => |k| if (k.code == KEY_UP and k.pressed) {
+                found_key_up = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_key_up);
+
+    // dpad_y = 1 → KEY_DOWN
+    const ev_down = try m.apply(.{ .dpad_y = 1 }, 16);
+    var found_key_down = false;
+    for (ev_down.aux.slice()) |e| {
+        switch (e) {
+            .key => |k| if (k.code == KEY_DOWN and k.pressed) {
+                found_key_down = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(found_key_down);
 }

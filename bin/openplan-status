@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+# Display worktree + checkpoint + recent activity
+
+echo "=== Worktrees ==="
+git worktree list
+
+echo ""
+echo "=== Checkpoints ==="
+tags=$(git tag -l 'checkpoint/*' 2>/dev/null)
+if [ -n "$tags" ]; then
+    echo "$tags"
+else
+    echo "(none)"
+fi
+
+echo ""
+echo "=== Recent Activity ==="
+git log --oneline -10 2>/dev/null || echo "(no commits)"

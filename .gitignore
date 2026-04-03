@@ -14,9 +14,14 @@ openplan.jsonc
 openspec/
 _skills/
 _templates/
-spike/
 hooks/
 .gitattributes
+_agent/signals/
+_agent/workers/
+_agent/dispatch*.lock
+_agent/results/
+_agent/flags/
+_agent/sessions/
 docs/book/
 formal/lean/.lake/
 formal/states/

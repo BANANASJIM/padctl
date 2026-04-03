@@ -1,0 +1,656 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+_lib="$SCRIPT_DIR/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT:?OPENPLAN_ROOT not set}/hooks/lib/common.sh"
+. "$_lib"
+
+# Load directory config once from openplan.jsonc (falls back to defaults)
+_cfg_root="${OPENPLAN_CFG_DIR:-$SCRIPT_DIR/..}"
+_garden_doc_dirs=$(cd "$_cfg_root" && op_jsonc_array '.layers.doc' 'design/ engineering/ decisions/ conventions/')
+_garden_ephemeral_dirs=$(cd "$_cfg_root" && op_jsonc_array '.garden.ephemeralDirs' 'research/ _agent/ planning/ review/ deviations/')
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: openplan-garden --docs-consistency [--json] [--fix [--commit]] [path]
+
+Options:
+  --docs-consistency    Docs-repo focused scan (ADR-042 Layer 2)
+  --json                JSON output (machine-readable)
+  --fix                 Auto-repair fixable issues (F1: git-mv renames, F2: DC4 missing sections)
+  --commit              With --fix: commit staged repairs (GARDEN: prefix, openplan-garden author)
+  [path]                Scope to directory (default: OPENPLAN_DOCS_REPO or .)
+
+Exit codes: 0=clean, 1=warnings, 2=errors
+EOF
+    exit 1
+}
+
+# --- stub check functions (filled in later tasks) ---
+_check_dc1() {
+    _root="$1"
+    find "$_root" -name '*.md' -not -path '*/archive/*' -not -path '*/.worktrees/*' | while read -r _file; do
+        _rel="${_file#$_root/}"
+        grep -nP '`[a-zA-Z][^`]*\.md(#[^`]*)?`' "$_file" 2>/dev/null | \
+        while IFS=: read -r _lnum _content; do
+            printf '%s\n' "$_content" | grep -oP '`[a-zA-Z][^`]*\.md(#[^`]*)?`' | \
+            while read -r _token; do
+                case "$_content" in context:*) continue ;; esac
+                case "$_token" in *://*) continue ;; esac
+                _ref="${_token#\`}"; _ref="${_ref%\`}"
+                case "$_ref" in \#*) continue ;; esac
+                case "$_ref" in *'*'*|*'<'*|*'$'*|*'{'*) continue ;; esac
+                _fpath="${_ref%%#*}"
+                _section=""
+                case "$_ref" in *#*) _section="${_ref#*#}" ;; esac
+                _target="$_root/$_fpath"
+                if ! test -f "$_target"; then
+                    case "$_fpath" in
+                        */archive/*) printf 'INFO|DC1|%s:%s|archive ref: `%s` (file not found, archive exempted)\n' "$_rel" "$_lnum" "$_ref" ;;
+                        *) printf 'WARNING|DC1|%s:%s|broken ref: `%s` (file not found)\n' "$_rel" "$_lnum" "$_ref" ;;
+                    esac
+                    continue
+                fi
+                if [ -n "$_section" ]; then
+                    # Normalize anchor: lowercase, spaces→hyphens, strip non-[a-z0-9-]
+                    _norm_anchor=$(printf '%s' "$_section" | tr 'A-Z' 'a-z' | tr ' ' '-' | sed 's/[^a-z0-9-]//g')
+                    _anchor_ok=false
+                    grep -E '^#{1,6} ' "$_target" 2>/dev/null | sed 's/^#\+ //' | {
+                        while IFS= read -r _h; do
+                            _norm_h=$(printf '%s' "$_h" | tr 'A-Z' 'a-z' | tr ' ' '-' | sed 's/[^a-z0-9-]//g')
+                            [ "$_norm_h" = "$_norm_anchor" ] && exit 0
+                        done; exit 1
+                    } && _anchor_ok=true
+                    if ! $_anchor_ok; then
+                        case "$_fpath" in
+                            */archive/*) printf 'INFO|DC1-ANCHOR|%s:%s|broken anchor: `%s` (section not found in %s)\n' "$_rel" "$_lnum" "$_ref" "$_fpath" ;;
+                            *) printf 'WARNING|DC1-ANCHOR|%s:%s|broken anchor: `%s` (section not found in %s)\n' "$_rel" "$_lnum" "$_ref" "$_fpath" ;;
+                        esac
+                    fi
+                fi
+            done
+        done
+    done
+}
+_check_dc3() {
+    _root="$1"
+    [ -d "$_root/decisions" ] || return 0
+    find "$_root" -name '*.md' -not -path '*/archive/*' -not -path '*/.worktrees/*' | xargs grep -lE 'ADR-[0-9]+' 2>/dev/null | \
+    xargs grep -nE 'ADR-[0-9]+' 2>/dev/null | while IFS=: read -r _file _line _rest; do
+        printf '%s\n' "$_rest" | grep -oE 'ADR-[0-9]+' | while read -r _ref; do
+            _num=$(printf '%s' "$_ref" | grep -oE '[0-9]+')
+            _padded=$(printf '%03d' "$_num")
+            ls "$_root/decisions/$_padded-"*.md 2>/dev/null | grep -q . && continue
+            _relfile=$(printf '%s' "$_file" | sed "s|^$_root/||")
+            printf 'WARNING|DC3|%s:%s|%s referenced but decisions/%s-*.md not found\n' \
+                "$_relfile" "$_line" "$_ref" "$_padded"
+        done
+    done | awk -F'|' '{ split($4,a," "); if (!seen[a[1]]++) print }'
+}
+
+_check_dc4() {
+    _root="$1"
+    _tmpl_dir="$_root/_templates"
+    [ -d "$_tmpl_dir" ] || return 0
+    for _map in \
+        "research.md:research:调研-*.md" \
+        "review.md:review:审查-*.md" \
+        "phase.md:planning:phase-*.md" \
+        "decision.md:decisions:[0-9]*.md" \
+        "deviation.md:deviations:deviation-*.md" \
+        "needs-snapshot.md:_agent/state:needs-snapshot*.md" \
+        "align-round.md:_agent/advisor:align-round-*.md" \
+        "design-principles.md:design:principles*.md"
+    do
+        _tmpl=$(printf '%s' "$_map" | cut -d: -f1)
+        _dir=$(printf '%s' "$_map" | cut -d: -f2)
+        _glob=$(printf '%s' "$_map" | cut -d: -f3)
+        _tmpl_path="$_tmpl_dir/$_tmpl"
+        [ -f "$_tmpl_path" ] || continue
+        _sections=$(grep '^## ' "$_tmpl_path" | sed 's/^## //')
+        for _f in "$_root/$_dir"/$_glob; do
+            [ -f "$_f" ] || continue
+            printf '%s' "$_f" | grep -q '/archive/' && continue
+            _relfile=$(printf '%s' "$_f" | sed "s|^$_root/||")
+            printf '%s\n' "$_sections" | while read -r _sec; do
+                case "$_sec" in *'<'*) continue ;; esac
+                _sec_pat=$(printf '%s' "$_sec" | sed 's/[.*[\^$]/\\&/g')
+                _lnum=$(grep -ni "^## $_sec_pat" "$_f" 2>/dev/null | head -1 | cut -d: -f1)
+                if [ -z "$_lnum" ]; then
+                    printf 'WARNING|DC4|%s:0|missing required section: ## %s (from template %s)\n' \
+                        "$_relfile" "$_sec" "$_tmpl"
+                else
+                    # check if section body (until next ## or EOF) is all blank lines
+                    _total=$(wc -l < "$_f" | tr -d ' ')
+                    _next=$(awk "NR > $_lnum && /^## /{print NR; exit}" "$_f")
+                    [ -z "$_next" ] && _next=$((_total + 1))
+                    _body_lines=$(awk "NR > $_lnum && NR < $_next" "$_f")
+                    if [ -n "$_body_lines" ]; then
+                        _nonempty=$(printf '%s\n' "$_body_lines" | grep -c '[^[:space:]]' || true)
+                        if [ "$_nonempty" = "0" ]; then
+                            printf 'WARNING|DC4-EMPTY|%s:%s|section "%s" exists but is empty\n' \
+                                "$_relfile" "$_lnum" "$_sec"
+                        fi
+                    else
+                        printf 'WARNING|DC4-EMPTY|%s:%s|section "%s" exists but is empty\n' \
+                            "$_relfile" "$_lnum" "$_sec"
+                    fi
+                fi
+            done
+        done
+    done
+}
+
+_check_dc_eng() {
+    _root="$1"
+    _eng_dir=$(cd "$_cfg_root" && op_jsonc_val '.garden.dirs.engineering' 'engineering')
+    _eng_count=$(find "$_root/$_eng_dir" -name '*.md' ! -name 'index.md' 2>/dev/null | wc -l)
+    if [ "$_eng_count" -eq 0 ] && [ -n "$(find "$_root/review" -name 'reviewer-*.md' 2>/dev/null | head -1)" ]; then
+        printf 'WARNING|DC-ENG|%s/:0|%s/ has no content files (only index.md or empty)\n' "$_eng_dir" "$_eng_dir"
+    fi
+}
+
+_check_dc_conv() {
+    _root="$1"
+    _conv_dir=$(cd "$_cfg_root" && op_jsonc_val '.garden.dirs.conventions' 'conventions')
+    _conv_count=$(find "$_root/$_conv_dir" -name '*.md' ! -name 'index.md' 2>/dev/null | wc -l)
+    if [ "$_conv_count" -eq 0 ] && [ -n "$(find "$_root/review" -name 'reviewer-*.md' 2>/dev/null | head -1)" ]; then
+        printf 'WARNING|DC-CONV|%s/:0|%s/ has no content files (only index.md or empty)\n' "$_conv_dir" "$_conv_dir"
+    fi
+}
+
+_check_dc_des() {
+    _root="$1"
+    _des_dir=$(cd "$_cfg_root" && op_jsonc_val '.garden.dirs.design' 'design')
+    _des_count=$(find "$_root/$_des_dir" -name '*.md' ! -name 'index.md' ! -name 'architecture.md' 2>/dev/null | wc -l)
+    if [ "$_des_count" -eq 0 ] && [ -n "$(find "$_root/review" -name 'reviewer-*.md' 2>/dev/null | head -1)" ]; then
+        printf 'WARNING|DC-DES|%s/:0|%s/ has no content files beyond architecture.md (missing principles.md or similar)\n' "$_des_dir" "$_des_dir"
+    fi
+}
+
+_check_idx() {
+    _root="$1"
+    find "$_root" -name 'index.md' -not -path '*/archive/*' -not -path '*/.worktrees/*' 2>/dev/null | while read -r _idx; do
+        _dir=$(dirname "$_idx")
+        _relidx=$(printf '%s' "$_idx" | sed "s|^$_root/||")
+        for _f in "$_dir"/*.md; do
+            [ -f "$_f" ] || continue
+            _base=$(basename "$_f")
+            [ "$_base" = "index.md" ] && continue
+            printf '%s' "$_f" | grep -q '/archive/' && continue
+            grep -q "$_base" "$_idx" || \
+                printf 'WARNING|IDX|%s:0|file not indexed: %s\n' "$_relidx" "$_base"
+        done
+    done
+}
+_check_dir() {
+    _root="$1"
+    _arch="$_root/design/architecture.md"
+    [ -f "$_arch" ] || return 0
+    _tree_dirs=$(grep -E '^[├└]── ' "$_arch" | grep -oE '[├└]── [a-zA-Z_][a-zA-Z0-9_.-]*/' | sed 's/[├└]── //; s|/$||')
+    printf '%s\n' "$_tree_dirs" | while read -r _d; do
+        [ -z "$_d" ] && continue
+        case "$_d" in .*|_agent) continue ;; esac
+        [ -d "$_root/$_d" ] || \
+            printf 'WARNING|DIR|design/architecture.md:0|directory in tree but not found: %s/\n' "$_d"
+    done
+}
+
+_check_ref() {
+    _root="$1"
+    find "$_root" -name '*.md' -not -path '*/archive/*' -not -path '*/.worktrees/*' | while read -r _file; do
+        _rel="${_file#$_root/}"
+        _src=$(_layer_of "$_rel")
+        case "$_src" in other|code) continue ;; esac
+        grep -nE '`[^`]+`' "$_file" 2>/dev/null | \
+        while IFS=: read -r _lnum _content; do
+            case "$_content" in context:*) continue ;; esac
+            printf '%s\n' "$_content" | grep -oE '`[^`]+\.md(#[^`]*)?`' | \
+            while read -r _token; do
+                case "$_token" in *://*) continue ;; esac
+                _ref="${_token#\`}"; _ref="${_ref%\`}"
+                case "$_ref" in \#*) continue ;; esac
+                case "$_ref" in *'*'*|*'<'*|*'$'*|*'{'*) continue ;; esac
+                _fpath="${_ref%%#*}"
+                _ref_illegal "$_src" "$_fpath" && \
+                    printf 'ERROR|REF|%s:%s|illegal ref direction (%s -> %s): `%s`\n' \
+                        "$_rel" "$_lnum" "$_src" "$(_layer_of "$_fpath")" "$_ref"
+            done
+        done
+    done
+}
+
+_check_ref_intra() {
+    _root="$1"
+    _ephemeral_prefixes="$_garden_ephemeral_dirs"
+    for _src_dir in design engineering; do
+        [ -d "$_root/$_src_dir" ] || continue
+        find "$_root/$_src_dir" -name '*.md' -not -path '*/archive/*' -not -path '*/.worktrees/*' | \
+        while read -r _file; do
+            _rel="${_file#$_root/}"
+            grep -nE '`[^`]+`|\[[^]]+\]\([^)]+\)' "$_file" 2>/dev/null | \
+            while IFS=: read -r _lnum _content; do
+                # collect backtick refs
+                printf '%s\n' "$_content" | grep -oE '`[^`]+`' | sed 's/`//g' | \
+                while read -r _ref; do
+                    case "$_ref" in *://*) continue ;; esac
+                    case "$_ref" in *'*'*|*'<'*|*'$'*|*'{'*) continue ;; esac
+                    _fpath="${_ref%%#*}"
+                    case "$_fpath" in */archive/*) continue ;; esac
+                    for _pfx in $_ephemeral_prefixes; do
+                        case "$_fpath" in "$_pfx"*)
+                            printf 'ERROR|REF-INTRA|%s:%s|design/engineering file references ephemeral layer: %s\n' \
+                                "$_rel" "$_lnum" "$_fpath"
+                            break ;;
+                        esac
+                    done
+                done
+                # collect markdown link refs [text](path)
+                printf '%s\n' "$_content" | grep -oE '\[[^]]+\]\([^)]+\)' | \
+                grep -oE '\([^)]+\)' | sed 's/[()]//g' | \
+                while read -r _ref; do
+                    case "$_ref" in *://*) continue ;; esac
+                    case "$_ref" in *'*'*|*'<'*|*'$'*|*'{'*) continue ;; esac
+                    _fpath="${_ref%%#*}"
+                    case "$_fpath" in */archive/*) continue ;; esac
+                    for _pfx in $_ephemeral_prefixes; do
+                        case "$_fpath" in "$_pfx"*)
+                            printf 'ERROR|REF-INTRA|%s:%s|design/engineering file references ephemeral layer: %s\n' \
+                                "$_rel" "$_lnum" "$_fpath"
+                            break ;;
+                        esac
+                    done
+                done
+            done
+        done
+    done
+}
+
+_check_cfg() {
+    _root="$1"
+    [ -f "$_cfg_root/openplan.jsonc" ] || return 0
+    _docs=$(cd "$_cfg_root" && op_jsonc_val '.repos.docs' '')
+    _code=$(cd "$_cfg_root" && op_jsonc_val '.repos.code' '')
+    [ -n "$_docs" ] && [ ! -d "$_docs" ] && \
+        printf 'WARNING|CFG|openplan.jsonc:0|repos.docs path does not exist: %s\n' "$_docs"
+    [ -n "$_code" ] && [ ! -d "$_code" ] && \
+        printf 'WARNING|CFG|openplan.jsonc:0|repos.code path does not exist: %s\n' "$_code"
+}
+
+_check_sha_drift() {
+    _root="$1"
+    _docs_layer_prefixes="$_garden_doc_dirs $_garden_ephemeral_dirs"
+    find "$_root" -name '*.md' -not -path '*/archive/*' -not -path '*/.worktrees/*' | while read -r _file; do
+        _rel="${_file#$_root/}"
+        grep -nE '`[^`]+`[[:space:]]*@[0-9a-fA-F]{7,12}[^0-9a-fA-F]|`[^`]+`[[:space:]]*@[0-9a-fA-F]{7,12}$' \
+            "$_file" 2>/dev/null | \
+        while IFS=: read -r _lnum _content; do
+            # extract all `path`@sha pairs from line
+            printf '%s\n' "$_content" | grep -oE '`[^`]+`[[:space:]]*@[0-9a-fA-F]{7,12}' | \
+            while read -r _token; do
+                _tpath=$(printf '%s' "$_token" | sed 's/`//g; s/[[:space:]]*@[0-9a-fA-F]*//')
+                _sha=$(printf '%s' "$_token" | grep -oE '@[0-9a-fA-F]{7,12}' | tr -d '@')
+                case "$_tpath" in *'*'*|*'<'*|*'$'*|*'{'*) continue ;; esac
+                # determine repo
+                _use_docs=0
+                for _pfx in $_docs_layer_prefixes; do
+                    case "$_tpath" in "$_pfx"*) _use_docs=1; break ;; esac
+                done
+                if [ "$_use_docs" = "1" ]; then
+                    if [ -z "${OPENPLAN_DOCS_REPO:-}" ]; then
+                        printf 'INFO|SHA-DRIFT|%s:%s|drift: `%s` @%s (repo unset, cannot calculate)\n' \
+                            "$_rel" "$_lnum" "$_tpath" "$_sha"
+                        continue
+                    fi
+                    _repo="${OPENPLAN_DOCS_REPO}"
+                else
+                    if [ -z "${OPENPLAN_CODE_REPO:-}" ]; then
+                        printf 'INFO|SHA-DRIFT|%s:%s|drift: `%s` @%s (repo unset, cannot calculate)\n' \
+                            "$_rel" "$_lnum" "$_tpath" "$_sha"
+                        continue
+                    fi
+                    _repo="${OPENPLAN_CODE_REPO}"
+                fi
+                # check SHA reachability
+                if ! git -C "$_repo" cat-file -e "${_sha}^{commit}" 2>/dev/null; then
+                    printf 'ERROR|SHA-DRIFT|%s:%s|drift: `%s` @%s (unknown SHA)\n' \
+                        "$_rel" "$_lnum" "$_tpath" "$_sha"
+                    continue
+                fi
+                _drift=$(git -C "$_repo" log --oneline "${_sha}..HEAD" -- "$_tpath" 2>/dev/null | wc -l | tr -d ' ')
+                [ "$_drift" = "0" ] && continue
+                printf 'WARNING|SHA-DRIFT|%s:%s|drift: `%s` @%s (HEAD +%s commits)\n' \
+                    "$_rel" "$_lnum" "$_tpath" "$_sha" "$_drift"
+            done
+        done
+    done
+}
+
+_check_orphan() {
+    _root="$1"
+
+    # Suppress ORPHAN in empty repos: if design/ and research/ have no
+    # content .md files, no meaningful reference graph exists yet.
+    _design_count=$(find "$_root/design" -name '*.md' ! -name 'index.md' ! -name 'architecture.md' 2>/dev/null | wc -l | tr -d ' ')
+    _research_count=$(find "$_root/research" -name '*.md' ! -path '*/archive/*' ! -name 'index.md' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_design_count" = "0" ] && [ "$_research_count" = "0" ]; then
+        return 0
+    fi
+
+    # Collect all backtick .md references across both repos into a temp file
+    _refs_tmp=$(mktemp)
+    _collect_refs() {
+        _r="$1"
+        find "$_r" -name '*.md' -not -path '*/.worktrees/*' 2>/dev/null | while read -r _f; do
+            grep -oE '`[^`]+\.md(#[^`]*)?`' "$_f" 2>/dev/null | \
+            sed "s/\`//g; s/#.*//"
+        done
+    }
+    _collect_refs "$_root" >> "$_refs_tmp"
+    if [ -n "${OPENPLAN_CODE_REPO:-}" ] && [ -d "$OPENPLAN_CODE_REPO" ]; then
+        find "$OPENPLAN_CODE_REPO/openspec" -name '*.md' 2>/dev/null | while read -r _f; do
+            grep -oE '`[^`]+\.md(#[^`]*)?`' "$_f" 2>/dev/null | \
+            sed "s/\`//g; s/#.*//"
+        done >> "$_refs_tmp"
+    fi
+
+    # Scan docs repo .md files; check each against exclusion rules and ref set
+    find "$_root" -name '*.md' -not -path '*/.worktrees/*' | while read -r _file; do
+        _rel="${_file#$_root/}"
+        _base=$(basename "$_rel")
+        # Exclusion rules
+        case "$_rel" in .worktrees/*) continue ;; esac
+        case "$_base" in index.md) continue ;; esac
+        case "$_base" in RULES.md|AGENTS.md|ENTRYPOINTS.md|CLAUDE.md|MEMORY.md) continue ;; esac
+        case "$_base" in QUICKSTART.md|ci.md) continue ;; esac
+        case "$_rel" in */archive/*|archive/*) continue ;; esac
+        case "$_rel" in _agent/state/*) ;; */_agent/*|_agent/*) continue ;; esac
+        case "$_rel" in _templates/*) continue ;; esac
+        case "$_rel" in openspec/*) continue ;; esac
+
+        # Check if _rel or basename (when unique) appears in refs
+        _found=false
+        if grep -qxF "$_rel" "$_refs_tmp" 2>/dev/null; then
+            _found=true
+        else
+            # basename-only match: count how many files share this basename
+            _bcount=$(find "$_root" -name "$_base" | wc -l)
+            if [ "$_bcount" = "1" ]; then
+                grep -qxF "$_base" "$_refs_tmp" 2>/dev/null && _found=true
+            fi
+        fi
+        $_found || printf 'WARNING|ORPHAN|%s:0|orphan: no incoming references\n' "$_rel"
+    done
+
+    # Also scan openspec/ in code repo as orphan candidates
+    if [ -n "${OPENPLAN_CODE_REPO:-}" ] && [ -d "$OPENPLAN_CODE_REPO/openspec" ]; then
+        find "$OPENPLAN_CODE_REPO/openspec" -name '*.md' | while read -r _file; do
+            _rel="${_file#$OPENPLAN_CODE_REPO/}"
+            _base=$(basename "$_rel")
+            case "$_base" in index.md) continue ;; esac
+            case "$_rel" in */archive/*|archive/*) continue ;; esac
+            _found=false
+            if grep -qxF "$_rel" "$_refs_tmp" 2>/dev/null; then
+                _found=true
+            else
+                _bcount=$(find "$OPENPLAN_CODE_REPO/openspec" -name "$_base" | wc -l)
+                if [ "$_bcount" = "1" ]; then
+                    grep -qxF "$_base" "$_refs_tmp" 2>/dev/null && _found=true
+                fi
+            fi
+            $_found || printf 'WARNING|ORPHAN|%s:0|orphan: no incoming references\n' "$_rel"
+        done
+    fi
+    rm -f "$_refs_tmp"
+}
+
+_check_dc_archive() {
+    _root="$1"
+    for _dir in research review; do
+        [ -d "$_root/$_dir/archive" ] || continue
+        for _f in "$_root/$_dir"/*.md; do
+            [ -f "$_f" ] || continue
+            _base=$(basename "$_f")
+            case "$_base" in index.md) continue ;; esac
+            [ -f "$_root/$_dir/archive/$_base" ] && \
+                printf 'WARNING|DC-ARCHIVE|%s/%s:0|file co-exists with %s/archive/%s — original should have been archived\n' \
+                    "$_dir" "$_base" "$_dir" "$_base"
+        done
+    done
+}
+
+_check_dc_adr() {
+    _root="$1"
+    [ -d "$_root/decisions" ] || return 0
+    _des_count=0
+    for _f in "$_root"/design/*.md; do
+        [ -f "$_f" ] || continue
+        _b=$(basename "$_f")
+        case "$_b" in index.md|architecture.md) continue ;; esac
+        _des_count=$((_des_count + 1))
+    done
+    [ "$_des_count" -gt 0 ] || return 0
+    # Check decisions/ has at least one .md file
+    for _f in "$_root"/decisions/*.md; do
+        [ -f "$_f" ] && return 0
+    done
+    printf 'WARNING|DC-ADR|design/:0|%d design file(s) exist but decisions/ has no ADR\n' "$_des_count"
+}
+
+_CHECKS="_check_dc1 _check_dc3 _check_dc4 _check_dc_eng _check_dc_conv _check_dc_des _check_idx _check_dir _check_ref _check_ref_intra _check_cfg _check_sha_drift _check_orphan _check_dc_archive _check_dc_adr"
+
+_DISPATCH="$SCRIPT_DIR/../lib/garden-dispatch.sh"
+
+_run_custom_checks() {
+    [ -x "$_DISPATCH" ] || return 0
+    "$_DISPATCH" "$1" >> "$2" 2>&1 || true
+}
+
+# --- report rendering ---
+
+_report_markdown() {
+    _root="$1"; _results="$2"
+    printf '# openplan-garden report\n\nScanned: %s\n\n' "$_root"
+    _has_rows=0
+    if [ -s "$_results" ]; then
+        printf '| Severity | Check | File | Message |\n'
+        printf '|----------|-------|------|----------|\n'
+        while IFS='|' read -r _sev _chk _loc _msg; do
+            printf '| %-8s | %-5s | %s | %s |\n' "$_sev" "$_chk" "$_loc" "$_msg"
+            _has_rows=1
+        done < "$_results"
+    fi
+    _nerr=0; _nwarn=0; _ninfo=0
+    if [ -s "$_results" ]; then
+        _nerr=$(grep -c '^ERROR|' "$_results" 2>/dev/null || true)
+        _nwarn=$(grep -c '^WARNING|' "$_results" 2>/dev/null || true)
+        _ninfo=$(grep -c '^INFO|' "$_results" 2>/dev/null || true)
+    fi
+    printf '\nSummary: %s ERROR, %s WARNING, %s INFO\n' \
+        "${_nerr:-0}" "${_nwarn:-0}" "${_ninfo:-0}"
+}
+
+_report_json() {
+    _root="$1"; _results="$2"
+    _ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    _nerr=0; _nwarn=0; _ninfo=0
+    _entries=""
+    if [ -s "$_results" ]; then
+        _nerr=$(grep -c '^ERROR|' "$_results" 2>/dev/null || true)
+        _nwarn=$(grep -c '^WARNING|' "$_results" 2>/dev/null || true)
+        _ninfo=$(grep -c '^INFO|' "$_results" 2>/dev/null || true)
+        _first=1
+        while IFS='|' read -r _sev _chk _loc _msg; do
+            _file=$(printf '%s' "$_loc" | sed 's/:.*//')
+            _line=$(printf '%s' "$_loc" | grep -oE ':[0-9]+$' | tr -d ':')
+            [ -z "$_line" ] && _line=0
+            _esc_msg=$(printf '%s' "$_msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            if [ "$_chk" = "SHA-DRIFT" ]; then
+                _pinned=$(printf '%s' "$_msg" | grep -oE '@[0-9a-fA-F]{7,12}' | head -1 | tr -d '@')
+                _dc=$(printf '%s' "$_msg" | grep -oE 'HEAD \+[0-9]+' | grep -oE '[0-9]+')
+                [ -z "$_dc" ] && _dc='"unknown"'
+                _entry=$(printf '{"id":"%s","severity":"%s","file":"%s","line":%s,"message":"%s","pinned_sha":"%s","drift_commits":%s}' \
+                    "$_chk" "$_sev" "$_file" "$_line" "$_esc_msg" "$_pinned" "$_dc")
+            else
+                _entry=$(printf '{"id":"%s","severity":"%s","file":"%s","line":%s,"message":"%s"}' \
+                    "$_chk" "$_sev" "$_file" "$_line" "$_esc_msg")
+            fi
+            if [ "$_first" = "1" ]; then
+                _entries="$_entry"; _first=0
+            else
+                _entries="$_entries,$_entry"
+            fi
+        done < "$_results"
+    fi
+    printf '{\n  "timestamp": "%s",\n  "repo": "%s",\n  "checks": [%s],\n  "summary": {"error": %s, "warning": %s, "info": %s}\n}\n' \
+        "$_ts" "$_root" "${_entries:-}" \
+        "${_nerr:-0}" "${_nwarn:-0}" "${_ninfo:-0}"
+}
+
+# --- arg parsing ---
+_docs_consistency=0
+_json=0
+_fix=0
+_commit=0
+_path=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --docs-consistency) _docs_consistency=1; shift ;;
+        --json) _json=1; shift ;;
+        --fix) _fix=1; shift ;;
+        --commit) _commit=1; shift ;;
+        -*) usage ;;
+        *) _path="$1"; shift ;;
+    esac
+done
+
+[ "$_docs_consistency" = "0" ] && usage
+
+if [ "$_commit" = "1" ] && [ "$_fix" = "0" ]; then
+    printf '%s\n' '--commit requires --fix' >&2
+    exit 2
+fi
+
+# Resolve repo root
+if [ -z "$_path" ]; then
+    _path="${OPENPLAN_DOCS_REPO:-$(op_jsonc_val '.repos.docs' '.')}"
+    [ -z "$_path" ] && _path="."
+fi
+_root=$(cd "$_path" && pwd)
+
+# --- run checks ---
+_results=$(mktemp)
+for _fn in $_CHECKS; do
+    "$_fn" "$_root" >> "$_results" 2>/dev/null || true
+done
+_run_custom_checks "$_root" "$_results"
+
+# --- auto-fix ---
+if [ "$_fix" = "1" ]; then
+    # Collect files to fix: DC1 broken refs with git mv history, DC4 missing sections
+    _fix_files=$(mktemp)
+
+    # F1: DC1 broken refs where git history contains a rename record
+    grep '^WARNING|DC1|' "$_results" 2>/dev/null | while IFS='|' read -r _sev _chk _loc _msg; do
+        _old_fpath=$(printf '%s\n' "$_msg" | grep -oE '`[^`]+`' | head -1 | tr -d '`')
+        [ -z "$_old_fpath" ] && continue
+        _old_fpath="${_old_fpath%%#*}"
+        # find rename record: locate delete commit for old path, inspect its rename lines
+        _del_sha=$(git -C "$_root" log --diff-filter=D --format='%H' -- "$_old_fpath" 2>/dev/null | head -1)
+        [ -z "$_del_sha" ] && continue
+        _new_path=$(git -C "$_root" diff-tree -M --diff-filter=R --name-status -r "$_del_sha" 2>/dev/null \
+            | grep "	${_old_fpath}	" | awk '{print $3}')
+        [ -z "$_new_path" ] && continue
+        # source file that contains the broken ref
+        _src_file=$(printf '%s' "$_loc" | sed 's/:.*//')
+        printf 'F1\t%s\t%s\t%s\n' "$_src_file" "$_old_fpath" "$_new_path" >> "$_fix_files"
+    done
+
+    # F2: DC4 missing sections
+    grep '^WARNING|DC4|' "$_results" 2>/dev/null | while IFS='|' read -r _sev _chk _loc _msg; do
+        _file=$(printf '%s' "$_loc" | sed 's/:.*//')
+        _sec=$(printf '%s\n' "$_msg" | sed 's/.*missing required section: ## //' | sed 's/ (from template.*//')
+        [ -z "$_sec" ] && continue
+        printf 'F2\t%s\t%s\n' "$_file" "$_sec" >> "$_fix_files"
+    done
+
+    # count distinct files to modify
+    _fix_count=0
+    if [ -s "$_fix_files" ]; then
+        _fix_count=$(awk -F'\t' '{print $2}' "$_fix_files" | sort -u | wc -l | tr -d ' ')
+    fi
+
+    if [ "$_fix_count" -gt 20 ]; then
+        printf 'ERROR: --fix would modify %s files (limit 20). Review manually or run in smaller scopes.\n' "$_fix_count" >&2
+        rm -f "$_fix_files" "$_results"
+        exit 2
+    fi
+
+    if [ "$_fix_count" = "0" ]; then
+        printf 'nothing to fix\n'
+    else
+        _fixed=0
+        _BT='`'
+        while IFS='	' read -r _ftype _src _arg1 _arg2; do
+            case "$_ftype" in
+                F1)
+                    _abs="$_root/$_src"
+                    [ -f "$_abs" ] || continue
+                    _esc_old=$(printf '%s' "$_arg1" | sed 's/[.[\*^$&|]/\\&/g')
+                    _esc_new=$(printf '%s' "$_arg2" | sed 's/[&\\]/\\&/g')
+                    sed -i "s|${_BT}${_esc_old}|${_BT}${_esc_new}|g" "$_abs"
+                    git -C "$_root" add "$_src" 2>/dev/null || true
+                    _fixed=$((_fixed + 1))
+                    printf 'fixed: %s -> %s in %s\n' "$_arg1" "$_arg2" "$_src"
+                    ;;
+                F2)
+                    _abs="$_root/$_src"
+                    [ -f "$_abs" ] || continue
+                    printf '\n## %s\n\n' "$_arg1" >> "$_abs"
+                    git -C "$_root" add "$_src" 2>/dev/null || true
+                    _fixed=$((_fixed + 1))
+                    printf 'fixed: appended ## %s to %s\n' "$_arg1" "$_src"
+                    ;;
+            esac
+        done < "$_fix_files"
+        printf 'staged %s fix(es)\n' "$_fixed"
+
+        if [ "$_commit" = "1" ] && [ "$_fixed" -gt 0 ]; then
+            _ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+            _commit_sha=$(GIT_AUTHOR_NAME=openplan-garden \
+                GIT_AUTHOR_EMAIL=openplan-garden@openplan.local \
+                git -C "$_root" commit -m "GARDEN: auto-fix $_ts" 2>/dev/null) || true
+            _sha=$(git -C "$_root" rev-parse HEAD 2>/dev/null || true)
+            if [ -n "$_sha" ]; then
+                git -C "$_root" notes --ref=refs/notes/dispatch append -m "GARDEN: auto-fix $_sha" "$_sha" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    rm -f "$_fix_files"
+
+    # re-run checks to get fresh results after fixes
+    : > "$_results"
+    for _fn in $_CHECKS; do
+        "$_fn" "$_root" >> "$_results" 2>/dev/null || true
+    done
+    _run_custom_checks "$_root" "$_results"
+fi
+
+# --- render report ---
+if [ "$_json" = "1" ]; then
+    _report_json "$_root" "$_results"
+else
+    _report_markdown "$_root" "$_results"
+fi
+
+# --- exit code ---
+_exit=0
+if [ -s "$_results" ]; then
+    grep -q '^ERROR|' "$_results" 2>/dev/null && _exit=2
+    [ "$_exit" = "0" ] && grep -q '^WARNING|' "$_results" 2>/dev/null && _exit=1
+fi
+rm -f "$_results"
+exit "$_exit"

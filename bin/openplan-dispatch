@@ -1,0 +1,1837 @@
+#!/usr/bin/env bash
+# Dispatcher CLI: validate, start session, export env, spawn subprocess
+set -e
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+_lib="$SCRIPT_DIR/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT:?OPENPLAN_ROOT not set}/hooks/lib/common.sh"
+. "$_lib"
+
+VALID_ROLES="implementer spec-writer researcher reviewer doc-writer advisor gardener"
+LOCK_DIR="_agent/dispatch.lock"
+SIGNAL_FILE="_agent/dispatch.signal"
+_log_git_dir=$(git rev-parse --git-dir 2>/dev/null || echo .git)
+DISPATCH_LOG="${_log_git_dir}/openplan/logs/dispatch-$(date +%Y%m%d).log"
+
+_log() {
+    mkdir -p "$(dirname "$DISPATCH_LOG")" 2>/dev/null || true
+    _msg=$(printf -- "$@")
+    printf '%s [dispatch] %s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_msg" | tee -a "$DISPATCH_LOG" >&2 2>/dev/null
+}
+
+# _consume_task_signal <task_id>
+# Returns 0 if signal found and consumed, 1 otherwise.
+# Outputs: "<task_id> <sha>" on stdout if found.
+_consume_task_signal() {
+    _cts_tid="$1"
+    _cts_per_task="_agent/signals/${_cts_tid}.signal"
+    _cts_legacy="_agent/dispatch.signal"
+
+    if [ -f "$_cts_per_task" ]; then
+        cat "$_cts_per_task"
+        rm -f "$_cts_per_task"
+        return 0
+    fi
+
+    if [ -f "$_cts_legacy" ]; then
+        _cts_content=$(cat "$_cts_legacy")
+        _cts_sig_tid=$(printf '%s' "$_cts_content" | awk '{print $1}')
+        if [ "$_cts_sig_tid" = "$_cts_tid" ]; then
+            printf '%s\n' "$_cts_content"
+            rm -f "$_cts_legacy"
+            return 0
+        fi
+        return 1
+    fi
+
+    return 1
+}
+
+_worker_exit() {
+    if [ -n "${_session_id:-}" ]; then
+        _gd="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+        _cnt_file="${_gd}/OPENPLAN_HOTFIX_COUNT_${_session_id}"
+        if [ -f "$_cnt_file" ]; then
+            _cnt=$(wc -l < "$_cnt_file" | tr -d ' ')
+            _threshold=$(op_jsonc_val '.ci.hotfix_warn_threshold' '3')
+            [ "$_cnt" -ge "$_threshold" ] && \
+                _log 'WARNING: %d HOTFIX commits in session %s (threshold: %s)\n' "$_cnt" "$_session_id" "$_threshold"
+            rm -f "$_cnt_file"
+        fi
+        "$SCRIPT_DIR/openplan-session" end "$_session_id" --commit "$(git rev-parse --short HEAD 2>/dev/null)" 2>/dev/null || true
+    fi
+}
+
+_harvest_worker() {
+    _hw_pid="$1"
+    _hw_task="${_task_by_pid[$_hw_pid]}"
+    unset '_task_by_pid[$_hw_pid]'
+    _log 'worker finished: %s (pid=%s)\n' "$_hw_task" "$_hw_pid"
+}
+
+usage() {
+    printf 'Usage: openplan-dispatch [--watch] [--init] <role> <task-id|auto> [feature-name]\n' >&2
+    printf '       openplan-dispatch --align <feature-name>\n' >&2
+    printf '       openplan-dispatch --prompt <role> "<prompt_text>" <feature>\n' >&2
+    printf '       openplan-dispatch --align-round <feature> <N> [feedback]\n' >&2
+    exit 1
+}
+
+_cleanup_wt=""
+_cleanup_wt_name=""
+_cleanup_repo=""
+_oc_home=""
+_saved_author="${GIT_AUTHOR_NAME:-}"
+
+cleanup() {
+    # Parallel workers emergency cleanup
+    for _wf in _agent/workers/*/pid; do
+        [ -f "$_wf" ] || continue
+        kill "$(cat "$_wf")" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+    for _sf in _agent/workers/*/serve_port; do
+        [ -f "$_sf" ] || continue
+        fuser -k "$(cat "$_sf")/tcp" 2>/dev/null || true
+    done
+    for _oh in _agent/workers/*/oc_home; do
+        [ -f "$_oh" ] || continue
+        rm -rf "$(cat "$_oh")" 2>/dev/null || true
+    done
+    for _wn in _agent/workers/*/wt_name; do
+        [ -f "$_wn" ] || continue
+        _wd=$(dirname "$_wn")
+        _wt_n=$(cat "$_wn")
+        _wt_r=$(cat "$_wd/wt_repo" 2>/dev/null || echo "")
+        if [ -n "$_wt_r" ]; then _wt_p="$_wt_r/.worktrees/$_wt_n"
+        else _wt_p="$(op_jsonc_val '.git.worktree_dir' '.worktrees')/$_wt_n"; fi
+        [ -d "$_wt_p" ] || continue
+        for _rtd in signals workers dispatch.lock results sessions flags; do
+            rm -rf "$_wt_p/_agent/$_rtd" 2>/dev/null || true
+        done
+        if git -C "$_wt_p" diff --quiet -- . ':(exclude)_agent/' 2>/dev/null && \
+           git -C "$_wt_p" diff --cached --quiet -- . ':(exclude)_agent/' 2>/dev/null; then
+            if [ -n "$_wt_r" ]; then
+                git -C "$_wt_r" worktree unlock "$_wt_p" 2>/dev/null || true
+                git -C "$_wt_r" worktree remove "$_wt_p" --force 2>/dev/null || true
+            else
+                git worktree unlock "$_wt_p" 2>/dev/null || true
+                git worktree remove "$_wt_p" --force 2>/dev/null || true
+            fi
+        fi
+    done
+    rm -rf _agent/workers/ 2>/dev/null || true
+    rm -rf _agent/results/ 2>/dev/null || true
+    if [ -n "${_session_id:-}" ]; then
+        _gd="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+        _cnt_file="${_gd}/OPENPLAN_HOTFIX_COUNT_${_session_id}"
+        if [ -f "$_cnt_file" ]; then
+            _cnt=$(wc -l < "$_cnt_file" | tr -d ' ')
+            _threshold=$(op_jsonc_val '.ci.hotfix_warn_threshold' '3')
+            if [ "$_cnt" -ge "$_threshold" ]; then
+                _log 'WARNING: %d HOTFIX commits in session %s (threshold: %s). Consider creating proper tasks.\n' \
+                    "$_cnt" "$_session_id" "$_threshold"
+            fi
+            rm -f "$_cnt_file"
+        fi
+    fi
+    if [ -n "$_cleanup_wt" ] && [ -d "$_cleanup_wt" ]; then
+        # Remove transient _agent/ state but preserve gardener reports
+        find "$_cleanup_wt/_agent" -mindepth 1 -maxdepth 1 ! -name 'gardener' -exec rm -rf {} + 2>/dev/null || true
+        _preserve=false
+        if ! git -C "$_cleanup_wt" diff --quiet -- . ':(exclude)_agent/' 2>/dev/null || \
+           ! git -C "$_cleanup_wt" diff --cached --quiet -- . ':(exclude)_agent/' 2>/dev/null; then
+            _log 'WARNING: worktree %s has uncommitted changes, preserving\n' "$_cleanup_wt"
+            _preserve=true
+        fi
+        # F77: also preserve if worktree has unmerged commits
+        if ! $_preserve; then
+            _wt_head=$(git -C "$_cleanup_wt" rev-parse HEAD 2>/dev/null) || _wt_head=""
+            if [ -n "$_cleanup_repo" ]; then
+                _parent_head=$(git -C "$_cleanup_repo" rev-parse HEAD 2>/dev/null) || _parent_head=""
+            else
+                _parent_head=$(git rev-parse HEAD 2>/dev/null) || _parent_head=""
+            fi
+            if [ -n "$_wt_head" ] && [ -n "$_parent_head" ] && \
+               ! git merge-base --is-ancestor "$_wt_head" "$_parent_head" 2>/dev/null; then
+                _log 'WARNING: worktree %s has unmerged commits, preserving for manual merge\n' "$_cleanup_wt"
+                _preserve=true
+            fi
+        fi
+        if $_preserve; then
+            if [ -n "$_cleanup_repo" ]; then
+                git -C "$_cleanup_repo" worktree unlock "$_cleanup_wt" 2>/dev/null || true
+            else
+                git worktree unlock "$_cleanup_wt" 2>/dev/null || true
+            fi
+        else
+            if [ -n "$_cleanup_repo" ]; then
+                git -C "$_cleanup_repo" worktree unlock "$_cleanup_wt" 2>/dev/null || true
+                git -C "$_cleanup_repo" worktree remove "$_cleanup_wt" 2>/dev/null || true
+            else
+                git worktree unlock "$_cleanup_wt" 2>/dev/null || true
+                git worktree remove "$_cleanup_wt" 2>/dev/null || true
+            fi
+        fi
+    fi
+    export GIT_AUTHOR_NAME="$_saved_author"
+    if [ -f "${_oc_home:-}/serve.pid" ]; then
+        _sp=$(cat "$_oc_home/serve.pid" 2>/dev/null) || _sp=""
+        if [ -n "$_sp" ] && kill -0 "$_sp" 2>/dev/null; then
+            kill "$_sp" 2>/dev/null; wait "$_sp" 2>/dev/null || true
+        fi
+    fi
+    rm -rf "${_oc_home:-}" 2>/dev/null || true
+    type backend_cleanup &>/dev/null && backend_cleanup 2>/dev/null || true
+    _log 'dispatch end: role=%s task=%s\n' "${role:-}" "${task_id:-}"
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    if [ -n "${_session_id:-}" ]; then
+        "$SCRIPT_DIR/openplan-session" end "$_session_id" --commit "$(git rev-parse --short HEAD 2>/dev/null)" 2>/dev/null || true
+    fi
+}
+
+# Parse --watch flag
+_watch=false
+if [ "${1:-}" = "--watch" ]; then
+    _watch=true; shift
+fi
+
+# Parse --init flag
+_init=false
+if [ "${1:-}" = "--init" ]; then
+    _init=true; shift
+fi
+
+# Parse --align flag
+_align=false
+_align_feature=""
+if [ "${1:-}" = "--align" ]; then
+    _align=true; shift
+    _align_feature="${1:-}"
+    [ -n "$_align_feature" ] || { printf 'Error: --align requires feature name\n' >&2; exit 1; }
+    shift
+    role="advisor"; task_id="auto"; feature="$_align_feature"
+fi
+
+# Parse --prompt flag
+_prompt_mode=false
+_prompt_text=""
+if [ "${1:-}" = "--prompt" ]; then
+    _prompt_mode=true; shift
+    role="${1:?'--prompt requires role'}"; shift
+    if [ "$role" = "gardener" ]; then
+        _prompt_text="${1:-Run full SEM-1 through SEM-11 check}"; shift
+    else
+        _prompt_text="${1:?'--prompt requires prompt text'}"; shift
+    fi
+    feature="${1:-}"
+fi
+
+# Parse --align-round flag
+_align_round=false
+_ar_feature=""
+_ar_round=""
+_ar_feedback=""
+if [ "${1:-}" = "--align-round" ]; then
+    _align_round=true; shift
+    case "${1:-}" in --*) printf 'Error: --align-round requires feature (got flag: %s)\n' "${1:-}" >&2; exit 1 ;; esac
+    _ar_feature="${1:?'--align-round requires feature'}"; shift
+    _ar_round="${1:?'--align-round requires round number N'}"; shift
+    _ar_feedback="${1:-}"; [ $# -gt 0 ] && shift
+    role="advisor"; task_id="auto"; feature="$_ar_feature"
+fi
+
+# Mutual exclusion
+_mode_count=0
+$_align && _mode_count=$((_mode_count + 1))
+$_align_round && _mode_count=$((_mode_count + 1))
+$_watch && _mode_count=$((_mode_count + 1))
+$_init && _mode_count=$((_mode_count + 1))
+$_prompt_mode && _mode_count=$((_mode_count + 1))
+if [ "$_mode_count" -gt 1 ]; then
+    printf 'Error: --watch, --align, --align-round, --init, and --prompt are mutually exclusive\n' >&2; exit 1
+fi
+
+if ! $_align && ! $_align_round && ! $_prompt_mode; then
+    [ $# -ge 2 ] || usage
+    role="$1"; task_id="$2"; feature="${3:-}"
+fi
+
+# Validate role
+_valid=false
+for _r in $VALID_ROLES; do [ "$role" = "$_r" ] && _valid=true; done
+$_valid || { printf 'Error: invalid role: %s\n' "$role" >&2; exit 1; }
+
+# Per-worktree lock for --prompt mode (D9): multiple prompts can run in parallel
+if $_prompt_mode; then
+    LOCK_DIR="_agent/dispatch-${role}-${feature:-nofeat}-$$.lock"
+fi
+
+# Resolve feature from branch if not provided
+if [ -z "$feature" ]; then
+    _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    feature=$(printf '%s' "$_branch" | sed 's|.*/||')
+fi
+[ -n "$feature" ] || { echo "Error: cannot resolve feature name" >&2; exit 1; }
+
+# --init: create openspec skeleton if tasks.md doesn't exist
+tasks_file="openspec/changes/${feature}/tasks.md"
+if $_init; then
+    if ! git show HEAD:"$tasks_file" >/dev/null 2>&1; then
+        rm -f "$tasks_file"
+        mkdir -p "openspec/changes/${feature}"
+        cat > "$tasks_file" <<INIT_EOF
+# Tasks: ${feature}
+
+- [ ] T0: research ${feature} algorithms and patterns
+  context: [\`design/\`]
+  depends:
+  role: researcher
+  commit:
+
+- [ ] T1: write design document and ADR
+  context: [\`research/\`, \`design/\`, \`_templates/\`]
+  depends: T0
+  role: doc-writer
+  commit:
+
+- [ ] RG1: docs layer consistency review
+  context: [\`design/\`, \`research/\`, \`decisions/\`]
+  depends: T1
+  role: reviewer
+  commit:
+
+$(if [ -n "${OPENPLAN_DOCS_REPO:-}" ]; then cat <<'DOCS_TASKS'
+- [ ] T2: write phase plans for each major subsystem
+  context: [`design/`, `research/`, `_templates/`]
+  depends: RG1
+  role: doc-writer
+  commit:
+
+- [ ] T3: write engineering implementation specs
+  context: [`design/`, `planning/`, `engineering/`]
+  depends: T2
+  role: doc-writer
+  commit:
+
+- [ ] T4: write project conventions
+  context: [`design/`, `conventions/`, `_templates/`]
+  depends: T3
+  role: doc-writer
+  commit:
+
+- [ ] RG2: full docs completeness review
+  context: [`design/`, `decisions/`, `engineering/`, `planning/`, `conventions/`]
+  depends: T4
+  role: reviewer
+  commit:
+DOCS_TASKS
+else cat <<'CODE_TASKS'
+- [ ] T2: write openspec four-file set
+  context: [`design/`, `research/`]
+  depends: RG1
+  role: spec-writer
+  commit:
+
+- [ ] RG2: spec-docs alignment review
+  context: [`openspec/`, `design/`]
+  depends: T2
+  role: reviewer
+  commit:
+CODE_TASKS
+fi)
+INIT_EOF
+        git add "$tasks_file"
+        OPENPLAN_ROLE=dispatcher OPENPLAN_SPARSE_SKIP=1 GIT_AUTHOR_NAME=openplan-dispatcher GIT_AUTHOR_EMAIL=openplan-dispatcher@openplan.local \
+            git commit -m "$(printf 'D: init openspec skeleton for %s\nrefs: none' "$feature")"
+        printf '[openplan] Created openspec skeleton: %s\n' "$tasks_file"
+    else
+        printf '[openplan] --init: %s already exists, skipping\n' "$tasks_file"
+    fi
+fi
+# Needs-snapshot gate: non-advisor roles require needs-snapshot.md
+if ! $_align && ! $_align_round && ! $_init && ! $_prompt_mode && [ -n "${OPENPLAN_DOCS_REPO:-}" ]; then
+    _needs_file="$OPENPLAN_DOCS_REPO/_agent/state/needs-snapshot.md"
+    if [ ! -f "$_needs_file" ] && [ "$role" != "advisor" ]; then
+        printf 'Error: _agent/state/needs-snapshot.md does not exist\n' >&2
+        printf 'Dispatch advisor first: openplan-dispatch --watch advisor auto %s\n' "$feature" >&2
+        exit 1
+    fi
+fi
+
+if ! $_align && ! $_align_round && ! $_prompt_mode; then
+    # Validate tasks.md exists
+    [ -f "$tasks_file" ] || { printf 'Error: %s not found\n' "$tasks_file" >&2; exit 1; }
+
+    # For non-watch mode, validate task-id is present
+    if ! $_watch; then
+        grep -q "^- \[.\] ${task_id}:" "$tasks_file" || {
+            printf 'Error: %s not found in %s\n' "$task_id" "$tasks_file" >&2; exit 1
+        }
+    fi
+fi
+
+# Cross-repo branch pre-check
+_docs_repo=$(op_jsonc_val '.repos.docs' '')
+if [ -n "$_docs_repo" ] && [ -d "$_docs_repo/.git" ]; then
+    _code_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    _docs_branch=$(git -C "$_docs_repo" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    case "$_docs_branch" in
+        "$_code_branch"|main|master) ;;
+        *) _log 'WARNING: docs repo on branch %s (code: %s)\n' "$_docs_branch" "$_code_branch" ;;
+    esac
+fi
+[ -n "$_docs_repo" ] && export OPENPLAN_DOCS_REPO="$_docs_repo"
+
+# Precondition check (ADR-032) — fail-closed for spec-writer/implementer
+_phase_plan=""
+_docs_plan_repo="${OPENPLAN_DOCS_REPO:-}"
+_gate_role=false
+case "$role" in spec-writer|implementer) _gate_role=true ;; esac
+
+if $_gate_role && [ -z "$_docs_plan_repo" ]; then
+    _log 'ERROR: OPENPLAN_DOCS_REPO not set — cannot verify phase preconditions\n'
+    exit 1
+fi
+
+if [ -n "$_docs_plan_repo" ]; then
+    for _pp in "$_docs_plan_repo"/planning/phase-*.md; do
+        [ -f "$_pp" ] || continue
+        _pp_base=$(basename "$_pp" .md)
+        _pp_id="${_pp_base#phase-}"
+        case "$feature" in *"$_pp_id"*) _phase_plan="$_pp"; break ;; esac
+    done
+fi
+
+if $_gate_role; then
+    if [ -z "$_phase_plan" ]; then
+        _log 'ERROR: no phase plan found for feature "%s" — spec-writer/implementer requires phase plan\n' "$feature"
+        exit 1
+    fi
+    _plan_status=$(sed -n '/^---$/,/^---$/p' "$_phase_plan" | grep '^status:' | cut -d' ' -f2)
+    if [ "${_plan_status:-accepted}" = "draft" ]; then
+        _log 'ERROR: phase plan status is draft — dispatch rejected (D17)\n'
+        _log 'Phase plan: %s\n' "$_phase_plan"
+        exit 1
+    fi
+    _precond=$(sed -n '/^## \([Pp]reconditions\|前置条件\)/,/^## /{//!p;}' "$_phase_plan")
+    if [ -z "$_precond" ]; then
+        _log 'ERROR: phase plan has no precondition section — cannot verify readiness\n'
+        exit 1
+    fi
+    if printf '%s\n' "$_precond" | grep -q '\- \[ \]'; then
+        _log 'ERROR: preconditions incomplete — phase plan contains unchecked items\n'
+        _log 'Phase plan: %s\n' "$_phase_plan"
+        printf '%s\n' "$_precond" | grep '\- \[ \]' | head -5 | sed 's/^/  /' >&2
+        exit 1
+    fi
+fi
+
+# Lockfile
+mkdir -p _agent
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [ -f "$LOCK_DIR/pid" ]; then
+        _lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+        if [ -n "$_lock_pid" ] && kill -0 "$_lock_pid" 2>/dev/null; then
+            printf 'Error: another dispatch is running (PID %s)\n' "$_lock_pid" >&2
+            exit 1
+        fi
+        _log 'WARNING: removing stale lock (PID %s no longer running)\n' "$_lock_pid"
+        rm -rf "$LOCK_DIR"
+        mkdir "$LOCK_DIR" || { echo "Error: cannot acquire lock" >&2; exit 1; }
+    else
+        echo "Error: another dispatch is running (lockfile exists)" >&2; exit 1
+    fi
+fi
+printf '%s\n' "$$" > "$LOCK_DIR/pid"
+trap cleanup EXIT INT TERM HUP
+_log 'dispatch start: role=%s task=%s feature=%s pid=%s\n' "$role" "$task_id" "$feature" "$$"
+
+# Pending HOTFIX scan (non-blocking warning)
+_hotfix_pending=$("$SCRIPT_DIR/openplan-hotfix" 2>/dev/null | head -5) || true
+if [ -n "$_hotfix_pending" ]; then
+    _log 'WARNING: pending HOTFIX commits detected:\n%s\n' "$_hotfix_pending"
+fi
+
+# Probe for orphaned sessions (output on stderr, always exits 0)
+_orphans=$("$SCRIPT_DIR/openplan-recover" --probe 2>&1) || true
+if [ -n "$_orphans" ]; then
+    printf '%s\n' "$_orphans" >&2
+    echo "[dispatch] blocked: orphaned sessions detected, run openplan-recover first" >&2
+    exit 1
+fi
+
+# Cycle detection (skip for --align/--align-round/--prompt which don't use tasks.md)
+if ! $_align && ! $_align_round && ! $_prompt_mode; then
+    op_check_cycles "$tasks_file" || { echo "Error: cycle detected in task dependencies" >&2; exit 1; }
+fi
+
+# Per-role backend routing (Phase 11.7)
+_resolve_backend() {
+    local _role="$1" _rb
+    _rb=$(op_jsonc_val ".roleBackends.${_role}" '')
+    [ -n "$_rb" ] && { echo "$_rb"; return; }
+    op_jsonc_val '.backend' 'opencode'
+}
+
+_CURRENT_CAPABILITIES=""
+
+_source_backend_for_role() {
+    local _role="$1" _be _be_file
+    _be=$(_resolve_backend "$_role")
+    _be_file="$SCRIPT_DIR/../lib/backend-${_be}.sh"
+    if [ ! -f "$_be_file" ]; then
+        _log 'ERROR: unknown backend: %s for role %s (missing %s)\n' "$_be" "$_role" "$_be_file"
+        return 1
+    fi
+    . "$_be_file"
+    _CURRENT_CAPABILITIES=$(backend_capabilities 2>/dev/null || echo '{}')
+}
+
+_check_audit_requirements() {
+    local _role="$1" _ti
+    case "$_role" in
+        implementer)
+            _ti=$(printf '%s' "$_CURRENT_CAPABILITIES" | jq -r '.toolInterception // 0')
+            if [ "$_ti" -lt 1 ] 2>/dev/null; then
+                _log 'WARN: backend for role %s reports toolInterception=%s (required >= 1)\n' "$_role" "$_ti"
+                if ! op_sudo_ask "Implementer routed to backend with toolInterception=$_ti (<1). Allow dispatch without tool-level audit? [y/n]" yn "AUDIT_IMPL_TI"; then
+                    _log 'ERROR: dispatch rejected — implementer requires tool-level audit\n'
+                    return 1
+                fi
+                _log 'WARN: continuing with degraded audit (human approved)\n'
+            fi
+            ;;
+        *)
+            _ti=$(printf '%s' "$_CURRENT_CAPABILITIES" | jq -r '.toolInterception // 0')
+            if [ "$_ti" -lt 1 ] 2>/dev/null; then
+                _log 'NOTE: role %s on backend with toolInterception=%s — audit degrades to commit-level (L3)\n' "$_role" "$_ti"
+            fi
+            ;;
+    esac
+    return 0
+}
+
+_precheck_backends() {
+    local _be _be_file _rb_json
+    _be=$(op_jsonc_val '.backend' 'opencode')
+    _be_file="$SCRIPT_DIR/../lib/backend-${_be}.sh"
+    [ -f "$_be_file" ] || { _log 'ERROR: backend=%s but %s not found\n' "$_be" "$_be_file"; return 1; }
+    _rb_json=$(op_jsonc_val '.roleBackends' '{}')
+    for _be in $(printf '%s' "$_rb_json" | jq -r 'values[]' 2>/dev/null); do
+        _be_file="$SCRIPT_DIR/../lib/backend-${_be}.sh"
+        [ -f "$_be_file" ] || { _log 'ERROR: roleBackends references backend %s but %s not found\n' "$_be" "$_be_file"; return 1; }
+    done
+}
+
+_run_serve_session() {
+    local _dir="$1" _prompt="$2" _role="$3"
+    _source_backend_for_role "$_role" || return 1
+    _check_audit_requirements "$_role" || return 1
+    backend_run_session "$_dir" "$_prompt" "$_role"
+}
+
+# Extract content under a ## heading from a Markdown file
+_extract_section() {
+    sed -n "/^## ${2}$/,/^## /{/^## ${2}$/d;/^## /d;p;}" "$1"
+}
+
+do_align() {
+    _feat="$1"
+    [ -n "${OPENPLAN_DOCS_REPO:-}" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO required for --align\n'; return 1; }
+    [ -d "$OPENPLAN_DOCS_REPO/.git" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO=%s is not a git repo\n' "$OPENPLAN_DOCS_REPO"; return 1; }
+    export OPENPLAN_ROLE="advisor"
+    export GIT_AUTHOR_NAME="openplan-advisor"
+    export GIT_AUTHOR_EMAIL="openplan-advisor@openplan.local"
+    # Idempotent: skip if needs-snapshot already exists
+    [ -f "$OPENPLAN_DOCS_REPO/_agent/state/needs-snapshot.md" ] && { _log 'needs-snapshot exists, skipping align\n'; return 0; }
+    # TTY required for interactive alignment
+    [ -c /dev/tty ] || { _log 'ERROR: --align requires tty\n'; return 1; }
+
+    # Collect initial input
+    printf '[openplan] 请描述您的需求或想法：\n' >&2
+    op_sudo_ask "" text || { _log 'ERROR: no initial input\n'; return 1; }
+    _initial="$OPENPLAN_SUDO_REPLY"
+
+    # Context directory (gitignored)
+    _ctx_dir="_agent/align"
+    mkdir -p "$_ctx_dir"
+    printf '## 初始输入\n\n%s\n' "$_initial" > "${_ctx_dir}/context.md"
+
+    # Continue from existing non-empty rounds
+    _round=0
+    for _f in "$OPENPLAN_DOCS_REPO/_agent/advisor/align-round-"*.md "$OPENPLAN_DOCS_REPO/research/align-round-"*.md; do  # COMPAT: remove research/ glob after Phase 10.12
+        [ -s "$_f" ] && _round=$((_round + 1))
+    done
+    while [ $_round -lt 10 ]; do
+        _round=$((_round + 1))
+        _is_final=false
+
+        # Build advisor prompt
+        _prompt="你是 advisor。读取提供的 context 文件，分析需求盲区。
+产出写入 _agent/advisor/align-round-${_round}.md，使用 _templates/align-round.md 格式。
+完成后 commit（A: prefix）。"
+
+        # Dispatch advisor via worktree + _run_serve_session
+        _wt_name="align-${_feat}-r${_round}"
+        "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" "feature/${_feat}" --repo "$OPENPLAN_DOCS_REPO"
+        _wt_path="$OPENPLAN_DOCS_REPO/.worktrees/$_wt_name"
+        cp "${_ctx_dir}/context.md" "${_wt_path}/_agent_context.md"
+
+        _rss_rc=0
+        _run_serve_session "$_wt_path" "$_prompt" advisor || _rss_rc=$?
+        "$SCRIPT_DIR/openplan-worktree" complete "$_wt_name" --repo "$OPENPLAN_DOCS_REPO"
+        if [ "$_rss_rc" -ne 0 ]; then
+            _log 'ERROR: serve session failed in round %d\n' "$_round"
+            rm -rf "$_ctx_dir"
+            return "$_rss_rc"
+        fi
+
+        # Read report and extract key sections
+        _report="$OPENPLAN_DOCS_REPO/_agent/advisor/align-round-${_round}.md"
+        if [ ! -f "$_report" ]; then
+            _log 'WARN: advisor did not produce report in round %d\n' "$_round"
+            printf '[openplan] WARNING: advisor produced no report (round %d). Enter /done to crystallize, or any text to retry.\n' "$_round" >&2
+        fi
+
+        if [ -f "$_report" ]; then
+            _blindspots=$(_extract_section "$_report" "盲区")
+            _suggestions=$(_extract_section "$_report" "建议")
+            _scores=$(_extract_section "$_report" "参考评分")
+
+            # Display to human
+            if [ -n "$_blindspots" ] || [ -n "$_suggestions" ]; then
+                printf '\n═══════════════════════════════════════════\n' >&2
+                printf '  Advisor 分析 — Round %d\n' "$_round" >&2
+                printf '═══════════════════════════════════════════\n\n' >&2
+                [ -n "$_blindspots" ] && printf '盲区：\n%s\n\n' "$_blindspots" >&2
+                [ -n "$_suggestions" ] && printf '建议：\n%s\n\n' "$_suggestions" >&2
+                [ -n "$_scores" ] && printf '参考评分：\n%s\n\n' "$_scores" >&2
+                printf '───────────────────────────────────────────\n' >&2
+            else
+                head -40 "$_report" >&2
+            fi
+        fi
+
+        # Safety valve: soft reminder at round 5+
+        [ $_round -ge 5 ] && printf '[openplan] 已进行 %d 轮对齐，建议考虑结束（输入 /done）\n' "$_round" >&2
+
+        # Collect human feedback
+        printf '[openplan] 请输入反馈（或 /done 结束对齐）：\n' >&2
+        op_sudo_ask "" text || { _log 'WARN: no feedback, ending align\n'; _is_final=true; }
+        _feedback="$OPENPLAN_SUDO_REPLY"
+
+        case "$_feedback" in /done|done) _is_final=true ;; esac
+
+        if $_is_final; then
+            # Crystallization round
+            _prompt_final="你是 advisor。读取所有 align-round-*.md 和 context 文件，
+结晶为 _agent/state/needs-snapshot.md。使用 _templates/needs-snapshot.md 格式。
+完成后 commit（A: prefix）。"
+            _wt_name="align-${_feat}-final"
+            "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" "feature/${_feat}" --repo "$OPENPLAN_DOCS_REPO"
+            cp "${_ctx_dir}/context.md" "$OPENPLAN_DOCS_REPO/.worktrees/$_wt_name/_agent_context.md"
+            _rss_rc=0
+            _run_serve_session "$OPENPLAN_DOCS_REPO/.worktrees/$_wt_name" "$_prompt_final" advisor || _rss_rc=$?
+            "$SCRIPT_DIR/openplan-worktree" complete "$_wt_name" --repo "$OPENPLAN_DOCS_REPO"
+            if [ "$_rss_rc" -ne 0 ]; then
+                _log 'ERROR: crystallization serve session failed\n'
+                rm -rf "$_ctx_dir"
+                return "$_rss_rc"
+            fi
+            break
+        fi
+
+        # Accumulate context
+        _round_summary=$(_extract_section "$_report" "盲区")
+        printf '\n## Round %d\n\n### 盲区摘要\n%s\n\n### 人的反馈\n%s\n' \
+            "$_round" "$_round_summary" "$_feedback" >> "${_ctx_dir}/context.md"
+    done
+
+    # Hard limit: force crystallization if loop exhausted without /done
+    if [ $_round -ge 10 ] && [ ! -f "$OPENPLAN_DOCS_REPO/_agent/state/needs-snapshot.md" ]; then
+        _log 'Hard limit reached, forcing crystallization\n'
+        _prompt_final="你是 advisor。读取所有 align-round-*.md 和 context 文件，
+结晶为 _agent/state/needs-snapshot.md。使用 _templates/needs-snapshot.md 格式。
+完成后 commit（A: prefix）。"
+        _wt_name="align-${_feat}-final"
+        "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" "feature/${_feat}" --repo "$OPENPLAN_DOCS_REPO"
+        cp "${_ctx_dir}/context.md" "$OPENPLAN_DOCS_REPO/.worktrees/$_wt_name/_agent_context.md"
+        _rss_rc=0
+        _run_serve_session "$OPENPLAN_DOCS_REPO/.worktrees/$_wt_name" "$_prompt_final" advisor || _rss_rc=$?
+        "$SCRIPT_DIR/openplan-worktree" complete "$_wt_name" --repo "$OPENPLAN_DOCS_REPO"
+        if [ "$_rss_rc" -ne 0 ]; then
+            _log 'ERROR: hard-limit crystallization serve session failed\n'
+            rm -rf "$_ctx_dir"
+            return "$_rss_rc"
+        fi
+    fi
+
+    # Cleanup temporary context
+    rm -rf "$_ctx_dir"
+}
+
+do_align_round() {
+    _ar_feat="$1"
+    _ar_n="$2"
+    _ar_fb="${3:-}"
+    _ar_ts=$(date -u +%Y%m%dT%H%M%SZ)
+
+    [ -n "${OPENPLAN_DOCS_REPO:-}" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO required for --align-round\n'; return 1; }
+    [ -d "$OPENPLAN_DOCS_REPO/.git" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO=%s is not a git repo\n' "$OPENPLAN_DOCS_REPO"; return 1; }
+
+    export OPENPLAN_ROLE="advisor"
+    export GIT_AUTHOR_NAME="openplan-advisor"
+    export GIT_AUTHOR_EMAIL="openplan-advisor@openplan.local"
+
+    # Accumulate context from previous align-round files
+    _ar_ctx=""
+    for _arf in "$OPENPLAN_DOCS_REPO"/_agent/advisor/align-round-*.md "$OPENPLAN_DOCS_REPO"/research/align-round-*.md; do  # COMPAT: remove research/ glob after Phase 10.12
+        [ -s "$_arf" ] || continue
+        _ar_ctx="${_ar_ctx}
+--- $(basename "$_arf") ---
+$(cat "$_arf")
+"
+    done
+
+    # Build prompt
+    _ar_prompt="Read _skills/advisor.md. You are the advisor role. This is alignment round ${_ar_n}."
+    if [ -n "$_ar_ctx" ]; then
+        _ar_prompt="${_ar_prompt}
+Previous rounds:
+${_ar_ctx}"
+    fi
+    if [ -n "$_ar_fb" ]; then
+        _ar_prompt="${_ar_prompt}
+Feedback: ${_ar_fb}"
+    else
+        _ar_prompt="${_ar_prompt}
+Feedback: none"
+    fi
+    _ar_prompt="${_ar_prompt}
+Write your analysis ONLY to _agent/advisor/align-round-${_ar_n}.md. Do NOT modify any other file.
+After writing, commit: git add _agent/advisor/align-round-${_ar_n}.md && git commit -m 'A: align round ${_ar_n}
+based-on: prompt@dispatch'. You MUST commit before finishing."
+
+    # Create worktree in docs-repo
+    _ar_wt_name="align-${_ar_feat}-r${_ar_n}"
+    _cleanup_wt_name="$_ar_wt_name"
+    _cleanup_repo="$OPENPLAN_DOCS_REPO"
+    "$SCRIPT_DIR/openplan-worktree" create "$_ar_wt_name" --repo "$OPENPLAN_DOCS_REPO" || return 1
+    _ar_wt_dir="$OPENPLAN_DOCS_REPO/.worktrees/$_ar_wt_name"
+    _cleanup_wt="$_ar_wt_dir"
+    git -C "$_ar_wt_dir" config openplan.signalDir "$(pwd)/_agent"
+    export OPENPLAN_CODE_REPO="$(pwd)"
+    export OPENPLAN_SIGNAL_DIR="$(pwd)/_agent"
+    (cd "$_ar_wt_dir" && op_sparse_role advisor "$_ar_feat")
+    mkdir -p "$_ar_wt_dir/_agent/advisor" "$_ar_wt_dir/_agent/state"
+
+    # Launch serve session
+    _ar_rc=0
+    _run_serve_session "$_ar_wt_dir" "$_ar_prompt" advisor || _ar_rc=$?
+
+    if [ "$_ar_rc" -ne 0 ]; then
+        _log 'ERROR: serve session failed in align round %s\n' "$_ar_n"
+        # Cleanup trap handles worktree via _cleanup_wt
+        return "$_ar_rc"
+    fi
+
+    # Merge back to main
+    # Only delete runtime _agent/ subdirs; preserve tracked dirs (gardener, context, state, advisor, align)
+    for _ar_rtd in signals workers dispatch.lock results sessions flags; do
+        rm -rf "$_ar_wt_dir/_agent/$_ar_rtd" 2>/dev/null || true
+    done
+    "$SCRIPT_DIR/openplan-worktree" complete "$_ar_wt_name" --repo "$OPENPLAN_DOCS_REPO" || {
+        _log 'ERROR: merge failed for %s\n' "$_ar_wt_name"
+        _log 'Worktree preserved: %s\n' "$_ar_wt_dir"
+        _log 'Recovery: cd %s && git merge --continue\n' "$_ar_wt_dir"
+        return 1
+    }
+    _cleanup_wt=""
+
+    # Checkpoint tag on docs-repo main
+    _ar_tag="checkpoint/${_ar_feat}/advisor-r${_ar_n}-${_ar_ts}"
+    git -C "$OPENPLAN_DOCS_REPO" tag -f "$_ar_tag" HEAD 2>/dev/null || \
+        _log 'WARNING: checkpoint tag failed: %s\n' "$_ar_tag"
+
+    # Output path to merged artifact
+    _ar_output="$OPENPLAN_DOCS_REPO/_agent/advisor/align-round-${_ar_n}.md"
+    if [ -f "$_ar_output" ]; then
+        printf '%s\n' "$_ar_output"
+    else
+        _log 'WARNING: expected output not found: %s\n' "$_ar_output"
+    fi
+}
+
+do_dispatch() {
+    _d_task="$1"
+    _cleanup_wt=""
+    _session_id=""
+    _task_role=$(op_task_role "$tasks_file" "$_d_task")
+    _effective_role="${_task_role:-$role}"
+
+    # Context file path (computed before session start for T4 context_file field)
+    _ctx_dir="_agent/context/${_effective_role}"
+    _ctx_file="${_ctx_dir}/${_d_task}.md"
+
+    # Start session
+    _session_out=$("$SCRIPT_DIR/openplan-session" start "$_effective_role" "$_d_task" "$feature" "$_ctx_file")
+    _session_id=$(printf '%s' "$_session_out" | grep '^session_id=' | cut -d= -f2)
+    _trace_id=$(printf '%s' "$_session_out" | grep '^trace_id=' | cut -d= -f2)
+
+    # Export env
+    export OPENPLAN_ROLE="$_effective_role"
+    export OPENPLAN_SESSION_ID="$_session_id"
+    export OPENPLAN_TRACE_ID="$_trace_id"
+    export OPENPLAN_ENTRY="${_d_task:-unknown}"
+    export OPENPLAN_TASK_FILE="$(cd "$(dirname "$tasks_file")" && pwd)/$(basename "$tasks_file")"
+    export GIT_AUTHOR_NAME="openplan-${_effective_role}"
+    export GIT_AUTHOR_EMAIL="openplan-${_effective_role}@openplan.local"
+    export OPENPLAN_TASK_ID="$_d_task"
+
+    # Generate task context file
+    mkdir -p "$_ctx_dir"
+    # Trace header
+    printf 'trace_id: %s\nsession_id: %s\n\n' "${OPENPLAN_TRACE_ID:-}" "$_session_id" > "$_ctx_file"
+    # Part 1: task block from tasks.md
+    awk -v tid="$_d_task" '
+      (index($0, "- [ ] " tid ":") == 1) || (index($0, "- [x] " tid ":") == 1) { p=1 }
+      p && /^- \[/ && !(index($0, "- [ ] " tid ":") == 1 || index($0, "- [x] " tid ":") == 1) { p=0 }
+      p { print }
+    ' "$tasks_file" >> "$_ctx_file"
+    # Part 2: design.md section for this task (or full content as fallback)
+    _design_file="$(dirname "$tasks_file")/design.md"
+    if [ -f "$_design_file" ]; then
+        printf '\n---\n\n' >> "$_ctx_file"
+        _task_section=$(awk -v tid="$_d_task" '
+          $0 ~ "^## " tid ":" { p=1 }
+          p && /^## T[0-9]/ && !($0 ~ "^## " tid ":") { p=0 }
+          p { print }
+        ' "$_design_file")
+        if [ -n "$_task_section" ]; then
+            printf '%s\n' "$_task_section" >> "$_ctx_file"
+        else
+            cat "$_design_file" >> "$_ctx_file"
+        fi
+    fi
+    # Cross-repo context path injection
+    if [ -n "${OPENPLAN_DOCS_REPO:-}" ] && [ -d "$OPENPLAN_DOCS_REPO" ]; then
+        _xrepo_paths=""
+        _ctx_paths=$(sed '/^---$/q' "$_ctx_file" | grep 'context:' | sed 's/.*context:.*\[//; s/\].*//; s/`//g; s/,/ /g' \
+                     | tr ' ' '\n' | sed '/^$/d' | sed 's/@.*//')
+        for _cp in $_ctx_paths; do
+            [ -e "$_cp" ] && continue
+            _docs_abs=$(cd "$OPENPLAN_DOCS_REPO" && pwd)
+            if [ -e "$_docs_abs/$_cp" ]; then
+                _xrepo_paths="${_xrepo_paths}${_docs_abs}/${_cp}
+"
+            else
+                _log 'WARN: context path not found: %s\n' "$_cp"
+            fi
+        done
+
+        if [ -n "$_xrepo_paths" ]; then
+            # Copy cross-repo files into context dir to avoid external_directory permission block
+            _xrepo_local="$_ctx_dir/xrepo"
+            mkdir -p "$_xrepo_local"
+            printf '\n## Cross-repo materials (copied locally)\n\n' >> "$_ctx_file"
+            printf '%s' "$_xrepo_paths" | while IFS= read -r _xp; do
+                [ -n "$_xp" ] || continue
+                _xparent=$(basename "$(dirname "$_xp")")
+                _xname="${_xparent}-$(basename "$_xp")"
+                if [ -d "$_xp" ]; then
+                    cp -r "$_xp" "$_xrepo_local/$_xname"
+                    printf -- '- `%s/xrepo/%s/`\n' "$_ctx_dir" "$_xname" >> "$_ctx_file"
+                elif [ -f "$_xp" ]; then
+                    cp "$_xp" "$_xrepo_local/$_xname"
+                    printf -- '- `%s/xrepo/%s`\n' "$_ctx_dir" "$_xname" >> "$_ctx_file"
+                fi
+            done
+        fi
+    fi
+    export OPENPLAN_TASK_CONTEXT="$(cd "$_ctx_dir" && pwd)/${_d_task}.md"
+
+    # Create worktree
+    _wt_dir=""
+    _cleanup_repo=""
+    _wt_init_head=""  # F52: record initial HEAD for accurate advancement detection
+    # F57: reviewer routes to docs repo if task context references docs-layer paths
+    _reviewer_docs=false
+    if [ "$_effective_role" = "reviewer" ] && [ -n "${OPENPLAN_DOCS_REPO:-}" ]; then
+        _task_ctx=$(awk -v tid="$_d_task" '
+          (index($0, "- [ ] " tid ":") == 1) || (index($0, "- [x] " tid ":") == 1) { p=1 }
+          p && /^  context:/ { print; p=0 }
+          p && /^- \[/ && !(index($0, "- [ ] " tid ":") == 1 || index($0, "- [x] " tid ":") == 1) { p=0 }
+        ' "$tasks_file")
+        case "$_task_ctx" in
+            *design/*|*research/*|*decisions/*|*engineering/*|*planning/*) _reviewer_docs=true ;;
+        esac
+    fi
+    case "$_effective_role" in
+        researcher|doc-writer|gardener)
+            [ -n "${OPENPLAN_DOCS_REPO:-}" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO required for %s\n' "$_effective_role"; return 1; }
+            [ -d "$OPENPLAN_DOCS_REPO/.git" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO=%s is not a git repo\n' "$OPENPLAN_DOCS_REPO"; return 1; }
+            _wt_name="${_effective_role}-${_d_task}-${feature}"
+            op_validate_worktree_name "$_wt_name" || return 1
+            _wt_base=".worktrees"
+            _cleanup_wt="$OPENPLAN_DOCS_REPO/$_wt_base/$_wt_name"
+            _cleanup_wt_name="$_wt_name"
+            _cleanup_repo="$OPENPLAN_DOCS_REPO"
+            if ! "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" --repo "$OPENPLAN_DOCS_REPO"; then
+                _log 'ERROR: worktree creation failed for %s\n' "$_wt_name"
+                return 1
+            fi
+            _wt_dir="$OPENPLAN_DOCS_REPO/$_wt_base/$_wt_name"
+            git -C "$_wt_dir" config openplan.signalDir "$(pwd)/_agent"
+            export OPENPLAN_CODE_REPO="$(pwd)"
+            export OPENPLAN_SIGNAL_DIR="$(pwd)/_agent"
+            if [ -d "$_wt_dir" ]; then
+                (cd "$_wt_dir" && op_sparse_role "$_effective_role" "$feature")
+                _wt_init_head=$(git -C "$_wt_dir" rev-parse HEAD 2>/dev/null) || _wt_init_head=""
+            fi
+            ;;
+        implementer|spec-writer)
+            _wt_name="${_effective_role}-${_d_task}-${feature}"
+            op_validate_worktree_name "$_wt_name" || return 1
+            _wt_base=$(op_jsonc_val '.git.worktree_dir' '.worktrees')
+            _cleanup_wt="$_wt_base/$_wt_name"
+            _cleanup_wt_name="$_wt_name"
+            if ! "$SCRIPT_DIR/openplan-worktree" create "$_wt_name"; then
+                _log 'ERROR: worktree creation failed for %s\n' "$_wt_name"
+                return 1
+            fi
+            _wt_dir="$_wt_base/$_wt_name"
+            if [ -d "$_wt_dir" ]; then
+                (cd "$_wt_dir" && op_sparse_role "$_effective_role" "$feature")
+                _wt_init_head=$(git -C "$_wt_dir" rev-parse HEAD 2>/dev/null) || _wt_init_head=""
+            fi
+            ;;
+        reviewer)
+            if $_reviewer_docs; then
+                # F57: docs-layer review — route to docs repo
+                [ -d "$OPENPLAN_DOCS_REPO/.git" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO=%s is not a git repo\n' "$OPENPLAN_DOCS_REPO"; return 1; }
+                _wt_name="${_effective_role}-${_d_task}-${feature}"
+                op_validate_worktree_name "$_wt_name" || return 1
+                _wt_base=".worktrees"
+                _cleanup_wt="$OPENPLAN_DOCS_REPO/$_wt_base/$_wt_name"
+                _cleanup_wt_name="$_wt_name"
+                _cleanup_repo="$OPENPLAN_DOCS_REPO"
+                if ! "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" --repo "$OPENPLAN_DOCS_REPO"; then
+                    _log 'ERROR: worktree creation failed for %s\n' "$_wt_name"
+                    return 1
+                fi
+                _wt_dir="$OPENPLAN_DOCS_REPO/$_wt_base/$_wt_name"
+                git -C "$_wt_dir" config openplan.signalDir "$(pwd)/_agent"
+                export OPENPLAN_CODE_REPO="$(pwd)"
+                export OPENPLAN_SIGNAL_DIR="$(pwd)/_agent"
+                if [ -d "$_wt_dir" ]; then
+                    (cd "$_wt_dir" && git sparse-checkout disable 2>/dev/null || true)
+                    _wt_init_head=$(git -C "$_wt_dir" rev-parse HEAD 2>/dev/null) || _wt_init_head=""
+                fi
+            else
+                # Code-layer review — route to code repo
+                _wt_name="${_effective_role}-${_d_task}-${feature}"
+                op_validate_worktree_name "$_wt_name" || return 1
+                _wt_base=$(op_jsonc_val '.git.worktree_dir' '.worktrees')
+                _cleanup_wt="$_wt_base/$_wt_name"
+                _cleanup_wt_name="$_wt_name"
+                if ! "$SCRIPT_DIR/openplan-worktree" create "$_wt_name"; then
+                    _log 'ERROR: worktree creation failed for %s\n' "$_wt_name"
+                    return 1
+                fi
+                _wt_dir="$_wt_base/$_wt_name"
+                if [ -d "$_wt_dir" ]; then
+                    (cd "$_wt_dir" && git sparse-checkout disable 2>/dev/null || true)
+                    _wt_init_head=$(git -C "$_wt_dir" rev-parse HEAD 2>/dev/null) || _wt_init_head=""
+                fi
+            fi
+            ;;
+    esac
+
+    # Worker info for parallel dispatch
+    if [ -n "${_WORKER_DIR:-}" ]; then
+        [ -n "$_cleanup_wt_name" ] && printf '%s\n' "$_cleanup_wt_name" > "$_WORKER_DIR/wt_name"
+        [ -n "$_cleanup_repo" ] && printf '%s\n' "$_cleanup_repo" > "$_WORKER_DIR/wt_repo"
+        [ -n "$_wt_init_head" ] && printf '%s\n' "$_wt_init_head" > "$_WORKER_DIR/wt_init_head"
+    fi
+
+    # Copy context file (and xrepo materials) into worktree so opencode can read it
+    if [ -n "$_wt_dir" ] && [ -f "$_ctx_file" ]; then
+        mkdir -p "$_wt_dir/$_ctx_dir"
+        cp "$_ctx_file" "$_wt_dir/$_ctx_dir/"
+        [ -d "$_ctx_dir/xrepo" ] && cp -r "$_ctx_dir/xrepo" "$_wt_dir/$_ctx_dir/"
+        OPENPLAN_TASK_CONTEXT="$(cd "$_wt_dir/$_ctx_dir" && pwd)/${_d_task}.md"
+    fi
+
+    # Output dispatch info
+    _log 'dispatch: role=%s task=%s feature=%s session=%s trace=%s\n' "$_effective_role" "$_d_task" "$feature" "$_session_id" "${OPENPLAN_TRACE_ID:-}"
+    [ -n "$_wt_dir" ] && _log 'worktree: %s\n' "$_wt_dir"
+    _log 'env: OPENPLAN_ROLE=%s OPENPLAN_SESSION_ID=%s OPENPLAN_TRACE_ID=%s OPENPLAN_TASK_CONTEXT=%s OPENPLAN_TASK_ID=%s\n' "$_effective_role" "$_session_id" "$_trace_id" "$OPENPLAN_TASK_CONTEXT" "$_d_task"
+
+    # Skip opencode launch if E2E harness manages it
+    if [ "${OPENPLAN_NO_SPAWN:-}" = "1" ]; then
+        return 0
+    fi
+
+    # Build feature directory path for prompt context
+    _feat_dir="openspec/changes/${feature}"
+
+    case "$_effective_role" in
+        spec-writer)
+            _prompt="Read ${OPENPLAN_TASK_CONTEXT}. Write the OpenSpec four-file set to ${_feat_dir}/. Produce exactly these files in that directory: brief.md, design.md, tasks.md, test-plan.md — no other file names, no other directory. CRITICAL for tasks.md: generate a complete task breakdown. After spec-writer tasks, add an RG2 reviewer task (role: reviewer) for spec-docs alignment review. Then T-series implementer tasks (role: implementer). Then a final RG3 reviewer task (role: reviewer) for code-spec alignment review. Format each task exactly as:
+- [ ] T<n>: <description>
+  context: [\`${_feat_dir}/design.md\`]
+  depends: T<n-1>
+  role: implementer
+  commit:
+The commit: field must be left EMPTY. tasks.md must preserve any existing [x] tasks and their commit SHAs. Valid role values: implementer, spec-writer, researcher, reviewer, doc-writer. IMPORTANT: in brief.md, for every design/ or engineering/ file you reference, append (hash: <first-7-hex-chars>) inline after the backtick-quoted path — this enables staleness detection. Commit all files: git add -A && git commit -m 'S: <summary>
+based-on: <path-to-source-doc>@<first-7-chars-of-HEAD-sha>'. You MUST include the based-on: trailer with @<sha> version anchor."
+            ;;
+        researcher)
+            _prompt="Read ${OPENPLAN_TASK_CONTEXT}. The context: field lists reference documents — read each one (check ${_ctx_dir}/xrepo/ for cross-repo copies). Execute the research task as described — write findings to research/ (e.g. research/rendering-pipelines.md). Do NOT use task IDs (T0, T1...) in filenames. For research tasks: include background, key patterns, recommendations, trade-offs. After writing, commit: git add -A && git commit -m 'R: <concise summary>
+refs: <path-to-primary-context-doc>@<first-7-chars-of-HEAD-sha>'. Include refs: trailer. You MUST commit before finishing."
+            ;;
+        doc-writer)
+            _prompt="Read ${OPENPLAN_TASK_CONTEXT}. The context: field lists reference documents — read each one (check ${_ctx_dir}/xrepo/ for cross-repo copies). Execute the task as described — write output to the correct directory: design/ for architecture docs, decisions/ for ADRs, engineering/ for implementation guides, planning/ for phase plans, conventions/ for coding standards, deviations/ for deviation reports. Do NOT use task IDs (T0, T1...) in filenames. For design/ changes: you MUST also create or update a corresponding ADR in decisions/. If the task says 'must create deviation', you MUST write a file to deviations/. Use _templates/ for document format. After writing, commit: git add -A && git commit -m 'D: <concise summary>
+based-on: <path-to-primary-context-doc>@<first-7-chars-of-HEAD-sha>'. Include based-on: trailer. You MUST commit before finishing."
+            ;;
+        gardener)
+            _ts=$(date -u '+%Y%m%d-%H%M%S')
+            _prompt="Read _skills/gardener.md (ONLY this skill file, not others). You are the gardener role: run structural + semantic lint on the docs-repo.
+Step 1: run 'openplan-garden --docs-consistency' and capture all output.
+Step 2: for each non-archive .md file in the docs-repo, execute SEM-1~11 checks as defined in _skills/gardener.md.
+Step 3: merge garden output and SEM findings. Output each finding as: SEVERITY|CHECK_ID|file:line|message|fix
+where fix is a one-sentence imperative action (e.g. 'replace vague qualifier with exhaustive branch list'). Constraints: starts with verb, no external file references, self-contained.
+Step 4: write the merged report to _agent/gardener/${_ts}.md (create directory if needed). Include \`trace_id: ${OPENPLAN_TRACE_ID:-}\` as the first line of your report. Do NOT commit. Do NOT modify any files other than creating this report."
+            ;;
+        reviewer)
+            _rev_desc=$(grep "^- \[.\] ${_d_task}:" "$tasks_file" 2>/dev/null | head -1 | sed "s/^- \[.\] ${_d_task}: *//" || true)
+            case "$_d_task" in
+                RG2) _gate_focus="Gate 2 (spec-docs alignment): verify the OpenSpec accurately reflects source design documents. Check completeness, no hallucinated requirements, version anchors present, (hash:) annotations in brief.md." ;;
+                RG3) _gate_focus="Gate 3 (code-spec alignment): verify the implementation matches the OpenSpec. Check all tasks implemented as specified, no undocumented behavior, test coverage matches test-plan.md." ;;
+                *)
+                    case "$_rev_desc" in
+                        *spec*doc*|*doc*spec*)
+                            _gate_focus="Gate 2 (spec-docs alignment): verify the OpenSpec accurately reflects source design documents. Check completeness, no hallucinated requirements, version anchors present, (hash:) annotations in brief.md." ;;
+                        *code*spec*|*spec*code*|*implementation*review*)
+                            _gate_focus="Gate 3 (code-spec alignment): verify the implementation matches the OpenSpec. Check all tasks implemented as specified, no undocumented behavior, test coverage matches test-plan.md." ;;
+                        *)
+                            _gate_focus="General review: check correctness, completeness, and adherence to project conventions." ;;
+                    esac ;;
+            esac
+            # Wave vs Feature gate detection: depends on all T tasks → feature gate
+            _rg_deps=$(awk "/^- \[.\] ${_d_task}:/{found=1;next} found && /^  depends:/{print;exit}" "$tasks_file" 2>/dev/null | sed 's/.*depends: *//')
+            _all_t=$(grep -E '^- \[.\] T[0-9]+:' "$tasks_file" 2>/dev/null | grep -v "^- \[.\] ${_d_task}:" | sed 's/^- \[.\] \(T[0-9]*\):.*/\1/' | sort -t T -k2 -n -u)
+            _dep_t=$(printf '%s' "$_rg_deps" | grep -oE 'T[0-9]+' 2>/dev/null | sort -t T -k2 -n -u)
+            if [ -n "$_all_t" ] && [ "$_all_t" = "$_dep_t" ]; then
+                _gate_focus="${_gate_focus} Focus on design alignment and cross-task consistency. Verify openspec compliance and check for regressions."
+            else
+                _gate_focus="${_gate_focus} Focus on code quality and test coverage for the tasks in this wave. Check that implementations match their task descriptions in tasks.md."
+            fi
+            _log 'reviewer gate: %s\n' "$(printf '%s' "$_gate_focus" | head -c 60)"
+            _prompt="Read ${OPENPLAN_TASK_CONTEXT}. Review focus: ${_gate_focus} Write a review (under 30 lines) to review/${_d_task}-${feature}.md with ## Findings (P0-P3) and ## Summary. Then: git add -A && git commit -m '${_d_task}: review ${feature}'. IMPORTANT: the commit prefix MUST be exactly '${_d_task}:' (e.g. '${_d_task}: review ${feature}'). Do NOT use 'D:' prefix — reviewers use their gate ID as prefix. Do not modify code or run tests.
+Before committing, write _agent/results/${_d_task}.result with these exact lines:
+status: ok|partial|blocked|failed
+summary: <one-line what was done>
+x_findings_p0: <integer count of P0 findings>
+x_findings_total: <integer count of all findings>"
+            ;;
+        *)
+            _impl_read=$(op_jsonc_array ".roles.implementer.read" "lib/ plugin/ tests/ openspec/")
+            _impl_write=$(op_jsonc_array ".roles.implementer.write" "lib/ plugin/ tests/")
+            _prompt="Read ${OPENPLAN_TASK_CONTEXT}. The context: field in that file lists reference documents — read each one to understand the architecture, tech stack, and conventions. Then check existing code in ${_impl_read} to see what's already implemented and follow the same patterns. Implement the task described in the context file. Write code to ${_impl_write} directories. After implementation, commit: git add -A && git commit -m '${_d_task}: <concise summary>
+refs: openspec/changes/${feature}/tasks.md#${_d_task}@<first-7-chars-of-HEAD-sha>'. You MUST include the refs: trailer with @<sha> version anchor. You MUST commit before finishing."
+            ;;
+    esac
+
+    # EP1: universal result contract suffix (all roles)
+    _prompt="${_prompt}
+Before committing, write _agent/results/${_d_task}.result with exactly two lines: 'status: ok|partial|blocked|failed' and 'summary: <one-line description of what was done>'."
+
+    # Cross-repo context guidance
+    if grep -q 'Cross-repo materials' "$_ctx_file" 2>/dev/null; then
+        _prompt="${_prompt}
+
+Context file references local copies of cross-repo materials under ${_ctx_dir}/xrepo/. Read them as needed following P1 minimum effective context."
+    fi
+
+    _oc_rc=0
+    _run_serve_session "$_wt_dir" "$_prompt" "$_effective_role" || _oc_rc=$?
+
+    # F70: always check for agent commit regardless of SSE outcome
+    # F49: detect agent commit via bash tool (bypasses post-commit hook signal)
+    # F52: compare against worktree's initial HEAD, not code repo HEAD (cross-repo fix)
+    if [ ! -f "$SIGNAL_FILE" ] && [ ! -f "_agent/signals/${_d_task}.signal" ] && [ -n "$_cleanup_wt" ] && [ -d "$_cleanup_wt" ] && [ -n "$_wt_init_head" ]; then
+        _wt_head=$(git -C "$_cleanup_wt" rev-parse HEAD 2>/dev/null) || _wt_head=""
+        if [ -n "$_wt_head" ] && [ "$_wt_head" != "$_wt_init_head" ]; then
+            # F73: find the task commit among possibly multiple agent commits
+            case "$_effective_role" in
+                spec-writer)  _detect_prefix="S:" ;;
+                researcher)   _detect_prefix="R:" ;;
+                advisor)      _detect_prefix="A:" ;;
+                doc-writer)   _detect_prefix="D:" ;;
+                reviewer)     _detect_prefix="${_d_task}:" ;;
+                *)            _detect_prefix="${_d_task}:" ;;
+            esac
+            _task_sha=""
+            while IFS=' ' read -r _csha _csubj; do
+                case "$_csubj" in "$_detect_prefix"*) _task_sha="$_csha"; break ;; esac
+            done <<EOF
+$(git -C "$_cleanup_wt" log --format='%H %s' "$_wt_init_head".."$_wt_head" 2>/dev/null)
+EOF
+            if [ -z "$_task_sha" ]; then
+                _task_sha="$_wt_head"
+                _log 'agent commit detected (no signal, no prefix match, fallback to HEAD): %s -> %s\n' "$_d_task" "$_task_sha"
+            else
+                _log 'agent commit detected (no signal, prefix "%s"): %s -> %s\n' "$_detect_prefix" "$_d_task" "$_task_sha"
+            fi
+            mkdir -p "_agent/signals"
+            printf '%s %s\n' "$_d_task" "$_task_sha" > "_agent/signals/${_d_task}.signal.tmp"
+            mv "_agent/signals/${_d_task}.signal.tmp" "_agent/signals/${_d_task}.signal"
+            # Legacy signal: use per-task tmp to avoid parallel race
+            printf '%s %s\n' "$_d_task" "$_task_sha" > "${SIGNAL_FILE}.${_d_task}.tmp"
+            mv "${SIGNAL_FILE}.${_d_task}.tmp" "$SIGNAL_FILE"
+        fi
+    fi
+    # No fallback commit: if agent wrote files but didn't commit, preserve worktree and fail
+    if [ ! -f "$SIGNAL_FILE" ] && [ ! -f "_agent/signals/${_d_task}.signal" ] && [ -n "$_cleanup_wt" ] && [ -d "$_cleanup_wt" ]; then
+        _wt_status=$(git -C "$_cleanup_wt" status --porcelain -- . ':(exclude)_agent/' 2>/dev/null) || _wt_status=""
+        if [ -n "$_wt_status" ]; then
+            _log 'WARNING: agent wrote files but did not commit\n'
+            _log 'Worktree preserved: %s\n' "$_cleanup_wt"
+            _log 'Files:\n'
+            printf '%s\n' "$_wt_status" | head -10 | while IFS= read -r _l; do
+                _log '  %s\n' "$_l"
+            done
+            _log 'Recovery: cd %s && git add -A && git commit\n' "$_cleanup_wt"
+            _cleanup_wt=""  # prevent cleanup from removing the preserved worktree
+            return 1
+        elif [ "$_oc_rc" -eq 0 ]; then
+            _log 'WARNING: agent exited 0 but no signal — did it commit?\n'
+        fi
+    elif [ ! -f "$SIGNAL_FILE" ] && [ ! -f "_agent/signals/${_d_task}.signal" ] && [ "$_oc_rc" -eq 0 ]; then
+        _log 'WARNING: agent exited 0 but no signal — did it commit?\n'
+    fi
+    if [ "$_oc_rc" -ne 0 ] && [ ! -f "$SIGNAL_FILE" ] && [ ! -f "_agent/signals/${_d_task}.signal" ]; then
+        return "$_oc_rc"
+    fi
+    # F47: fail dispatch if no signal produced (agent wrote nothing useful)
+    if [ ! -f "$SIGNAL_FILE" ] && [ ! -f "_agent/signals/${_d_task}.signal" ] && [ "$_effective_role" != "reviewer" ]; then
+        return 1
+    fi
+    # No-worktree path: result file lives in code repo, clean up after decision matrix
+    [ -z "$_cleanup_wt" ] && rm -f "_agent/results/${_d_task}.result" 2>/dev/null || true
+}
+
+# do_prompt_dispatch -- state-based dispatch for docs-repo (--prompt mode)
+# Uses module-scope: role, feature, _prompt_text
+do_prompt_dispatch() {
+    _start_ts=$(date +%s)
+    _ts=$(date -u '+%Y%m%dT%H%M%SZ')
+    _cleanup_wt=""
+    _cleanup_wt_name=""
+    _cleanup_repo=""
+
+    # Context file path (computed before session start for T4 context_file field)
+    _ctx_dir="_agent/context/${role}"
+    _ctx_prompt_file="${_ctx_dir}/prompt-${role}-${_ts}.md"
+
+    # Session
+    _session_out=$("$SCRIPT_DIR/openplan-session" start "$role" "prompt" "$feature" "$_ctx_prompt_file")
+    _session_id=$(printf '%s' "$_session_out" | grep '^session_id=' | cut -d= -f2)
+    _trace_id=$(printf '%s' "$_session_out" | grep '^trace_id=' | cut -d= -f2)
+
+    # Env (no OPENPLAN_TASK_FILE / OPENPLAN_TASK_ID -- prompt mode has no task concept)
+    export OPENPLAN_ROLE="$role"
+    export OPENPLAN_SESSION_ID="$_session_id"
+    export OPENPLAN_TRACE_ID="$_trace_id"
+    export OPENPLAN_ENTRY="prompt-${role}"
+    export GIT_AUTHOR_NAME="openplan-${role}"
+    export GIT_AUTHOR_EMAIL="openplan-${role}@openplan.local"
+
+    # Context file -- write prompt text with trace header
+    mkdir -p "$_ctx_dir"
+    printf 'trace_id: %s\nsession_id: %s\n\n%s\n' "${OPENPLAN_TRACE_ID:-}" "$_session_id" "$_prompt_text" > "$_ctx_prompt_file"
+
+    # Worktree routing
+    _wt_dir=""
+    case "$role" in
+        researcher|doc-writer|advisor|gardener)
+            [ -n "${OPENPLAN_DOCS_REPO:-}" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO required for %s\n' "$role"; return 1; }
+            [ -d "$OPENPLAN_DOCS_REPO/.git" ] || { _log 'ERROR: OPENPLAN_DOCS_REPO=%s is not a git repo\n' "$OPENPLAN_DOCS_REPO"; return 1; }
+            _wt_name="${role}-prompt-${feature}-${_ts}"
+            op_validate_worktree_name "$_wt_name" || return 1
+            _wt_base=".worktrees"
+            _cleanup_wt="$OPENPLAN_DOCS_REPO/$_wt_base/$_wt_name"
+            _cleanup_wt_name="$_wt_name"
+            _cleanup_repo="$OPENPLAN_DOCS_REPO"
+            "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" --repo "$OPENPLAN_DOCS_REPO" || return 1
+            _wt_dir="$OPENPLAN_DOCS_REPO/$_wt_base/$_wt_name"
+            git -C "$_wt_dir" config openplan.signalDir "$(pwd)/_agent"
+            export OPENPLAN_CODE_REPO="$(pwd)"
+            export OPENPLAN_SIGNAL_DIR="$(pwd)/_agent"
+            (cd "$_wt_dir" && op_sparse_role "$role" "$feature")
+            mkdir -p "$_wt_dir/_agent/advisor" "$_wt_dir/_agent/state" "$_wt_dir/_agent/gardener"
+            ;;
+        implementer|spec-writer)
+            # Guard: these roles are code-repo only
+            _git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+            _docs_root=$(cd "$OPENPLAN_DOCS_REPO" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true)
+            if [ -n "$_docs_root" ] && [ "$_git_root" = "$_docs_root" ]; then
+                _log 'ERROR: %s cannot run in docs-repo (code-repo only role)\n' "$role"
+                return 1
+            fi
+            _wt_name="${role}-prompt-${feature}-${_ts}"
+            op_validate_worktree_name "$_wt_name" || return 1
+            _wt_base=$(op_jsonc_val '.git.worktree_dir' '.worktrees')
+            _cleanup_wt="$_wt_base/$_wt_name"
+            _cleanup_wt_name="$_wt_name"
+            "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" || return 1
+            _wt_dir="$_wt_base/$_wt_name"
+            (cd "$_wt_dir" && op_sparse_role "$role" "$feature")
+            ;;
+        reviewer)
+            # T0 Phase 10.8: reviewer requires fresh gardener report (E3 hard gate)
+            _docs="${OPENPLAN_DOCS_REPO:-$(pwd)}"
+            _gard_dir="$_docs/_agent/gardener"
+            _latest_gard=$(ls -t "$_gard_dir"/*.md 2>/dev/null | head -1)
+            if [ -z "$_latest_gard" ]; then
+                printf '[openplan] ERROR: no gardener report found — dispatch gardener first (E3)\n' >&2
+                return 1
+            fi
+            _gard_ct=$(git -C "$_docs" log -1 --format=%ct --author=openplan-gardener 2>/dev/null || echo 0)
+            _nongard_ct=$(git -C "$_docs" log --format='%ct %an' | grep -v openplan-gardener | head -1 | cut -d' ' -f1)
+            _nongard_ct=${_nongard_ct:-0}
+            if [ "$_gard_ct" -lt "$_nongard_ct" ]; then
+                printf '[openplan] ERROR: gardener report is stale (predates latest non-gardener commit) — re-dispatch gardener\n' >&2
+                return 1
+            fi
+            _wt_name="${role}-prompt-${feature}-${_ts}"
+            op_validate_worktree_name "$_wt_name" || return 1
+            _wt_base=$(op_jsonc_val '.git.worktree_dir' '.worktrees')
+            _cleanup_wt="$_wt_base/$_wt_name"
+            _cleanup_wt_name="$_wt_name"
+            "$SCRIPT_DIR/openplan-worktree" create "$_wt_name" || return 1
+            _wt_dir="$_wt_base/$_wt_name"
+            (cd "$_wt_dir" && git sparse-checkout disable 2>/dev/null || true)
+            ;;
+    esac
+    _wt_init_head=$(git -C "$_wt_dir" rev-parse HEAD 2>/dev/null) || _wt_init_head=""
+
+    _log 'prompt-dispatch: role=%s feature=%s session=%s trace=%s worktree=%s\n' "$role" "$feature" "$_session_id" "${OPENPLAN_TRACE_ID:-}" "$_wt_dir"
+
+    [ "${OPENPLAN_NO_SPAWN:-}" = "1" ] && return 0
+
+    # Commit format norms (injected to prevent garden DC4 false positives)
+    case "$role" in
+        spec-writer)  _commit_norm="Commit prefix: 'S: <summary>'" ;;
+        researcher) _commit_norm="Commit prefix: 'R: <summary>'" ;;
+        advisor)    _commit_norm="Commit prefix: 'A: <summary>'" ;;
+        doc-writer)   _commit_norm="Commit prefix: 'D: <summary>'" ;;
+        reviewer)     _commit_norm="Commit prefix: 'RG<n>: <summary>'" ;;
+        gardener)     _commit_norm="Do NOT commit." ;;
+        *)            _commit_norm="Commit prefix: '<role>: <summary>'" ;;
+    esac
+
+    # Prompt construction
+    case "$role" in
+        doc-writer)
+            _prompt="Read _skills/doc-writer.md. You are the doc-writer role.
+${_prompt_text}
+Write output to the correct directory: design/ for architecture, decisions/ for ADRs, engineering/ for guides, planning/ for phase plans, conventions/ for standards, deviations/ for deviations. Use _templates/ for format.
+${_commit_norm}. After writing, commit: git add -A && git commit -m 'D: <summary>
+based-on: prompt@dispatch'. You MUST commit before finishing." ;;
+        researcher)
+            _prompt="Read _skills/researcher.md. You are the researcher role.
+${_prompt_text}
+Write findings to research/. ${_commit_norm}. After writing, commit: git add -A && git commit -m 'R: <summary>
+based-on: prompt@dispatch'. You MUST commit before finishing." ;;
+        advisor)
+            _prompt="Read _skills/advisor.md. You are the advisor role.
+${_prompt_text}
+Write output to _agent/advisor/ or _agent/state/ as appropriate. ${_commit_norm}. After writing, commit: git add -A && git commit -m 'A: <summary>
+based-on: prompt@dispatch'. You MUST commit before finishing." ;;
+        gardener)
+            _prompt="Read _skills/gardener.md (ONLY this skill file, not others). You are the gardener role.
+${_prompt_text}
+Step 1: run 'openplan-garden --docs-consistency' and capture all output.
+Step 2: for each non-archive .md, execute SEM-1~11 checks from _skills/gardener.md.
+Step 3: merge findings. Output: SEVERITY|CHECK_ID|file:line|message|fix
+where fix is a one-sentence imperative action (e.g. 'replace vague qualifier with exhaustive branch list'). Constraints: starts with verb, no external file references, self-contained.
+Step 4: write report to _agent/gardener/${_ts}.md (create directory if needed). Include \`trace_id: ${OPENPLAN_TRACE_ID:-}\` as the first line of your report. ${_commit_norm}" ;;
+        *)
+            _prompt="${_prompt_text}
+${_commit_norm}. After implementation, commit: git add -A && git commit -m '${role}: <summary>
+based-on: prompt@dispatch'. You MUST commit before finishing." ;;
+    esac
+
+    # Launch
+    _oc_rc=0
+    _run_serve_session "$_wt_dir" "$_prompt" "$role" || _oc_rc=$?
+
+    # Gardener commit delegation: gardener does not commit, dispatcher does
+    if [ "$role" = "gardener" ] && [ -n "$_cleanup_wt" ] && [ -d "$_cleanup_wt" ]; then
+        _gard_files=$(find "$_cleanup_wt/_agent/gardener" -name '*.md' -newer "$_cleanup_wt" 2>/dev/null | head -1)
+        if [ -n "$_gard_files" ]; then
+            git -C "$_cleanup_wt" add _agent/gardener/
+            GIT_AUTHOR_NAME=openplan-gardener GIT_AUTHOR_EMAIL=openplan-gardener@openplan.local \
+                git -C "$_cleanup_wt" commit -m "GARDEN: gardener report $(date -u +%Y%m%dT%H%M%SZ)
+based-on: _skills/gardener.md@$(git -C "$_cleanup_wt" rev-parse --short HEAD)
+refs: none"
+        else
+            _log '[openplan] ERROR: gardener produced no output in _agent/gardener/, blocking downstream reviewer\n'
+            "$SCRIPT_DIR/openplan-worktree" remove "$_cleanup_wt_name" ${_cleanup_repo:+--repo "$_cleanup_repo"} 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    # HEAD advancement check
+    _wt_head=$(git -C "$_wt_dir" rev-parse HEAD 2>/dev/null) || _wt_head=""
+    if [ -n "$_wt_head" ] && [ -n "$_wt_init_head" ] && [ "$_wt_head" = "$_wt_init_head" ]; then
+        if [ "$role" != "gardener" ]; then
+            _log 'WARNING: agent did not advance HEAD in worktree %s\n' "$_wt_dir"
+            return 1
+        fi
+    fi
+
+    # Merge worktree back to main
+    if [ -n "$_cleanup_wt_name" ] && [ -d "$_cleanup_wt" ]; then
+        # Remove transient _agent/ state but preserve gardener reports
+        find "$_cleanup_wt/_agent" -mindepth 1 -maxdepth 1 ! -name 'gardener' -exec rm -rf {} + 2>/dev/null || true
+        if [ -n "$_cleanup_repo" ]; then
+            "$SCRIPT_DIR/openplan-worktree" complete "$_cleanup_wt_name" --repo "$_cleanup_repo" || {
+                _log 'ERROR: merge failed — worktree preserved: %s\n' "$_cleanup_wt"
+                _log 'Recovery: cd %s && git merge --continue\n' "$_cleanup_wt"
+                return 1
+            }
+        else
+            "$SCRIPT_DIR/openplan-worktree" complete "$_cleanup_wt_name" || {
+                _log 'ERROR: merge failed — worktree preserved: %s\n' "$_cleanup_wt"
+                _log 'Recovery: cd %s && git merge --continue\n' "$_cleanup_wt"
+                return 1
+            }
+        fi
+    fi
+
+    # Checkpoint tag (from main repo, not worktree)
+    if [ -n "$_cleanup_repo" ]; then
+        git -C "$_cleanup_repo" tag -f "checkpoint/${feature}/${role}-${_ts}" HEAD 2>/dev/null || \
+            _log 'WARNING: checkpoint tag failed for %s-%s\n' "$role" "$_ts"
+    else
+        "$SCRIPT_DIR/openplan-checkpoint" "${feature}/${role}-${_ts}" 2>/dev/null || \
+            _log 'WARNING: checkpoint tag failed for %s-%s\n' "$role" "$_ts"
+    fi
+
+    # Git notes (refs/notes/dispatch)
+    _duration_s=$(( $(date +%s) - _start_ts ))
+    _note_json="{\"ts\":\"$(date -u +%FT%TZ)\",\"entry\":\"prompt\",\"role\":\"$role\",\"feature\":\"$feature\",\"task_id\":\"prompt\",\"session_id\":\"$_session_id\",\"trace_id\":\"${OPENPLAN_TRACE_ID:-}\",\"context_file\":\"${_ctx_prompt_file}\",\"duration_s\":${_duration_s},\"init_head\":\"${_wt_init_head:-}\",\"exit_code\":${_oc_rc}}"
+    if [ -n "$_cleanup_repo" ]; then
+        git -C "$_cleanup_repo" notes --ref refs/notes/dispatch add -f -m "$_note_json" HEAD 2>/dev/null || \
+            _log 'WARNING: git notes failed\n'
+    else
+        git notes --ref refs/notes/dispatch add -f -m "$_note_json" HEAD 2>/dev/null || \
+            _log 'WARNING: git notes failed\n'
+    fi
+
+    # Garden check (docs-repo only)
+    if [ -n "$_cleanup_repo" ]; then
+        _gc=0
+        _garden_out=$("$SCRIPT_DIR/openplan-garden" --docs-consistency "$_cleanup_repo" 2>&1) || _gc=$?
+        if [ "$_gc" -eq 2 ]; then
+            _log 'ERROR: garden critical issues in docs repo\n'
+            return 1
+        elif [ "$_gc" -ne 0 ]; then
+            _warn_count=$(printf '%s' "$_garden_out" | grep -c WARNING || true)
+            _log 'garden: %d warnings after prompt dispatch\n' "$_warn_count"
+        fi
+    fi
+}
+
+if $_prompt_mode; then
+    do_prompt_dispatch
+    exit $?
+fi
+
+if $_align_round; then
+    do_align_round "$_ar_feature" "$_ar_round" "$_ar_feedback"
+    exit $?
+fi
+
+if $_align; then
+    do_align "$_align_feature"
+    exit $?
+fi
+
+if $_watch; then
+    # Auto-confirm policy
+    _ac=$(op_jsonc_val '.dispatch.auto_confirm' 'none')
+    case "$_ac" in
+        allow) export OPENPLAN_SUDO_ANSWER=allow ;;
+        deny)  export OPENPLAN_SUDO_ANSWER=reject ;;
+    esac
+
+    _precheck_backends || exit 1
+
+    # Clean stale signal files from previous crash
+    rm -f "$SIGNAL_FILE"
+    rm -rf "_agent/signals/"
+
+    export OPENPLAN_TASK_FILE="$(cd "$(dirname "$tasks_file")" && pwd)/$(basename "$tasks_file")"
+    _dispatched=0
+    while true; do
+        _wave=$(op_ready_wave "$tasks_file")
+        if [ -z "$_wave" ]; then
+            if [ "$_dispatched" -eq 0 ] && [ "$role" = "reviewer" ]; then
+                printf 'Error: no pending reviewer task in %s\nAdd a reviewer task: - [ ] T<n>: review ...\n  role: reviewer\n' "$tasks_file" >&2
+                exit 1
+            fi
+            printf 'all tasks done (%d dispatched)\n' "$_dispatched"; exit 0
+        fi
+
+        # Filter wave by CLI role
+        _filtered_wave=""
+        while IFS= read -r _wt; do
+            _wr=$(op_task_role "$tasks_file" "$_wt")
+            _wr="${_wr:-$role}"
+            [ "$_wr" = "$role" ] || continue
+            _filtered_wave="${_filtered_wave:+${_filtered_wave}
+}${_wt}"
+        done <<< "$_wave"
+        if [ -z "$_filtered_wave" ]; then
+            _next_task=$(printf '%s\n' "$_wave" | head -1)
+            _next_role=$(op_task_role "$tasks_file" "$_next_task")
+            _next_role="${_next_role:-$role}"
+            printf 'all %s tasks done (%d dispatched, next=%s needs role=%s)\n' "$role" "$_dispatched" "$_next_task" "$_next_role"
+            exit 0
+        fi
+
+        _max=$(op_jsonc_val '.dispatch.max_parallel' '2')
+        [ "$_max" -ge 1 ] 2>/dev/null || _max=1
+        # bash < 5.1 lacks wait -n -p; force serial
+        if [ "$_max" -gt 1 ]; then
+            _bash_maj="${BASH_VERSINFO[0]:-0}" _bash_min="${BASH_VERSINFO[1]:-0}"
+            if [ "$_bash_maj" -lt 5 ] || { [ "$_bash_maj" -eq 5 ] && [ "$_bash_min" -lt 1 ]; }; then
+                _max=1
+            fi
+        fi
+
+        declare -A _task_by_pid=()
+        _workers_base="$(pwd)/_agent/workers"
+        rm -rf _agent/workers/
+        _running=0
+
+        op_cross_feature_probe "feature/${feature}"
+        while IFS= read -r _task; do
+            # Throttle: if at max, wait for one to finish
+            if [ "$_running" -ge "$_max" ]; then
+                if [ "$_max" -eq 1 ]; then
+                    _done_pid="${!_task_by_pid[@]}"
+                    wait "$_done_pid" 2>/dev/null || true
+                else
+                    wait -n -p _done_pid "${!_task_by_pid[@]}" 2>/dev/null || true
+                fi
+                _harvest_worker "$_done_pid"
+                (( _running-- )) || true
+            fi
+
+            _wdir="$_workers_base/$_task"
+            mkdir -p "$_wdir"
+            (
+                trap '_worker_exit' EXIT
+                _WORKER_DIR="$_wdir"
+                _rc=0; do_dispatch "$_task" || _rc=$?
+                echo "$_rc" > "$_WORKER_DIR/exit_code"
+                exit "$_rc"
+            ) &
+            _task_by_pid[$!]="$_task"
+            echo "$!" > "$_wdir/pid"
+            (( _running++ )) || true
+        done <<< "$_filtered_wave"
+
+        # Drain remaining workers
+        while [ "$_running" -gt 0 ]; do
+            if [ "$_max" -eq 1 ]; then
+                _done_pid="${!_task_by_pid[@]}"
+                wait "$_done_pid" 2>/dev/null || true
+            else
+                wait -n -p _done_pid "${!_task_by_pid[@]}" 2>/dev/null || true
+            fi
+            _harvest_worker "$_done_pid"
+            (( _running-- )) || true
+        done
+
+        # Serial merge phase
+        _failures=()
+        while IFS= read -r _task; do
+            _wdir="$_workers_base/$_task"
+            _ec=$(cat "$_wdir/exit_code" 2>/dev/null || echo "1")
+            _effective_role=$(op_task_role "$tasks_file" "$_task")
+            _effective_role="${_effective_role:-$role}"
+
+            if [ "$_ec" -ne 0 ]; then
+                # Clean up failed task's worktree (P0-1: must happen before worker dir deletion)
+                _fail_wt_n=$(cat "$_wdir/wt_name" 2>/dev/null || echo "")
+                _fail_wt_r=$(cat "$_wdir/wt_repo" 2>/dev/null || echo "")
+                if [ -n "$_fail_wt_n" ]; then
+                    if [ -n "$_fail_wt_r" ]; then _fail_wt_p="$_fail_wt_r/.worktrees/$_fail_wt_n"
+                    else _fail_wt_p="$(op_jsonc_val '.git.worktree_dir' '.worktrees')/$_fail_wt_n"; fi
+                    if [ -d "$_fail_wt_p" ]; then
+                        for _rtd in signals workers dispatch.lock results sessions flags; do
+                            rm -rf "$_fail_wt_p/_agent/$_rtd" 2>/dev/null || true
+                        done
+                        rm -f "_agent/results/${_task}.result" 2>/dev/null || true
+                        if git -C "$_fail_wt_p" diff --quiet -- . ':(exclude)_agent/' 2>/dev/null && \
+                           git -C "$_fail_wt_p" diff --cached --quiet -- . ':(exclude)_agent/' 2>/dev/null; then
+                            if [ -n "$_fail_wt_r" ]; then
+                                git -C "$_fail_wt_r" worktree unlock "$_fail_wt_p" 2>/dev/null || true
+                                git -C "$_fail_wt_r" worktree remove "$_fail_wt_p" --force 2>/dev/null || true
+                            else
+                                git worktree unlock "$_fail_wt_p" 2>/dev/null || true
+                                git worktree remove "$_fail_wt_p" --force 2>/dev/null || true
+                            fi
+                        else
+                            _log 'WARNING: preserving failed worktree with uncommitted changes: %s\n' "$_fail_wt_p"
+                        fi
+                    fi
+                fi
+                if [ "$_effective_role" = "reviewer" ]; then
+                    _log 'Reviewer %s reported issues.\n' "$_task"
+                    _saved_sudo="${OPENPLAN_SUDO_ANSWER:-}"
+                    unset OPENPLAN_SUDO_ANSWER
+                    if op_sudo_ask "Reviewer $_task found deviations. [y=continue ignoring] [n=halt dispatch]"; then
+                        [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo"
+                        sed -i "s/^- \\[ \\] ${_task}:/- [x] ${_task}:/" "$tasks_file"
+                    else
+                        _log 'Dispatch halted by reviewer failure.\n'
+                        rm -rf "$_wdir" 2>/dev/null || true
+                        exit 1
+                    fi
+                else
+                    _failures+=("$_task")
+                fi
+                rm -rf "$_wdir" 2>/dev/null || true
+                continue
+            fi
+            _dispatched=$((_dispatched + 1))
+
+            # When E2E harness manages opencode externally, poll for signal
+            if [ "${OPENPLAN_WAIT_SIGNAL:-}" = "1" ] && [ ! -f "_agent/signals/${_task}.signal" ] && [ ! -f "$SIGNAL_FILE" ] && [ "$_effective_role" != "reviewer" ]; then
+                while [ ! -f "_agent/signals/${_task}.signal" ] && [ ! -f "$SIGNAL_FILE" ]; do sleep 2; done
+            fi
+
+            # Consume signal after agent exits (per-task preferred, legacy fallback)
+            _sig=$(_consume_task_signal "$_task") && _sig_found=true || _sig_found=false
+            # Read result contract (zero-regression: absent file leaves vars empty)
+            _result_file="_agent/results/${_task}.result"
+            _result_status=$(grep '^status: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+            _result_summary=$(grep '^summary: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+            _result_risks=$(grep '^risks: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+            # Reviewer P0 escalation (T3): fires before decision matrix
+            if [ "$_effective_role" = "reviewer" ] && [ -n "$_result_status" ]; then
+                _x_p0=$(grep '^x_findings_p0: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+                if [ -n "$_x_p0" ] && [ "$_x_p0" -gt 0 ] 2>/dev/null; then
+                    _saved_sudo="${OPENPLAN_SUDO_ANSWER:-}"
+                    unset OPENPLAN_SUDO_ANSWER
+                    if ! op_sudo_ask "Reviewer $_task: $_x_p0 P0 finding(s) — ${_result_summary}. [y=continue] [n=halt]"; then
+                        [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo"
+                        exit 1
+                    fi
+                    [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo"
+                fi
+            fi
+            # Decision matrix: signal × status (T4)
+            if $_sig_found && [ -n "$_result_status" ]; then
+                case "$_result_status" in
+                    ok) ;;
+                    partial)
+                        _log 'WARNING: task %s partial: %s\n' "$_task" "$_result_summary" ;;
+                    blocked|failed)
+                        _saved_sudo="${OPENPLAN_SUDO_ANSWER:-}"
+                        unset OPENPLAN_SUDO_ANSWER
+                        if ! op_sudo_ask "Task $_task status=$_result_status: $_result_summary. [y=continue] [n=halt]"; then
+                            _log 'Dispatch halted: task %s status=%s\n' "$_task" "$_result_status"
+                            rm -f "$_result_file"
+                            exit 1
+                        fi
+                        [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo" ;;
+                    *)
+                        _log 'WARNING: task %s unknown status=%s, ignoring\n' "$_task" "$_result_status" ;;
+                esac
+                rm -f "$_result_file"
+            fi
+            _reviewer_mark_done=""
+            if $_sig_found; then
+                if [ -n "$_sig" ]; then
+                    _sig_task=$(printf '%s' "$_sig" | cut -d' ' -f1)
+                    _sig_sha=$(printf '%s' "$_sig" | cut -d' ' -f2)
+                    [ -n "$_sig_task" ] || { _log 'ERROR: empty task in signal\n'; _sig=""; }
+                    case "$_sig_sha" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) _log 'ERROR: invalid sha in signal: %s\n' "$_sig_sha"; _sig="" ;; esac
+                fi
+                # S5 recovery: format validation failed, signal already deleted — try HEAD detection
+                _wt_n=$(cat "$_wdir/wt_name" 2>/dev/null || echo "")
+                _wt_r=$(cat "$_wdir/wt_repo" 2>/dev/null || echo "")
+                if [ -n "$_wt_n" ]; then
+                    if [ -n "$_wt_r" ]; then _wt_p="$_wt_r/.worktrees/$_wt_n"
+                    else _wt_p="$(op_jsonc_val '.git.worktree_dir' '.worktrees')/$_wt_n"; fi
+                else
+                    _wt_p=""
+                fi
+                if [ -z "$_sig" ] && [ -n "$_wt_p" ] && [ -d "$_wt_p" ]; then
+                    _wt_init_head=$(cat "$_wdir/wt_init_head" 2>/dev/null || echo "")
+                    _current_head=$(git -C "$_wt_p" rev-parse HEAD 2>/dev/null || echo "")
+                    if [ -n "$_current_head" ] && [ -n "$_wt_init_head" ] && [ "$_current_head" != "$_wt_init_head" ]; then
+                        _log 'S5 recovery: signal format invalid, falling back to HEAD detection\n'
+                        _task_sha=""
+                        case "$_effective_role" in
+                            spec-writer)  _s5_prefix="S:" ;;
+                            researcher)   _s5_prefix="R:" ;;
+                            advisor)      _s5_prefix="A:" ;;
+                            doc-writer)   _s5_prefix="D:" ;;
+                            *)            _s5_prefix="${_task}:" ;;
+                        esac
+                        for _c in $(git -C "$_wt_p" log --format='%H' "${_wt_init_head}..HEAD" 2>/dev/null); do
+                            _cmsg=$(git -C "$_wt_p" log -1 --format='%s' "$_c" 2>/dev/null || true)
+                            case "$_cmsg" in "$_s5_prefix"*)
+                                _task_sha=$(git -C "$_wt_p" rev-parse --short=7 "$_c" 2>/dev/null || echo "$_c")
+                                break
+                            ;; esac
+                        done
+                        if [ -n "$_task_sha" ]; then
+                            _sig="${_task} ${_task_sha}"
+                            _sig_task="$_task"
+                            _sig_sha="$_task_sha"
+                        fi
+                    fi
+                fi
+                if [ -n "$_sig" ]; then
+                    # F56: ensure author identity for update-commit
+                    [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ] || {
+                        export GIT_AUTHOR_NAME="openplan-dispatcher"
+                        export GIT_AUTHOR_EMAIL="openplan-dispatcher@openplan.local"
+                    }
+                    "$SCRIPT_DIR/openplan-update-commit" "$_sig_task" "$_sig_sha"
+                    if ! git diff --quiet -- "$tasks_file" 2>/dev/null; then
+                        git add "$tasks_file"
+                        OPENPLAN_ROLE=dispatcher OPENPLAN_SPARSE_SKIP=1 \
+                            GIT_AUTHOR_NAME=openplan-dispatcher GIT_AUTHOR_EMAIL=openplan-dispatcher@openplan.local \
+                            git commit -m "$(printf 'D: mark %s done (commit: %s)\nrefs: none' "$_sig_task" "$_sig_sha")"
+                    fi
+                    if [ "$_effective_role" != "reviewer" ]; then
+                        "$SCRIPT_DIR/openplan-checkpoint" "$_sig_task" || \
+                            _log 'WARNING: checkpoint tag failed for %s\n' "$_sig_task"
+                    fi
+                fi
+            elif [ "$_effective_role" = "reviewer" ]; then
+                _reviewer_mark_done=true
+                _log 'Reviewer %s completed (no signal)\n' "$_task"
+            fi
+
+            # Clean ephemeral context files (F37, F54)
+            rm -f "_agent/context/${_effective_role}/${_task}.md" 2>/dev/null || true
+            rm -rf "${_ctx_dir}/xrepo/" 2>/dev/null || true
+
+            # Ensure main tree is clean before merge (F38)
+            if ! git diff --quiet 2>/dev/null; then
+                _log 'WARN: main tree dirty before merge, restoring\n'
+                git checkout -- . 2>/dev/null || true
+            fi
+
+            # Merge worktree
+            if [ -n "$_wt_n" ] && [ -n "$_wt_p" ] && [ -d "$_wt_p" ]; then
+                for _rtd in signals workers dispatch.lock results sessions flags; do
+                    rm -rf "$_wt_p/_agent/$_rtd" 2>/dev/null || true
+                done
+                if [ -n "$_wt_r" ]; then
+                    "$SCRIPT_DIR/openplan-worktree" complete "$_wt_n" --repo "$_wt_r" || {
+                        _log 'ERROR: worktree complete failed for %s — manual merge needed\n' "$_wt_n"
+                        exit 1
+                    }
+                else
+                    "$SCRIPT_DIR/openplan-worktree" complete "$_wt_n" || {
+                        _log 'ERROR: worktree complete failed for %s — manual merge needed\n' "$_wt_n"
+                        exit 1
+                    }
+                fi
+            fi
+
+            # T2: Garden integration after docs-repo task merge
+            if [ -n "$_wt_r" ]; then
+                _gc=0
+                _garden_out=$("$SCRIPT_DIR/openplan-garden" --docs-consistency "$_wt_r" 2>&1) || _gc=$?
+                if [ "$_gc" -eq 2 ]; then
+                    _log 'ERROR: garden critical issues in docs repo\n'
+                    exit 1
+                elif [ "$_gc" -ne 0 ]; then
+                    _warn_count=$(printf '%s' "$_garden_out" | grep -c WARNING || true)
+                    op_sudo_ask "garden: $_warn_count warnings. [fix] run --fix [skip] continue [halt] stop" text
+                    case "$OPENPLAN_SUDO_REPLY" in
+                        fix) "$SCRIPT_DIR/openplan-garden" --fix "$_wt_r" ;;
+                        halt) exit 1 ;;
+                    esac
+                fi
+            fi
+
+            # F58: mark reviewer done AFTER merge
+            if [ "${_reviewer_mark_done:-}" = "true" ]; then
+                sed -i "s/^- \\[ \\] ${_task}:/- [x] ${_task}:/" "$tasks_file"
+            fi
+
+            rm -rf "$_wdir" 2>/dev/null || true
+        done <<< "$_filtered_wave"
+
+        rm -rf _agent/workers/ 2>/dev/null || true
+        if [ "${#_failures[@]}" -gt 0 ]; then
+            _log 'ERROR: failed tasks in wave: %s\n' "${_failures[*]}"
+            exit 1
+        fi
+    done
+else
+    _effective_role=$(op_task_role "$tasks_file" "$task_id")
+    _effective_role="${_effective_role:-$role}"
+    do_dispatch "$task_id" || {
+        if [ "$_effective_role" = "reviewer" ]; then
+            _log 'Reviewer %s reported issues.\n' "$task_id"
+            _saved_sudo="${OPENPLAN_SUDO_ANSWER:-}"
+            unset OPENPLAN_SUDO_ANSWER
+            if op_sudo_ask "Reviewer $task_id found deviations. [y=continue] [n=halt]"; then
+                [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo"
+                true  # allow exit 0
+            else
+                exit 1
+            fi
+        else
+            exit 1
+        fi
+    }
+
+    # Consume signal after agent exits (per-task preferred, legacy fallback)
+    _sig=$(_consume_task_signal "$task_id") && _sig_found=true || _sig_found=false
+    # Read result contract (zero-regression: absent file leaves vars empty)
+    _result_file="_agent/results/${task_id}.result"
+    _result_status=$(grep '^status: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+    _result_summary=$(grep '^summary: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+    _result_risks=$(grep '^risks: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+    # Reviewer P0 escalation (T3): fires before decision matrix
+    if [ "$_effective_role" = "reviewer" ] && [ -n "$_result_status" ]; then
+        _x_p0=$(grep '^x_findings_p0: ' "$_result_file" 2>/dev/null | cut -d' ' -f2- || true)
+        if [ -n "$_x_p0" ] && [ "$_x_p0" -gt 0 ] 2>/dev/null; then
+            _saved_sudo="${OPENPLAN_SUDO_ANSWER:-}"
+            unset OPENPLAN_SUDO_ANSWER
+            if ! op_sudo_ask "Reviewer ${task_id}: $_x_p0 P0 finding(s) — ${_result_summary}. [y=continue] [n=halt]"; then
+                [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo"
+                exit 1
+            fi
+            [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo"
+        fi
+    fi
+    # Decision matrix: signal × status (T4)
+    if $_sig_found && [ -n "$_result_status" ]; then
+        case "$_result_status" in
+            ok) ;;
+            partial)
+                _log 'WARNING: task %s partial: %s\n' "$task_id" "$_result_summary" ;;
+            blocked|failed)
+                _saved_sudo="${OPENPLAN_SUDO_ANSWER:-}"
+                unset OPENPLAN_SUDO_ANSWER
+                if ! op_sudo_ask "Task $task_id status=$_result_status: $_result_summary. [y=continue] [n=halt]"; then
+                    _log 'Dispatch halted: task %s status=%s\n' "$task_id" "$_result_status"
+                    rm -f "$_result_file"
+                    exit 1
+                fi
+                [ -n "$_saved_sudo" ] && export OPENPLAN_SUDO_ANSWER="$_saved_sudo" ;;
+            *)
+                _log 'WARNING: task %s unknown status=%s, ignoring\n' "$task_id" "$_result_status" ;;
+        esac
+        rm -f "$_result_file"
+    fi
+    if $_sig_found; then
+        if [ -n "$_sig" ]; then
+            _sig_task=$(printf '%s' "$_sig" | cut -d' ' -f1)
+            _sig_sha=$(printf '%s' "$_sig" | cut -d' ' -f2)
+            [ -n "$_sig_task" ] || { _log 'ERROR: empty task in signal\n'; _sig=""; }
+            case "$_sig_sha" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) _log 'ERROR: invalid sha in signal: %s\n' "$_sig_sha"; _sig="" ;; esac
+        fi
+        # S5 recovery: format validation failed, signal already deleted — try HEAD detection
+        if [ -z "$_sig" ] && [ -n "$_cleanup_wt" ] && [ -d "$_cleanup_wt" ] && [ -n "$_wt_init_head" ]; then
+            _current_head=$(git -C "$_cleanup_wt" rev-parse HEAD 2>/dev/null || echo "")
+            if [ -n "$_current_head" ] && [ "$_current_head" != "$_wt_init_head" ]; then
+                _log 'S5 recovery: signal format invalid, falling back to HEAD detection\n'
+                _task_sha=""
+                case "$_effective_role" in
+                    spec-writer)  _s5_prefix="S:" ;;
+                    researcher)   _s5_prefix="R:" ;;
+                    advisor)      _s5_prefix="A:" ;;
+                    doc-writer)   _s5_prefix="D:" ;;
+                    *)            _s5_prefix="${_d_task}:" ;;
+                esac
+                for _c in $(git -C "$_cleanup_wt" log --format='%H' "${_wt_init_head}..HEAD" 2>/dev/null); do
+                    _cmsg=$(git -C "$_cleanup_wt" log -1 --format='%s' "$_c" 2>/dev/null || true)
+                    case "$_cmsg" in "$_s5_prefix"*)
+                        _task_sha=$(git -C "$_cleanup_wt" rev-parse --short=7 "$_c" 2>/dev/null || echo "$_c")
+                        break
+                    ;; esac
+                done
+                if [ -n "$_task_sha" ]; then
+                    _sig="${_d_task} ${_task_sha}"
+                    _sig_task="$_d_task"
+                    _sig_sha="$_task_sha"
+                fi
+            fi
+        fi
+        if [ -n "$_sig" ]; then
+            # F56: ensure author identity for update-commit
+            [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ] || {
+                export GIT_AUTHOR_NAME="openplan-dispatcher"
+                export GIT_AUTHOR_EMAIL="openplan-dispatcher@openplan.local"
+            }
+            "$SCRIPT_DIR/openplan-update-commit" "$_sig_task" "$_sig_sha"
+            # Commit tasks.md update so worktree merge doesn't fail on dirty tree
+            _tasks_file="openspec/changes/${feature}/tasks.md"
+            if ! git diff --quiet -- "$_tasks_file" 2>/dev/null; then
+                git add "$_tasks_file"
+                OPENPLAN_ROLE=dispatcher OPENPLAN_SPARSE_SKIP=1 \
+                    GIT_AUTHOR_NAME=openplan-dispatcher GIT_AUTHOR_EMAIL=openplan-dispatcher@openplan.local \
+                    git commit -m "$(printf 'D: mark %s done (commit: %s)\nrefs: none' "$_sig_task" "$_sig_sha")"
+            fi
+        fi
+    elif [ "$_effective_role" = "reviewer" ]; then
+        _reviewer_mark_done=true
+        _log 'Reviewer %s completed (no signal)\n' "$task_id"
+    fi
+
+    if [ "$_effective_role" != "reviewer" ]; then
+        "$SCRIPT_DIR/openplan-checkpoint" "$task_id" 2>/dev/null || \
+            _log 'WARNING: checkpoint tag failed for %s\n' "$task_id"
+    fi
+
+    # Merge worktree back to feature branch
+    if [ -n "$_cleanup_wt_name" ] && [ -d "$_cleanup_wt" ]; then
+        for _rtd in signals workers dispatch.lock results sessions flags; do
+            rm -rf "$_cleanup_wt/_agent/$_rtd" 2>/dev/null || true
+        done
+        rm -f "_agent/context/${_effective_role}/${task_id}.md" 2>/dev/null || true
+        rm -rf "${_ctx_dir}/xrepo/" 2>/dev/null || true
+        if ! git diff --quiet 2>/dev/null; then
+            _log 'WARN: main tree dirty before merge, restoring\n'
+            git checkout -- . 2>/dev/null || true
+        fi
+        if [ -n "$_cleanup_repo" ]; then
+            "$SCRIPT_DIR/openplan-worktree" complete "$_cleanup_wt_name" --repo "$_cleanup_repo" || {
+                _log 'ERROR: worktree complete failed for %s — manual merge needed\n' "$_cleanup_wt_name"
+                exit 1
+            }
+        else
+            "$SCRIPT_DIR/openplan-worktree" complete "$_cleanup_wt_name" || {
+                _log 'ERROR: worktree complete failed for %s — manual merge needed\n' "$_cleanup_wt_name"
+                exit 1
+            }
+        fi
+    fi
+
+    # F58: mark reviewer done AFTER merge
+    if [ "${_reviewer_mark_done:-}" = "true" ]; then
+        sed -i "s/^- \\[ \\] ${task_id}:/- [x] ${task_id}:/" "$tasks_file"
+    fi
+fi
+
+exit 0

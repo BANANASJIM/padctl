@@ -1,0 +1,150 @@
+#!/bin/sh
+# Create or close a deviation record
+set -e
+
+usage() {
+    echo "Usage: openplan-deviation create <feature-dir> <severity> <title>" >&2
+    echo "       openplan-deviation close <file> fixed <fix-commit-sha> [root-cause-category]" >&2
+    echo "       openplan-deviation close <file> accepted-as-is [root-cause-category]" >&2
+    echo "       openplan-deviation close <file> deferred <deferred-to> [root-cause-category]" >&2
+    echo "       openplan-deviation status" >&2
+    exit 1
+}
+
+[ $# -ge 1 ] || usage
+
+action="$1"
+case "$action" in
+    --status|status|list)
+        _exit=0
+        for f in deviations/deviation-*.md openspec/changes/*/deviation-*.md; do
+            [ -f "$f" ] || continue
+            _status=$(grep -m1 'status:' "$f" | sed 's/.*status: *\([a-z-]*\).*/\1/')
+            echo "$(basename "$f") ${_status}"
+            [ "$_status" = "open" ] && _exit=1
+        done
+        exit "$_exit"
+        ;;
+    create)
+        [ $# -ge 4 ] || usage
+        dir="$2"; severity="$3"; title="$4"
+        # Find next deviation number
+        max=0
+        if [ -n "${OPENPLAN_TASK_ID:-}" ]; then
+            _prefix="deviation-${OPENPLAN_TASK_ID}-"
+            for f in "$dir"/${_prefix}*.md; do
+                [ -f "$f" ] || continue
+                n=$(echo "$f" | sed "s/.*${_prefix}\([0-9]*\)\.md/\1/")
+                [ "$n" -gt "$max" ] 2>/dev/null && max="$n"
+            done
+            next=$((max + 1))
+            out="$dir/${_prefix}${next}.md"
+        else
+            for f in "$dir"/deviation-*.md; do
+                [ -f "$f" ] || continue
+                n=$(echo "$f" | sed 's/.*deviation-\([0-9]*\)\.md/\1/')
+                [ "$n" -gt "$max" ] 2>/dev/null && max="$n"
+            done
+            next=$((max + 1))
+            out="$dir/deviation-${next}.md"
+        fi
+        today=$(date '+%Y-%m-%d')
+        if [ -n "${OPENPLAN_TASK_ID:-}" ]; then
+            _label="${OPENPLAN_TASK_ID}-${next}"
+        else
+            _label="${next}"
+        fi
+        tmp=$(mktemp)
+        cat > "$tmp" <<EOF
+# Deviation-${_label}: ${title}
+
+> severity: ${severity} | status: open | date: ${today}
+
+## Description
+
+(describe expected vs actual)
+
+## Related Design
+
+(design doc paths)
+
+## Resolution
+
+(pending)
+EOF
+        mkdir -p "$dir"
+        mv "$tmp" "$out"
+        echo "Created: $out"
+        _sha=$(git rev-parse HEAD 2>/dev/null) || true
+        if [ -n "$_sha" ]; then
+            _dnote="deviation-file: ${out}
+severity: ${severity}
+status: open"
+            _existing=$(git notes --ref=refs/notes/deviations show "$_sha" 2>/dev/null) || true
+            [ -n "$_existing" ] && _dnote="${_existing}
+---
+${_dnote}"
+            git notes --ref=refs/notes/deviations add -f -m "$_dnote" "$_sha" 2>/dev/null || true
+        fi
+        ;;
+    close)
+        [ $# -ge 3 ] || usage
+        file="$2"; resolution="$3"
+        case "$resolution" in
+            fixed|accepted-as-is|deferred) ;;
+            *) echo "Error: resolution must be fixed|accepted-as-is|deferred" >&2; exit 1 ;;
+        esac
+        if [ "$resolution" = "fixed" ]; then
+            [ -n "$4" ] || { echo "Error: fixed requires fix-commit SHA argument (DEV-007)" >&2; exit 1; }
+            fix_commit="$4"
+            git rev-parse --verify "${fix_commit}^{commit}" >/dev/null 2>&1 || \
+                { echo "Error: fix-commit SHA $fix_commit not found in git history (DEV-008)" >&2; exit 1; }
+            root_cause="${5:-}"
+        elif [ "$resolution" = "deferred" ]; then
+            [ -n "$4" ] || { echo "Error: deferred requires deferred-to argument" >&2; exit 1; }
+            deferred_to="$4"
+            root_cause="${5:-}"
+        else
+            root_cause="${4:-}"
+        fi
+        # Rewrite file: replace (pending) with resolution, update status
+        tmp=$(mktemp)
+        while IFS= read -r line; do
+            case "$line" in
+                '(pending)')
+                    printf '%s\n' "- **resolution:** ${resolution}"
+                    [ "$resolution" = "fixed" ] && printf '%s\n' "- **fix-commit:** ${fix_commit}"
+                    [ "$resolution" = "deferred" ] && printf '%s\n' "- **deferred-to:** ${deferred_to}"
+                    [ -n "$root_cause" ] && printf '%s\n' "- **root-cause-category:** ${root_cause}"
+                    ;;
+                *'status: open'*)
+                    printf '%s\n' "$line" | sed 's/status: open/status: resolved/'
+                    ;;
+                *) printf '%s\n' "$line" ;;
+            esac
+        done < "$file" > "$tmp"
+        mv "$tmp" "$file"
+        _readme="$(dirname "$file")/README.md"
+        if [ -f "$_readme" ]; then
+            _base=$(basename "$file" .md)
+            sed -i "s/| ${_base} \(.*\)| open/| ${_base} \1| resolved/" "$_readme" 2>/dev/null || true
+        fi
+        echo "Closed: $file ($resolution)"
+        _sha=$(git rev-parse HEAD 2>/dev/null) || true
+        if [ -n "$_sha" ]; then
+            _dnote="deviation-file: ${file}
+status: resolved
+resolution: ${resolution}"
+            [ -n "$root_cause" ] && _dnote="${_dnote}
+root-cause-category: ${root_cause}"
+            _existing=$(git notes --ref=refs/notes/deviations show "$_sha" 2>/dev/null) || true
+            [ -n "$_existing" ] && _dnote="${_existing}
+---
+${_dnote}"
+            git notes --ref=refs/notes/deviations add -f -m "$_dnote" "$_sha" 2>/dev/null || true
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac

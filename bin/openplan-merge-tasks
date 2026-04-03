@@ -1,0 +1,200 @@
+#!/bin/sh
+set -e
+
+# Git merge driver for tasks.md — semantic section-level 3-way merge
+# Called as: openplan-merge-tasks %O %A %B
+
+if [ $# -ne 3 ]; then
+    echo "Usage: openplan-merge-tasks <ancestor> <ours> <theirs>" >&2
+    exit 1
+fi
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+_lib="$SCRIPT_DIR/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT:?OPENPLAN_ROOT not set}/hooks/lib/common.sh"
+. "$_lib"
+
+BASE="$1" OURS="$2" THEIRS="$3"
+
+# Config gate
+enabled=$(op_jsonc_val '.git.merge_drivers' 'false')
+[ "$enabled" = "true" ] || exit 1
+
+# Dump sections into key files (awk writes files directly to avoid pipe+read multi-line bug)
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+_dump() {
+    _label="$1"; _file="$2"
+    awk -v dir="$tmpdir" -v lbl="$_label" '
+    function flush() {
+        if (buf == "") return
+        f = dir "/" lbl "_" key
+        printf "%s", buf > f; close(f)
+        print key >> dir "/" lbl "_keys"; close(dir "/" lbl "_keys")
+    }
+    BEGIN { key = "preamble"; buf = "" }
+    /^- \[[ x]\] (T[0-9]|RG[0-9])/ {
+        flush()
+        match($0, /(T|RG)[0-9]+/)
+        key = substr($0, RSTART, RLENGTH)
+        buf = $0
+        next
+    }
+    { buf = (buf == "" ? $0 : buf "\n" $0) }
+    END { flush() }
+    ' "$_file"
+}
+
+_dump base "$BASE"
+_dump ours "$OURS"
+_dump theirs "$THEIRS"
+
+# Collect all unique keys in order: preamble first, then task IDs in order of appearance
+{
+    cat "$tmpdir/base_keys" 2>/dev/null || true
+    cat "$tmpdir/ours_keys" 2>/dev/null || true
+    cat "$tmpdir/theirs_keys" 2>/dev/null || true
+} | awk '!seen[$0]++ { if ($0 == "preamble") p = $0; else keys[n++] = $0 }
+    END { if (p != "") print p; for (i = 0; i < n; i++) print keys[i] }' > "$tmpdir/all_keys"
+
+conflict=0
+result="$tmpdir/result"
+: > "$result"
+first=1
+
+while IFS= read -r key; do
+    b_file="$tmpdir/base_${key}"
+    o_file="$tmpdir/ours_${key}"
+    t_file="$tmpdir/theirs_${key}"
+    has_b=0; has_o=0; has_t=0
+    if [ -f "$b_file" ]; then has_b=1; fi
+    if [ -f "$o_file" ]; then has_o=1; fi
+    if [ -f "$t_file" ]; then has_t=1; fi
+
+    # Only in base -> deleted by both sides, omit
+    if [ "$has_b" = 1 ] && [ "$has_o" = 0 ] && [ "$has_t" = 0 ]; then continue; fi
+
+    # Deleted by one side (was in base + one side, not in the other)
+    if [ "$has_b" = 1 ]; then
+        if [ "$has_o" = 0 ] && [ "$has_t" = 1 ]; then
+            b_content=$(cat "$b_file")
+            t_content=$(cat "$t_file")
+            if [ "$b_content" = "$t_content" ]; then
+                continue  # deleted in ours, unchanged in theirs -> delete
+            fi
+            # theirs modified, ours deleted -> conflict
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            printf '<<<<<<< ours (deleted)\n=======\n' >> "$result"
+            cat "$t_file" >> "$result"
+            printf '\n>>>>>>> theirs\n' >> "$result"
+            conflict=1
+            continue
+        fi
+        if [ "$has_o" = 1 ] && [ "$has_t" = 0 ]; then
+            b_content=$(cat "$b_file")
+            o_content=$(cat "$o_file")
+            if [ "$b_content" = "$o_content" ]; then
+                continue  # deleted in theirs, unchanged in ours -> delete
+            fi
+            # Ours has commit SHA (task completed) — keep it despite theirs deleting
+            if echo "$o_content" | grep -q 'commit: [0-9a-f]'; then
+                [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+                cat "$o_file" >> "$result"
+                continue
+            fi
+            # ours modified, theirs deleted -> conflict
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            printf '<<<<<<< ours\n' >> "$result"
+            cat "$o_file" >> "$result"
+            printf '\n=======\n>>>>>>> theirs (deleted)\n' >> "$result"
+            conflict=1
+            continue
+        fi
+    fi
+
+    # New task (not in base)
+    if [ "$has_b" = 0 ]; then
+        if [ "$has_o" = 1 ] && [ "$has_t" = 0 ]; then
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$o_file" >> "$result"
+            continue
+        fi
+        if [ "$has_o" = 0 ] && [ "$has_t" = 1 ]; then
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$t_file" >> "$result"
+            continue
+        fi
+        if [ "$has_o" = 1 ] && [ "$has_t" = 1 ]; then
+            o_content=$(cat "$o_file")
+            t_content=$(cat "$t_file")
+            if [ "$o_content" = "$t_content" ]; then
+                [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+                cat "$o_file" >> "$result"
+                continue
+            fi
+            # Both added same key differently -> conflict
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            printf '<<<<<<< ours\n' >> "$result"
+            cat "$o_file" >> "$result"
+            printf '\n=======\n' >> "$result"
+            cat "$t_file" >> "$result"
+            printf '\n>>>>>>> theirs\n' >> "$result"
+            conflict=1
+            continue
+        fi
+    fi
+
+    # Present in all three
+    if [ "$has_b" = 1 ] && [ "$has_o" = 1 ] && [ "$has_t" = 1 ]; then
+        b_content=$(cat "$b_file")
+        o_content=$(cat "$o_file")
+        t_content=$(cat "$t_file")
+
+        if [ "$o_content" = "$t_content" ]; then
+            # Both same (changed or not)
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$o_file" >> "$result"
+        elif [ "$o_content" = "$b_content" ]; then
+            # Only theirs changed
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$t_file" >> "$result"
+        elif [ "$t_content" = "$b_content" ]; then
+            # Only ours changed
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$o_file" >> "$result"
+        elif echo "$o_content" | grep -q 'commit: [0-9a-f]' && ! echo "$t_content" | grep -q 'commit: [0-9a-f]'; then
+            # Ours has commit SHA, theirs doesn't — prefer ours (update-commit wins)
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$o_file" >> "$result"
+        elif echo "$t_content" | grep -q 'commit: [0-9a-f]' && ! echo "$o_content" | grep -q 'commit: [0-9a-f]'; then
+            # Theirs has commit SHA, ours doesn't — prefer theirs
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$t_file" >> "$result"
+        elif echo "$o_content" | grep -q 'commit: [0-9a-f]' && echo "$t_content" | grep -q 'commit: [0-9a-f]'; then
+            # Both have commit SHA — prefer ours (update-commit writes to main tree = ours)
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$o_file" >> "$result"
+        elif [ "$key" = "preamble" ]; then
+            # Preamble (heading): prefer theirs (agent output over skeleton)
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            cat "$t_file" >> "$result"
+        else
+            # Both changed differently -> conflict
+            [ "$first" = 1 ] && first=0 || printf '\n' >> "$result"
+            printf '<<<<<<< ours\n' >> "$result"
+            cat "$o_file" >> "$result"
+            printf '\n=======\n' >> "$result"
+            cat "$t_file" >> "$result"
+            printf '\n>>>>>>> theirs\n' >> "$result"
+            conflict=1
+        fi
+        continue
+    fi
+done < "$tmpdir/all_keys"
+
+# Write result to %A
+cp "$result" "$OURS" || exit 1
+
+if [ "$conflict" = 1 ]; then exit 1; fi
+exit 0

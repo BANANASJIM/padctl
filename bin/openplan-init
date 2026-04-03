@@ -1,0 +1,801 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+_lib="$SCRIPT_DIR/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT:?OPENPLAN_ROOT not set}/hooks/lib/common.sh"
+. "$_lib"
+
+NON_INTERACTIVE=0
+DOCS_REPO=""
+CODE_REPO=""
+INIT_DOCS=""
+LITE=0
+
+usage() {
+    echo "Usage: openplan-init [--non-interactive] [--lite] [--docs-repo <path>] [--code-repo <path>] [--init-docs <path>]" >&2
+    exit 1
+}
+
+info() { printf '[openplan-init] %s\n' "$1" >&2; }
+
+_set_git_config() {
+    _key="$1"; _val="$2"
+    _cur=$(git config --local "$_key" 2>/dev/null || true)
+    if [ "$_cur" = "$_val" ]; then
+        info "skip: git config $_key (already set)"
+    else
+        git config --local "$_key" "$_val"
+        info "set: git config $_key = $_val"
+    fi
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --non-interactive) NON_INTERACTIVE=1; shift ;;
+        --lite) LITE=1; shift ;;
+        --docs-repo) DOCS_REPO="$2"; shift 2 ;;
+        --code-repo) CODE_REPO="$2"; shift 2 ;;
+        --init-docs) INIT_DOCS="$2"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+create_skeleton() {
+    for d in openspec/changes _skills _templates; do
+        if [ -d "$d" ]; then
+            info "skip: $d/ (exists)"
+        else
+            mkdir -p "$d"
+            info "created: $d/"
+        fi
+    done
+}
+
+write_jsonc() {
+    _docs=$(printf '%s' "${DOCS_REPO}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    _code=$(printf '%s' "${CODE_REPO}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    if [ -f openplan.jsonc ] && command -v jq >/dev/null 2>&1; then
+        _docs_raw="${DOCS_REPO:-$(op_jsonc_val '.repos.docs' '')}"
+        _code_raw="${CODE_REPO:-$(op_jsonc_val '.repos.code' '')}"
+        _docs=$(printf '%s' "$_docs_raw" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        _code=$(printf '%s' "$_code_raw" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        _ci_mode=$(op_jsonc_val '.ci.mode' '')
+        _perm_mode=$(op_jsonc_val '.permissions.mode' '')
+        _perm_roles=$(op_jsonc_val '.permissions.roles' '{}')
+        info "merge: openplan.jsonc (preserving existing values)"
+    elif [ -f openplan.jsonc ]; then
+        info "skip: openplan.jsonc (exists but jq not available, not overwriting)"
+        return 0
+    else
+        _ci_mode=""
+        _perm_mode=""
+        _perm_roles="{}"
+    fi
+
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp" <<EOF
+// OpenPlan Configuration (ADR-058)
+{
+  // CI mode: "strict" | "relaxed"
+  "ci": {
+    "mode": "${_ci_mode:-strict}",
+    "hooks": ["commit-msg", "pre-commit", "pre-merge-commit"],
+    "root_file_limit_lines": 150
+  },
+
+  // Permission system
+  "permissions": {
+    "mode": "${_perm_mode:-strict}",
+    "roles": ${_perm_roles}
+  },
+
+  // Repository paths (docs = design SSOT, code = implementation)
+  "repos": {
+    "docs": "${_docs}",
+    "code": "${_code}"
+  },
+
+  // Backend runtime: "opencode" | "claude-code" | "claude-cli" | "gemini" | "codex"
+  "backend": "opencode",
+
+  // Per-role backend routing (ADR-057): e.g. {"researcher": "claude-cli"}
+  "roleBackends": {},
+
+  // Configurable roles (ADR-058): override read/write/sparseCheckout/allowedTools/disallowedTools/model/budget/maxTurns/commitPrefix per role
+  // Example: "implementer": {"write": ["src/", "tests/"], "model": "claude-sonnet-4-6"}
+  "roles": {},
+
+  // Directory-layer mapping (ADR-058): maps directory prefixes to doc/spec/code layers
+  // Default: doc=[design/,engineering/,decisions/,conventions/] spec=[openspec/] code=[src/,lib/,plugin/,hooks/,bin/,tests/]
+  "layers": {},
+
+  // Git configuration
+  "git": {
+    "worktree_dir": ".worktrees",
+    "rerere": false,
+    "notes_namespaces": ["budget", "reviews", "sudo", "dispatch", "deviations", "hotfix"],
+    "merge_drivers": true,
+    "branch_pattern": "feature/[^ ]+"
+  },
+
+  // Staleness detection (ADR-019)
+  "staleness": {
+    "enabled": true,
+    "check_existence": true,
+    "check_adr_chain": true,
+    "check_hash_drift": true
+  },
+
+  // Dual-repo branch pairing (ADR-020)
+  "dual_repo": {
+    "branch_check": true,
+    "default_strategy": "same-name",
+    "branch_map": {}
+  },
+
+  // Budget tracking
+  "budget": {
+    "default_task_tokens": null
+  },
+
+  // Deduplication
+  "dedup": {
+    "enabled": false,
+    "threshold": 0.8,
+    "exclude": ["_templates/"]
+  },
+
+  // Skills auto-loading
+  "skills": {
+    "auto_load": true
+  },
+
+  // Archive settings
+  "archive": {
+    "auto_tag": true,
+    "summary_section": "Summary"
+  },
+
+  // Validation checks
+  "checks": {
+    "depends_validation": true,
+    "openspec_completeness": true
+  },
+
+  // Observability
+  "observability": {
+    "track_model": false,
+    "capture_transcript": "off"
+  }
+}
+EOF
+
+    if [ -f openplan.jsonc ] && diff -q openplan.jsonc "$tmp" >/dev/null 2>&1; then
+        info "skip: openplan.jsonc (unchanged)"
+        rm -f "$tmp"
+    else
+        mv "$tmp" openplan.jsonc
+        info "wrote: openplan.jsonc"
+    fi
+}
+
+setup_git_config() {
+    _ci_mode=$(op_jsonc_val '.ci.mode' 'strict')
+
+    _set_git_config "openplan.ci-mode" "$_ci_mode"
+    _set_git_config "notes.displayRef" "refs/notes/*"
+    _set_git_config "notes.rewriteRef" "refs/notes/*"
+
+    for ns in budget reviews sudo dispatch deviations hotfix; do
+        _set_git_config "notes.${ns}.mergeStrategy" "union"
+    done
+
+    if git remote get-url origin >/dev/null 2>&1; then
+        _refspec="+refs/notes/*:refs/notes/*"
+        _existing=$(git config --local --get-all remote.origin.fetch 2>/dev/null || true)
+        if printf '%s\n' "$_existing" | grep -qF "$_refspec"; then
+            info "skip: remote.origin.fetch notes refspec (already present)"
+        else
+            git config --local --add remote.origin.fetch "$_refspec"
+            info "added: remote.origin.fetch = $_refspec"
+        fi
+    else
+        info "skip: remote notes refspec (no origin remote)"
+    fi
+
+    _set_git_config "merge.openplan-task-merge.name" "OpenPlan tasks.md merge"
+    _set_git_config "merge.openplan-task-merge.driver" "openplan-merge-tasks %O %A %B"
+}
+
+setup_gitattributes() {
+    _line="openspec/changes/*/tasks.md merge=openplan-task-merge"
+    if [ -f .gitattributes ] && grep -qF "$_line" .gitattributes; then
+        info "skip: .gitattributes (merge driver rule already present)"
+    else
+        printf '%s\n' "$_line" >> .gitattributes
+        info "added: .gitattributes merge driver rule"
+    fi
+
+    _md_line="*.md diff=markdown"
+    if [ -f .gitattributes ] && grep -qF "$_md_line" .gitattributes; then
+        info "skip: .gitattributes (markdown diff already present)"
+    else
+        printf '%s\n' "$_md_line" >> .gitattributes
+        info "added: .gitattributes markdown diff driver"
+    fi
+}
+
+copy_hooks() {
+    _src="$SCRIPT_DIR/../hooks"
+    [ -d "$_src" ] || return 0
+    [ -d hooks ] && { info "skip: hooks/ (exists)"; return 0; }
+    cp -r "$_src" hooks
+    info "copied: hooks/"
+}
+
+copy_bin() {
+    _src="$SCRIPT_DIR/.."
+    mkdir -p bin
+    for _tool in openplan-check-permission openplan-garden openplan-archive openplan-checkpoint openplan-init openplan-merge-tasks openplan-worktree openplan-deviation openplan-dispatch openplan-status; do
+        [ -f "$_src/bin/$_tool" ] || continue
+        if [ -f "bin/$_tool" ]; then
+            info "skip: bin/$_tool (exists)"
+        else
+            cp "$_src/bin/$_tool" "bin/$_tool"
+            chmod +x "bin/$_tool"
+            info "copied: bin/$_tool"
+        fi
+    done
+}
+
+setup_hooks_path() {
+    _hooks_abs="$(git rev-parse --show-toplevel)/hooks"
+    _cur=$(git config --local core.hooksPath 2>/dev/null || true)
+    if [ "$_cur" = "$_hooks_abs" ]; then
+        info "skip: core.hooksPath (already set)"
+    else
+        git config --local core.hooksPath "$_hooks_abs"
+        info "set: core.hooksPath = $_hooks_abs"
+    fi
+}
+
+check_role_author() {
+    [ -z "$OPENPLAN_ROLE" ] && return 0
+    _expected="openplan-${OPENPLAN_ROLE}"
+    _actual="${GIT_AUTHOR_NAME:-}"
+    if [ -n "$_actual" ] && [ "$_actual" != "$_expected" ]; then
+        info "WARNING: OPENPLAN_ROLE=$OPENPLAN_ROLE but GIT_AUTHOR_NAME=$_actual (expected $_expected)"
+    fi
+}
+
+setup_hook_permissions() {
+    [ -d hooks ] || return 0
+    for f in hooks/*; do
+        [ -f "$f" ] || continue
+        case "$f" in hooks/lib/*|*.sh) continue ;; esac
+        if [ ! -x "$f" ]; then
+            chmod +x "$f"
+            info "chmod +x: $f"
+        fi
+    done
+}
+
+_generate_rules_skeleton() {
+    cat > "$1" <<'RULES_EOF'
+# Project Rules
+
+OpenPlan is a multi-agent framework where a dispatcher coordinates specialized subagents.
+Two repos: docs-repo (design SSOT) and code-repo (implementation). Authority flows docs → spec → code.
+Each subagent runs in an isolated git worktree with sparse checkout — you can only see files your role permits.
+State lives in filesystem and git. The dispatcher reads file-system signals to drive convergence.
+Quality gates: garden (structural) → gardener (semantic) → reviewer (alignment).
+
+## P1: Minimal Effective Context
+
+Load only what the current task needs. Irrelevant context wastes tokens and distorts judgement.
+
+- **Stateless agents** — no long conversations; reload state from filesystem every round
+- **Zero redundancy** — no content duplication; all references via file paths
+- **Physical isolation** — worktree + sparse checkout limits what each role can see
+- **Leak isolation** — parallel subagents run in separate worktrees, invisible to each other
+- **ATL pattern** — dispatcher passes file path references, never file contents
+
+## P2: Human Is the Final Decision-Maker
+
+All decisions can only be made by humans. Agents only execute and suggest.
+
+- **Question tool gate** — every dispatch must show status and wait for human approval
+- **Deviation handling** — blocking deviations notify human; non-blocking are logged
+- **Independent review** — writer and reviewer are always separate roles
+- **Strict by default** — all checks default to strictest; relaxation requires explicit config or sudo
+- **HOTFIX bypass** — human can bypass all gates via `HOTFIX` (emergency escape, audited)
+- **Dispatcher is sole interface** — only the dispatcher interacts with human; subagents run non-interactively
+
+## Format Rules
+
+- New review / research / deviation files must use the corresponding `_templates/` template
+- All status tracking uses `- [x]` / `- [ ]` checkboxes
+
+## Commit Format
+
+Prefixes: `T<n>:` implementer | `S:` spec-writer | `R:` researcher | `A:` advisor | `D:` doc-writer | `RG<n>:` reviewer gate | `HOTFIX:` manual bypass | `GARDEN:` garden auto-fix
+
+## Role: dispatcher
+- Read: all | Write: openspec/ commit: field
+- Skill: `_skills/dispatcher-playbook.md`
+
+## Role: spec-writer
+- Read: all | Write: openspec/
+- Commit prefix: S:
+
+## Role: implementer
+- Read: src/, tests/, openspec/ + context paths | Write: src/, tests/, deviations/
+- Commit prefix: T<n>:
+
+## Role: reviewer
+- Read: all | Write: review/, deviations/
+- Skill: `_skills/code-review.md`
+- Commit prefix: RG<n>:
+
+## Role: researcher
+- Read: design/, research/ | Write: research/, deviations/
+- Commit prefix: R:
+- Template: `_templates/research.md`
+
+## Role: doc-writer
+- Read: all (docs-repo) | Write: design/, decisions/, engineering/, planning/, conventions/, deviations/, _templates/
+- Commit prefix: D:
+
+## Role: advisor
+- Read: all | Write: research/, _agent/state/, _agent/advisor/
+- Commit prefix: A:
+- Skill: `_skills/advisor.md`
+
+## Role: probe
+- Read: all | Write: none
+
+## Role: gardener
+- Read: all (docs-repo) | Write: none (dispatcher commits to _agent/gardener/)
+- Skill: `_skills/gardener.md`
+- Quality: `conventions/doc-quality.md`
+RULES_EOF
+}
+
+_generate_agents_skeleton() {
+    cat > "$1" <<'AGENTS_EOF'
+# Agent Role Definitions
+
+## dispatcher
+Orchestrates task execution. Reads all files. Writes openspec/ commit: field.
+Skill: `_skills/dispatcher-playbook.md`
+
+## spec-writer
+Translates design into openspec tasks. Reads all files. Writes openspec/.
+
+## implementer
+Implements code per openspec tasks. Reads src/, tests/, openspec/. Writes src/, tests/, deviations/.
+
+## reviewer
+Reviews deliverable quality. Reads all files. Writes review/, deviations/.
+Template: `_templates/review.md`
+
+## researcher
+Investigates technical questions. Reads design/, research/. Writes research/, deviations/.
+Template: `_templates/research.md`
+
+## doc-writer
+Writes and maintains design-layer documentation. Reads all (docs-repo). Writes design/, decisions/, engineering/, planning/, conventions/, deviations/, _templates/.
+
+## advisor
+Requirement alignment consultant. Reads all files. Writes research/, _agent/state/, _agent/advisor/.
+Skill: `_skills/advisor.md`
+
+## probe
+Diagnostic health checks. Reads all files. Writes none.
+
+## gardener
+Structural + semantic documentation lint. Reads all (docs-repo). Writes none (dispatcher commits to _agent/gardener/).
+Skill: `_skills/gardener.md`
+Quality: `conventions/doc-quality.md`
+AGENTS_EOF
+}
+
+write_lite_jsonc() {
+    if [ -f openplan.jsonc ]; then
+        info "skip: openplan.jsonc (exists)"
+        return 0
+    fi
+    _preset="$SCRIPT_DIR/../presets/lite.jsonc"
+    if [ ! -f "$_preset" ]; then
+        printf '{"roles":{}}\n' > openplan.jsonc
+        info "wrote: openplan.jsonc (minimal fallback — preset not found)"
+        return 0
+    fi
+    cp "$_preset" openplan.jsonc
+    info "wrote: openplan.jsonc (from presets/lite.jsonc)"
+}
+
+_write_plugin_json() {
+    _pj=".claude-plugin/plugin.json"
+    if [ -f "$_pj" ]; then
+        info "skip: $_pj (exists)"
+        return 0
+    fi
+    _src="$SCRIPT_DIR/../.claude-plugin/plugin.json"
+    if [ -f "$_src" ]; then
+        cp "$_src" "$_pj"
+        info "copied: $_pj"
+    else
+        cat > "$_pj" <<'PLUGIN_EOF'
+{
+  "name": "openplan",
+  "version": "0.1.0",
+  "description": "OpenPlan Lite — state-driven multi-agent document governance",
+  "author": {"name": "OpenPlan contributors"},
+  "hooks": {
+    "PreToolUse": []
+  }
+}
+PLUGIN_EOF
+        info "wrote: $_pj (built-in default)"
+    fi
+}
+
+setup_claude_skeleton() {
+    mkdir -p .claude-plugin
+    info "created: .claude-plugin/"
+
+    _write_plugin_json
+
+    # Generate hooks.json at code-repo root (plugin path resolution)
+    _sh="$SCRIPT_DIR/../lib/generators/hooks-json.sh"
+    if [ -f "$_sh" ]; then
+        info "run: lib/generators/hooks-json.sh"
+        bash "$_sh"
+    else
+        info "skip: generator hooks-json (not found)"
+    fi
+}
+
+init_docs_repo() {
+    _target="$1"
+    [ -z "$_target" ] && return 0
+
+    # Guard: --code-repo is required before any filesystem mutation
+    if [ -z "$CODE_REPO" ]; then
+        info "ERROR: --code-repo is required with --init-docs"
+        exit 1
+    fi
+
+    _code_repo="${CODE_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+    info "initializing docs repo at $_target"
+    mkdir -p "$_target"
+
+    # Create directory structure (architecture.md canonical)
+    for d in _agent/sessions _agent/gardener _agent/state _agent/advisor _agent/align _agent/context \
+             _templates _skills design engineering decisions planning/archive \
+             research/archive review/archive conventions deviations; do
+        mkdir -p "$_target/$d"
+    done
+    info "created: directory structure"
+
+    # .gitkeep for _agent/ subdirs (git doesn't track empty dirs, garden DIR check needs them)
+    for d in _agent/sessions _agent/gardener _agent/state _agent/advisor _agent/align _agent/context; do
+        touch "$_target/$d/.gitkeep"
+    done
+
+    # RULES.md — copy from code-repo if available, otherwise generate skeleton
+    if [ ! -f "$_target/RULES.md" ]; then
+        if [ -f "$_code_repo/RULES.md" ]; then
+            cp "$_code_repo/RULES.md" "$_target/RULES.md"
+            info "copied: RULES.md"
+        else
+            _generate_rules_skeleton "$_target/RULES.md"
+            info "wrote: RULES.md skeleton"
+        fi
+    else
+        info "skip: RULES.md (exists)"
+    fi
+
+    # AGENTS.md — copy from code-repo if available, otherwise generate skeleton
+    if [ ! -f "$_target/AGENTS.md" ]; then
+        if [ -f "$_code_repo/AGENTS.md" ]; then
+            cp "$_code_repo/AGENTS.md" "$_target/AGENTS.md"
+            info "copied: AGENTS.md"
+        else
+            _generate_agents_skeleton "$_target/AGENTS.md"
+            info "wrote: AGENTS.md skeleton"
+        fi
+    else
+        info "skip: AGENTS.md (exists)"
+    fi
+
+    # ENTRYPOINTS.md skeleton
+    if [ ! -f "$_target/ENTRYPOINTS.md" ]; then
+        cat > "$_target/ENTRYPOINTS.md" <<'ENTRYPOINTS_EOF'
+# Entrypoints
+
+## Root Files
+
+- `RULES.md` — Agent behavior constraints (hot memory)
+- `AGENTS.md` — Agent roles and permissions (hot memory)
+- `ENTRYPOINTS.md` — This file (hot memory)
+
+## Directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `_agent/` | Agent IPC (sessions, state, advisor, gardener, learnings) |
+| `_templates/` | Document templates |
+| `_skills/` | Role-specific execution SOPs |
+| `design/` | High-level design (constitutional) |
+| `engineering/` | Engineering specs (evolvable) |
+| `decisions/` | ADRs (append-only, immutable) |
+| `planning/` | Roadmap, phases (mutable) |
+| `research/` | Investigation reports (snapshots) |
+| `review/` | Quality review reports |
+| `conventions/` | Norms and standards |
+| `deviations/` | Deviation reports |
+ENTRYPOINTS_EOF
+        info "wrote: ENTRYPOINTS.md skeleton"
+    else
+        info "skip: ENTRYPOINTS.md (exists)"
+    fi
+
+    # Copy docs-repo templates only (D9: skip code-repo-only templates)
+    _docs_templates="align-round.md needs-snapshot.md research.md review.md decision.md deviation.md phase.md design-principles.md"
+    for _base in $_docs_templates; do
+        _f="$_code_repo/_templates/$_base"
+        [ -f "$_f" ] || _f="$SCRIPT_DIR/../_templates/$_base"
+        [ -f "$_f" ] || continue
+        if [ ! -f "$_target/_templates/$_base" ]; then
+            cp "$_f" "$_target/_templates/$_base"
+            info "copied: _templates/$_base"
+        fi
+    done
+
+    # Copy skills from code repo if available (whitelist: docs-repo roles only)
+    for _base in dispatcher-playbook.md advisor.md gardener.md code-review.md doc-writer.md researcher.md reviewer.md implementer.md spec-writer.md; do
+        _src="$_code_repo/_skills/$_base"
+        [ -f "$_src" ] || _src="$SCRIPT_DIR/../_skills/$_base"
+        if [ -f "$_src" ] && [ ! -f "$_target/_skills/$_base" ]; then
+            cp "$_src" "$_target/_skills/$_base"
+            info "copied: _skills/$_base"
+        fi
+    done
+
+    # Create learnings file (D13: single-line title)
+    if [ ! -f "$_target/_agent/learnings.md" ]; then
+        printf '# Operational Learnings\n' > "$_target/_agent/learnings.md"
+        info "wrote: _agent/learnings.md"
+    else
+        info "skip: _agent/learnings.md (exists)"
+    fi
+
+    # conventions/doc-quality.md
+    if [ ! -f "$_target/conventions/doc-quality.md" ]; then
+        _cq="$_code_repo/conventions/doc-quality.md"
+        [ -f "$_cq" ] || _cq="$SCRIPT_DIR/../conventions/doc-quality.md"
+        if [ -f "$_cq" ]; then
+            cp "$_cq" "$_target/conventions/doc-quality.md"
+            info "copied: conventions/doc-quality.md"
+        else
+            info "skip: conventions/doc-quality.md (source not found)"
+        fi
+    else
+        info "skip: conventions/doc-quality.md (exists)"
+    fi
+
+    # design/architecture.md (D7: directory tree declaration)
+    if [ ! -f "$_target/design/architecture.md" ]; then
+        cat > "$_target/design/architecture.md" <<'ARCH_EOF'
+# Architecture
+
+## Directory Structure
+
+```
+project-docs/
+├── RULES.md
+├── AGENTS.md
+├── ENTRYPOINTS.md
+├── _agent/
+├── _templates/
+├── _skills/
+├── design/
+├── engineering/
+├── decisions/
+├── planning/
+├── research/
+├── review/
+├── conventions/
+└── deviations/
+```
+ARCH_EOF
+        info "wrote: design/architecture.md"
+    fi
+
+    # Generate planning/roadmap.md stub (D3: no stub index files)
+    if [ ! -f "$_target/planning/roadmap.md" ]; then
+        printf '# Roadmap\n' > "$_target/planning/roadmap.md"
+        info "wrote: planning/roadmap.md"
+    fi
+
+    # openplan.jsonc must exist before generators read it
+    if [ ! -f "$_target/openplan.jsonc" ]; then
+        _preset="$SCRIPT_DIR/../presets/lite.jsonc"
+        if [ -f "$_preset" ]; then
+            cp "$_preset" "$_target/openplan.jsonc"
+            info "wrote: docs openplan.jsonc (from presets/lite.jsonc)"
+        else
+            printf '{"roles":{}}\n' > "$_target/openplan.jsonc"
+            info "wrote: docs openplan.jsonc (minimal fallback)"
+        fi
+    else
+        info "skip: docs openplan.jsonc (exists)"
+    fi
+
+    # .claude/commands/ and .claude/agents/ — create dirs for generators
+    mkdir -p "$_target/.claude/commands" "$_target/.claude/agents"
+
+    # dispatch-command generator — writes .claude/commands/dispatch.md in docs-repo
+    _gen_dispatch="$SCRIPT_DIR/../lib/generators/dispatch-command.sh"
+    if [ -f "$_gen_dispatch" ]; then
+        info "run: lib/generators/dispatch-command.sh (docs-repo)"
+        (cd "$_target" && bash "$_gen_dispatch" ".claude/commands/dispatch.md")
+    else
+        info "skip: generator dispatch-command (not found)"
+    fi
+
+    # agent-files generator — writes .claude/agents/*.md in docs-repo
+    _gen_agents="$SCRIPT_DIR/../lib/generators/agent-files.sh"
+    if [ -f "$_gen_agents" ]; then
+        info "run: lib/generators/agent-files.sh (docs-repo)"
+        (cd "$_target" && SKILLS_ROOT="$_target" bash "$_gen_agents" ".claude/agents")
+    else
+        info "skip: generator agent-files (not found)"
+    fi
+
+    # settings generator — writes .claude/settings.json in docs-repo
+    _gen_settings="$SCRIPT_DIR/../lib/generators/settings.sh"
+    if [ -f "$_gen_settings" ]; then
+        if [ ! -f "$_target/.claude/settings.json" ]; then
+            info "run: lib/generators/settings.sh (docs-repo)"
+            (cd "$_target" && bash "$_gen_settings" ".claude/settings.json" "$_code_repo")
+        else
+            info "skip: .claude/settings.json (exists)"
+        fi
+    else
+        info "skip: generator settings (not found)"
+    fi
+
+    # CLAUDE.md — framework context + strip frontmatter from generated dispatch.md
+    _claude_header='# OpenPlan
+
+OpenPlan is a multi-agent collaboration framework for software engineering. A dispatcher agent orchestrates specialized subagents (researcher, doc-writer, reviewer, advisor, gardener, implementer, spec-writer), each physically isolated in its own git worktree with sparse checkout.
+
+## Core Principles
+
+- **P1 Minimal Effective Context**: Load only what the current task needs. Agents are stateless — state lives in filesystem and git, not conversation history.
+- **P2 Human Is the Final Decision-Maker**: All decisions can only be made by humans. Agents only execute and suggest. Every dispatch requires human approval via question tool.
+
+## Architecture
+
+- **Dual-repo isolation**: docs-repo (design SSOT) and code-repo (implementation + openspec). Authority flows one way: docs → spec → code.
+- **Physical isolation**: Each subagent runs in a sparse-checkout worktree. It can only see files its role permits — not convention, but physical enforcement.
+- **Quality gates**: garden (CLI structural checks) → gardener (LLM semantic checks SEM-1~12) → reviewer (LLM design alignment review).
+- **State-driven convergence**: The dispatcher reads file-system signals (garden exit code, reviewer reports, needs-snapshot existence) every round to select the next action. No reliance on conversation history.
+
+## Dispatcher Role
+
+You are the dispatcher. Pure scheduler — read state, select entry, dispatch subagent. You do NOT write files, analyze code, or implement solutions yourself.
+
+'
+    if [ ! -f "$_target/CLAUDE.md" ]; then
+        if [ -f "$_target/.claude/commands/dispatch.md" ]; then
+            { printf '%s' "$_claude_header"; sed '1{/^---$/!q;};1,/^---$/d' "$_target/.claude/commands/dispatch.md"; } > "$_target/CLAUDE.md"
+            info "wrote: CLAUDE.md (from dispatch.md)"
+        else
+            { printf '%s' "$_claude_header"; printf '# OpenPlan Dispatcher\n\nRead RULES.md, AGENTS.md, ENTRYPOINTS.md on session start.\n'; } > "$_target/CLAUDE.md"
+            info "wrote: CLAUDE.md (minimal fallback)"
+        fi
+    else
+        info "skip: CLAUDE.md (exists)"
+    fi
+
+    # .gitattributes (before seed commit so it's tracked)
+    _md_attr="*.md diff=markdown"
+    if [ -f "$_target/.gitattributes" ] && grep -qF "$_md_attr" "$_target/.gitattributes"; then
+        info "skip: docs .gitattributes (already set)"
+    else
+        printf '%s\n' "$_md_attr" >> "$_target/.gitattributes"
+        info "wrote: docs .gitattributes"
+    fi
+
+    # git init + seed commit (before hooksPath so seed commit isn't checked by agent hooks)
+    if [ ! -d "$_target/.git" ]; then
+        (cd "$_target" && git init -b main --quiet && \
+         git config user.name "openplan-init" && \
+         git config user.email "init@openplan" && \
+         git add -A && \
+         git commit -m "init: docs repo skeleton" --quiet)
+        info "git: initialized + seed commit"
+    else
+        info "skip: git init (already initialized)"
+    fi
+
+    # hooksPath -> code repo hooks/ (ADR-034)
+    _code_abs=$(cd "$CODE_REPO" && pwd)
+    _hooks_abs="$_code_abs/hooks"
+    _cur_hooks=$(git -C "$_target" config core.hooksPath 2>/dev/null || true)
+    if [ "$_cur_hooks" = "$_hooks_abs" ]; then
+        info "skip: docs hooksPath (already set)"
+    else
+        git -C "$_target" config core.hooksPath "$_hooks_abs"
+        info "set: docs core.hooksPath = $_hooks_abs"
+    fi
+
+    # notes namespaces (6ns, same as code repo)
+    for ns in budget reviews sudo dispatch deviations hotfix; do
+        git -C "$_target" config "notes.${ns}.mergeStrategy" "union"
+    done
+    git -C "$_target" config "notes.displayRef" "refs/notes/*"
+    git -C "$_target" config "notes.rewriteRef" "refs/notes/*"
+    info "set: docs git notes config (6 namespaces)"
+}
+
+init_docs_repo "$INIT_DOCS"
+
+# Write openplan.jsonc into docs-repo (init_docs_repo handles git config/hooks/attrs)
+if [ -n "$INIT_DOCS" ]; then
+    _docs_abs=$(cd "$INIT_DOCS" && pwd)
+    DOCS_REPO="$_docs_abs"
+    # Patch repos paths into existing docs-repo openplan.jsonc (preserve workflow/garden config)
+    if [ -f "$_docs_abs/openplan.jsonc" ] && command -v jq >/dev/null 2>&1; then
+        _tmp=$(mktemp)
+        op_strip_jsonc "$_docs_abs/openplan.jsonc" | \
+            jq --arg d "$_docs_abs" --arg c "${CODE_REPO:-}" \
+                '.repos.docs = $d | if $c != "" then .repos.code = $c else . end' \
+                > "$_tmp" && mv "$_tmp" "$_docs_abs/openplan.jsonc"
+        info "merge: docs-repo openplan.jsonc (repos paths only)"
+    elif [ -f "$_docs_abs/openplan.jsonc" ]; then
+        info "skip: docs-repo openplan.jsonc (exists, jq unavailable)"
+    else
+        (cd "$_docs_abs" && write_jsonc)
+    fi
+    # Commit openplan.jsonc into the seed history
+    if git -C "$_docs_abs" diff --quiet 2>/dev/null && \
+       git -C "$_docs_abs" diff --cached --quiet 2>/dev/null; then
+        git -C "$_docs_abs" add openplan.jsonc 2>/dev/null || true
+        _has_new=$(git -C "$_docs_abs" diff --cached --name-only 2>/dev/null)
+        if [ -n "$_has_new" ]; then
+            git -C "$_docs_abs" commit -m "init: add openplan.jsonc" --quiet 2>/dev/null || true
+        fi
+    else
+        git -C "$_docs_abs" add openplan.jsonc 2>/dev/null || true
+        git -C "$_docs_abs" commit -m "init: add openplan.jsonc" --quiet 2>/dev/null || true
+    fi
+fi
+
+# Code-repo init (skip when --init-docs is the only operation)
+if [ -z "$INIT_DOCS" ] || [ -n "$CODE_REPO" ]; then
+    create_skeleton
+    if [ "$LITE" = "1" ]; then
+        write_lite_jsonc
+    else
+        write_jsonc
+    fi
+    setup_git_config
+    setup_gitattributes
+    copy_hooks
+    copy_bin
+    setup_hooks_path
+    setup_hook_permissions
+    if [ "$LITE" = "1" ]; then
+        setup_claude_skeleton
+    fi
+fi
+check_role_author
+info "done"

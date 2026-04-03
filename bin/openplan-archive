@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Scan for archive candidates, present them, and move with git mv
+set -e
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+_lib="$SCRIPT_DIR/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT:?OPENPLAN_ROOT not set}/hooks/lib/common.sh"
+. "$_lib"
+
+dry_run=""
+force=""
+yes=""
+for _a in "$@"; do
+    case "$_a" in
+        --dry-run) dry_run=1 ;;
+        --force)   force=1 ;;
+        --yes)     yes=1 ;;
+    esac
+done
+
+scan_repo="${OPENPLAN_DOCS_REPO:-.}"
+scan_repo="${scan_repo%/}"
+
+# Read config from openplan.jsonc
+_auto_tag=$(op_jsonc_val '.archive.auto_tag' 'true')
+_summary_section=$(op_jsonc_val '.archive.summary_section' 'Summary')
+candidates=()
+labels=()
+
+# Research files not in archive/
+for f in "$scan_repo"/research/*.md; do
+    [ -f "$f" ] || continue
+    rel="${f#$scan_repo/}"
+    feeds=$(sed -n '/^## Feeds/,/^##/{/^## Feeds/d;/^##/d;/^$/d;p;}' "$f" | head -1)
+    candidates+=("$f")
+    labels+=("$rel  (Feeds: ${feeds:-unknown})")
+done
+
+# Extract unchecked items from success criteria section (##/### level)
+_check_success_criteria() {
+    sed -n '/^#\{2,3\} \([Ss]uccess [Cc]riteria\|成功标准\)/,/^#/{ //d; p; }' "$1" \
+        | grep -n '\- \[ \]' || true
+}
+
+_scan_refs() {
+    _target="$1"
+    _target_stem=$(basename "$_target" .md)
+    _scan_dir="$2"
+    _hits=$(grep -rl -E "\`${_target}\`|\[\[${_target_stem}\]\]" "$_scan_dir" --include='*.md' 2>/dev/null \
+        | grep -v "^${_scan_dir}/${_target}$" || true)
+    printf '%s' "$_hits"
+}
+
+# Planning phase files with all criteria checked
+for f in "$scan_repo"/planning/phase-*.md; do
+    [ -f "$f" ] || continue
+    grep -q '\[x\]' "$f" || continue
+    _unchecked=$(_check_success_criteria "$f")
+    if [ -n "$_unchecked" ]; then
+        rel="${f#$scan_repo/}"
+        if [ -n "$force" ]; then
+            echo "openplan-archive: WARNING: --force used, skipping success criteria check" >&2
+            _sha=$(cd "$scan_repo" && git rev-parse HEAD 2>/dev/null) || true
+            [ -n "$_sha" ] && op_note_append refs/notes/hotfix "$_sha" \
+                "forced-archive: $rel at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        else
+            echo "openplan-archive: BLOCKED — unchecked success criteria in $rel:" >&2
+            echo "$_unchecked" | sed 's/^[0-9]*://; s/^/  /' >&2
+            echo "Use --force to bypass." >&2
+            exit 1
+        fi
+    fi
+    rel="${f#$scan_repo/}"
+    candidates+=("$f")
+    labels+=("$rel  (all criteria [x])")
+done
+
+# Review files not in archive/
+for f in "$scan_repo"/review/*.md; do
+    [ -f "$f" ] || continue
+    rel="${f#$scan_repo/}"
+    candidates+=("$f")
+    labels+=("$rel")
+done
+
+if [ ${#candidates[@]} -eq 0 ]; then
+    echo "No archive candidates found."
+    exit 0
+fi
+
+echo "Archive candidates:"
+for i in "${!candidates[@]}"; do
+    printf '  [%d] %s\n' "$((i + 1))" "${labels[$i]}"
+done
+
+[ -n "$dry_run" ] && exit 0
+
+moved=()
+for i in "${!candidates[@]}"; do
+    src="${candidates[$i]}"
+    dir=$(dirname "$src")
+    base=$(basename "$src")
+    dest="$dir/archive/$base"
+
+    if [ -n "$yes" ]; then
+        ans=y
+    else
+        printf 'Archive %s? (y/n/q) ' "${labels[$i]}" >&2
+        read -r ans < /dev/tty 2>/dev/null || ans=n
+    fi
+    case "$ans" in
+        y|Y)
+            # Check for references to this file
+            _rel_src="${src#$scan_repo/}"
+            _refs=$(_scan_refs "$_rel_src" "$scan_repo")
+            if [ -n "$_refs" ]; then
+                if [ -z "$force" ]; then
+                    echo "openplan-archive: BLOCKED — references to $_rel_src found in:" >&2
+                    echo "$_refs" | sed "s|^${scan_repo}/||; s/^/  /" >&2
+                    echo "Use --force to bypass." >&2
+                    continue
+                else
+                    echo "openplan-archive: WARNING — references to $_rel_src exist, archiving anyway (--force)" >&2
+                fi
+            fi
+
+            # Extract summary before git mv (file still at src)
+            _summary=""
+            _title=$(head -1 "$src" | sed 's/^#\+ *//')
+            _ss_esc=$(printf '%s' "$_summary_section" | sed 's/[].[\\()*^$/]/\\&/g')
+            _summary=$(sed -n "/^## ${_ss_esc}$/,/^##/{/^## ${_ss_esc}$/d;/^##/d;p;}" "$src")
+
+            mkdir -p "$dir/archive"
+            if ! (cd "$scan_repo" && git mv "${src#$scan_repo/}" "${dest#$scan_repo/}"); then
+                echo "Error: git mv failed for ${src#$scan_repo/}" >&2
+                continue
+            fi
+
+            # Create stub with summary if found
+            if [ -n "$_summary" ]; then
+                _rel_dest="${dest#$scan_repo/}"
+                printf '# %s\n\n> Archived to `%s`. See git history for full content.\n\n## %s\n\n%s\n' \
+                    "$_title" "$_rel_dest" "$_summary_section" "$_summary" > "$src"
+                (cd "$scan_repo" && git add "${src#$scan_repo/}")
+            fi
+
+            # Create archive tag
+            if [ "$_auto_tag" = "true" ]; then
+                _type=$(echo "$dir" | grep -oE 'research|planning|review' || echo "misc")
+                _name=$(basename "$src" .md)
+                (cd "$scan_repo" && git tag "archive/${_type}/${_name}" HEAD 2>/dev/null) || true
+            fi
+
+            moved+=("${src#$scan_repo/} -> ${dest#$scan_repo/}")
+            ;;
+        q|Q) break ;;
+        *) ;;
+    esac
+done
+
+git worktree prune 2>/dev/null || true
+
+if [ ${#moved[@]} -gt 0 ]; then
+    echo ""
+    echo "Archived ${#moved[@]} file(s):"
+    for m in "${moved[@]}"; do
+        echo "  $m"
+    done
+    echo "Remember to commit the changes."
+else
+    echo "No files archived."
+fi

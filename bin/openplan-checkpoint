@@ -1,0 +1,26 @@
+#!/bin/sh
+# Create a checkpoint tag: checkpoint/<feature>/<task-id>
+set -e
+
+if [ -z "$1" ]; then
+    echo "Usage: openplan-checkpoint <task-id>" >&2
+    exit 1
+fi
+
+task_id="$1"
+branch=$(git symbolic-ref --short HEAD 2>/dev/null) || {
+    echo "Error: not on a branch" >&2; exit 1
+}
+
+# Extract feature name from branch (e.g., feature/add-auth -> add-auth)
+case "$branch" in
+    */*)  feature=$(echo "$branch" | sed 's|^[^/]*/||') ;;
+    *)    feature="$branch" ;;
+esac
+
+tag="checkpoint/${feature}/${task_id}"
+case "$tag" in
+    *[!a-zA-Z0-9/_.-]*) echo "Error: invalid characters in tag name: $tag" >&2; exit 1 ;;
+esac
+git tag -f "$tag" HEAD
+echo "Created checkpoint: $tag"

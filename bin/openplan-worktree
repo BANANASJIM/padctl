@@ -1,0 +1,191 @@
+#!/bin/sh
+# Manage OpenPlan worktrees: create (with lock) / complete (unlock + remove)
+set -e
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+_lib="$SCRIPT_DIR/../hooks/lib/common.sh"
+[ -f "$_lib" ] || _lib="${OPENPLAN_ROOT:?OPENPLAN_ROOT not set}/hooks/lib/common.sh"
+. "$_lib"
+
+usage() {
+    echo "Usage: openplan-worktree create <name> [branch] [--repo <path>] [--role <role>]" >&2
+    echo "       openplan-worktree complete <name> [--repo <path>]" >&2
+    exit 1
+}
+
+[ $# -ge 2 ] || usage
+
+action="$1"; shift
+name="$1"; shift
+_repo=""
+_branch=""
+_role=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo) _repo="$2"; shift 2 ;;
+        --role) _role="$2"; shift 2 ;;
+        *) _branch="$1"; shift ;;
+    esac
+done
+
+_git() {
+    if [ -n "$_repo" ]; then
+        git -C "$_repo" "$@"
+    else
+        git "$@"
+    fi
+}
+
+op_validate_worktree_name "$name" || exit 1
+if [ -n "$_repo" ]; then
+    _wt_dir="$_repo/.worktrees"
+else
+    _wt_dir=$(op_jsonc_val '.git.worktree_dir' '.worktrees')
+fi
+wt_path="$_wt_dir/$name"
+
+case "$action" in
+    create)
+        branch="${_branch:-$name}"
+        if _git rev-parse --verify "$branch" >/dev/null 2>&1; then
+            if ! _git worktree list --porcelain | grep -q "^branch refs/heads/${branch}$"; then
+                _git branch -D "$branch" 2>/dev/null || true
+            fi
+        fi
+        _git worktree add "$wt_path" -b "$branch" >&2
+        _git worktree lock "$wt_path" --reason "openplan task in progress" 2>/dev/null ||
+            _git worktree lock "$wt_path" 2>/dev/null || true
+
+        if [ -n "$_role" ]; then
+            _cfg_file="${_repo:+$_repo/}openplan.jsonc"
+            _read_paths=""
+            _write_paths=""
+            if [ -f "$_cfg_file" ] && command -v jq >/dev/null 2>&1; then
+                _stripped=$(op_strip_jsonc "$_cfg_file")
+                _read_paths=$(printf '%s' "$_stripped" | jq -r --arg r "$_role" '.roles[$r].read[]? // empty' | tr '\n' ' ')
+                _write_paths=$(printf '%s' "$_stripped" | jq -r --arg r "$_role" '.roles[$r].write[]? // empty' | tr '\n' ' ')
+                _code_repo=$(printf '%s' "$_stripped" | jq -r '.repos.code // empty')
+            fi
+            if [ -z "$_read_paths" ]; then
+                case "$_role" in
+                    researcher)  _read_paths="design/ research/ _templates/ _skills/" ;;
+                    doc-writer)  _read_paths="design/ decisions/ engineering/ planning/ conventions/ _templates/ _skills/ research/ review/ deviations/" ;;
+                    reviewer)    _read_paths="design/ decisions/ engineering/ planning/ conventions/ _templates/ _skills/ research/ review/" ;;
+                    advisor)     _read_paths="design/ research/ _agent/ _templates/ _skills/" ;;
+                    gardener)    _read_paths="design/ decisions/ engineering/ planning/ conventions/ _templates/ _skills/ research/ review/ deviations/" ;;
+                    implementer) _read_paths="src/ lib/ tests/ openspec/" ;;
+                    spec-writer) _read_paths="design/ engineering/ decisions/ openspec/" ;;
+                esac
+            fi
+            if [ -z "$_write_paths" ]; then
+                case "$_role" in
+                    researcher)  _write_paths="research/ deviations/" ;;
+                    doc-writer)  _write_paths="design/ decisions/ engineering/ planning/ conventions/ deviations/ _templates/" ;;
+                    reviewer)    _write_paths="review/ deviations/" ;;
+                    advisor)     _write_paths="_agent/advisor/ _agent/state/ research/" ;;
+                    gardener)    _write_paths="_agent/gardener/" ;;
+                    implementer) _write_paths="src/ lib/ tests/" ;;
+                    spec-writer) _write_paths="openspec/" ;;
+                esac
+            fi
+            # shellcheck disable=SC2086
+            git -C "$wt_path" sparse-checkout init --cone >&2
+            # shellcheck disable=SC2086
+            git -C "$wt_path" sparse-checkout set $_read_paths $_write_paths >&2
+            git -C "$wt_path" checkout HEAD >&2 2>&1
+
+            _signal_dir="${_code_repo:+${_code_repo}/_agent}"
+            _allowlist=$(op_role_allowlist "$_role" 2>/dev/null || true)
+            _abs_wt="$(cd "$wt_path" && pwd)"
+            printf "WORKTREE_PATH='%s'\nOPENPLAN_ROLE='%s'\nOPENPLAN_SUDO_ALLOWLIST='%s'\nGIT_AUTHOR_NAME='openplan-%s'\nGIT_AUTHOR_EMAIL='openplan-%s@openplan.local'\n" \
+                "$_abs_wt" "$_role" "$_allowlist" "$_role" "$_role"
+            [ -n "$_signal_dir" ] && printf "OPENPLAN_SIGNAL_DIR='%s'\n" "$_signal_dir"
+        else
+            echo "Created and locked worktree: $wt_path (branch: $branch)"
+        fi
+        ;;
+    complete)
+        # Ensure merge drivers (e.g. openplan-merge-tasks) are discoverable
+        export PATH="$SCRIPT_DIR:$PATH"
+        _wt_branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+        if [ -n "$_wt_branch" ] && [ "$_wt_branch" != "HEAD" ]; then
+            export OPENPLAN_ROLE=dispatcher OPENPLAN_SUDO_ANSWER=allow OPENPLAN_SPARSE_SKIP=1 \
+                GIT_AUTHOR_NAME=openplan-dispatcher GIT_AUTHOR_EMAIL=openplan-dispatcher@openplan.local
+            if git -C "$wt_path" ls-files --error-unmatch _agent/ >/dev/null 2>&1; then
+                git -C "$wt_path" sparse-checkout disable 2>/dev/null || true
+                # Docs-repo: _agent/ contains persistent outputs (advisor/ state/ gardener/ context/).
+                # Only remove runtime subdirs; keep tracked outputs so downstream consumers
+                # (e.g. crystallization reading align-round files) find them on main after merge.
+                _is_docs_wt=true
+                [ -d "$wt_path/openspec" ] && _is_docs_wt=false
+                if $_is_docs_wt; then
+                    _agent_items=$(git -C "$wt_path" ls-files _agent/ | grep -E '^_agent/(signals|workers|dispatch\.lock|results|sessions/[^a])' || true)
+                else
+                    _agent_items=$(git -C "$wt_path" ls-files _agent/)
+                fi
+                if [ -n "$_agent_items" ]; then
+                    printf '%s\n' "$_agent_items" | xargs git -C "$wt_path" rm --quiet --
+                    git -C "$wt_path" -c commit.gpgsign=false commit --quiet -m "$(printf 'D: worktree cleanup %s\nrefs: none' "$name")"
+                fi
+            fi
+            _feat_part=$(printf '%s' "$_wt_branch" | sed 's/^[^-]*-[^-]*-//')
+            _stashed=false
+            if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+                git stash push --include-untracked -m "openplan-worktree complete: stash before merging $name" >/dev/null
+                _stashed=true
+            fi
+            _merge_ok=false
+            _merge_err=$(mktemp)
+            for _retry in 1 2 3; do
+                if GIT_REFLOG_ACTION="merge feature/$_feat_part" _git merge --no-ff "$_wt_branch" -m "Merge $_wt_branch (openplan-worktree complete)" 2>"$_merge_err"; then
+                    _merge_ok=true; break
+                fi
+                # Retry only on index.lock contention (parallel merge); real conflicts exit immediately
+                _conflict_err=$(mktemp)
+                if _git diff --check HEAD 2>"$_conflict_err" | grep -q 'conflict'; then
+                    cat "$_merge_err" >&2
+                    cat "$_conflict_err" >&2
+                    rm -f "$_conflict_err"
+                    break
+                fi
+                rm -f "$_conflict_err"
+                _delay=$((1 << (_retry - 1)))
+                printf '[openplan] merge contention (attempt %d/3), retrying in %ds...\n' "$_retry" "$_delay" >&2
+                cat "$_merge_err" >&2
+                sleep "$_delay"
+            done
+            if ! $_merge_ok; then
+                if [ -f "$(_git rev-parse --git-dir)/MERGE_HEAD" ]; then
+                    printf '[openplan] ERROR: merge conflict for %s — resolve manually then re-run complete\n' "$_wt_branch" >&2
+                    _git merge --abort 2>/dev/null || true
+                else
+                    printf '[openplan] ERROR: merge failed for %s — resolve manually then re-run complete\n' "$_wt_branch" >&2
+                fi
+                cat "$_merge_err" >&2
+                rm -f "$_merge_err"
+                exit 1
+            fi
+            rm -f "$_merge_err"
+            $_stashed && git stash pop >/dev/null || true
+        fi
+        _dns="budget reviews sudo dispatch deviations hotfix"
+        _ns=""
+        if [ -z "$_repo" ] && [ -f openplan.jsonc ] && command -v jq >/dev/null 2>&1; then
+            _ns=$(op_jsonc_val '.git.notes_namespaces // empty | join(" ")' '')
+        fi
+        for _n in ${_ns:-$_dns}; do
+            _git rev-parse "refs/notes/$_n" >/dev/null 2>&1 || continue
+            _git notes --ref="$_n" merge "refs/notes/$_n" 2>/dev/null ||
+                printf '[openplan] WARNING: notes merge conflict for %s\n' "$_n" >&2
+        done
+        _git worktree unlock "$wt_path" 2>/dev/null || true
+        rm -rf "$wt_path/.opencode" 2>/dev/null
+        git -C "$wt_path" clean -fd 2>/dev/null || true
+        git -C "$wt_path" checkout -- . 2>/dev/null || true
+        _git worktree remove "$wt_path"
+        echo "Completed worktree: $wt_path"
+        ;;
+    *)
+        usage
+        ;;
+esac
