@@ -31,13 +31,14 @@ pub const GyroProcessor = struct {
             return .{ .rel_x = 0, .rel_y = 0, .joy_x = null, .joy_y = null };
         }
 
+        // gyro_x = pitch (up/down tilt) → REL_Y; gyro_y = yaw (left/right rotation) → REL_X
         // [1] deadzone
-        const fx: f32 = if (@abs(@as(i32, gx)) < cfg.deadzone) 0.0 else @floatFromInt(gx);
-        const fy: f32 = if (@abs(@as(i32, gy)) < cfg.deadzone) 0.0 else @floatFromInt(gy);
+        const fyaw: f32 = if (@abs(@as(i32, gy)) < cfg.deadzone) 0.0 else @floatFromInt(gy);
+        const fpitch: f32 = if (@abs(@as(i32, gx)) < cfg.deadzone) 0.0 else @floatFromInt(gx);
 
-        // [2] EMA smoothing
-        self.ema_x = self.ema_x * cfg.smoothing + fx * (1.0 - cfg.smoothing);
-        self.ema_y = self.ema_y * cfg.smoothing + fy * (1.0 - cfg.smoothing);
+        // [2] EMA smoothing (ema_x tracks yaw→REL_X, ema_y tracks pitch→REL_Y)
+        self.ema_x = self.ema_x * cfg.smoothing + fyaw * (1.0 - cfg.smoothing);
+        self.ema_y = self.ema_y * cfg.smoothing + fpitch * (1.0 - cfg.smoothing);
 
         // [3] normalized curve (vader5): normalize [deadzone,max_val]→[0,1], apply pow, sensitivity scale
         const scaled_x = applyCurve(self.ema_x, cfg) * cfg.sensitivity_x;
@@ -250,4 +251,26 @@ test "gyro: custom max_val clips normalization ceiling" {
     const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .curve = 1.0, .sensitivity_x = 1.0, .sensitivity_y = 1.0, .max_val = 1000.0 };
     _ = g.process(&cfg, 1000, 1000, 0);
     try testing.expect(g.accum_x >= 0.0 and g.accum_x < 1.0);
+}
+
+// T6: axis orientation regression — pitch(gx)→REL_Y, yaw(gy)→REL_X
+
+test "gyro: pitch-only input (gx nonzero, gy=0) produces only rel_y" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .sensitivity_x = 32767.0, .sensitivity_y = 32767.0 };
+    // gx=32767 (pitch/up-down), gy=0 (no yaw)
+    const out = g.process(&cfg, 32767, 0, 0);
+    // rel_x must be zero (no yaw input), rel_y must be non-zero (pitch drives vertical)
+    try testing.expectEqual(@as(i32, 0), out.rel_x);
+    try testing.expect(out.rel_y != 0 or g.accum_y != 0);
+}
+
+test "gyro: yaw-only input (gy nonzero, gx=0) produces only rel_x" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .sensitivity_x = 32767.0, .sensitivity_y = 32767.0 };
+    // gx=0 (no pitch), gy=32767 (yaw/left-right)
+    const out = g.process(&cfg, 0, 32767, 0);
+    // rel_y must be zero (no pitch input), rel_x must be non-zero (yaw drives horizontal)
+    try testing.expectEqual(@as(i32, 0), out.rel_y);
+    try testing.expect(out.rel_x != 0 or g.accum_x != 0);
 }
