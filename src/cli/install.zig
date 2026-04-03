@@ -374,8 +374,8 @@ fn generateUdevRulesFromDirs(allocator: std.mem.Allocator, dirs: []const []const
     for (entries.items) |e| {
         const line = try std.fmt.allocPrint(
             allocator,
-            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"systemd\", ENV{{SYSTEMD_WANTS}}=\"padctl.service\", TAG+=\"uaccess\"\n# {s}\n",
-            .{ e.vid, e.pid, e.name },
+            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"systemd\", ENV{{SYSTEMD_WANTS}}=\"padctl.service\", TAG+=\"uaccess\"\nACTION==\"add\", SUBSYSTEM==\"input\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"uaccess\"\n# {s}\n",
+            .{ e.vid, e.pid, e.vid, e.pid, e.name },
         );
         defer allocator.free(line);
         try buf.appendSlice(allocator, line);
@@ -646,6 +646,7 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "37d7") != null);
     try testing.expect(std.mem.indexOf(u8, content, "2401") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"input\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
 }
