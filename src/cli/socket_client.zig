@@ -6,7 +6,7 @@ pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
 /// Non-root: prefer $XDG_RUNTIME_DIR/padctl.sock. Root: system path.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
-    if (linux.getuid() != 0) {
+    if (posix.geteuid() != 0) {
         if (posix.getenv("XDG_RUNTIME_DIR")) |xrd| {
             return std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch return DEFAULT_SOCKET_PATH;
         }

@@ -22,7 +22,7 @@ name = "example"   # identifies this profile; used with `padctl switch`
 #   "mouse_left/right/middle/side/extra/forward/back"   mouse button shorthand
 #   "BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA/FORWARD/BACK"     same, Linux BTN_ alias
 #   "BTN_TRIGGER_HAPPY1" .. "BTN_TRIGGER_HAPPY40"       gamepad extra buttons
-#   "<ButtonId>"     re-route to another gamepad button (e.g. "R3")
+#   "<ButtonId>"     re-route to another gamepad button (e.g. "RS")
 #   "disabled"       suppress the button entirely
 #   "macro:<name>"   fire a named macro (must be defined in [[macro]] below)
 # ═══════════════════════════════════════════════════════════════
