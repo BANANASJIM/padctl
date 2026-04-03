@@ -1146,13 +1146,16 @@ pub const Supervisor = struct {
                     continue;
                 };
                 // Register devname → phys in devname_map so detach() can find this instance.
+                // m.devname must be a separate allocation from the map key because
+                // teardownManaged frees both independently.
                 {
                     const devname = std.fs.path.basename(hidraw_path);
                     const dev_copy = self.allocator.dupe(u8, devname) catch null;
                     const phys_copy = if (dev_copy != null) self.allocator.dupe(u8, phys) catch null else null;
                     if (dev_copy != null and phys_copy != null) {
                         if (self.devname_map.put(dev_copy.?, phys_copy.?)) {
-                            self.managed.items[self.managed.items.len - 1].devname = dev_copy;
+                            const dn_copy = self.allocator.dupe(u8, devname) catch null;
+                            self.managed.items[self.managed.items.len - 1].devname = dn_copy;
                         } else |_| {
                             self.allocator.free(dev_copy.?);
                             self.allocator.free(phys_copy.?);
