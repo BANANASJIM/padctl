@@ -622,7 +622,12 @@ pub const Supervisor = struct {
         while (i < self.hotplug_pending.items.len) {
             const p = &self.hotplug_pending.items[i];
             const name = p.devname[0..p.len];
-            self.attach(name) catch {
+            self.attach(name) catch |err| {
+                if (err != error.AccessDenied) {
+                    std.log.warn("hotplug retry {s}: {}, dropping", .{ name, err });
+                    _ = self.hotplug_pending.swapRemove(i);
+                    continue;
+                }
                 p.retries += 1;
                 if (p.retries >= 3) {
                     std.log.warn("hotplug: giving up on {s} after 3 retries", .{name});
