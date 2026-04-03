@@ -196,7 +196,12 @@ pub const DeviceInstance = struct {
         while (!@atomicLoad(bool, &self.stopped, .acquire)) {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
-                if (self.mapper) |*m| m.config = new;
+                if (Mapper.init(new, self.loop.timer_fd, self.allocator)) |nm| {
+                    if (self.mapper) |*m| m.deinit();
+                    self.mapper = nm;
+                } else |err| {
+                    std.log.err("mapping hot-swap failed: {}", .{err});
+                }
                 @atomicStore(?*MappingConfig, &self.pending_mapping, null, .release);
             }
 
