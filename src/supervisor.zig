@@ -265,6 +265,7 @@ pub const Supervisor = struct {
 
         for (self.managed.items, 0..) |*m, i| {
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
+                std.log.info("device detached: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
                 m.instance.stop();
                 m.thread.join();
                 self.teardownManaged(m);
@@ -814,6 +815,8 @@ pub const Supervisor = struct {
             };
         }
 
+        std.log.info("mapping switched: \"{s}\" ({d} device(s))", .{ name, targets.items.len });
+
         var resp_buf: [128]u8 = undefined;
         if (device_id) |dev_id| {
             const resp = std.fmt.bufPrint(&resp_buf, "OK {s} {s}\n", .{ name, dev_id }) catch {
@@ -898,9 +901,15 @@ pub const Supervisor = struct {
     fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?mapping_cfg.ParseResult {
         const ucfg = &(self.user_cfg orelse return null);
         const mapping_name = user_config_mod.findDefaultMapping(ucfg, device_name) orelse return null;
-        const path = (mapping_discovery.findMapping(self.allocator, mapping_name) catch return null) orelse return null;
-        defer self.allocator.free(path);
-        return mapping_cfg.parseFile(self.allocator, path) catch null;
+        const path = mapping_discovery.findMapping(self.allocator, mapping_name) catch return null;
+        if (path == null) {
+            std.log.warn("mapping file \"{s}\" not found in XDG paths", .{mapping_name});
+            return null;
+        }
+        defer self.allocator.free(path.?);
+        const result = mapping_cfg.parseFile(self.allocator, path.?) catch return null;
+        std.log.info("mapping discovery: device \"{s}\" mapping \"{s}\" from \"{s}\"", .{ device_name, mapping_name, path.? });
+        return result;
     }
 
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
@@ -1322,6 +1331,7 @@ pub const Supervisor = struct {
             self.allocator.destroy(inst_ptr);
             return err;
         };
+        std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
     }
 };
 
