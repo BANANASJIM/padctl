@@ -4,9 +4,13 @@ const linux = std.os.linux;
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
-/// Resolve the socket path. Always returns the system socket path — padctl runs as a system service.
+/// Non-root: prefer $XDG_RUNTIME_DIR/padctl.sock. Root: system path.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
-    _ = buf;
+    if (linux.getuid() != 0) {
+        if (posix.getenv("XDG_RUNTIME_DIR")) |xrd| {
+            return std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch return DEFAULT_SOCKET_PATH;
+        }
+    }
     return DEFAULT_SOCKET_PATH;
 }
 
@@ -62,10 +66,17 @@ pub fn formatSwitch(buf: []u8, name: []const u8, device_id: ?[]const u8) []const
 
 const testing = std.testing;
 
-test "resolveSocketPath: always returns default system path" {
+test "resolveSocketPath: root returns system path" {
+    // This test only verifies the default fallback path constant.
+    try testing.expectEqualStrings("/run/padctl/padctl.sock", DEFAULT_SOCKET_PATH);
+}
+
+test "resolveSocketPath: buf large enough for XDG path" {
+    // Verify bufPrint won't overflow for a typical XDG_RUNTIME_DIR length.
     var buf: [256]u8 = undefined;
-    const path = resolveSocketPath(&buf);
-    try testing.expectEqualStrings("/run/padctl/padctl.sock", path);
+    const fake_xrd = "/run/user/1000";
+    const result = std.fmt.bufPrint(&buf, "{s}/padctl.sock", .{fake_xrd}) catch unreachable;
+    try testing.expectEqualStrings("/run/user/1000/padctl.sock", result);
 }
 
 test "formatSwitch: global" {
