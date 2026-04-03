@@ -515,7 +515,7 @@ pub const Supervisor = struct {
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
-                m.instance.rebuildAuxIfChanged(map_copy, null) catch |err| {
+                m.instance.rebuildAuxIfChanged(map_copy, old_mapping_cfg) catch |err| {
                     std.log.warn("rebuildAuxIfChanged: {}", .{err});
                 };
                 restartManagedThread(m) catch |err| {
