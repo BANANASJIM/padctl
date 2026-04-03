@@ -655,7 +655,24 @@ pub fn main() !void {
     };
     defer device_cfg.deinit();
 
-    var inst = DeviceInstance.init(allocator, &device_cfg.value, null) catch |err| {
+    var default_mapping_pr: ?config.mapping.ParseResult = null;
+    defer if (default_mapping_pr) |*pr| pr.deinit();
+    const default_mapping: ?*const config.mapping.MappingConfig = blk: {
+        const name = device_cfg.value.device.default_mapping orelse break :blk null;
+        const path = config.mapping_discovery.findMapping(allocator, name) catch break :blk null;
+        const resolved = path orelse {
+            std.log.warn("default_mapping '{s}' not found, running passthrough", .{name});
+            break :blk null;
+        };
+        defer allocator.free(resolved);
+        default_mapping_pr = config.mapping.parseFile(allocator, resolved) catch |err| {
+            std.log.warn("failed to parse default_mapping '{s}': {}", .{ name, err });
+            break :blk null;
+        };
+        break :blk &default_mapping_pr.?.value;
+    };
+
+    var inst = DeviceInstance.init(allocator, &device_cfg.value, default_mapping) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };
