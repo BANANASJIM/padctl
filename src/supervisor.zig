@@ -563,7 +563,9 @@ pub const Supervisor = struct {
 
     fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
         switch (action) {
-            .add => self.attach(devname) catch {},
+            .add => self.attach(devname) catch |err| {
+                std.log.warn("hotplug attach {s}: {}", .{ devname, err });
+            },
             .remove => self.detach(devname),
             .other => {},
         }
