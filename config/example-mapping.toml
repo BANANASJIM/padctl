@@ -1,5 +1,9 @@
-# Vader 5 Pro — padctl mapping
-# Copy to ~/.config/padctl/mappings/ and load with: padctl --mapping <path>
+# Vader 5 Pro — padctl mapping example
+# Install: copy to ~/.config/padctl/mappings/
+# Usage:
+#   padctl switch vader5-pro          # switch at runtime (no restart)
+#   padctl --mapping <path>           # one-off load by path
+#   config.toml default_mapping = "vader5-pro"  # auto-load on device connect
 
 name = "vader5-pro"
 
@@ -23,6 +27,8 @@ M1 = "KEY_F13"               # back paddle → media / macro key
 M2 = "KEY_F14"
 M3 = "mouse_left"            # grip button → left click
 M4 = "mouse_right"
+M5 = "mouse_forward"         # extra side button → browser forward (XF86Forward)
+M6 = "mouse_back"            # extra side button → browser back  (XF86Back)
 C  = "disabled"              # silence an unused button
 Z  = "KEY_LEFTMETA"          # extra button → Super key
 LM = "macro:dodge_roll"      # left menu → dodge macro
@@ -82,6 +88,20 @@ A = "KEY_F1"
 B = "KEY_F2"
 X = "KEY_F3"
 Y = "KEY_F4"
+
+# ═══════════════════════════════════════════════════════════════
+# Layer: wasd — toggle with RB for DPad-as-WASD movement
+# ═══════════════════════════════════════════════════════════════
+[[layer]]
+name       = "wasd"
+trigger    = "RB"
+activation = "toggle"
+
+[layer.remap]
+DPadUp    = "KEY_W"
+DPadDown  = "KEY_S"
+DPadLeft  = "KEY_A"
+DPadRight = "KEY_D"
 
 # ═══════════════════════════════════════════════════════════════
 # Macros

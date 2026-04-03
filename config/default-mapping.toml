@@ -1,8 +1,11 @@
 name = "default"
 
 [remap]
-# Back button examples — uncomment to activate:
-# M1 = { type = "key", code = "KEY_F13" }
-# M2 = "mouse_side"
-# M3 = "disabled"
-# M4 = "KEY_F14"
+# Remap values are strings: key codes ("KEY_F13"), mouse buttons ("mouse_left"),
+# or special values ("disabled", "macro:<name>").
+# Switch profiles at runtime: padctl switch <name>
+# Auto-load on device connect: set default_mapping in ~/.config/padctl/config.toml
+M1 = "KEY_F13"
+M2 = "KEY_F14"
+# M3 = "mouse_left"
+# M4 = "disabled"
