@@ -2,6 +2,8 @@
 
 **Universal Linux gamepad compatibility layer**
 
+> **This project is very much a work in progress.** Feedback, bug reports, and feature requests are welcome — please [open an issue](https://github.com/BANANASJIM/padctl/issues)!
+
 ![CI](https://github.com/BANANASJIM/padctl/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)
 
@@ -19,6 +21,9 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Multi-device + hotplug** — automatic device detection and per-device threads via netlink
 - **Hot-reload** — `SIGHUP` re-reads configs without restart, diffed per physical device
 - **Force feedback** — FF_RUMBLE passthrough from uinput to physical device
+- **Runtime mapping switch** — `padctl switch <name>` changes profiles without restart
+- **User config** — `~/.config/padctl/config.toml` for per-device default mappings
+- **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl config init/edit/test`
 
 ## Architecture
 
@@ -86,10 +91,25 @@ Ships with configs for **12 devices** across 8 vendors:
 zig build                                    # build from source
 sudo zig-out/bin/padctl install              # install binary, configs, udev rules, systemd service
 sudo systemctl enable --now padctl.service   # start daemon with hotplug support
-padctl scan                                  # check detected devices
+padctl config init                           # create ~/.config/padctl/config.toml interactively
+padctl status                                # check daemon and detected devices
+padctl switch <name>                         # switch mapping profile without restart
 ```
 
 See the [getting started guide](https://bananasjim.github.io/padctl/getting-started.html) for detailed setup.
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `padctl status` | Show daemon state and active devices |
+| `padctl devices` | List detected HID/USB devices |
+| `padctl list-mappings` | Show available mapping profiles |
+| `padctl switch <name>` | Switch to a named mapping profile |
+| `padctl config init` | Create user config interactively |
+| `padctl config edit` | Open user config in `$EDITOR` |
+| `padctl config test` | Validate config without applying |
+| `padctl scan` | Re-scan for connected devices |
 
 ## Build
 

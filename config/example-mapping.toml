@@ -1,71 +1,181 @@
-# Vader 5 Pro — padctl mapping example
-# Install: copy to ~/.config/padctl/mappings/
-# Usage:
-#   padctl switch vader5-pro          # switch at runtime (no restart)
-#   padctl --mapping <path>           # one-off load by path
-#   config.toml default_mapping = "vader5-pro"  # auto-load on device connect
+# padctl — full-featured mapping reference
+#
+# This file documents every supported field with defaults and value ranges.
+# Copy any section you need into your own mapping file in
+# ~/.config/padctl/mappings/
+#
+# Runtime switch:  padctl switch <name>
+# Auto-load:       set default_mapping = "<name>" in ~/.config/padctl/config.toml
 
-name = "vader5-pro"
-
-[gyro]
-mode = "off"                 # "off" or "mouse"
-
-[stick.left]
-deadzone = 128               # 0–32767
-
-[stick.right]
-deadzone = 128
-
-[dpad]
-mode = "gamepad"             # "gamepad" or "arrows"
+name = "example"   # identifies this profile; used with `padctl switch`
 
 # ═══════════════════════════════════════════════════════════════
-# Base Remaps — active when no layer is held
+# [remap] — base-layer button remaps
+#
+# Key:   any ButtonId (A B X Y LB RB LT RT Start Select Home Capture
+#                       LS RS DPadUp DPadDown DPadLeft DPadRight
+#                       M1..M4 Paddle1..Paddle4 TouchPad Mic C Z LM RM O)
+#
+# Value — one of:
+#   "KEY_*"          keyboard key   (see key list at end of this file)
+#   "mouse_left/right/middle/side/extra/forward/back"   mouse button shorthand
+#   "BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA/FORWARD/BACK"     same, Linux BTN_ alias
+#   "BTN_TRIGGER_HAPPY1" .. "BTN_TRIGGER_HAPPY40"       gamepad extra buttons
+#   "<ButtonId>"     re-route to another gamepad button (e.g. "R3")
+#   "disabled"       suppress the button entirely
+#   "macro:<name>"   fire a named macro (must be defined in [[macro]] below)
 # ═══════════════════════════════════════════════════════════════
 [remap]
-M1 = "KEY_F13"               # back paddle → media / macro key
-M2 = "KEY_F14"
-M3 = "mouse_left"            # grip button → left click
-M4 = "mouse_right"
-M5 = "mouse_forward"         # extra side button → browser forward (XF86Forward)
-M6 = "mouse_back"            # extra side button → browser back  (XF86Back)
-C  = "disabled"              # silence an unused button
-Z  = "KEY_LEFTMETA"          # extra button → Super key
-LM = "macro:dodge_roll"      # left menu → dodge macro
-RM = "R3"                    # right menu → R3 (click)
+M1        = "KEY_F13"           # back paddle → media / macro key
+M2        = "KEY_F14"
+M3        = "mouse_left"        # grip button → left click
+M4        = "mouse_right"
+M5        = "mouse_forward"     # browser forward (XF86Forward)
+M6        = "mouse_back"        # browser back   (XF86Back)
+C         = "disabled"          # silence an unused button
+Z         = "KEY_LEFTMETA"      # Super key
+LM        = "macro:dodge_roll"  # fire a named macro
+RM        = "R3"                # reroute to gamepad R3 click
+
+# DPad buttons can also be remapped individually:
+DPadUp    = "KEY_W"
+DPadDown  = "KEY_S"
+DPadLeft  = "KEY_A"
+DPadRight = "KEY_D"
 
 # ═══════════════════════════════════════════════════════════════
-# Layer: aim — hold LM for gyro mouse + aim buttons
+# [gyro] — gyroscope → mouse / joystick
+#
+# mode            "off" | "mouse" | "joystick"   (default: "off")
+# activate        hold trigger that gates gyro, e.g. "hold_RB"
+#                 omit to leave gyro always-on
+# sensitivity     shorthand that sets both sensitivity_x and sensitivity_y
+#                 (overridden by per-axis values below)
+# sensitivity_x   yaw  → REL_X  scale   (default: 1.5, any positive float)
+# sensitivity_y   pitch → REL_Y scale   (default: 1.5, any positive float)
+# deadzone        raw gyro units below which input is zeroed  (default: 0, range 0–32767)
+# smoothing       EMA coefficient: 0.0 = no smoothing, 1.0 = frozen (default: 0.3)
+# curve           response curve exponent: 1.0 = linear, 2.0 = quadratic (default: 1.0)
+# max_val         normalization ceiling (default: 32767.0)
+# invert_x        flip horizontal axis  (default: false)
+# invert_y        flip vertical axis    (default: false)
+# ═══════════════════════════════════════════════════════════════
+[gyro]
+mode          = "mouse"
+activate      = "hold_RB"     # gyro active only while RB is held; omit for always-on
+sensitivity_x = 2.0
+sensitivity_y = 1.8
+deadzone      = 60            # 0–32767
+smoothing     = 0.3           # 0.0–1.0
+curve         = 1.2           # 1.0 = linear, higher = more exponential
+max_val       = 32767.0
+invert_x      = false
+invert_y      = false
+
+# ═══════════════════════════════════════════════════════════════
+# [stick.left] / [stick.right] — analog stick behaviour
+#
+# mode             "gamepad" | "mouse" | "scroll"  (default: "gamepad")
+# deadzone         raw axis units below which input is zeroed  (default: 128, range 0–32767)
+# sensitivity      speed scale for mouse/scroll modes  (default: 1.0, any positive float)
+# suppress_gamepad true = do not emit gamepad axis events in mouse/scroll mode (default: false)
+# ═══════════════════════════════════════════════════════════════
+[stick.left]
+mode             = "gamepad"
+deadzone         = 128
+sensitivity      = 1.0
+suppress_gamepad = false
+
+[stick.right]
+mode             = "mouse"    # right stick moves the mouse pointer
+deadzone         = 100
+sensitivity      = 3.0
+suppress_gamepad = true
+
+# ═══════════════════════════════════════════════════════════════
+# [dpad] — D-Pad behaviour
+#
+# mode             "gamepad" | "arrows"  (default: "gamepad")
+#                  "arrows" emits KEY_UP/DOWN/LEFT/RIGHT
+# suppress_gamepad true = do not emit HAT axis events in arrows mode (default: false)
+# ═══════════════════════════════════════════════════════════════
+[dpad]
+mode             = "gamepad"
+suppress_gamepad = false
+
+# ═══════════════════════════════════════════════════════════════
+# [adaptive_trigger] — DualSense haptic trigger feedback (PS5 only)
+#
+# mode             "off" | "feedback" | "weapon" | "vibration"  (default: "off")
+# command_prefix   internal, leave at default
+#
+# [adaptive_trigger.left / .right]
+#   feedback mode:  position (0–255), strength (0–255)
+#   weapon mode:    start (0–255), end (0–255), strength (0–255)
+#   vibration mode: position (0–255), amplitude (0–255), frequency (0–255)
+# ═══════════════════════════════════════════════════════════════
+[adaptive_trigger]
+mode = "feedback"
+
+[adaptive_trigger.left]
+position = 70
+strength = 180
+
+[adaptive_trigger.right]
+position = 50
+strength = 150
+
+# ═══════════════════════════════════════════════════════════════
+# [[layer]] — hold layer (tap-hold)
+#
+# name         unique layer identifier (string)
+# trigger      ButtonId that activates this layer
+# activation   "hold" | "toggle"          (default: "hold")
+# tap          remap target fired on short-tap before hold_timeout
+#              (any remap value: "mouse_side", "KEY_F13", etc.)
+# hold_timeout milliseconds before hold is considered active  (default: 200, range 1–5000)
+#
+# Overrides inside a hold layer (all optional):
+#   [layer.remap]       button remaps active while this layer is held
+#   [layer.gyro]        gyro config override
+#   [layer.stick_left]  left stick config override
+#   [layer.stick_right] right stick config override
+#   [layer.dpad]        dpad config override
+#   [layer.adaptive_trigger]  adaptive trigger override
 # ═══════════════════════════════════════════════════════════════
 [[layer]]
-name        = "aim"
-trigger     = "LM"
-activation  = "hold"
-tap         = "mouse_side"   # short-tap fires mouse side button
-hold_timeout = 200           # ms; tap fires if released before this
-
-[layer.gyro]
-mode        = "mouse"
-sensitivity = 2.0
-smoothing   = 0.3
-
-[layer.stick_left]
-mode = "scroll"              # left stick scrolls while aiming
-
-[layer.stick_right]
-mode             = "mouse"
-sensitivity      = 1.0
-suppress_gamepad = true      # no duplicate gamepad axis events
-
-[layer.dpad]
-mode             = "arrows"
-suppress_gamepad = true
+name         = "aim"
+trigger      = "LM"
+activation   = "hold"
+tap          = "mouse_side"   # short-tap (< hold_timeout ms) fires mouse side button
+hold_timeout = 200            # 1–5000 ms
 
 [layer.remap]
 RB = "mouse_left"
 RT = "mouse_right"
-LB = "KEY_LEFTSHIFT"         # ADS sprint
-A  = "KEY_LEFTMETA"
+LB = "KEY_LEFTSHIFT"
+A  = "KEY_SPACE"
+
+[layer.gyro]
+mode          = "mouse"
+sensitivity_x = 3.0
+sensitivity_y = 2.5
+deadzone      = 50
+smoothing     = 0.25
+
+[layer.stick_left]
+mode             = "scroll"
+sensitivity      = 1.5
+suppress_gamepad = true
+
+[layer.stick_right]
+mode             = "mouse"
+sensitivity      = 2.0
+suppress_gamepad = true
+
+[layer.dpad]
+mode             = "arrows"
+suppress_gamepad = true
 
 [layer.adaptive_trigger]
 mode = "weapon"
@@ -75,41 +185,85 @@ start    = 30
 end      = 120
 strength = 200
 
+[layer.adaptive_trigger.right]
+start    = 20
+end      = 100
+strength = 180
+
 # ═══════════════════════════════════════════════════════════════
-# Layer: fn — toggle with Select for F-key row
+# [[layer]] — toggle layer
+#
+# activation = "toggle": first release turns the layer on,
+# second release turns it off.  Only one toggle layer can be
+# active at a time; a hold layer always takes priority.
 # ═══════════════════════════════════════════════════════════════
 [[layer]]
 name       = "fn"
 trigger    = "Select"
-activation = "toggle"        # press once to enter, again to exit
+activation = "toggle"
 
 [layer.remap]
 A = "KEY_F1"
 B = "KEY_F2"
 X = "KEY_F3"
 Y = "KEY_F4"
+LB = "KEY_F5"
+RB = "KEY_F6"
 
 # ═══════════════════════════════════════════════════════════════
-# Layer: wasd — toggle with RB for DPad-as-WASD movement
+# [[macro]] — named key sequences
+#
+# Steps (inline table array):
+#   { tap   = "<target>" }   press + release one button
+#   { down  = "<target>" }   press (hold) one button
+#   { up    = "<target>" }   release one button
+#   { delay = <ms> }         wait N milliseconds (u32)
+#   "pause_for_release"      block until the trigger button is released
+#
+# <target> is any ButtonId or KEY_* string.
 # ═══════════════════════════════════════════════════════════════
-[[layer]]
-name       = "wasd"
-trigger    = "RB"
-activation = "toggle"
 
-[layer.remap]
-DPadUp    = "KEY_W"
-DPadDown  = "KEY_S"
-DPadLeft  = "KEY_A"
-DPadRight = "KEY_D"
-
-# ═══════════════════════════════════════════════════════════════
-# Macros
-# ═══════════════════════════════════════════════════════════════
+# Simple combo: tap B, wait 50 ms, tap left stick
 [[macro]]
 name  = "dodge_roll"
 steps = [
     { tap = "B" },
     { delay = 50 },
-    { tap = "LEFT" },
+    { tap = "LS" },
 ]
+
+# Modifier hold: hold Shift while the trigger is held, release on button-up
+[[macro]]
+name  = "shift_hold"
+steps = [
+    { down = "KEY_LEFTSHIFT" },
+    "pause_for_release",
+    { up = "KEY_LEFTSHIFT" },
+]
+
+# Complex sequence: Ctrl+C shortcut
+[[macro]]
+name  = "copy"
+steps = [
+    { down = "KEY_LEFTCTRL" },
+    { tap  = "KEY_C" },
+    { up   = "KEY_LEFTCTRL" },
+]
+
+# ═══════════════════════════════════════════════════════════════
+# Supported KEY_* codes (subset — full list in input_codes.zig)
+#
+# Letters:    KEY_A .. KEY_Z
+# Numbers:    KEY_0 .. KEY_9
+# F-keys:     KEY_F1 .. KEY_F24
+# Arrows:     KEY_UP  KEY_DOWN  KEY_LEFT  KEY_RIGHT
+# Modifiers:  KEY_LEFTCTRL  KEY_RIGHTCTRL
+#             KEY_LEFTSHIFT KEY_RIGHTSHIFT
+#             KEY_LEFTALT   KEY_RIGHTALT
+#             KEY_LEFTMETA  KEY_RIGHTMETA
+# Common:     KEY_ENTER  KEY_SPACE  KEY_TAB  KEY_ESC  KEY_BACKSPACE
+#             KEY_HOME   KEY_END    KEY_PAGEUP  KEY_PAGEDOWN
+#             KEY_INSERT KEY_DELETE KEY_CAPSLOCK
+# Media:      KEY_MUTE  KEY_VOLUMEUP  KEY_VOLUMEDOWN
+#             KEY_PLAYPAUSE  KEY_NEXTSONG  KEY_PREVIOUSSONG
+# ═══════════════════════════════════════════════════════════════
