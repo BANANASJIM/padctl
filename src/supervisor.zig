@@ -280,21 +280,29 @@ pub const Supervisor = struct {
 
     /// Stop and free the instance attached under devname. No-op if not found.
     pub fn detach(self: *Supervisor, devname: []const u8) void {
-        const entry = self.devname_map.fetchRemove(devname) orelse return;
+        const entry = self.devname_map.fetchRemove(devname) orelse {
+            std.log.debug("detach: {s} not in devname_map", .{devname});
+            return;
+        };
         self.allocator.free(entry.key);
         const phys_key = entry.value;
         defer self.allocator.free(phys_key);
 
-        for (self.managed.items, 0..) |*m, i| {
+        var i: usize = self.managed.items.len;
+        var found = false;
+        while (i > 0) {
+            i -= 1;
+            const m = &self.managed.items[i];
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
                 std.log.info("device detached: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
                 m.instance.stop();
                 m.thread.join();
                 self.teardownManaged(m);
                 _ = self.managed.swapRemove(i);
-                return;
+                found = true;
             }
         }
+        if (!found) std.log.debug("detach: no managed instance for phys {s}", .{phys_key});
     }
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
@@ -1462,6 +1470,18 @@ pub const Supervisor = struct {
             }
         }
         if (cfg == null) return;
+
+        const iface_id = readInterfaceId(path) orelse {
+            std.log.debug("hotplug: {s} no interface id, skipping", .{path});
+            return;
+        };
+        const declared = for (cfg.?.device.interface) |ci| {
+            if (iface_id == @as(u8, @intCast(ci.id))) break true;
+        } else false;
+        if (!declared) {
+            std.log.debug("hotplug: {s} interface {} not in config, skipping", .{ path, iface_id });
+            return;
+        }
 
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
