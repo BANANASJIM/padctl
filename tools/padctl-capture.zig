@@ -165,7 +165,10 @@ fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
     defer out.deinit(allocator);
     var i: usize = 0;
     while (i < hex.len) {
-        if (hex[i] == ' ') { i += 1; continue; }
+        if (hex[i] == ' ') {
+            i += 1;
+            continue;
+        }
         if (i + 1 >= hex.len) return error.InvalidHex;
         const hi = std.fmt.charToDigit(hex[i], 16) catch return error.InvalidHex;
         const lo = std.fmt.charToDigit(hex[i + 1], 16) catch return error.InvalidHex;

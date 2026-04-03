@@ -29,6 +29,7 @@ pub const DeviceInfo = struct {
     interface: []const InterfaceConfig,
     init: ?InitConfig = null,
     mode: ?[]const u8 = null,
+    default_mapping: ?[]const u8 = null,
 };
 
 pub const MatchConfig = struct {

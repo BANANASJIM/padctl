@@ -433,10 +433,7 @@ pub fn main() !void {
                                     for (out.aux.slice()) |ev| {
                                         switch (ev) {
                                             .rel => |r| {
-                                                if (r.code == 0) aux_display.mouse_dx += r.value
-                                                else if (r.code == 1) aux_display.mouse_dy += r.value
-                                                else if (r.code == 8) aux_display.scroll_v += r.value
-                                                else if (r.code == 6) aux_display.scroll_h += r.value;
+                                                if (r.code == 0) aux_display.mouse_dx += r.value else if (r.code == 1) aux_display.mouse_dy += r.value else if (r.code == 8) aux_display.scroll_v += r.value else if (r.code == 6) aux_display.scroll_h += r.value;
                                             },
                                             .key => |k| {
                                                 const now_ms = std.time.milliTimestamp();

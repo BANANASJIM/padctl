@@ -162,12 +162,20 @@ pub const DeviceInstance = struct {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
         }
+        const mapper: ?Mapper = if (init_mapping) |mcfg|
+            Mapper.init(mcfg, loop.timer_fd, allocator) catch |err| blk: {
+                std.log.warn("failed to init mapper from default_mapping: {}", .{err});
+                break :blk null;
+            }
+        else
+            null;
+
         return .{
             .allocator = allocator,
             .devices = devices,
             .loop = loop,
             .interp = interp,
-            .mapper = null,
+            .mapper = mapper,
             .uinput_dev = uinput_dev,
             .aux_dev = aux_dev,
             .touchpad_dev = touchpad_dev,

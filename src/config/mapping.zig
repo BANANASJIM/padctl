@@ -72,12 +72,16 @@ fn scanRemapTargets(caps: *DerivedAuxCaps, remap: *const toml.HashMap([]const u8
             caps.mouse_buttons |= 8;
         } else if (std.mem.eql(u8, target, "mouse_extra") or std.mem.eql(u8, target, "BTN_EXTRA")) {
             caps.mouse_buttons |= 16;
+        } else if (std.mem.eql(u8, target, "mouse_forward") or std.mem.eql(u8, target, "BTN_FORWARD")) {
+            caps.mouse_buttons |= 32;
+        } else if (std.mem.eql(u8, target, "mouse_back") or std.mem.eql(u8, target, "BTN_BACK")) {
+            caps.mouse_buttons |= 64;
         }
     }
 }
 
-// Maximum EV_KEY codes that buildAuxKeyCodes may produce: all key_table entries (97) + 5 mouse buttons
-pub const AUX_KEY_CODES_MAX = 104;
+// Maximum EV_KEY codes that buildAuxKeyCodes may produce: all key_table entries (97) + 7 mouse buttons
+pub const AUX_KEY_CODES_MAX = 106;
 
 /// Build a key_codes slice for AuxDevice.create() from derived caps.
 /// buf must be at least AUX_KEY_CODES_MAX elements.
@@ -96,6 +100,8 @@ pub fn buildAuxKeyCodes(caps: DerivedAuxCaps, buf: []u16) []u16 {
         .{ .mask = 4, .name = "mouse_middle" },
         .{ .mask = 8, .name = "mouse_side" },
         .{ .mask = 16, .name = "mouse_extra" },
+        .{ .mask = 32, .name = "mouse_forward" },
+        .{ .mask = 64, .name = "mouse_back" },
     };
     for (mouse_codes) |mc| {
         if (caps.mouse_buttons & mc.mask != 0) {
@@ -708,6 +714,52 @@ test "deriveAuxFromMapping: layer stick mouse needs_rel" {
     const caps = deriveAuxFromMapping(&result.value);
     try std.testing.expect(caps.needs_rel);
     try std.testing.expect(caps.needsAux());
+}
+
+test "deriveAuxFromMapping: remap mouse_forward sets bit 32" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M3 = "mouse_forward"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.mouse_buttons & 32 != 0);
+    try std.testing.expect(caps.needsAux());
+}
+
+test "deriveAuxFromMapping: remap mouse_back sets bit 64" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M4 = "mouse_back"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.mouse_buttons & 64 != 0);
+    try std.testing.expect(caps.needsAux());
+}
+
+test "deriveAuxFromMapping: BTN_FORWARD alias sets bit 32" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M3 = "BTN_FORWARD"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.mouse_buttons & 32 != 0);
+}
+
+test "deriveAuxFromMapping: BTN_BACK alias sets bit 64" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M4 = "BTN_BACK"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.mouse_buttons & 64 != 0);
 }
 
 test "mapping: fuzz parseString: no panic on arbitrary input" {

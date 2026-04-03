@@ -321,6 +321,31 @@ pub const Supervisor = struct {
         }
     }
 
+    /// Load the default mapping for a device config if `device.default_mapping` is set.
+    /// On success, *out_pr is set to a heap-allocated ParseResult (caller takes ownership).
+    /// Returns a pointer into *out_pr value, or null (and *out_pr = null) on any failure.
+    fn loadDefaultMapping(self: *Supervisor, cfg: *const DeviceConfig, out_pr: *?*mapping_cfg.ParseResult) ?*const mapping_cfg.MappingConfig {
+        out_pr.* = null;
+        const name = cfg.device.default_mapping orelse return null;
+        const path = mapping_discovery.findMapping(self.allocator, name) catch return null;
+        const resolved = path orelse {
+            std.log.warn("default_mapping '{s}' not found, running passthrough", .{name});
+            return null;
+        };
+        defer self.allocator.free(resolved);
+        const parsed = mapping_cfg.parseFile(self.allocator, resolved) catch |err| {
+            std.log.warn("failed to parse default_mapping '{s}': {}", .{ name, err });
+            return null;
+        };
+        const pr = self.allocator.create(mapping_cfg.ParseResult) catch {
+            parsed.deinit();
+            return null;
+        };
+        pr.* = parsed;
+        out_pr.* = pr;
+        return &pr.value;
+    }
+
     fn lookupSwitchMappingPath(self: *Supervisor, name: []const u8) !?[]const u8 {
         if (builtin.is_test) {
             if (self.test_switch_mapping_override) |override_path| {
@@ -977,10 +1002,17 @@ pub const Supervisor = struct {
                 }
                 // seen now owns phys bytes via the key slot
 
+                var default_pr: ?*mapping_cfg.ParseResult = null;
+                const default_mcfg = self.loadDefaultMapping(&cfg_ptr.value, &default_pr);
+
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, null) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, default_mcfg) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
+                    if (default_pr) |pr| {
+                        pr.deinit();
+                        self.allocator.destroy(pr);
+                    }
                     // reclaim phys from seen
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
@@ -990,10 +1022,18 @@ pub const Supervisor = struct {
                     std.log.warn("spawnInstance for {s}: {}", .{ hidraw_path, err });
                     inst_ptr.deinit();
                     self.allocator.destroy(inst_ptr);
+                    if (default_pr) |pr| {
+                        pr.deinit();
+                        self.allocator.destroy(pr);
+                    }
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
                     continue;
                 };
+                // Transfer default_pr ownership to the managed instance.
+                if (default_pr) |pr| {
+                    self.managed.items[self.managed.items.len - 1].switch_mapping = pr;
+                }
                 // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
                 spawned += 1;
             }
@@ -1286,18 +1326,32 @@ pub const Supervisor = struct {
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
+        var default_pr: ?*mapping_cfg.ParseResult = null;
+        const default_mcfg = self.loadDefaultMapping(cfg.?, &default_pr);
+
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, null) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, default_mcfg) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
+            if (default_pr) |pr| {
+                pr.deinit();
+                self.allocator.destroy(pr);
+            }
             return;
         };
         self.attachWithInstance(devname, phys, inst_ptr) catch |err| {
             inst_ptr.deinit();
             self.allocator.destroy(inst_ptr);
+            if (default_pr) |pr| {
+                pr.deinit();
+                self.allocator.destroy(pr);
+            }
             return err;
         };
+        if (default_pr) |pr| {
+            self.managed.items[self.managed.items.len - 1].switch_mapping = pr;
+        }
     }
 };
 
@@ -2054,4 +2108,49 @@ test "supervisor: startFromDirs loads configs from two dirs" {
     // With a non-existent dev root neither device will be found, so managed is empty.
     // The key assertion: startFromDirs did not error out after scanning the first dir.
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "supervisor: loadDefaultMapping: null when no default_mapping in device config" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    const parsed = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed.deinit();
+
+    var out_pr: ?*mapping_cfg.ParseResult = null;
+    const result = sup.loadDefaultMapping(&parsed.value, &out_pr);
+    try testing.expectEqual(@as(?*const mapping_cfg.MappingConfig, null), result);
+    try testing.expectEqual(@as(?*mapping_cfg.ParseResult, null), out_pr);
+}
+
+test "supervisor: loadDefaultMapping: returns null when file not found" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    const device_toml =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\default_mapping = "nonexistent_xyz_999"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 3
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+    ;
+    const parsed_dev = try device_mod.parseString(allocator, device_toml);
+    defer parsed_dev.deinit();
+
+    var out_pr: ?*mapping_cfg.ParseResult = null;
+    const result = sup.loadDefaultMapping(&parsed_dev.value, &out_pr);
+    try testing.expectEqual(@as(?*const mapping_cfg.MappingConfig, null), result);
+    try testing.expectEqual(@as(?*mapping_cfg.ParseResult, null), out_pr);
 }
