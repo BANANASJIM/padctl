@@ -145,17 +145,38 @@ pub const DeviceInstance = struct {
                 errdefer uinput_dev.?.close();
                 try loop.addUinputFf(uinput_dev.?.pollFfFd());
             }
-            if (out_cfg.aux != null) {
-                // Explicit [output.aux] in device config — create with empty key_codes.
-                // (Key registration handled via auto-derive path for correctness.)
-                aux_dev = try AuxDevice.create(&.{});
-            } else if (init_mapping) |mcfg| {
-                // Auto-derive: create AuxDevice iff the mapping actually needs it.
-                const caps = mapping_mod.deriveAuxFromMapping(mcfg);
-                if (caps.needsAux()) {
+            if (out_cfg.aux != null or init_mapping != null) {
+                const mcfg_opt = init_mapping;
+                const caps: mapping_mod.DerivedAuxCaps = if (mcfg_opt) |m|
+                    mapping_mod.deriveAuxFromMapping(m)
+                else
+                    .{};
+                if (out_cfg.aux != null or caps.needsAux()) {
                     var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
                     const key_codes = mapping_mod.buildAuxKeyCodes(caps, &buf);
                     aux_dev = try AuxDevice.create(key_codes);
+                    var cap_buf: [64]u8 = undefined;
+                    var cap_fbs = std.io.fixedBufferStream(&cap_buf);
+                    const cap_w = cap_fbs.writer();
+                    var sep = false;
+                    if (caps.needs_keyboard or out_cfg.aux != null) {
+                        cap_w.writeAll("keyboard") catch {};
+                        sep = true;
+                    }
+                    if (caps.mouse_buttons != 0) {
+                        if (sep) {
+                            cap_w.writeAll(", ") catch {};
+                        }
+                        cap_w.writeAll("mouse") catch {};
+                        sep = true;
+                    }
+                    if (caps.needs_rel) {
+                        if (sep) {
+                            cap_w.writeAll(", ") catch {};
+                        }
+                        cap_w.writeAll("rel") catch {};
+                    }
+                    std.log.info("aux device created: {s}", .{cap_fbs.getWritten()});
                 }
             }
             if (out_cfg.touchpad) |*tp_cfg| {
@@ -169,6 +190,13 @@ pub const DeviceInstance = struct {
             }
         else
             null;
+
+        if (mapper != null) {
+            std.log.info("device \"{s}\": mapping loaded", .{cfg.device.name});
+        } else {
+            std.log.info("device \"{s}\": passthrough (no mapping)", .{cfg.device.name});
+        }
+        std.log.info("device ready: \"{s}\"", .{cfg.device.name});
 
         return .{
             .allocator = allocator,
@@ -204,12 +232,17 @@ pub const DeviceInstance = struct {
         while (!@atomicLoad(bool, &self.stopped, .acquire)) {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
+                const old_mcfg: ?*const MappingConfig = if (self.mapper) |*m| m.config else self.mapping_cfg;
                 if (Mapper.init(new, self.loop.timer_fd, self.allocator)) |nm| {
                     if (self.mapper) |*m| m.deinit();
                     self.mapper = nm;
                 } else |err| {
                     std.log.err("mapping hot-swap failed: {}", .{err});
                 }
+                self.mapping_cfg = new;
+                self.rebuildAuxIfChanged(new, old_mcfg) catch |err| {
+                    std.log.err("aux rebuild after mapping swap failed: {}", .{err});
+                };
                 @atomicStore(?*MappingConfig, &self.pending_mapping, null, .release);
             }
 
@@ -242,14 +275,34 @@ pub const DeviceInstance = struct {
         }
     }
 
-    /// Create AuxDevice if mapping needs it and device has an output section but no explicit
-    /// [output.aux]. Safe to call only when the run() thread is NOT running.
+    /// Rebuild AuxDevice if caps changed after a mapping swap. old_mcfg may be null
+    /// if there was no prior mapping. Called from run() after pending_mapping swap.
+    fn rebuildAuxIfChanged(self: *DeviceInstance, new_mcfg: *const MappingConfig, old_mcfg: ?*const MappingConfig) !void {
+        if (self.device_cfg.output == null) return;
+        const new_caps = mapping_mod.deriveAuxFromMapping(new_mcfg);
+        const old_caps: mapping_mod.DerivedAuxCaps = if (old_mcfg) |m|
+            mapping_mod.deriveAuxFromMapping(m)
+        else
+            .{};
+        if (std.meta.eql(new_caps, old_caps)) return;
+        if (self.aux_dev) |*a| {
+            a.close();
+            self.aux_dev = null;
+        }
+        if (new_caps.needsAux() or self.device_cfg.output.?.aux != null) {
+            var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
+            const key_codes = mapping_mod.buildAuxKeyCodes(new_caps, &buf);
+            self.aux_dev = try AuxDevice.create(key_codes);
+        }
+    }
+
+    /// Create AuxDevice if mapping needs it and device has an output section.
+    /// Safe to call only when the run() thread is NOT running.
     pub fn ensureAuxForMapping(self: *DeviceInstance, mcfg: *const MappingConfig) !void {
-        if (self.aux_dev != null) return; // already have one
+        if (self.aux_dev != null) return;
         const out_cfg = self.device_cfg.output orelse return;
-        if (out_cfg.aux != null) return; // explicit override handles it
         const caps = mapping_mod.deriveAuxFromMapping(mcfg);
-        if (!caps.needsAux()) return;
+        if (!caps.needsAux() and out_cfg.aux == null) return;
         var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
         const key_codes = mapping_mod.buildAuxKeyCodes(caps, &buf);
         self.aux_dev = try AuxDevice.create(key_codes);
@@ -444,4 +497,94 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
 
     // pending_mapping consumed (set to null) after being applied
     try testing.expectEqual(@as(?*mapping.MappingConfig, null), inst.pending_mapping);
+    // mapping_cfg updated to new after swap (problem 3 fix)
+    try testing.expectEqual(@as(?*const mapping.MappingConfig, &new_cfg), inst.mapping_cfg);
+}
+
+test "DeviceInstance: updateMapping updates mapping_cfg after swap" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    const mapping_parsed = try mapping.parseString(allocator, "");
+    defer mapping_parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const devices = try allocator.alloc(DeviceIO, 1);
+    devices[0] = mock.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    errdefer loop.deinit();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
+        .uinput_dev = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .mapping_cfg = null,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+    defer {
+        if (inst.mapper) |*m| m.deinit();
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    var new_cfg = mapping_parsed.value;
+
+    const T = struct {
+        fn runFn(i: *DeviceInstance) !void {
+            try i.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.runFn, .{&inst});
+
+    try waitRunning(&inst.loop);
+    inst.updateMapping(&new_cfg);
+
+    var w: usize = 0;
+    while (w < 1000) : (w += 1) {
+        if (@atomicLoad(?*mapping.MappingConfig, &inst.pending_mapping, .acquire) == null) break;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+    inst.stop();
+    thread.join();
+
+    try testing.expectEqual(@as(?*const mapping.MappingConfig, &new_cfg), inst.mapping_cfg);
+}
+
+test "DeviceInstance: rebuildAuxIfChanged is no-op when device has no output config" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    const mapping_parsed = try mapping.parseString(allocator, "");
+    defer mapping_parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    // no output config on minimal_toml device — rebuildAuxIfChanged must return without error
+    try inst.rebuildAuxIfChanged(&mapping_parsed.value, null);
+    try testing.expectEqual(@as(?AuxDevice, null), inst.aux_dev);
 }
