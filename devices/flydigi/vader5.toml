@@ -40,8 +40,8 @@ right_y = { offset = 9,  type = "i16le", transform = "negate" }
 lt      = { offset = 15, type = "u8" }
 rt      = { offset = 16, type = "u8" }
 gyro_x  = { offset = 17, type = "i16le" }
-gyro_y  = { offset = 19, type = "i16le" }
-gyro_z  = { offset = 21, type = "i16le" }
+gyro_y  = { offset = 21, type = "i16le", transform = "negate" }
+gyro_z  = { offset = 19, type = "i16le" }
 accel_x = { offset = 23, type = "i16le" }
 accel_y = { offset = 25, type = "i16le" }
 accel_z = { offset = 27, type = "i16le" }
