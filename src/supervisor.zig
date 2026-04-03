@@ -16,6 +16,7 @@ const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
 const mapping_discovery = @import("config/mapping_discovery.zig");
+const user_config_mod = @import("config/user_config.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
@@ -141,6 +142,7 @@ pub const Supervisor = struct {
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
+    user_cfg: ?user_config_mod.ParseResult = null,
     test_switch_mapping_override: ?[]const u8 = null,
     test_switch_fail_commit_index: ?usize = null,
 
@@ -185,6 +187,7 @@ pub const Supervisor = struct {
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = sock,
+            .user_cfg = user_config_mod.load(allocator),
             .test_switch_mapping_override = null,
             .test_switch_fail_commit_index = null,
         };
@@ -214,6 +217,7 @@ pub const Supervisor = struct {
 
     pub fn deinit(self: *Supervisor) void {
         if (self.ctrl_sock) |*cs| cs.deinit();
+        if (self.user_cfg) |*uc| uc.deinit();
         if (self.test_switch_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
@@ -889,6 +893,16 @@ pub const Supervisor = struct {
         cs.sendResponse(fd, resp_buf[0..pos]);
     }
 
+    /// Look up the user config's default_mapping for device_name, find and parse the mapping file.
+    /// Caller owns the returned ParseResult (call deinit on it). Returns null if none configured.
+    fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?mapping_cfg.ParseResult {
+        const ucfg = &(self.user_cfg orelse return null);
+        const mapping_name = user_config_mod.findDefaultMapping(ucfg, device_name) orelse return null;
+        const path = (mapping_discovery.findMapping(self.allocator, mapping_name) catch return null) orelse return null;
+        defer self.allocator.free(path);
+        return mapping_cfg.parseFile(self.allocator, path) catch null;
+    }
+
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
     pub fn startFromDir(self: *Supervisor, dir_path: []const u8) !void {
         return self.startFromDirWithRoot(dir_path, "/dev");
@@ -979,8 +993,12 @@ pub const Supervisor = struct {
                 }
                 // seen now owns phys bytes via the key slot
 
+                var default_pr = self.loadUserDefaultMapping(cfg_ptr.value.device.name);
+                defer if (default_pr) |*pr| pr.deinit();
+                const init_mapping: ?*const MappingConfig = if (default_pr) |*pr| &pr.value else null;
+
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, null) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
                     // reclaim phys from seen
@@ -1288,9 +1306,13 @@ pub const Supervisor = struct {
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
+        var default_pr = self.loadUserDefaultMapping(cfg.?.device.name);
+        defer if (default_pr) |*pr| pr.deinit();
+        const init_mapping: ?*const MappingConfig = if (default_pr) |*pr| &pr.value else null;
+
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, null) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
             return;

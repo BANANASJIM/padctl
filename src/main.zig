@@ -110,6 +110,7 @@ pub const config = struct {
     pub const mapping_discovery = @import("config/mapping_discovery.zig");
     pub const presets = @import("config/presets.zig");
     pub const paths = @import("config/paths.zig");
+    pub const user_config = @import("config/user_config.zig");
 };
 
 pub const debug = struct {
@@ -655,15 +656,31 @@ pub fn main() !void {
     };
     defer device_cfg.deinit();
 
+    const user_cfg_mod = @import("config/user_config.zig");
+    var user_cfg_pr = user_cfg_mod.load(allocator);
+    defer if (user_cfg_pr) |*pr| pr.deinit();
+
     var mapping_pr: ?config.mapping.ParseResult = null;
     defer if (mapping_pr) |*pr| pr.deinit();
     const init_mapping: ?*const config.mapping.MappingConfig = blk: {
-        const path = parsed.mapping_path orelse break :blk null;
-        mapping_pr = config.mapping.parseFile(allocator, path) catch |err| {
-            std.log.err("failed to parse mapping '{s}': {}", .{ path, err });
-            std.process.exit(1);
-        };
-        break :blk &mapping_pr.?.value;
+        if (parsed.mapping_path) |path| {
+            mapping_pr = config.mapping.parseFile(allocator, path) catch |err| {
+                std.log.err("failed to parse mapping '{s}': {}", .{ path, err });
+                std.process.exit(1);
+            };
+            break :blk &mapping_pr.?.value;
+        }
+        // No --mapping: try user config default
+        if (user_cfg_pr) |*ucpr| {
+            if (user_cfg_mod.findDefaultMapping(ucpr, device_cfg.value.device.name)) |name| {
+                if (config.mapping_discovery.findMapping(allocator, name) catch null) |mp| {
+                    defer allocator.free(mp);
+                    mapping_pr = config.mapping.parseFile(allocator, mp) catch null;
+                    if (mapping_pr) |*pr| break :blk &pr.value;
+                }
+            }
+        }
+        break :blk null;
     };
 
     var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping) catch |err| {
