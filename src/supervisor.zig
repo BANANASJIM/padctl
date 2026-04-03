@@ -1077,6 +1077,8 @@ pub const Supervisor = struct {
     }
 
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
         self.stopAll();
         for (self.configs.items) |c| {
             c.deinit();
@@ -1095,6 +1097,8 @@ pub const Supervisor = struct {
     }
 
     fn doReloadFromDirs(self: *Supervisor, dirs: []const []const u8) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
         self.stopAll();
         for (self.configs.items) |c| {
             c.deinit();
