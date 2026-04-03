@@ -1472,8 +1472,8 @@ pub const Supervisor = struct {
         if (cfg == null) return;
 
         const iface_id = readInterfaceId(path) orelse {
-            std.log.debug("hotplug: {s} no interface id, skipping", .{path});
-            return;
+            std.log.debug("hotplug: {s} sysfs not ready, will retry", .{path});
+            return error.AccessDenied;
         };
         const declared = for (cfg.?.device.interface) |ci| {
             if (iface_id == @as(u8, @intCast(ci.id))) break true;
