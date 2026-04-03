@@ -137,52 +137,58 @@ pub const HidrawDevice = struct {
         sys_root: []const u8,
         input_dev_root: []const u8,
     ) !void {
-        const node_name = std.fs.path.basename(hidraw_path); // "hidrawN"
+        // Get the physical path from sysfs uevent and strip the /inputN suffix
+        // to obtain the USB device prefix (e.g. "usb-0000:00:14.0-4").
+        var phys_buf: [1024]u8 = undefined;
+        const phys = readPhysFromSysfs(hidraw_path, &phys_buf) orelse return;
+        const usb_prefix = stripInputSuffix(phys);
+        if (usb_prefix.len == 0 or std.mem.eql(u8, usb_prefix, phys)) return;
+
+        // Iterate /sys/class/input/event* and grab any whose phys starts with
+        // the same USB device prefix.
         var path_buf: [256]u8 = undefined;
-        const input_dir_path = try std.fmt.bufPrint(
+        const input_class_dir = try std.fmt.bufPrint(
             &path_buf,
-            "{s}/class/hidraw/{s}/device/input",
-            .{ sys_root, node_name },
+            "{s}/class/input",
+            .{sys_root},
         );
 
-        var input_dir = std.fs.openDirAbsolute(input_dir_path, .{ .iterate = true }) catch return;
+        var input_dir = std.fs.openDirAbsolute(input_class_dir, .{ .iterate = true }) catch return;
         defer input_dir.close();
 
         var it = input_dir.iterate();
         while (try it.next()) |entry| {
-            if (!std.mem.startsWith(u8, entry.name, "input")) continue;
+            if (!std.mem.startsWith(u8, entry.name, "event")) continue;
 
-            var event_path_buf: [256]u8 = undefined;
-            const event_dir_path = try std.fmt.bufPrint(
-                &event_path_buf,
-                "{s}/class/hidraw/{s}/device/input/{s}",
-                .{ sys_root, node_name, entry.name },
-            );
+            // Read the phys sysfs file for this event device.
+            var ev_phys_path_buf: [320]u8 = undefined;
+            const ev_phys_path = std.fmt.bufPrint(
+                &ev_phys_path_buf,
+                "{s}/class/input/{s}/device/phys",
+                .{ sys_root, entry.name },
+            ) catch continue;
 
-            var event_dir = std.fs.openDirAbsolute(event_dir_path, .{ .iterate = true }) catch continue;
-            defer event_dir.close();
+            var ev_phys_buf: [256]u8 = undefined;
+            const ev_phys = readSysfsFile(ev_phys_path, &ev_phys_buf) orelse continue;
 
-            var eit = event_dir.iterate();
-            while (try eit.next()) |ev_entry| {
-                if (!std.mem.startsWith(u8, ev_entry.name, "event")) continue;
+            if (!std.mem.startsWith(u8, ev_phys, usb_prefix)) continue;
 
-                var dev_path_buf: [128]u8 = undefined;
-                const dev_path = try std.fmt.bufPrint(
-                    &dev_path_buf,
-                    "{s}/{s}",
-                    .{ input_dev_root, ev_entry.name },
-                );
+            var dev_path_buf: [128]u8 = undefined;
+            const dev_path = std.fmt.bufPrint(
+                &dev_path_buf,
+                "{s}/{s}",
+                .{ input_dev_root, entry.name },
+            ) catch continue;
 
-                const evfd = posix.open(dev_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
-                const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, @intFromPtr(&@as(c_int, 1)));
-                if (grab_rc != 0) {
-                    posix.close(evfd);
-                    continue;
-                }
-                self.evdev_fds.append(evfd) catch {
-                    posix.close(evfd);
-                };
+            const evfd = posix.open(dev_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+            const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, @intFromPtr(&@as(c_int, 1)));
+            if (grab_rc != 0) {
+                posix.close(evfd);
+                continue;
             }
+            self.evdev_fds.append(evfd) catch {
+                posix.close(evfd);
+            };
         }
     }
 
@@ -271,6 +277,16 @@ fn readInterfaceIdFromSysfs(basename_s: []const u8) ?u8 {
     const n = f.read(&b) catch return null;
     const trimmed = std.mem.trim(u8, b[0..n], " \t\n\r");
     return std.fmt.parseInt(u8, trimmed, 16) catch null;
+}
+
+/// Read a sysfs file and return its contents (trimmed of trailing whitespace).
+/// Returned slice points into buf; caller must copy if needed.
+fn readSysfsFile(path: []const u8, buf: []u8) ?[]const u8 {
+    const fd = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer fd.close();
+    const n = fd.read(buf) catch return null;
+    if (n == 0) return null;
+    return std.mem.trimRight(u8, buf[0..n], " \t\n\r");
 }
 
 /// Read HID_PHYS value from sysfs uevent file for a hidraw node.
@@ -374,8 +390,8 @@ test "hidraw: parseInterfaceId: finds last 'inputN' even when trailing segment i
     try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("usb/event0/dev"));
 }
 
-test "hidraw: grabAssociatedEvdev sysfs path parsing" {
-    // Build a temp sysfs-like tree and verify grab logic finds eventK entries.
+test "hidraw: grabAssociatedEvdev: no crash when phys missing or no matching events" {
+    // grabAssociatedEvdevWithRoot returns early when hidraw uevent has no HID_PHYS.
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -383,17 +399,48 @@ test "hidraw: grabAssociatedEvdev sysfs path parsing" {
     const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(tmp_path);
 
-    // Create: <tmp>/class/hidraw/hidraw2/device/input/input5/event3
-    try tmp.dir.makePath("class/hidraw/hidraw2/device/input/input5/event3");
+    // Minimal sysfs tree without a uevent file → readPhysFromSysfs returns null → early return.
+    try tmp.dir.makePath("class/hidraw/hidraw2/device");
+    try tmp.dir.makePath("class/input");
 
     var dev = HidrawDevice.init(allocator);
+    dev.grabAssociatedEvdevWithRoot("/dev/hidraw2", tmp_path, "/nonexistent") catch {};
+    try std.testing.expectEqual(@as(usize, 0), dev.evdev_fds.len);
+}
 
-    // grabAssociatedEvdevWithRoot should traverse without crashing even if
-    // opening /dev/input/event3 fails (no real device).
-    const hidraw_path = "/dev/hidraw2";
-    const sys_root = tmp_path;
-    // input_dev_root points somewhere that doesn't exist → open will fail → skipped gracefully
-    dev.grabAssociatedEvdevWithRoot(hidraw_path, sys_root, "/nonexistent") catch {};
-    // No evdev_fds grabbed (open failed), but no crash.
+test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
+    // Build a temp sysfs-like tree with a matching and a non-matching event device.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    // hidraw uevent with HID_PHYS pointing to usb-0000:00:14.0-4/input1
+    try tmp.dir.makePath("class/hidraw/hidraw3/device");
+    const uevent_content = "HID_ID=0003:00001234:00005678\nHID_PHYS=usb-0000:00:14.0-4/input1\n";
+    try tmp.dir.writeFile(.{
+        .sub_path = "class/hidraw/hidraw3/device/uevent",
+        .data = uevent_content,
+    });
+
+    // Matching event: phys starts with "usb-0000:00:14.0-4"
+    try tmp.dir.makePath("class/input/event7/device");
+    try tmp.dir.writeFile(.{
+        .sub_path = "class/input/event7/device/phys",
+        .data = "usb-0000:00:14.0-4/input0\n",
+    });
+
+    // Non-matching event: different USB device
+    try tmp.dir.makePath("class/input/event9/device");
+    try tmp.dir.writeFile(.{
+        .sub_path = "class/input/event9/device/phys",
+        .data = "usb-0000:00:14.0-7/input0\n",
+    });
+
+    var dev = HidrawDevice.init(allocator);
+    // input_dev_root points nowhere → open fails → graceful skip, but traversal ran correctly.
+    dev.grabAssociatedEvdevWithRoot("/dev/hidraw3", tmp_path, "/nonexistent") catch {};
     try std.testing.expectEqual(@as(usize, 0), dev.evdev_fds.len);
 }
