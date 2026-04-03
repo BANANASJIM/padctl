@@ -266,6 +266,9 @@ pub const Supervisor = struct {
     /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
     pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         if (self.devname_map.contains(devname)) return;
+        for (self.managed.items) |m| {
+            if (std.mem.eql(u8, m.phys_key, phys_key)) return;
+        }
         const dev_copy = try self.allocator.dupe(u8, devname);
         errdefer self.allocator.free(dev_copy);
         const phys_copy = try self.allocator.dupe(u8, phys_key);
@@ -1142,6 +1145,23 @@ pub const Supervisor = struct {
                     self.allocator.free(phys);
                     continue;
                 };
+                // Register devname → phys in devname_map so detach() can find this instance.
+                {
+                    const devname = std.fs.path.basename(hidraw_path);
+                    const dev_copy = self.allocator.dupe(u8, devname) catch null;
+                    const phys_copy = if (dev_copy != null) self.allocator.dupe(u8, phys) catch null else null;
+                    if (dev_copy != null and phys_copy != null) {
+                        if (self.devname_map.put(dev_copy.?, phys_copy.?)) {
+                            self.managed.items[self.managed.items.len - 1].devname = dev_copy;
+                        } else |_| {
+                            self.allocator.free(dev_copy.?);
+                            self.allocator.free(phys_copy.?);
+                        }
+                    } else {
+                        if (dev_copy) |d| self.allocator.free(d);
+                        if (phys_copy) |p| self.allocator.free(p);
+                    }
+                }
                 // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
                 spawned += 1;
             }
