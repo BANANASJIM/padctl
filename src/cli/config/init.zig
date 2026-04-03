@@ -65,7 +65,7 @@ fn templateContent(idx: usize) []const u8 {
         \\trigger = "RB"
         \\activation = "hold"
         \\
-        \\[layer.stick.right]
+        \\[layer.stick_right]
         \\mode = "mouse"
         \\sensitivity = 1.5
         \\
