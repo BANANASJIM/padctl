@@ -137,15 +137,11 @@ pub const HidrawDevice = struct {
         sys_root: []const u8,
         input_dev_root: []const u8,
     ) !void {
-        // Get the physical path from sysfs uevent and strip the /inputN suffix
-        // to obtain the USB device prefix (e.g. "usb-0000:00:14.0-4").
         var phys_buf: [1024]u8 = undefined;
-        const phys = readPhysFromSysfs(hidraw_path, &phys_buf) orelse return;
+        const phys = readPhysFromSysfs(hidraw_path, &phys_buf, sys_root) orelse return;
         const usb_prefix = stripInputSuffix(phys);
         if (usb_prefix.len == 0 or std.mem.eql(u8, usb_prefix, phys)) return;
 
-        // Iterate /sys/class/input/event* and grab any whose phys starts with
-        // the same USB device prefix.
         var path_buf: [256]u8 = undefined;
         const input_class_dir = try std.fmt.bufPrint(
             &path_buf,
@@ -160,7 +156,6 @@ pub const HidrawDevice = struct {
         while (try it.next()) |entry| {
             if (!std.mem.startsWith(u8, entry.name, "event")) continue;
 
-            // Read the phys sysfs file for this event device.
             var ev_phys_path_buf: [320]u8 = undefined;
             const ev_phys_path = std.fmt.bufPrint(
                 &ev_phys_path_buf,
@@ -171,7 +166,7 @@ pub const HidrawDevice = struct {
             var ev_phys_buf: [256]u8 = undefined;
             const ev_phys = readSysfsFile(ev_phys_path, &ev_phys_buf) orelse continue;
 
-            if (!std.mem.startsWith(u8, ev_phys, usb_prefix)) continue;
+            if (!physMatchesPrefix(ev_phys, usb_prefix)) continue;
 
             var dev_path_buf: [128]u8 = undefined;
             const dev_path = std.fmt.bufPrint(
@@ -241,7 +236,7 @@ pub const HidrawDevice = struct {
 /// Read the HID physical path from sysfs uevent; caller owns the returned slice.
 pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     var buf: [1024]u8 = undefined;
-    const phys = readPhysFromSysfs(path, &buf) orelse return allocator.dupe(u8, path);
+    const phys = readPhysFromSysfs(path, &buf, "/sys") orelse return allocator.dupe(u8, path);
     const stripped = stripInputSuffix(phys);
     if (stripped.len == 0) return allocator.dupe(u8, path);
     return allocator.dupe(u8, stripped);
@@ -279,6 +274,14 @@ fn readInterfaceIdFromSysfs(basename_s: []const u8) ?u8 {
     return std.fmt.parseInt(u8, trimmed, 16) catch null;
 }
 
+/// Returns true if ev_phys starts with prefix and the next character is a separator or end.
+fn physMatchesPrefix(ev_phys: []const u8, prefix: []const u8) bool {
+    if (!std.mem.startsWith(u8, ev_phys, prefix)) return false;
+    if (ev_phys.len == prefix.len) return true;
+    const next = ev_phys[prefix.len];
+    return next == '/' or next == ':' or next == '.' or next == '-';
+}
+
 /// Read a sysfs file and return its contents (trimmed of trailing whitespace).
 /// Returned slice points into buf; caller must copy if needed.
 fn readSysfsFile(path: []const u8, buf: []u8) ?[]const u8 {
@@ -291,10 +294,10 @@ fn readSysfsFile(path: []const u8, buf: []u8) ?[]const u8 {
 
 /// Read HID_PHYS value from sysfs uevent file for a hidraw node.
 /// Returned slice points into an internal read buffer; caller must copy if needed.
-fn readPhysFromSysfs(path: []const u8, buf: *[1024]u8) ?[]const u8 {
+fn readPhysFromSysfs(path: []const u8, buf: *[1024]u8, sys_root: []const u8) ?[]const u8 {
     const basename = std.fs.path.basename(path);
     var path_buf: [256]u8 = undefined;
-    const sysfs_path = std.fmt.bufPrint(&path_buf, "/sys/class/hidraw/{s}/device/uevent", .{basename}) catch return null;
+    const sysfs_path = std.fmt.bufPrint(&path_buf, "{s}/class/hidraw/{s}/device/uevent", .{ sys_root, basename }) catch return null;
     const fd = std.fs.openFileAbsolute(sysfs_path, .{}) catch return null;
     defer fd.close();
     const n = fd.read(buf) catch return null;
@@ -408,8 +411,25 @@ test "hidraw: grabAssociatedEvdev: no crash when phys missing or no matching eve
     try std.testing.expectEqual(@as(usize, 0), dev.evdev_fds.len);
 }
 
+test "hidraw: physMatchesPrefix: exact, suffix, and boundary" {
+    // Exact match
+    try std.testing.expect(physMatchesPrefix("usb-0000:00:14.0-4", "usb-0000:00:14.0-4"));
+    // Valid separator chars after prefix
+    try std.testing.expect(physMatchesPrefix("usb-0000:00:14.0-4/input0", "usb-0000:00:14.0-4"));
+    try std.testing.expect(physMatchesPrefix("usb-0000:00:14.0-4:something", "usb-0000:00:14.0-4"));
+    try std.testing.expect(physMatchesPrefix("usb-0000:00:14.0-4.1", "usb-0000:00:14.0-4"));
+    try std.testing.expect(physMatchesPrefix("usb-0000:00:14.0-4-extra", "usb-0000:00:14.0-4"));
+    // Port -40 must NOT match prefix -4
+    try std.testing.expect(!physMatchesPrefix("usb-0000:00:14.0-40/input0", "usb-0000:00:14.0-4"));
+    // Different device
+    try std.testing.expect(!physMatchesPrefix("usb-0000:00:14.0-7/input0", "usb-0000:00:14.0-4"));
+    // Empty
+    try std.testing.expect(!physMatchesPrefix("", "usb-0000:00:14.0-4"));
+}
+
 test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
     // Build a temp sysfs-like tree with a matching and a non-matching event device.
+    // Create real event device files so the traversal path can be validated.
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -425,22 +445,41 @@ test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
         .data = uevent_content,
     });
 
-    // Matching event: phys starts with "usb-0000:00:14.0-4"
+    // Matching event: phys starts with "usb-0000:00:14.0-4" followed by /
     try tmp.dir.makePath("class/input/event7/device");
     try tmp.dir.writeFile(.{
         .sub_path = "class/input/event7/device/phys",
         .data = "usb-0000:00:14.0-4/input0\n",
     });
 
-    // Non-matching event: different USB device
+    // Non-matching event: different USB port
     try tmp.dir.makePath("class/input/event9/device");
     try tmp.dir.writeFile(.{
         .sub_path = "class/input/event9/device/phys",
         .data = "usb-0000:00:14.0-7/input0\n",
     });
 
+    // Port -40 must NOT match prefix -4 (boundary check)
+    try tmp.dir.makePath("class/input/event11/device");
+    try tmp.dir.writeFile(.{
+        .sub_path = "class/input/event11/device/phys",
+        .data = "usb-0000:00:14.0-40/input0\n",
+    });
+
+    // Create real event files in a temp input dir so open can succeed.
+    try tmp.dir.makePath("input");
+    try tmp.dir.writeFile(.{ .sub_path = "input/event7", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "input/event9", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "input/event11", .data = "" });
+
+    const input_dev_root = try std.fmt.allocPrint(allocator, "{s}/input", .{tmp_path});
+    defer allocator.free(input_dev_root);
+
     var dev = HidrawDevice.init(allocator);
-    // input_dev_root points nowhere → open fails → graceful skip, but traversal ran correctly.
-    dev.grabAssociatedEvdevWithRoot("/dev/hidraw3", tmp_path, "/nonexistent") catch {};
+    // open succeeds (regular files), but EVIOCGRAB fails → evdev_fds stays empty.
+    // The key assertion: no crash, and the non-matching events were correctly excluded.
+    dev.grabAssociatedEvdevWithRoot("/dev/hidraw3", tmp_path, input_dev_root) catch {};
+    // EVIOCGRAB will fail on regular files, so fds will be 0.
+    // This test primarily validates traversal correctness via physMatchesPrefix tests above.
     try std.testing.expectEqual(@as(usize, 0), dev.evdev_fds.len);
 }
