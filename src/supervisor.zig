@@ -437,6 +437,9 @@ pub const Supervisor = struct {
         reload_allocator: std.mem.Allocator,
         initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
     ) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
+
         const new_configs = reloadFn(reload_allocator) catch |err| {
             std.log.err("reload failed: {}", .{err});
             return;
@@ -512,8 +515,8 @@ pub const Supervisor = struct {
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
-                m.instance.ensureAuxForMapping(map_copy) catch |err| {
-                    std.log.warn("ensureAuxForMapping: {}", .{err});
+                m.instance.rebuildAuxIfChanged(map_copy, null) catch |err| {
+                    std.log.warn("rebuildAuxIfChanged: {}", .{err});
                 };
                 restartManagedThread(m) catch |err| {
                     m.instance.mapper = old_mapper;
@@ -704,11 +707,12 @@ pub const Supervisor = struct {
         m.instance.stop();
         m.thread.join();
         self.clearSwitchMapping(m);
+        const old_mcfg = m.instance.mapping_cfg;
         if (m.instance.mapper) |*old| old.deinit();
         m.instance.mapper = new_mapper;
         m.instance.mapping_cfg = &parsed_ptr.value;
-        m.instance.ensureAuxForMapping(&parsed_ptr.value) catch |err| {
-            std.log.warn("ensureAuxForMapping: {}", .{err});
+        m.instance.rebuildAuxIfChanged(&parsed_ptr.value, old_mcfg) catch |err| {
+            std.log.warn("rebuildAuxIfChanged: {}", .{err});
         };
         restartManagedThread(m) catch |err| {
             if (m.instance.mapper) |*mapper| {

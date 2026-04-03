@@ -277,7 +277,7 @@ pub const DeviceInstance = struct {
 
     /// Rebuild AuxDevice if caps changed after a mapping swap. old_mcfg may be null
     /// if there was no prior mapping. Called from run() after pending_mapping swap.
-    fn rebuildAuxIfChanged(self: *DeviceInstance, new_mcfg: *const MappingConfig, old_mcfg: ?*const MappingConfig) !void {
+    pub fn rebuildAuxIfChanged(self: *DeviceInstance, new_mcfg: *const MappingConfig, old_mcfg: ?*const MappingConfig) !void {
         if (self.device_cfg.output == null) return;
         const new_caps = mapping_mod.deriveAuxFromMapping(new_mcfg);
         const old_caps: mapping_mod.DerivedAuxCaps = if (old_mcfg) |m|
