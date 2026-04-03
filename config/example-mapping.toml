@@ -15,6 +15,7 @@ name = "example"   # identifies this profile; used with `padctl switch`
 # Key:   any ButtonId (A B X Y LB RB LT RT Start Select Home Capture
 #                       LS RS DPadUp DPadDown DPadLeft DPadRight
 #                       M1..M4 Paddle1..Paddle4 TouchPad Mic C Z LM RM O)
+#                       (replace with buttons your controller actually has)
 #
 # Value — one of:
 #   "KEY_*"          keyboard key   (see key list at end of this file)
@@ -30,12 +31,10 @@ M1        = "KEY_F13"           # back paddle → media / macro key
 M2        = "KEY_F14"
 M3        = "mouse_left"        # grip button → left click
 M4        = "mouse_right"
-M5        = "mouse_forward"     # browser forward (XF86Forward)
-M6        = "mouse_back"        # browser back   (XF86Back)
 C         = "disabled"          # silence an unused button
 Z         = "KEY_LEFTMETA"      # Super key
-LM        = "macro:dodge_roll"  # fire a named macro
-RM        = "R3"                # reroute to gamepad R3 click
+LM        = "mouse_forward"     # browser forward (XF86Forward)
+RM        = "mouse_back"        # browser back   (XF86Back)
 
 # DPad buttons can also be remapped individually:
 DPadUp    = "KEY_W"

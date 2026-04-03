@@ -8,6 +8,7 @@ pub fn userConfigDir(allocator: Allocator) ![]u8 {
         return std.fmt.allocPrint(allocator, "{s}/padctl", .{xdg});
     }
     if (std.posix.getenv("SUDO_USER")) |sudo_user| {
+        // TODO: use getpwnam for non-standard home dirs (e.g. /users/, /export/home/)
         const candidate = try std.fmt.allocPrint(allocator, "/home/{s}/.config/padctl", .{sudo_user});
         std.fs.accessAbsolute(candidate, .{}) catch {
             allocator.free(candidate);

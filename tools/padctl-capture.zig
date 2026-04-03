@@ -314,7 +314,7 @@ pub fn main() !void {
 
     if (frames.items.len == 0) {
         std.log.err("no frames captured", .{});
-        std.log.info("hint: some devices need an init sequence — try: padctl-capture --config <device.toml> --device <hidraw>", .{});
+        std.log.warn("hint: some devices need an init sequence — try: padctl-capture --config <device.toml> --device <hidraw>", .{});
         std.process.exit(1);
     }
 
