@@ -409,7 +409,6 @@ fn collectRemapMap(
             continue;
         };
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
-        suppressed.* |= @as(u64, 1) << src_idx;
         const target = resolveTarget(entry.value_ptr.*) catch {
             if (!warned.*) {
                 std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
@@ -417,6 +416,7 @@ fn collectRemapMap(
             }
             continue;
         };
+        suppressed.* |= @as(u64, 1) << src_idx;
         per_src_inject[@intCast(src_idx)] = target;
     }
 }
@@ -1307,4 +1307,21 @@ test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
     }
 
     try testing.expect(wheel_value < 0);
+}
+
+test "mapper: invalid remap target does not suppress source button" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = "INVALID_TARGET_XYZ"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    // A must still pass through — bad target must not suppress the source
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << a_idx)) != 0);
 }

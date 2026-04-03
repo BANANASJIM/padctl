@@ -66,7 +66,7 @@ fn initSup(allocator: std.mem.Allocator) !Supervisor {
 
 fn attach(sup: *Supervisor, allocator: std.mem.Allocator, mock: *MockDeviceIO, cfg: *const device_mod.DeviceConfig, devname: []const u8, phys: []const u8) !void {
     const inst = try makeInstance(allocator, mock, cfg);
-    try sup.attachWithInstance(devname, phys, inst);
+    try sup.attachWithInstance(devname, phys, inst, null);
 }
 
 // reload with empty config list = remove all
@@ -117,7 +117,7 @@ test "SM: attach → attach-duplicate is no-op" {
         inst_b.deinit();
         allocator.destroy(inst_b);
     }
-    try sup.attachWithInstance("hidraw0", "key0b", inst_b);
+    try sup.attachWithInstance("hidraw0", "key0b", inst_b, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     sup.stopAll();
 }

@@ -20,12 +20,18 @@ pub fn load(allocator: std.mem.Allocator) ?ParseResult {
     const config_path = std.fmt.allocPrint(allocator, "{s}/config.toml", .{config_dir}) catch return null;
     defer allocator.free(config_path);
 
-    const content = std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024) catch return null;
+    const content = std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024) catch |err| {
+        if (err != error.FileNotFound) std.log.warn("user config: cannot read {s}: {}", .{ config_path, err });
+        return null;
+    };
     defer allocator.free(content);
 
     var parser = toml.Parser(UserConfig).init(allocator);
     defer parser.deinit();
-    return parser.parseString(content) catch null;
+    return parser.parseString(content) catch |err| {
+        std.log.warn("user config: parse error in {s}: {}", .{ config_path, err });
+        return null;
+    };
 }
 
 /// Find the default_mapping for a device by name. Returns a slice into the parsed data.
@@ -40,15 +46,15 @@ pub fn findDefaultMapping(result: *const ParseResult, device_name: []const u8) ?
 // --- tests ---
 
 test "load: returns null when config.toml absent" {
-    // Point HOME to a temp dir with no config.toml
     const allocator = std.testing.allocator;
-    const tmp = "/tmp/padctl_user_config_test_absent";
-    std.fs.makeDirAbsolute(tmp) catch |e| if (e != error.PathAlreadyExists) return e;
-    defer std.fs.deleteTreeAbsolute(tmp) catch {};
-
-    // Can't set HOME in tests portably, but we can verify load() on a known-absent path
-    // by calling the file-read branch: just verify no crash when called normally.
-    _ = allocator;
+    // load() reads from XDG_CONFIG_HOME / HOME paths; in a clean test env with no
+    // config.toml it must return null without crashing.
+    const result = load(allocator);
+    if (result) |*r| {
+        var mr = r.*;
+        mr.deinit();
+    }
+    // If null, that is the expected outcome for a missing config.
 }
 
 test "findDefaultMapping: matches by name" {

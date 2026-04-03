@@ -203,7 +203,7 @@ pub const AuxDisplayState = struct {
     mouse_dy: i32 = 0,
     scroll_v: i32 = 0,
     scroll_h: i32 = 0,
-    mouse_buttons: u8 = 0, // bit 0=left,1=right,2=middle,3=side,4=extra
+    mouse_buttons: u8 = 0, // bit 0=left,1=right,2=middle,3=side,4=extra,5=forward,6=back
     last_keys: [8]KeyDisplay = [_]KeyDisplay{.{}} ** 8,
     key_write_pos: u8 = 0,
     key_total: u64 = 0,
@@ -899,7 +899,7 @@ fn renderAuxSection(writer: anytype, aux: *const AuxDisplayState) !void {
     {
         try writer.writeAll("│ ");
         var col: usize = 2;
-        const btn_labels = [_][]const u8{ "L", "R", "M", "S", "E" };
+        const btn_labels = [_][]const u8{ "L", "R", "M", "S", "E", "FWD", "BCK" };
         for (btn_labels, 0..) |lbl, i| {
             const pressed = (aux.mouse_buttons >> @intCast(i)) & 1 != 0;
             if (pressed) {

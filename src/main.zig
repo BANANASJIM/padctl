@@ -675,8 +675,13 @@ pub fn main() !void {
             if (user_cfg_mod.findDefaultMapping(ucpr, device_cfg.value.device.name)) |name| {
                 if (config.mapping_discovery.findMapping(allocator, name) catch null) |mp| {
                     defer allocator.free(mp);
-                    mapping_pr = config.mapping.parseFile(allocator, mp) catch null;
+                    mapping_pr = config.mapping.parseFile(allocator, mp) catch |err| blk2: {
+                        std.log.warn("failed to parse default mapping '{s}': {}", .{ mp, err });
+                        break :blk2 null;
+                    };
                     if (mapping_pr) |*pr| break :blk &pr.value;
+                } else {
+                    std.log.warn("default mapping '{s}' not found in XDG paths", .{name});
                 }
             }
         }

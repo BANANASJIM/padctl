@@ -106,7 +106,7 @@ test "supervisor: attach — one instance created, thread running" {
     defer sup.deinit();
 
     const inst = try makeInstance(allocator, &mock, &parsed.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst, null);
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     sup.stopAll();
@@ -127,7 +127,7 @@ test "supervisor: attach duplicate devname — no-op, still one instance" {
     defer sup.deinit();
 
     const inst_a = try makeInstance(allocator, &mock_a, &parsed.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     // Second attach with same devname — must be no-op.
@@ -137,7 +137,7 @@ test "supervisor: attach duplicate devname — no-op, still one instance" {
         inst_b.deinit();
         allocator.destroy(inst_b);
     }
-    try sup.attachWithInstance("hidraw3", "usb-1-1b", inst_b);
+    try sup.attachWithInstance("hidraw3", "usb-1-1b", inst_b, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     sup.stopAll();
@@ -156,7 +156,7 @@ test "supervisor: detach — instance stopped and freed" {
     defer sup.deinit();
 
     const inst = try makeInstance(allocator, &mock, &parsed.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     sup.detach("hidraw3");
@@ -187,12 +187,12 @@ test "supervisor: attach-detach-attach — second instance created normally" {
     defer sup.deinit();
 
     const inst_a = try makeInstance(allocator, &mock_a, &parsed.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
     sup.detach("hidraw3");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 
     const inst_b = try makeInstance(allocator, &mock_b, &parsed.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     sup.stopAll();

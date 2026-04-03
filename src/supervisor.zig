@@ -30,6 +30,7 @@ pub const ManagedInstance = struct {
     thread: std.Thread,
     mapping_arena: std.heap.ArenaAllocator,
     switch_mapping: ?*mapping_cfg.ParseResult = null,
+    default_mapping_pr: ?*mapping_cfg.ParseResult = null,
 };
 
 /// Config snapshot used for hot-reload diffing.
@@ -242,7 +243,8 @@ pub const Supervisor = struct {
 
     /// Attach a pre-constructed instance under a given devname / phys_key.
     /// Returns without error if devname already tracked (dedup guard).
-    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance) !void {
+    /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
+    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         if (self.devname_map.contains(devname)) return;
         const dev_copy = try self.allocator.dupe(u8, devname);
         errdefer self.allocator.free(dev_copy);
@@ -252,7 +254,7 @@ pub const Supervisor = struct {
         errdefer self.allocator.free(dn_copy);
         try self.devname_map.put(dev_copy, phys_copy);
         errdefer _ = self.devname_map.fetchRemove(dev_copy);
-        try self.spawnInstance(phys_key, instance);
+        try self.spawnInstance(phys_key, instance, default_pr);
         self.managed.items[self.managed.items.len - 1].devname = dn_copy;
     }
 
@@ -275,7 +277,7 @@ pub const Supervisor = struct {
         }
     }
 
-    fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance) !void {
+    fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         const thread = try std.Thread.spawn(.{}, threadEntry, .{instance});
         errdefer {
             instance.stop();
@@ -290,11 +292,16 @@ pub const Supervisor = struct {
             .thread = thread,
             .mapping_arena = std.heap.ArenaAllocator.init(self.allocator),
             .switch_mapping = null,
+            .default_mapping_pr = default_pr,
         });
     }
 
     fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {
         if (m.switch_mapping) |pm| {
+            pm.deinit();
+            self.allocator.destroy(pm);
+        }
+        if (m.default_mapping_pr) |pm| {
             pm.deinit();
             self.allocator.destroy(pm);
         }
@@ -495,7 +502,7 @@ pub const Supervisor = struct {
 
             if (found == null) {
                 const instance = try initFn(self.allocator, nc);
-                try self.spawnInstance(nc.phys_key, instance);
+                try self.spawnInstance(nc.phys_key, instance, null);
             } else if (nc.mapping_cfg) |new_map| {
                 const m = found.?;
                 // Stop-Swap-Restart: stop thread before touching arena
@@ -587,7 +594,7 @@ pub const Supervisor = struct {
     ) !void {
         for (initial_configs) |nc| {
             const instance = try initFn(self.allocator, nc);
-            try self.spawnInstance(nc.phys_key, instance);
+            try self.spawnInstance(nc.phys_key, instance, null);
         }
         defer self.stopAll();
 
@@ -1006,23 +1013,35 @@ pub const Supervisor = struct {
                 }
                 // seen now owns phys bytes via the key slot
 
-                var default_pr = self.loadUserDefaultMapping(cfg_ptr.value.device.name);
-                defer if (default_pr) |*pr| pr.deinit();
-                const init_mapping: ?*const MappingConfig = if (default_pr) |*pr| &pr.value else null;
+                const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
+                    const pr = self.loadUserDefaultMapping(cfg_ptr.value.device.name) orelse break :blk null;
+                    const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
+                    p.* = pr;
+                    break :blk p;
+                };
+                const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
                 const inst_ptr = try self.allocator.create(DeviceInstance);
                 inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
+                    if (default_pr_ptr) |p| {
+                        p.deinit();
+                        self.allocator.destroy(p);
+                    }
                     // reclaim phys from seen
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
                     continue;
                 };
-                self.spawnInstance(phys, inst_ptr) catch |err| {
+                self.spawnInstance(phys, inst_ptr, default_pr_ptr) catch |err| {
                     std.log.warn("spawnInstance for {s}: {}", .{ hidraw_path, err });
                     inst_ptr.deinit();
                     self.allocator.destroy(inst_ptr);
+                    if (default_pr_ptr) |p| {
+                        p.deinit();
+                        self.allocator.destroy(p);
+                    }
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
                     continue;
@@ -1319,20 +1338,32 @@ pub const Supervisor = struct {
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
-        var default_pr = self.loadUserDefaultMapping(cfg.?.device.name);
-        defer if (default_pr) |*pr| pr.deinit();
-        const init_mapping: ?*const MappingConfig = if (default_pr) |*pr| &pr.value else null;
+        const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
+            const pr = self.loadUserDefaultMapping(cfg.?.device.name) orelse break :blk null;
+            const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
+            p.* = pr;
+            break :blk p;
+        };
+        const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
         inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
+            if (default_pr_ptr) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
+            }
             return;
         };
-        self.attachWithInstance(devname, phys, inst_ptr) catch |err| {
+        self.attachWithInstance(devname, phys, inst_ptr, default_pr_ptr) catch |err| {
             inst_ptr.deinit();
             self.allocator.destroy(inst_ptr);
+            if (default_pr_ptr) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
+            }
             return err;
         };
         std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
@@ -1476,8 +1507,8 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst_a);
-    try sup.spawnInstance("usb-1-2", inst_b);
+    try sup.spawnInstance("usb-1-1", inst_a, null);
+    try sup.spawnInstance("usb-1-2", inst_b, null);
 
     sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
     sup.test_switch_fail_commit_index = 1;
@@ -1544,7 +1575,7 @@ test "supervisor: Supervisor: SIGHUP updates mapping without restarting instance
     var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1581,7 +1612,7 @@ test "supervisor: Supervisor: SIGHUP with new phys_key spawns new instance" {
     const entry_b = ConfigEntry{ .phys_key = "usb-1-2", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst_a);
+    try sup.spawnInstance("usb-1-1", inst_a, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     g_mock_slot = &mock_b;
@@ -1610,8 +1641,8 @@ test "supervisor: Supervisor: SIGHUP with removed phys_key stops instance" {
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst_a);
-    try sup.spawnInstance("usb-1-2", inst_b);
+    try sup.spawnInstance("usb-1-1", inst_a, null);
+    try sup.spawnInstance("usb-1-2", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1640,7 +1671,7 @@ test "supervisor: Supervisor: two rapid reloads serialize — no race condition"
     var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
 
     var map1 = parsed_map1.value;
     var map2 = parsed_map2.value;
@@ -1676,7 +1707,7 @@ test "supervisor: Supervisor: reload null mapping clears existing mapper" {
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     inst.mapping_cfg = &parsed_map.value;
     inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1712,7 +1743,7 @@ test "supervisor: reload with malformed TOML keeps old mapping active" {
     const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
     inst.mapping_cfg = &parsed_map.value;
     inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1796,7 +1827,7 @@ test "supervisor: Supervisor: duplicate attach devname — only one instance cre
     var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1809,7 +1840,7 @@ test "supervisor: Supervisor: duplicate attach devname — only one instance cre
         inst2.deinit();
         allocator.destroy(inst2);
     }
-    try sup.attachWithInstance("hidraw3", "usb-1-1b", inst2);
+    try sup.attachWithInstance("hidraw3", "usb-1-1b", inst2, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 }
 
@@ -1836,14 +1867,14 @@ test "supervisor: Supervisor: attach-detach-attach same devname — new instance
     var sup = try Supervisor.initForTest(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     sup.detach("hidraw3");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1865,8 +1896,8 @@ test "supervisor: Supervisor: two devnames attached simultaneously — independe
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
-    try sup.attachWithInstance("hidraw4", "usb-1-2", inst_b);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+    try sup.attachWithInstance("hidraw4", "usb-1-2", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();

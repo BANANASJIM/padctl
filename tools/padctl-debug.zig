@@ -452,6 +452,8 @@ pub fn main() !void {
                                                     0x112 => 2,
                                                     0x113 => 3,
                                                     0x114 => 4,
+                                                    0x115 => 5,
+                                                    0x116 => 6,
                                                     else => continue,
                                                 };
                                                 if (mb.pressed) {
