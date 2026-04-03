@@ -21,19 +21,40 @@ cp /usr/share/padctl/config/example-mapping.toml ~/.config/padctl/mappings/my-co
 $EDITOR ~/.config/padctl/mappings/my-config.toml
 ```
 
+Or use the interactive creator:
+
+```sh
+padctl config init
+```
+
+### XDG Search Paths
+
+padctl searches for mapping profiles in this order (first match wins):
+
+1. `~/.config/padctl/mappings/` — user overrides
+2. `/etc/padctl/mappings/` — system-wide profiles
+3. `/usr/share/padctl/mappings/` — builtin profiles
+
 ### Apply a mapping
 
-Pass it directly when running padctl:
+Switch the active mapping at runtime without restarting the daemon:
+
+```sh
+padctl switch fps
+```
+
+To apply on startup, set a `default_mapping` in `~/.config/padctl/config.toml`:
+
+```toml
+[[device]]
+name = "Flydigi Vader 5 Pro"
+default_mapping = "fps"
+```
+
+Or pass it directly when running padctl manually:
 
 ```sh
 padctl --mapping ~/.config/padctl/mappings/my-config.toml
-```
-
-Or add it to the systemd service override:
-
-```sh
-systemctl --user edit padctl.service
-# Add: Environment=PADCTL_MAPPING=/home/you/.config/padctl/mappings/my-config.toml
 ```
 
 ### Validate
@@ -60,7 +81,7 @@ M2 = "mouse_left"     # grip button → mouse left click
 M3 = "disabled"       # silence an unused button
 M4 = "macro:dodge_roll"  # run a macro (defined below)
 LM = "mouse_side"
-RM = "R3"
+RM = "RS"
 ```
 
 Available target types:
@@ -70,10 +91,11 @@ Available target types:
 | `"A"`, `"B"`, `"LB"`, … | Remap to another gamepad button |
 | `"KEY_*"` | Emit a Linux keyboard key (e.g. `"KEY_F13"`, `"KEY_LEFTSHIFT"`) |
 | `"mouse_left"` / `"mouse_right"` / `"mouse_middle"` / `"mouse_side"` / `"mouse_extra"` | Emit a mouse button |
+| `"mouse_forward"` / `"mouse_back"` | Emit mouse forward/back (button 4/5) |
 | `"disabled"` | Suppress the button entirely |
 | `"macro:<name>"` | Run a named macro sequence |
 
-Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `L3`, `R3`, `M1`, `M2`, `M3`, `M4`, `LM`, `RM`, `C`, `Z`
+Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `LS`, `RS`, `M1`, `M2`, `M3`, `M4`, `LM`, `RM`, `C`, `Z`
 
 ### Gyroscope (`[gyro]`)
 
@@ -82,7 +104,7 @@ Translates gyroscope motion to mouse movement. Off by default.
 ```toml
 [gyro]
 mode        = "mouse"
-activate    = "L3"      # hold L3 to enable gyro
+activate    = "LS"      # hold left stick click to enable gyro
 sensitivity = 2.0
 deadzone    = 300       # raw gyro units; filters small wobble
 smoothing   = 0.4       # 0–1; higher = smoother but more latency

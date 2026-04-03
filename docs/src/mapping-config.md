@@ -10,11 +10,11 @@ name = "fps"
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | Mapping profile name |
+| `name` | string | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
 
 ## `[remap]`
 
-Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`, `disabled`, or `macro:<name>`.
+Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
 
 ```toml
 [remap]
@@ -32,7 +32,7 @@ Global gyro-to-mouse configuration.
 ```toml
 [gyro]
 mode = "mouse"
-activate = "L3"
+activate = "LS"
 sensitivity = 2.0
 deadzone = 300
 smoothing = 0.4
@@ -43,7 +43,7 @@ invert_y = true
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | string | `"off"` | `"off"` or `"mouse"` |
-| `activate` | string | — | Button name to hold for activation (e.g. `"L3"`, `"hold_RB"`) |
+| `activate` | string | — | Button name to hold for activation (e.g. `"LS"`, `"hold_RB"`) |
 | `sensitivity` | float | — | Overall sensitivity multiplier |
 | `sensitivity_x` | float | — | X-axis sensitivity override |
 | `sensitivity_y` | float | — | Y-axis sensitivity override |

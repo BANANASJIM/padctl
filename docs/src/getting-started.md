@@ -45,10 +45,10 @@ Lists all connected HID devices and shows whether a matching device config was f
 ## Run as Service
 
 ```sh
-sudo systemctl enable --now padctl.service
+systemctl --user enable --now padctl.service
 ```
 
-The service runs padctl in daemon mode, scanning all config directories (user, system, and builtin) with automatic hotplug support.
+The service runs padctl in daemon mode, scanning all config directories (user, system, and builtin) with automatic hotplug support. udev rules grant access via `uaccess` — no `sudo` needed for the logged-in user.
 
 Check the daemon is running:
 
@@ -58,12 +58,20 @@ padctl status
 
 ## Run Manually
 
+Bare invocation — padctl auto-discovers configs via XDG paths:
+
+```sh
+padctl
+```
+
+Or target specific configs:
+
 ```sh
 # Single config
-sudo padctl --config /usr/share/padctl/devices/sony/dualsense.toml
+padctl --config /usr/share/padctl/devices/sony/dualsense.toml
 
 # All configs in a directory
-sudo padctl --config-dir /usr/share/padctl/devices/
+padctl --config-dir /usr/share/padctl/devices/
 ```
 
 ## Validate a Config
@@ -78,6 +86,32 @@ Exit 0 = valid. Exit 1 = validation errors printed to stderr. Exit 2 = file not 
 
 ```sh
 padctl --doc-gen --config devices/sony/dualsense.toml
+```
+
+## User Config
+
+padctl reads `~/.config/padctl/config.toml` to set per-device defaults:
+
+```toml
+[[device]]
+name = "Flydigi Vader 5 Pro"
+default_mapping = "fps"
+```
+
+On daemon start, padctl matches the connected device name and loads the named mapping profile automatically from `~/.config/padctl/mappings/fps.toml`.
+
+## CLI Reference
+
+```sh
+padctl switch <name> [--device <id>]       # switch mapping at runtime
+padctl status [--socket <path>]            # show daemon status
+padctl devices [--socket <path>]           # list connected devices
+padctl list-mappings [--config-dir <dir>]  # list available mapping profiles
+padctl reload [--pid <pid>]                # send SIGHUP to reload configs
+padctl config list                         # show XDG config search paths
+padctl config init [--device] [--preset]   # interactive mapping creator
+padctl config edit [name]                  # open mapping in $VISUAL/$EDITOR
+padctl config test [--config] [--mapping]  # live input preview
 ```
 
 ## udev Permissions
