@@ -364,6 +364,37 @@ pub const Supervisor = struct {
         }
     }
 
+    fn handleSwitchNone(self: *Supervisor, fd: posix.fd_t, device_id: ?[]const u8) void {
+        var cs = &self.ctrl_sock.?;
+        var found = false;
+        for (self.managed.items) |*m| {
+            if (device_id) |dev_id| {
+                const dn = m.devname orelse continue;
+                if (!std.mem.eql(u8, dn, dev_id)) continue;
+            }
+            found = true;
+            m.instance.stop();
+            m.thread.join();
+            if (m.instance.mapper) |*cur| {
+                cur.deinit();
+                m.instance.mapper = null;
+            }
+            m.instance.mapping_cfg = null;
+            self.clearSwitchMapping(m);
+            restartManagedThread(m) catch |err| {
+                std.log.err("switch none: restart failed for {s}: {}", .{ m.phys_key, err });
+                cs.sendResponse(fd, "ERR restart-failed\n");
+                return;
+            };
+            if (device_id != null) break;
+        }
+        if (device_id != null and !found) {
+            cs.sendResponse(fd, "ERR device-not-found\n");
+            return;
+        }
+        cs.sendResponse(fd, "OK none\n");
+    }
+
     fn lookupSwitchMappingPath(self: *Supervisor, name: []const u8) !?[]const u8 {
         if (builtin.is_test) {
             if (self.test_switch_mapping_override) |override_path| {
@@ -835,6 +866,13 @@ pub const Supervisor = struct {
             cs.sendResponse(fd, "ERR no-devices\n");
             return;
         }
+
+        // "none" clears mapping and returns to passthrough mode
+        if (std.mem.eql(u8, name, "none")) {
+            self.handleSwitchNone(fd, device_id);
+            return;
+        }
+
         const path = self.lookupSwitchMappingPath(name) catch {
             cs.sendResponse(fd, "ERR mapping-lookup-failed\n");
             return;
