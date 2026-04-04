@@ -26,7 +26,7 @@ Optional build flags:
 sudo ./zig-out/bin/padctl install
 ```
 
-This copies the binary, systemd service, device configs, and udev rules into `/usr`. It also runs `systemctl daemon-reload` and `udevadm trigger` automatically.
+This copies the binary, systemd service, device configs, and udev rules into `/usr`. It also runs `systemctl daemon-reload` and `udevadm trigger` automatically, and removes any legacy udev rules left by previous installs.
 
 Custom prefix (e.g. for packaging):
 

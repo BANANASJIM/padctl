@@ -18,6 +18,7 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Gyro mouse** — gyro-to-mouse with sensitivity, deadzone, smoothing, and curve controls
 - **Stick mouse/scroll** — left or right stick as mouse or scroll wheel
 - **Macros** — named key sequences bound to any button
+- **Exclusive device grab** — grabs the hidraw/evdev node so the original device is hidden from other processes while padctl is running
 - **Multi-device + hotplug** — automatic device detection and per-device threads via netlink
 - **Hot-reload** — `SIGHUP` re-reads configs without restart, diffed per physical device
 - **Force feedback** — FF_RUMBLE passthrough from uinput to physical device

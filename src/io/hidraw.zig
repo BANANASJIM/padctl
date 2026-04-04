@@ -175,11 +175,11 @@ pub const HidrawDevice = struct {
                 .{ input_dev_root, entry.name },
             ) catch continue;
 
-            const evfd = posix.open(dev_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| {
+            const evfd = posix.open(dev_path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
                 std.log.warn("evdev grab: open {s} failed: {}", .{ dev_path, err });
                 continue;
             };
-            const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, @intFromPtr(&@as(c_int, 1)));
+            const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, 1);
             if (grab_rc != 0) {
                 std.log.warn("evdev grab: EVIOCGRAB {s} failed: errno {d}", .{ dev_path, grab_rc });
                 posix.close(evfd);

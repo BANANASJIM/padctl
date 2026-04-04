@@ -20,6 +20,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\SupplementaryGroups=input
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
+        \\DeviceAllow=char-input rw
         \\
         \\[Install]
         \\WantedBy=multi-user.target
@@ -203,6 +204,13 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
+    // 4b. Remove legacy 99-padctl.rules if present (renamed to 60- for correct priority)
+    {
+        const legacy = try std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d/99-padctl.rules", .{ destdir, prefix });
+        defer allocator.free(legacy);
+        std.fs.deleteFileAbsolute(legacy) catch {};
+    }
+
     // 5. Reload system daemons only when not staging
     if (destdir.len == 0) {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
@@ -235,6 +243,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/bin/padctl-debug",
         "/lib/systemd/system/padctl.service",
         "/lib/udev/rules.d/60-padctl.rules",
+        "/lib/udev/rules.d/99-padctl.rules",
     };
 
     for (files) |suffix| {
