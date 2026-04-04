@@ -178,9 +178,10 @@ test "generative: layer hold -> pending -> active -> deactivate" {
     try testing.expect(tracker.seen[@intFromEnum(transition_id.TransitionId.layer_pending_to_active)]);
 
     // verify layer remap active: A -> X
+    // Production suppresses layer trigger buttons; oracle doesn't — mask out LT for comparison
     const prod = ctx.mapper.apply(.{ .buttons = lt | a }, 0) catch unreachable;
     const oout = mapper_oracle.apply(&oracle, .{ .buttons = lt | a }, &parsed.value, 0);
-    try testing.expectEqual(oout.gamepad.buttons, prod.gamepad.buttons);
+    try testing.expectEqual(oout.gamepad.buttons & ~lt, prod.gamepad.buttons);
 
     // active -> idle (release LT)
     prev = oracle;
@@ -293,9 +294,10 @@ test "generative: simultaneous buttons + layer remap" {
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 51);
 
     // Press A + B simultaneously while layer active
+    // Production suppresses layer trigger buttons; oracle doesn't — mask out LT for comparison
     const prod = ctx.mapper.apply(.{ .buttons = lt | a | b }, 0) catch unreachable;
     const oout = mapper_oracle.apply(&oracle, .{ .buttons = lt | a | b }, &parsed.value, 0);
-    try testing.expectEqual(oout.gamepad.buttons, prod.gamepad.buttons);
+    try testing.expectEqual(oout.gamepad.buttons & ~lt, prod.gamepad.buttons);
     try compareAux(&oout.aux, &prod.aux);
 }
 

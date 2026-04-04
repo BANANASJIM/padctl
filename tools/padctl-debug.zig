@@ -60,9 +60,29 @@ fn disableRawMode(fd: posix.fd_t, orig: *const Termios) void {
     tcsetattr(fd, orig) catch {};
 }
 
-fn sendRumble(dev: DeviceIO, strong: u8, weak: u8) void {
-    const pkt = [_]u8{ 0x00, 0x08, 0x00, strong, weak, 0x00, 0x00, 0x00 };
-    dev.write(&pkt) catch {};
+const command = src.core.command;
+
+fn sendRumbleFromConfig(
+    allocator: std.mem.Allocator,
+    dev: DeviceIO,
+    cfg: *const device_config.DeviceConfig,
+    strong: u8,
+    weak: u8,
+) void {
+    const cmds = cfg.commands orelse return;
+    const ff_type = if (cfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
+    const cmd = cmds.map.get(ff_type) orelse return;
+    const params = [_]command.Param{
+        .{ .name = "strong", .value = @as(u16, strong) << 8 },
+        .{ .name = "weak", .value = @as(u16, weak) << 8 },
+    };
+    if (command.fillTemplate(allocator, cmd.template, &params)) |bytes| {
+        defer allocator.free(bytes);
+        if (cmd.checksum) |*cs| {
+            command.applyChecksum(bytes, cs);
+        }
+        dev.write(bytes) catch {};
+    } else |_| {}
 }
 
 fn createDeviceIO(
@@ -318,12 +338,17 @@ pub fn main() !void {
         }
     }
 
-    // Find vendor-class device for rumble output
-    var vendor_dev: ?DeviceIO = null;
-    for (cfg.device.interface, 0..) |iface, i| {
-        if (std.mem.eql(u8, iface.class, "vendor")) {
-            vendor_dev = devices[i];
-            break;
+    // Find the device for rumble output using the command config's interface ID
+    var rumble_dev: ?DeviceIO = null;
+    if (cfg.commands) |cmds| {
+        const ff_type = if (cfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
+        if (cmds.map.get(ff_type)) |cmd| {
+            for (cfg.device.interface, 0..) |iface, i| {
+                if (iface.id == cmd.interface) {
+                    rumble_dev = devices[i];
+                    break;
+                }
+            }
         }
     }
 
@@ -497,8 +522,8 @@ pub fn main() !void {
                     'q', 'Q' => break,
                     'r', 'R' => {
                         rumble_on = !rumble_on;
-                        if (vendor_dev) |vd| {
-                            sendRumble(vd, if (rumble_on) 0x80 else 0x00, if (rumble_on) 0x80 else 0x00);
+                        if (rumble_dev) |rd| {
+                            sendRumbleFromConfig(allocator, rd, cfg, if (rumble_on) 0x80 else 0x00, if (rumble_on) 0x80 else 0x00);
                         }
                     },
                     'm', 'M' => {

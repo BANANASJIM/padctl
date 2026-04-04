@@ -1,4 +1,5 @@
 const std = @import("std");
+const device = @import("../config/device.zig");
 
 pub const Param = struct {
     name: []const u8,
@@ -49,6 +50,26 @@ pub fn fillTemplate(
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+/// Compute and insert a checksum into a filled command buffer.
+pub fn applyChecksum(buf: []u8, cs: *const device.CommandChecksumConfig) void {
+    if (cs.range.len != 2) return;
+    if (cs.range[0] < 0 or cs.range[1] < 0 or cs.offset < 0) return;
+    const start: usize = @intCast(cs.range[0]);
+    const end: usize = @intCast(cs.range[1]);
+    const off: usize = @intCast(cs.offset);
+    if (start > end or end > buf.len or off >= buf.len) return;
+
+    if (std.mem.eql(u8, cs.algo, "sum8")) {
+        var sum: u8 = if (cs.seed) |s| @intCast(s & 0xff) else 0;
+        for (buf[start..end]) |b| sum +%= b;
+        buf[off] = sum;
+    } else if (std.mem.eql(u8, cs.algo, "xor")) {
+        var xv: u8 = if (cs.seed) |s| @intCast(s & 0xff) else 0;
+        for (buf[start..end]) |b| xv ^= b;
+        buf[off] = xv;
+    }
 }
 
 fn findParam(params: []const Param, name: []const u8) ?u16 {

@@ -1,0 +1,63 @@
+name = "vader5"
+
+# Default mapping for Flydigi Vader 5 Pro
+#
+# Base: standard gamepad passthrough — all buttons and sticks work as-is.
+# Hold LM: aim mode — gyro + right stick act as mouse for camera control.
+# Hold RM: mouse mode — right stick moves cursor, A/B are mouse clicks.
+#
+# Edit ~/.config/padctl/mappings/vader5.toml for personal customizations.
+# Apply changes with: padctl switch vader5
+
+[gyro]
+mode = "off"
+
+[stick.left]
+mode = "gamepad"
+deadzone = 2000
+sensitivity = 1.0
+
+[stick.right]
+mode = "gamepad"
+deadzone = 2000
+sensitivity = 1.0
+
+[dpad]
+mode = "gamepad"
+
+# Aim mode (hold LM): gyro + right stick → mouse for camera/aim
+[[layer]]
+name = "aim"
+trigger = "LM"
+activation = "hold"
+hold_timeout = 200
+
+[layer.gyro]
+mode = "mouse"
+sensitivity = 60.0
+deadzone = 40
+smoothing = 0.4
+invert_y = true
+
+[layer.stick_right]
+mode = "mouse"
+sensitivity = 40.0
+deadzone = 2000
+suppress_gamepad = true
+
+# Mouse mode (hold RM): right stick → cursor, A/B → mouse clicks
+[[layer]]
+name = "mouse"
+trigger = "RM"
+activation = "hold"
+hold_timeout = 150
+
+[layer.remap]
+A = "mouse_left"
+B = "mouse_right"
+
+[layer.stick_right]
+mode = "mouse"
+sensitivity = 40.0
+deadzone = 2000
+suppress_gamepad = true

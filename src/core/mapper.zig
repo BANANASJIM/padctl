@@ -120,6 +120,14 @@ pub const Mapper = struct {
         self.suppressed_buttons = 0;
         self.injected_buttons = 0;
 
+        // Suppress layer trigger buttons so they don't leak to uinput output.
+        // Trigger buttons are consumed by the layer system regardless of
+        // whether the layer is currently active.
+        for (configs) |*cfg| {
+            const trigger_id = std.meta.stringToEnum(ButtonId, cfg.trigger) orelse continue;
+            self.suppressed_buttons |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(trigger_id)));
+        }
+
         // per-source inject map: null = not mapped, Some = last-write target
         const BUTTON_COUNT = @typeInfo(ButtonId).@"enum".fields.len;
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
@@ -261,6 +269,7 @@ pub const Mapper = struct {
         // assemble emit state
         var emit_state = self.state;
         emit_state.buttons = (self.state.buttons & ~self.suppressed_buttons) | self.injected_buttons;
+        emit_state.synthesizeDpadAxes();
         if (suppress_dpad_hat) {
             emit_state.dpad_x = 0;
             emit_state.dpad_y = 0;
@@ -287,6 +296,7 @@ pub const Mapper = struct {
         // [7] prev-frame masking: same masks applied to prev before diff
         var masked_prev = self.prev;
         masked_prev.buttons = (self.prev.buttons & ~self.suppressed_buttons) | self.injected_buttons;
+        masked_prev.synthesizeDpadAxes();
         if (suppress_dpad_hat) {
             masked_prev.dpad_x = 0;
             masked_prev.dpad_y = 0;

@@ -2,6 +2,7 @@
 name = "Flydigi Vader 5 Pro"
 vid = 0x37d7
 pid = 0x2401
+block_kernel_drivers = ["xpad"]
 
 # Only IF1 is used. IF0 is vendor-class (bInterfaceClass=255) with no
 # hidraw node; the reference driver also uses IF1 exclusively.
@@ -53,7 +54,12 @@ map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Sel
 # --- Commands ---
 [commands.rumble]
 interface = 1
-template = "5aa5 1206 {strong:u8} {weak:u8} 0000 0000"
+template = "5a a5 12 06 {strong:u8} {weak:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+[commands.rumble.checksum]
+algo = "sum8"
+range = [2, 8]
+offset = 8
 
 # --- Output device ---
 # Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and
@@ -95,6 +101,10 @@ O      = "BTN_TRIGGER_HAPPY9"
 
 [output.dpad]
 type = "hat"
+
+[output.aux]
+type = "mouse"
+name = "Vader 5 Pro Virtual Mouse"
 
 [output.force_feedback]
 type = "rumble"
