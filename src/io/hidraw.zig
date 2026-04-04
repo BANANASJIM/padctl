@@ -175,9 +175,14 @@ pub const HidrawDevice = struct {
                 .{ input_dev_root, entry.name },
             ) catch continue;
 
-            const evfd = posix.open(dev_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
-            const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, @intFromPtr(&@as(c_int, 1)));
-            if (grab_rc != 0) {
+            const evfd = posix.open(dev_path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
+                std.log.warn("evdev grab: open {s} failed: {}", .{ dev_path, err });
+                continue;
+            };
+            const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, 1);
+            const grab_errno = posix.errno(grab_rc);
+            if (grab_errno != .SUCCESS) {
+                std.log.warn("evdev grab: EVIOCGRAB {s} failed: {s}", .{ dev_path, @tagName(grab_errno) });
                 posix.close(evfd);
                 continue;
             }
@@ -476,10 +481,11 @@ test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
     defer allocator.free(input_dev_root);
 
     var dev = HidrawDevice.init(allocator);
-    // open succeeds (regular files), but EVIOCGRAB fails → evdev_fds stays empty.
-    // The key assertion: no crash, and the non-matching events were correctly excluded.
+    // Only event7 matches the phys prefix; event9 and event11 are excluded.
     dev.grabAssociatedEvdevWithRoot("/dev/hidraw3", tmp_path, input_dev_root) catch {};
-    // EVIOCGRAB will fail on regular files, so fds will be 0.
-    // This test primarily validates traversal correctness via physMatchesPrefix tests above.
-    try std.testing.expectEqual(@as(usize, 0), dev.evdev_fds.len);
+    // On regular files with O_RDWR, EVIOCGRAB returns 0 (harmless no-op),
+    // so exactly the 1 matching event (event7) is grabbed.
+    try std.testing.expectEqual(@as(usize, 1), dev.evdev_fds.len);
+    for (dev.evdev_fds.constSlice()) |fd| posix.close(fd);
+    dev.evdev_fds.len = 0;
 }

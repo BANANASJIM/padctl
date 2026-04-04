@@ -17,8 +17,10 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\PrivateTmp=true
         \\RuntimeDirectory=padctl
         \\NoNewPrivileges=true
+        \\SupplementaryGroups=input
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
+        \\DeviceAllow=char-input rw
         \\
         \\[Install]
         \\WantedBy=multi-user.target
@@ -186,8 +188,8 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: devices directory not found near executable or current working directory\n") catch {};
     }
 
-    // 4. Generate 99-padctl.rules from all config dirs
-    const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
+    // 4. Generate 60-padctl.rules from all config dirs
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{udev_dir});
     defer allocator.free(rules_path);
     const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
     defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
@@ -201,6 +203,13 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+
+    // 4b. Remove legacy 99-padctl.rules if present (renamed to 60- for correct priority)
+    {
+        const legacy = try std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d/99-padctl.rules", .{ destdir, prefix });
+        defer allocator.free(legacy);
+        std.fs.deleteFileAbsolute(legacy) catch {};
+    }
 
     // 5. Reload system daemons only when not staging
     if (destdir.len == 0) {
@@ -233,6 +242,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/bin/padctl-capture",
         "/bin/padctl-debug",
         "/lib/systemd/system/padctl.service",
+        "/lib/udev/rules.d/60-padctl.rules",
         "/lib/udev/rules.d/99-padctl.rules",
     };
 
@@ -374,8 +384,8 @@ fn generateUdevRulesFromDirs(allocator: std.mem.Allocator, dirs: []const []const
     for (entries.items) |e| {
         const line = try std.fmt.allocPrint(
             allocator,
-            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"systemd\", ENV{{SYSTEMD_WANTS}}=\"padctl.service\", TAG+=\"uaccess\"\n# {s}\n",
-            .{ e.vid, e.pid, e.name },
+            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"systemd\", ENV{{SYSTEMD_WANTS}}=\"padctl.service\", TAG+=\"uaccess\"\nACTION==\"add\", SUBSYSTEM==\"input\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", GROUP=\"input\", MODE=\"0660\"\n# {s}\n",
+            .{ e.vid, e.pid, e.vid, e.pid, e.name },
         );
         defer allocator.free(line);
         try buf.appendSlice(allocator, line);
@@ -634,7 +644,7 @@ test "install: generateUdevRules produces valid output" {
         );
     }
 
-    const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{tmp_path});
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
     defer allocator.free(rules_path);
     try generateUdevRules(allocator, devices_dir, rules_path);
 
@@ -646,7 +656,9 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "37d7") != null);
     try testing.expect(std.mem.indexOf(u8, content, "2401") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"input\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null); // hidraw rule
+    try testing.expect(std.mem.indexOf(u8, content, "GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
 }
 
