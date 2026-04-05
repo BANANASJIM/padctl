@@ -52,22 +52,24 @@ pub const ImmutableKind = enum { none, ostree, read_only_usr };
 /// Detect whether we're running on an immutable OS.
 /// Takes root_prefix for testability — pass "" for real system, tmpDir path for tests.
 pub fn detectImmutableOs(allocator: std.mem.Allocator, root_prefix: []const u8) ImmutableKind {
-    // Primary: check for ostree marker
+    // Primary: check for ostree marker.
+    // Use statFile instead of accessAbsolute to avoid unreachable panic
+    // on unexpected errno (e.g. ELOOP/SymLinkLoop on some CI runners).
     const ostree_path = std.fmt.allocPrint(allocator, "{s}/run/ostree-booted", .{root_prefix}) catch return .none;
     defer allocator.free(ostree_path);
-    if (std.fs.accessAbsolute(ostree_path, .{})) |_| {
+    if (std.fs.cwd().statFile(ostree_path)) |_| {
         return .ostree;
-    } else |_| {
-        // Not ostree (file missing, permission denied, symlink loop, etc.)
-    }
+    } else |_| {}
 
     // Fallback: check if /usr is writable (non-destructive, no file creation).
     const usr_path = std.fmt.allocPrint(allocator, "{s}/usr", .{root_prefix}) catch return .none;
     defer allocator.free(usr_path);
-    std.fs.accessAbsolute(usr_path, .{ .mode = .write_only }) catch |err| switch (err) {
-        error.AccessDenied, error.ReadOnlyFileSystem => return .read_only_usr,
-        else => return .none,
-    };
+    if (std.fs.cwd().statFile(usr_path)) |stat| {
+        // Check if writable by owner (root runs install)
+        if (stat.mode & 0o200 == 0) return .read_only_usr;
+    } else |_| {
+        return .none;
+    }
     return .none;
 }
 
