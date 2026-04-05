@@ -10,6 +10,13 @@ yay -S padctl-git
 
 A prebuilt binary package (`padctl-bin`) is also available in the AUR.
 
+### Debian / Ubuntu
+
+```sh
+curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_0.1.0_amd64.deb
+sudo dpkg -i padctl_0.1.0_amd64.deb
+```
+
 ## Prerequisites
 
 - **Zig 0.15+** (build from source)
@@ -73,6 +80,14 @@ padctl scan
 Lists all connected HID devices and shows whether a matching device config was found for each.
 
 ## Run as Service
+
+If you built from source, run the installer first — `zig build` alone does **not** install the service file:
+
+```sh
+zig build
+sudo ./zig-out/bin/padctl install    # installs binary, service, device configs, and udev rules
+sudo systemctl enable --now padctl
+```
 
 ```sh
 systemctl --user enable --now padctl.service

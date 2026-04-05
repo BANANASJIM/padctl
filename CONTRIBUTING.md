@@ -62,8 +62,11 @@ Pre-built and source package recipes live in `contrib/`:
 |-----------|----------|
 | `contrib/aur/` | AUR `PKGBUILD` (`padctl-git`, source build) and `padctl-bin` (prebuilt binary) |
 | `contrib/copr/` | RPM spec for Fedora/COPR (`padctl.spec`) |
+| `contrib/deb/` | Binary `.deb` builder and debhelper source build template |
 
-**Release workflow:** push a `v*.*.*` tag to trigger release builds for all package targets.
+**Release workflow:** pushing a `v*.*.*` tag triggers the full release pipeline:
+- Builds `.deb` packages and uploads them to the GitHub Release
+- Auto-updates the `padctl-bin` AUR package with the new SHA256 hashes
 
 ## Code Contributions
 
