@@ -1,0 +1,31 @@
+#!/usr/bin/make -f
+# TODO: once zig >= 0.15 is available in distro repos, this source-build variant
+# can be used directly. Until then, use contrib/deb/DEBIAN-BIN/ (prebuilt binary).
+
+export DH_VERBOSE = 1
+export ZIG_GLOBAL_CACHE_DIR = $(CURDIR)/.zig-cache
+
+# zig-toml dependency — vendored tarball must be in the source tree or fetched here.
+# TODO: vendor zig-toml tarball at contrib/deb/vendor/zig-toml-main.tar.gz and
+#       seed ZIG_GLOBAL_CACHE_DIR before building (same approach as AUR PKGBUILD).
+TOML_URL   = https://github.com/sam701/zig-toml/archive/refs/heads/main.tar.gz
+TOML_HASH  = toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Seed zig package cache so the build is network-free after source prep.
+	# The tarball must be vendored; see TODO above.
+	mkdir -p $(ZIG_GLOBAL_CACHE_DIR)/p
+	cp vendor/zig-toml-main.tar.gz $(ZIG_GLOBAL_CACHE_DIR)/p/$(TOML_HASH).tar.gz
+	zig build -Doptimize=ReleaseSafe
+
+override_dh_auto_install:
+	./zig-out/bin/padctl install --destdir $(CURDIR)/debian/padctl --prefix /usr
+
+override_dh_auto_test:
+	zig build test
+
+override_dh_installsystemd:
+	# Service files are installed by padctl install, not debhelper.

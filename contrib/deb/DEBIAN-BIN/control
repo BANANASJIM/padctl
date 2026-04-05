@@ -1,0 +1,14 @@
+Package: padctl
+Version: 0.1.0
+Architecture: amd64
+Maintainer: padctl maintainers <maintainers@padctl.dev>
+Depends: systemd
+Section: utils
+Priority: optional
+Homepage: https://github.com/BANANASJIM/padctl
+Description: HID gamepad remapper with declarative TOML config
+ padctl is a HID gamepad compatibility daemon. It reads declarative
+ TOML profiles and re-maps gamepad input via uinput, with per-device
+ systemd socket activation and udev integration.
+ .
+ This package contains the prebuilt musl static binary.
