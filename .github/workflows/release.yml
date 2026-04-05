@@ -17,26 +17,29 @@ jobs:
           fetch-depth: 0
 
       - name: Generate changelog
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          PREV=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
+          PREV=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1)
           {
-            echo "# Changelog — ${{ github.ref_name }}"
+            echo "# Changelog — ${TAG}"
             echo
             if [ -n "${PREV}" ]; then
-              git log --oneline "${PREV}..${{ github.ref_name }}"
+              git log --oneline "${PREV}..${TAG}"
             else
-              git log --oneline "${{ github.ref_name }}"
+              git log --oneline "${TAG}"
             fi
           } > CHANGELOG.md
 
       - name: Create release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create ${{ github.ref_name }}
-          --title "${{ github.ref_name }}"
+          gh release create "${TAG}"
+          --title "${TAG}"
           --notes-file CHANGELOG.md
           --draft=false
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   gen-install-artifacts:
     runs-on: ubuntu-latest
@@ -83,27 +86,29 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
 
       - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
-          VERSION=${{ github.ref_name }}
-          TARGET=${{ matrix.target }}
-          ARCHIVE=padctl-${VERSION}-${TARGET}.tar.gz
-          STAGING=padctl-${VERSION}-${TARGET}
+          ARCHIVE=padctl-${TAG}-${TARGET}.tar.gz
+          STAGING=padctl-${TAG}-${TARGET}
           mkdir -p "${STAGING}/bin" "${STAGING}/install"
           for bin in padctl padctl-capture padctl-debug; do
             [ -f "zig-out/bin/${bin}" ] && cp "zig-out/bin/${bin}" "${STAGING}/bin/"
           done
           cp staging/usr/lib/systemd/system/*.service "${STAGING}/install/"
           cp staging/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
-          [ -f staging/usr/bin/padctl-reconnect ] && cp staging/usr/bin/padctl-reconnect "${STAGING}/bin/"
+          [ -f staging/usr/bin/padctl-reconnect ] && cp staging/usr/bin/padctl-reconnect "${STAGING}/install/"
           cp -r devices "${STAGING}/"
           cp LICENSE README.md "${STAGING}/"
           tar czf "${ARCHIVE}" "${STAGING}"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Upload tarball
-        run: gh release upload ${{ github.ref_name }} "${{ env.ARCHIVE }}" --clobber
         env:
+          TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${TAG}" "${{ env.ARCHIVE }}" --clobber
 
       - name: Upload artifact for checksums
         uses: actions/upload-artifact@v4
@@ -126,6 +131,7 @@ jobs:
         run: sha256sum padctl-*.tar.gz > SHA256SUMS.txt
 
       - name: Upload checksums
-        run: gh release upload ${{ github.ref_name }} SHA256SUMS.txt --clobber
         env:
+          TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${TAG}" SHA256SUMS.txt --clobber
