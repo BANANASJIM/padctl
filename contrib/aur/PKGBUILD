@@ -6,7 +6,7 @@ pkgdesc="HID gamepad daemon — declarative TOML device config, uinput output"
 arch=('x86_64' 'aarch64')
 url="https://github.com/BANANASJIM/padctl"
 license=('LGPL-2.1-or-later')
-depends=('libusb' 'systemd-libs' 'gcc-libs' 'glibc')
+depends=('libusb' 'systemd' 'gcc-libs' 'glibc')
 makedepends=('zig>=0.15' 'git')
 provides=('padctl')
 conflicts=('padctl' 'padctl-bin')
