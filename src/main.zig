@@ -659,12 +659,16 @@ pub fn main() !void {
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
     if (parsed.config_dir) |dir_path| {
+        if (parsed.mapping_path != null)
+            std.log.warn("--mapping is ignored in daemon mode, use 'padctl switch' instead", .{});
         runFromDir(allocator, dir_path, parsed.pid_file);
         return;
     }
 
     // Bare invocation: XDG three-layer search — scan ALL accessible config dirs
     if (parsed.config_path == null) {
+        if (parsed.mapping_path != null)
+            std.log.warn("--mapping is ignored in daemon mode, use 'padctl switch' instead", .{});
         const dirs = config.paths.resolveDeviceConfigDirs(allocator) catch |err| {
             std.log.err("failed to resolve XDG config dirs: {}", .{err});
             std.process.exit(1);
