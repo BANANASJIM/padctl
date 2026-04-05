@@ -91,8 +91,18 @@ Ships with configs for **12 devices** across 8 vendors:
 ### Arch Linux (AUR)
 
 ```sh
-yay -S padctl-git
+yay -S padctl-bin   # prebuilt binary
+yay -S padctl-git   # build from source
 ```
+
+### Debian / Ubuntu
+
+```sh
+curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_0.1.0_amd64.deb
+sudo dpkg -i padctl_0.1.0_amd64.deb
+```
+
+For arm64, replace `amd64` with `arm64`.
 
 ### From Source
 
