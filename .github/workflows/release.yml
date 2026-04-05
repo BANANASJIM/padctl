@@ -50,8 +50,8 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Build native
-        run: zig build -Doptimize=ReleaseSafe -Dlibusb=false
+      - name: Build native (musl to avoid glibc errno gaps)
+        run: zig build -Doptimize=ReleaseSafe -Dlibusb=false -Dtarget=x86_64-linux-musl
 
       - name: Generate install artifacts
         run: ./zig-out/bin/padctl install --destdir staging --prefix /usr
