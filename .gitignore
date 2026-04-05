@@ -10,6 +10,7 @@ kcov-output/
 .worktrees/
 
 # OpenPlan framework (development governance, not public)
+bin/
 openplan.jsonc
 .claude/
 openspec/
