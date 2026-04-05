@@ -127,6 +127,21 @@ zig build check-all    # all checks (test + safe + fmt)
 | `-Dlibusb=false` | `true` | Disable libusb linkage (hidraw-only) |
 | `-Dwasm=false` | `true` | Disable WASM plugin runtime |
 
+## Bazzite / Immutable Distros
+
+On immutable distributions (Bazzite, Fedora Atomic, etc.) where `/usr` is read-only, use the bootstrap script for a complete one-command setup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BANANASJIM/padctl/main/scripts/bazzite-setup.sh \
+  | bash -s -- --mapping vader5
+```
+
+Replace `vader5` with the mapping for your controller, or omit `--mapping` to install without a mapping. When run locally (`bash scripts/bazzite-setup.sh`), the script prompts for mapping selection interactively.
+
+See the [Bazzite / Immutable Distros guide](docs/src/immutable-install.md) for full details on what the install does, the `--immutable` flag, security notes, and mapping management.
+
+> **Tested on:** Bazzite (Fedora Atomic / ostree). Other immutable distros may work but are untested.
+
 ## Documentation
 
 Full documentation: [bananasjim.github.io/padctl](https://bananasjim.github.io/padctl/)

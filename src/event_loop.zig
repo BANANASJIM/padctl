@@ -15,8 +15,10 @@ const state = @import("core/state.zig");
 const GamepadStateDelta = state.GamepadStateDelta;
 const mapper_mod = @import("core/mapper.zig");
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
-const fillTemplate = @import("core/command.zig").fillTemplate;
-const Param = @import("core/command.zig").Param;
+const command = @import("core/command.zig");
+const fillTemplate = command.fillTemplate;
+const applyChecksum = command.applyChecksum;
+const Param = command.Param;
 const AdaptiveTriggerConfig = @import("config/mapping.zig").AdaptiveTriggerConfig;
 const MappingConfig = @import("config/mapping.zig").MappingConfig;
 const wasm_runtime = @import("wasm/runtime.zig");
@@ -101,6 +103,16 @@ fn buildAdaptiveTriggerParams(buf: *[12]Param, at: *const AdaptiveTriggerConfig)
     return buf[0..12];
 }
 
+/// Resolve a USB interface ID to the devices array index by matching
+/// against the device config's interface list.  Returns null when the
+/// interface ID is not found.
+fn resolveIfaceIdx(dcfg: *const DeviceConfig, iface_id: i64) ?usize {
+    for (dcfg.device.interface, 0..) |iface, i| {
+        if (iface.id == iface_id) return i;
+    }
+    return null;
+}
+
 pub fn applyAdaptiveTrigger(
     devices: []DeviceIO,
     alloc: std.mem.Allocator,
@@ -122,9 +134,11 @@ pub fn applyAdaptiveTrigger(
 
     if (fillTemplate(alloc, cmd.template, params)) |bytes| {
         defer alloc.free(bytes);
-        const iface_idx: usize = @intCast(cmd.interface);
-        if (iface_idx < devices.len) {
-            devices[iface_idx].write(bytes) catch {};
+        if (cmd.checksum) |*cs| command.applyChecksum(bytes, cs);
+        if (resolveIfaceIdx(dcfg, cmd.interface)) |idx| {
+            if (idx < devices.len) {
+                devices[idx].write(bytes) catch {};
+            }
         }
     } else |_| {}
 }
@@ -291,17 +305,21 @@ pub const EventLoop = struct {
                                     if (dcfg.commands) |cmds| {
                                         const ff_type = if (dcfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
                                         if (cmds.map.get(ff_type)) |cmd| {
-                                            const iface_idx: usize = @intCast(cmd.interface);
-                                            if (iface_idx < ctx.devices.len) {
-                                                const params = [_]Param{
-                                                    .{ .name = "strong", .value = ff_ev.strong },
-                                                    .{ .name = "weak", .value = ff_ev.weak },
-                                                };
-                                                if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
-                                                    defer alloc.free(bytes);
-                                                    ctx.devices[iface_idx].write(bytes) catch {};
-                                                    self.last_rumble_ns = now_ns;
-                                                } else |_| {}
+                                            if (resolveIfaceIdx(dcfg, cmd.interface)) |iface_idx| {
+                                                if (iface_idx < ctx.devices.len) {
+                                                    const params = [_]Param{
+                                                        .{ .name = "strong", .value = ff_ev.strong },
+                                                        .{ .name = "weak", .value = ff_ev.weak },
+                                                    };
+                                                    if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
+                                                        defer alloc.free(bytes);
+                                                        if (cmd.checksum) |*cs| {
+                                                            applyChecksum(bytes, cs);
+                                                        }
+                                                        ctx.devices[iface_idx].write(bytes) catch {};
+                                                        self.last_rumble_ns = now_ns;
+                                                    } else |_| {}
+                                                }
                                             }
                                         }
                                     }
@@ -372,6 +390,8 @@ pub const EventLoop = struct {
                             break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
                         };
                         if (maybe_delta) |delta| {
+                            self.gamepad_state.applyDelta(delta);
+
                             if (ctx.mapper) |m| {
                                 const events = m.apply(delta, dt_ms) catch |err| {
                                     std.log.err("mapper.apply failed: {}", .{err});
@@ -390,7 +410,6 @@ pub const EventLoop = struct {
                                     if (events.aux.len > 0) ao.emitAux(events.aux.slice()) catch {};
                                 }
                             } else {
-                                self.gamepad_state.applyDelta(delta);
                                 self.gamepad_state.synthesizeDpadAxes();
                                 ctx.output.emit(self.gamepad_state) catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
@@ -983,7 +1002,6 @@ test "event_loop: config-driven FF command key — output.force_feedback.type ov
 
 // --- T8/T9: Adaptive trigger tests ---
 
-const command = @import("core/command.zig");
 const mapping_mod = @import("config/mapping.zig");
 
 test "event_loop: buildAdaptiveTriggerParams: maps left/right values with shift" {

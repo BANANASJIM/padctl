@@ -34,6 +34,26 @@ Custom prefix (e.g. for packaging):
 sudo ./zig-out/bin/padctl install --prefix /usr --destdir "$DESTDIR"
 ```
 
+### Additional Services
+
+`padctl install` also sets up the following on all systems:
+
+- **`padctl-resume.service`** — Restarts padctl after sleep/hibernate so USB devices reconnect cleanly.
+- **`padctl-reconnect`** — A hotplug script triggered by udev when a controller is plugged in. It starts the daemon if not running, restarts it if failed, and re-applies the active mapping.
+- **Driver conflict rules** — Auto-generated udev rules that unbind conflicting kernel drivers (e.g., `xpad`) from devices that padctl manages. Configured per-device via `block_kernel_drivers` in device TOML configs.
+
+### Install a Mapping
+
+To install a mapping config to `/etc/padctl/mappings/` during install:
+
+```sh
+sudo ./zig-out/bin/padctl install --mapping vader5
+```
+
+The `--mapping` flag is repeatable. Use `--force-mapping` to overwrite existing mappings.
+
+> **Bazzite / immutable distros:** See the [Bazzite / Immutable Distros guide](immutable-install.md) for special installation steps.
+
 ## Verify
 
 ```sh

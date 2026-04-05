@@ -873,10 +873,18 @@ pub const Supervisor = struct {
             return;
         }
 
-        const path = self.lookupSwitchMappingPath(name) catch {
-            cs.sendResponse(fd, "ERR mapping-lookup-failed\n");
-            return;
-        };
+        // If the name is an absolute path, use it directly (client-resolved).
+        // Otherwise, do server-side lookup from config dirs.
+        const path: ?[]const u8 = if (name.len > 0 and name[0] == '/')
+            (self.allocator.dupe(u8, name) catch {
+                cs.sendResponse(fd, "ERR oom\n");
+                return;
+            })
+        else
+            self.lookupSwitchMappingPath(name) catch {
+                cs.sendResponse(fd, "ERR mapping-lookup-failed\n");
+                return;
+            };
         if (path == null) {
             cs.sendResponse(fd, "ERR mapping-not-found\n");
             return;

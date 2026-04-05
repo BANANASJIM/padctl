@@ -4,11 +4,17 @@ const linux = std.os.linux;
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
-/// Non-root: prefer $XDG_RUNTIME_DIR/padctl.sock. Root: system path.
+/// Non-root: prefer $XDG_RUNTIME_DIR/padctl.sock if it exists, else fall back
+/// to the system path. The daemon always creates the socket at the system path
+/// (/run/padctl/padctl.sock), so the fallback is needed for non-root clients
+/// to reach a root-running daemon.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
     if (posix.geteuid() != 0) {
         if (posix.getenv("XDG_RUNTIME_DIR")) |xrd| {
-            return std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch return DEFAULT_SOCKET_PATH;
+            const xrd_path = std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch return DEFAULT_SOCKET_PATH;
+            // Only use XDG path if the socket actually exists there
+            std.fs.accessAbsolute(xrd_path, .{}) catch return DEFAULT_SOCKET_PATH;
+            return xrd_path;
         }
     }
     return DEFAULT_SOCKET_PATH;

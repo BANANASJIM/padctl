@@ -186,29 +186,53 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "install")) {
             var opts = cli.install.InstallOptions{};
+            // Not deferred — items must survive into run()/uninstall(); process exits after.
+            var mapping_list = std.ArrayList([]const u8){};
             while (args.next()) |iarg| {
                 if (std.mem.eql(u8, iarg, "--prefix")) {
                     opts.prefix = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, iarg, "--destdir")) {
                     opts.destdir = args.next() orelse return error.MissingArgValue;
+                } else if (std.mem.eql(u8, iarg, "--immutable")) {
+                    opts.immutable = true;
+                } else if (std.mem.eql(u8, iarg, "--no-immutable")) {
+                    opts.no_immutable = true;
+                } else if (std.mem.eql(u8, iarg, "--mapping")) {
+                    try mapping_list.append(allocator, args.next() orelse return error.MissingArgValue);
+                } else if (std.mem.eql(u8, iarg, "--force-mapping")) {
+                    opts.force_mapping = true;
+                } else if (std.mem.eql(u8, iarg, "--no-enable")) {
+                    opts.no_enable = true;
+                } else if (std.mem.eql(u8, iarg, "--no-start")) {
+                    opts.no_start = true;
                 } else {
                     std.log.err("unknown install argument: {s}", .{iarg});
                     return error.UnknownArgument;
                 }
             }
+            opts.mappings = mapping_list.items;
             parsed_cli.install_opts = opts;
         } else if (std.mem.eql(u8, arg, "uninstall")) {
             var opts = cli.install.InstallOptions{};
+            // Not deferred — items must survive into uninstall(); process exits after.
+            var mapping_list = std.ArrayList([]const u8){};
             while (args.next()) |iarg| {
                 if (std.mem.eql(u8, iarg, "--prefix")) {
                     opts.prefix = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, iarg, "--destdir")) {
                     opts.destdir = args.next() orelse return error.MissingArgValue;
+                } else if (std.mem.eql(u8, iarg, "--immutable")) {
+                    opts.immutable = true;
+                } else if (std.mem.eql(u8, iarg, "--no-immutable")) {
+                    opts.no_immutable = true;
+                } else if (std.mem.eql(u8, iarg, "--mapping")) {
+                    try mapping_list.append(allocator, args.next() orelse return error.MissingArgValue);
                 } else {
                     std.log.err("unknown uninstall argument: {s}", .{iarg});
                     return error.UnknownArgument;
                 }
             }
+            opts.mappings = mapping_list.items;
             parsed_cli.uninstall_opts = opts;
         } else if (std.mem.eql(u8, arg, "setup-test-udev")) {
             parsed_cli.setup_test_udev = true;
@@ -345,8 +369,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
 fn printHelp() void {
     const help =
         \\Usage: padctl [options]
-        \\       padctl install [--prefix /usr] [--destdir ""]
-        \\       padctl uninstall [--prefix /usr] [--destdir ""]
+        \\       padctl install [--prefix /usr] [--immutable] [--mapping <name>...]
+        \\       padctl uninstall [--prefix /usr] [--immutable] [--mapping <name>...]
         \\       padctl scan [--config-dir <dir>]
         \\       padctl list-mappings [--config-dir <dir>]
         \\       padctl reload [--pid <pid>]
@@ -358,9 +382,18 @@ fn printHelp() void {
         \\  install               Install binary, service, udev rules, and device configs
         \\    --prefix <dir>      Installation prefix (default: /usr)
         \\    --destdir <dir>     Staging root for package builds (default: "")
+        \\    --immutable         Use immutable OS file placement (/etc/ for systemd+udev)
+        \\    --no-immutable      Force standard install even on detected immutable OS
+        \\    --mapping <name>    Install a mapping config to /etc/padctl/mappings/ (repeatable)
+        \\    --force-mapping     Overwrite existing mapping files
+        \\    --no-enable         Skip systemctl enable
+        \\    --no-start          Skip systemctl start
         \\  uninstall             Remove installed files, stop and disable service
         \\    --prefix <dir>      Installation prefix (default: /usr)
-        \\    --destdir <dir>     Staging root (default: "")
+        \\    --destdir <dir>     Staging root for package builds (default: "")
+        \\    --no-immutable      Force standard uninstall even on detected immutable OS
+        \\    --immutable         Also remove immutable-specific files from /etc/
+        \\    --mapping <name>    Remove a specific mapping from /etc/padctl/mappings/ (repeatable)
         \\  scan                  List connected HID devices and config match status
         \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
         \\  list-mappings         List discovered mapping profiles from XDG paths
