@@ -27,5 +27,3 @@ override_dh_auto_install:
 override_dh_auto_test:
 	zig build test
 
-override_dh_installsystemd:
-	# Service files are installed by padctl install, not debhelper.

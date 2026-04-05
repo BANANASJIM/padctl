@@ -7,13 +7,22 @@ License:        LGPL-2.1-or-later
 URL:            https://github.com/BANANASJIM/padctl
 
 # TODO: update once release tarballs exist at the URL below.
-%global _arch_tag %{expand:%(uname -m)}-linux-musl
+%ifarch x86_64
+%global _arch_tag x86_64-linux-musl
+%endif
+%ifarch aarch64
+%global _arch_tag aarch64-linux-musl
+%endif
 Source0:        %{url}/releases/download/v%{version}/padctl-v%{version}-%{_arch_tag}.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
 # Prebuilt musl static binary — no Zig toolchain needed.
 BuildRequires:  coreutils
+BuildRequires:  systemd-rpm-macros
 Requires:       systemd
+Requires:       bash
+Requires:       util-linux
+Requires:       coreutils
 AutoReqProv:    no
 
 %description

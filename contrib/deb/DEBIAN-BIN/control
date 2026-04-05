@@ -2,7 +2,7 @@ Package: padctl
 Version: 0.1.0
 Architecture: amd64
 Maintainer: padctl maintainers <maintainers@padctl.dev>
-Depends: systemd
+Depends: systemd, bash
 Section: utils
 Priority: optional
 Homepage: https://github.com/BANANASJIM/padctl

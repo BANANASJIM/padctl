@@ -13,7 +13,7 @@ Rules-Requires-Root: no
 
 Package: padctl
 Architecture: any
-Depends: ${misc:Depends}, libusb-1.0-0, systemd
+Depends: ${shlibs:Depends}, ${misc:Depends}, systemd
 Description: HID gamepad remapper with declarative TOML config
  padctl is a HID gamepad compatibility daemon. It reads declarative
  TOML profiles and re-maps gamepad input via uinput, with per-device
