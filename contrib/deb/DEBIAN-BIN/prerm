@@ -1,4 +1,6 @@
 #!/bin/sh
 set -e
-systemctl stop padctl.service padctl-resume.service || true
-systemctl disable padctl.service padctl-resume.service || true
+if [ -d /run/systemd/system ]; then
+    systemctl stop padctl.service padctl-resume.service || true
+    systemctl disable padctl.service padctl-resume.service || true
+fi
