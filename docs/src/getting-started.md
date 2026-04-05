@@ -1,5 +1,15 @@
 # Getting Started
 
+## Install via Package Manager
+
+### Arch Linux (AUR)
+
+```sh
+yay -S padctl-git
+```
+
+A prebuilt binary package (`padctl-bin`) is also available in the AUR.
+
 ## Prerequisites
 
 - **Zig 0.15+** (build from source)

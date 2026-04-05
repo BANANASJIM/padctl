@@ -86,6 +86,18 @@ Ships with configs for **12 devices** across 8 vendors:
 
 [Full device list with feature matrix →](https://bananasjim.github.io/padctl/devices/)
 
+## Installation
+
+### Arch Linux (AUR)
+
+```sh
+yay -S padctl-git
+```
+
+### From Source
+
+See [Quick Start](#quick-start) below. For other distros, see [CONTRIBUTING.md](CONTRIBUTING.md#packaging).
+
 ## Quick Start
 
 ```sh

@@ -9,7 +9,58 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        run: |
+          PREV=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
+          {
+            echo "# Changelog — ${{ github.ref_name }}"
+            echo
+            if [ -n "${PREV}" ]; then
+              git log --oneline "${PREV}..${{ github.ref_name }}"
+            else
+              git log --oneline "${{ github.ref_name }}"
+            fi
+          } > CHANGELOG.md
+
+      - name: Create release
+        run: >
+          gh release create ${{ github.ref_name }}
+          --title "${{ github.ref_name }}"
+          --notes-file CHANGELOG.md
+          --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  gen-install-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build native
+        run: zig build -Doptimize=ReleaseSafe -Dlibusb=false
+
+      - name: Generate install artifacts
+        run: ./zig-out/bin/padctl install --destdir staging --prefix /usr
+
+      - name: Upload install artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-artifacts
+          path: staging/
+
   build:
+    needs: [create-release, gen-install-artifacts]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -22,6 +73,12 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Download install artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: install-artifacts
+          path: staging/
+
       - name: Build
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
 
@@ -31,9 +88,15 @@ jobs:
           TARGET=${{ matrix.target }}
           ARCHIVE=padctl-${VERSION}-${TARGET}.tar.gz
           STAGING=padctl-${VERSION}-${TARGET}
-          mkdir -p "${STAGING}/bin"
-          cp zig-out/bin/padctl "${STAGING}/bin/"
-          cp -r devices contrib install "${STAGING}/"
+          mkdir -p "${STAGING}/bin" "${STAGING}/install"
+          for bin in padctl padctl-capture padctl-debug; do
+            [ -f "zig-out/bin/${bin}" ] && cp "zig-out/bin/${bin}" "${STAGING}/bin/"
+          done
+          cp staging/usr/lib/systemd/system/*.service "${STAGING}/install/"
+          cp staging/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
+          [ -f staging/usr/bin/padctl-reconnect ] && cp staging/usr/bin/padctl-reconnect "${STAGING}/bin/"
+          cp -r devices "${STAGING}/"
+          cp LICENSE README.md "${STAGING}/"
           tar czf "${ARCHIVE}" "${STAGING}"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
@@ -53,10 +116,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Download archives
         uses: actions/download-artifact@v4
         with:
@@ -66,20 +125,7 @@ jobs:
       - name: Generate SHA256SUMS.txt
         run: sha256sum padctl-*.tar.gz > SHA256SUMS.txt
 
-      - name: Generate CHANGELOG.md
-        run: |
-          PREV=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
-          {
-            echo "# Changelog — ${{ github.ref_name }}"
-            echo
-            if [ -n "${PREV}" ]; then
-              git log --oneline "${PREV}..${{ github.ref_name }}"
-            else
-              git log --oneline "${{ github.ref_name }}"
-            fi
-          } > CHANGELOG.md
-
-      - name: Upload checksums and changelog
-        run: gh release upload ${{ github.ref_name }} SHA256SUMS.txt CHANGELOG.md --clobber
+      - name: Upload checksums
+        run: gh release upload ${{ github.ref_name }} SHA256SUMS.txt --clobber
         env:
           GH_TOKEN: ${{ github.token }}

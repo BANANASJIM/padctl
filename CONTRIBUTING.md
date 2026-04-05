@@ -54,6 +54,17 @@ devices/
 
 Add a new vendor directory if the manufacturer is not listed.
 
+## Packaging
+
+Pre-built and source package recipes live in `contrib/`:
+
+| Directory | Contents |
+|-----------|----------|
+| `contrib/aur/` | AUR `PKGBUILD` (`padctl-git`, source build) and `padctl-bin` (prebuilt binary) |
+| `contrib/copr/` | RPM spec for Fedora/COPR (`padctl.spec`) |
+
+**Release workflow:** push a `v*.*.*` tag to trigger release builds for all package targets.
+
 ## Code Contributions
 
 ### Workflow
