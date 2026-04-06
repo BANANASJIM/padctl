@@ -25,6 +25,7 @@ pub const ControlSocket = struct {
         };
 
         // Probe: if a live daemon owns the socket, refuse to start.
+        // Skip for over-length paths (PathTooLong will be returned below).
         if (path_z.len < @as(usize, @typeInfo(@TypeOf(@as(linux.sockaddr.un, undefined).path)).array.len)) probe: {
             const probe_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch break :probe;
             defer posix.close(probe_fd);
@@ -329,9 +330,16 @@ test "control_socket: ControlSocket: init returns AlreadyRunning when daemon is 
         if (err == error.AccessDenied) return;
         return err;
     };
-    defer cs.deinit();
 
     try testing.expectError(error.AlreadyRunning, ControlSocket.init(allocator, socket_path));
+
+    // After daemon exits, next init must succeed (stale socket cleaned up)
+    cs.deinit();
+    var cs2 = ControlSocket.init(allocator, socket_path) catch |err| {
+        if (err == error.AccessDenied) return;
+        return err;
+    };
+    cs2.deinit();
 }
 
 test "control_socket: ControlSocket: init rejects overly long unix socket path" {
