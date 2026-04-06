@@ -186,6 +186,7 @@ pub const Supervisor = struct {
         var sock_path_buf: [256]u8 = undefined;
         const sock_path = socket_client.resolveSocketPath(&sock_path_buf);
         const sock = ControlSocket.init(allocator, sock_path) catch |err| blk: {
+            if (err == error.AlreadyRunning) return err;
             std.log.warn("control socket unavailable: {}", .{err});
             break :blk null;
         };
