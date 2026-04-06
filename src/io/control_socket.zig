@@ -12,7 +12,7 @@ pub const ControlSocket = struct {
     path: []const u8,
     allocator: std.mem.Allocator,
 
-    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.fs.Dir.MakeError || std.mem.Allocator.Error || error{ ChmodFailed, PathTooLong };
+    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.fs.Dir.MakeError || std.mem.Allocator.Error || error{ AlreadyRunning, ChmodFailed, PathTooLong };
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) InitError!ControlSocket {
         const path_z = try allocator.dupeZ(u8, path);
@@ -23,6 +23,18 @@ pub const ControlSocket = struct {
             error.PathAlreadyExists => {},
             else => return err,
         };
+
+        // Probe: if a live daemon owns the socket, refuse to start.
+        // Skip for over-length paths (PathTooLong will be returned below).
+        if (path_z.len < @as(usize, @typeInfo(@TypeOf(@as(linux.sockaddr.un, undefined).path)).array.len)) probe: {
+            const probe_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch break :probe;
+            defer posix.close(probe_fd);
+            var probe_addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+            @memset(&probe_addr.path, 0);
+            @memcpy(probe_addr.path[0..path_z.len], path_z[0..path_z.len]);
+            posix.connect(probe_fd, @ptrCast(&probe_addr), @sizeOf(linux.sockaddr.un)) catch break :probe;
+            return error.AlreadyRunning;
+        }
 
         // Unlink stale socket
         std.fs.deleteFileAbsolute(path) catch {};
@@ -301,6 +313,33 @@ test "control_socket: ControlSocket: init creates socket at exact full path" {
 
     // The socket file must exist at the EXACT full path (not truncated).
     try std.fs.accessAbsolute(socket_path, .{});
+}
+
+test "control_socket: ControlSocket: init returns AlreadyRunning when daemon is live" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const socket_path = try std.fs.path.join(allocator, &.{ root, "live.sock" });
+    defer allocator.free(socket_path);
+
+    var cs = ControlSocket.init(allocator, socket_path) catch |err| {
+        if (err == error.AccessDenied) return;
+        return err;
+    };
+
+    try testing.expectError(error.AlreadyRunning, ControlSocket.init(allocator, socket_path));
+
+    // After daemon exits, next init must succeed (stale socket cleaned up)
+    cs.deinit();
+    var cs2 = ControlSocket.init(allocator, socket_path) catch |err| {
+        if (err == error.AccessDenied) return;
+        return err;
+    };
+    cs2.deinit();
 }
 
 test "control_socket: ControlSocket: init rejects overly long unix socket path" {

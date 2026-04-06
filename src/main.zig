@@ -444,6 +444,10 @@ fn deletePidFile(path: []const u8) void {
 
 fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]const u8) void {
     var sup = Supervisor.init(allocator) catch |err| {
+        if (err == error.AlreadyRunning) {
+            std.log.err("another padctl daemon is already running", .{});
+            std.process.exit(1);
+        }
         std.log.err("failed to init supervisor: {}", .{err});
         std.process.exit(1);
     };
@@ -466,6 +470,10 @@ fn runFromDir(allocator: std.mem.Allocator, dir_path: []const u8, pid_file: ?[]c
 
 fn runFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, pid_file: ?[]const u8) void {
     var sup = Supervisor.init(allocator) catch |err| {
+        if (err == error.AlreadyRunning) {
+            std.log.err("another padctl daemon is already running", .{});
+            std.process.exit(1);
+        }
         std.log.err("failed to init supervisor: {}", .{err});
         std.process.exit(1);
     };
