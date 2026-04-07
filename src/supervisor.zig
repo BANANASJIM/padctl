@@ -617,7 +617,7 @@ pub const Supervisor = struct {
     fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
         switch (action) {
             .add => self.attach(devname) catch |err| {
-                if (err == error.AccessDenied) {
+                if (err == error.HotplugTransient) {
                     self.enqueueHotplugRetry(devname);
                 } else {
                     std.log.warn("hotplug attach {s}: {}", .{ devname, err });
@@ -666,7 +666,7 @@ pub const Supervisor = struct {
             const p = &self.hotplug_pending.items[i];
             const name = p.devname[0..p.len];
             self.attach(name) catch |err| {
-                if (err != error.AccessDenied) {
+                if (err != error.HotplugTransient) {
                     std.log.warn("hotplug retry {s}: {}, dropping", .{ name, err });
                     _ = self.hotplug_pending.swapRemove(i);
                     continue;
@@ -1512,16 +1512,29 @@ pub const Supervisor = struct {
         return self.attachWithRoot(devname, "/dev");
     }
 
+    /// Transient open() errors that should trigger hotplug retry.
+    pub fn isTransientOpenError(err: anyerror) bool {
+        return switch (err) {
+            error.AccessDenied,
+            error.PermissionDenied,
+            error.DeviceBusy,
+            error.FileNotFound,
+            error.NoDevice,
+            => true,
+            else => false,
+        };
+    }
+
     pub fn attachWithRoot(self: *Supervisor, devname: []const u8, dev_root: []const u8) !void {
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
 
         const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
-            if (err == error.AccessDenied) {
-                std.log.warn("hotplug: {s} not ready (EACCES)", .{path});
-                return error.AccessDenied;
+            if (isTransientOpenError(err)) {
+                std.log.warn("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
+                return error.HotplugTransient;
             }
-            return;
+            return err;
         };
         defer posix.close(fd);
 
@@ -1543,7 +1556,7 @@ pub const Supervisor = struct {
 
         const iface_id = readInterfaceId(path) orelse {
             std.log.debug("hotplug: {s} sysfs not ready, will retry", .{path});
-            return error.AccessDenied;
+            return error.HotplugTransient;
         };
         const declared = for (cfg.?.device.interface) |ci| {
             if (iface_id == @as(u8, @intCast(ci.id))) break true;

@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const render = @import("../debug/render.zig");
 const hidraw = @import("../io/hidraw.zig");
+const Supervisor = @import("../supervisor.zig").Supervisor;
 
 // -- Test 1: renderFrame with empty raw slice --
 
@@ -38,7 +39,39 @@ test "stripInputSuffix: same base path deduplicates" {
     try testing.expectEqualStrings(a, b);
 }
 
-// -- Test 3: directory walker finds .toml in subdirectories --
+// -- Test 3 (issue #64): isTransientOpenError classifies errors correctly --
+// Regression: previously only error.AccessDenied was retried; EPERM/ENODEV/ENOENT
+// caused a silent drop (bare `return`), losing the hotplug attach forever.
+
+test "isTransientOpenError: transient errors are retried" {
+    try testing.expect(Supervisor.isTransientOpenError(error.AccessDenied));
+    try testing.expect(Supervisor.isTransientOpenError(error.PermissionDenied));
+    try testing.expect(Supervisor.isTransientOpenError(error.DeviceBusy));
+    try testing.expect(Supervisor.isTransientOpenError(error.FileNotFound));
+    try testing.expect(Supervisor.isTransientOpenError(error.NoDevice));
+}
+
+test "isTransientOpenError: fatal errors are not retried" {
+    try testing.expect(!Supervisor.isTransientOpenError(error.OutOfMemory));
+    try testing.expect(!Supervisor.isTransientOpenError(error.SystemResources));
+    try testing.expect(!Supervisor.isTransientOpenError(error.Unexpected));
+}
+
+// -- Test 4 (issue #64): attachWithRoot maps any transient open error to HotplugTransient --
+// Regression: previously EPERM/ENODEV/ENOENT were normalized to error.AccessDenied,
+// making it impossible for callers to distinguish the retry sentinel from a real EACCES.
+
+test "attachWithRoot: missing device returns HotplugTransient, not AccessDenied" {
+    var sup = try Supervisor.initForTest(testing.allocator);
+    defer sup.deinit();
+
+    // Use a nonexistent path under a real-looking dev root.
+    // open() will fail with FileNotFound — a transient error — which must surface as HotplugTransient.
+    const result = sup.attachWithRoot("hidraw99", "/dev/nonexistent_root_for_test");
+    try testing.expectError(error.HotplugTransient, result);
+}
+
+// -- Test 5: directory walker finds .toml in subdirectories --
 
 test "walker: finds toml files in subdirectories" {
     var tmp = testing.tmpDir(.{});
