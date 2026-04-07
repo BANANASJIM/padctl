@@ -299,7 +299,8 @@ pub const EventLoop = struct {
                     if (ctx.output.pollFf() catch null) |ff_ev| {
                         const now_ns = std.time.nanoTimestamp();
                         const min_interval_ns: i128 = 10_000_000; // 10ms
-                        if (now_ns - self.last_rumble_ns >= min_interval_ns) {
+                        const is_stop = ff_ev.strong == 0 and ff_ev.weak == 0;
+                        if (is_stop or now_ns - self.last_rumble_ns >= min_interval_ns) {
                             if (ctx.allocator) |alloc| {
                                 if (ctx.device_config) |dcfg| {
                                     if (dcfg.commands) |cmds| {
@@ -317,7 +318,7 @@ pub const EventLoop = struct {
                                                             applyChecksum(bytes, cs);
                                                         }
                                                         ctx.devices[iface_idx].write(bytes) catch {};
-                                                        self.last_rumble_ns = now_ns;
+                                                        if (!is_stop) self.last_rumble_ns = now_ns;
                                                     } else |_| {}
                                                 }
                                             }
@@ -998,6 +999,181 @@ test "event_loop: config-driven FF command key — output.force_feedback.type ov
     // strong=0x8000 >> 8 = 0x80, weak=0x4000 >> 8 = 0x40
     // Must NOT match "ff ff ff ff" (the rumble template)
     try testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0x80, 0x40, 0xbb }, mock_dev.write_log.items);
+}
+
+// Regression test: stop frame must bypass throttle even within 10ms of a play frame.
+const MockFfOutputSeq = struct {
+    allocator: std.mem.Allocator,
+    events: []const ?uinput.FfEvent,
+    call_count: usize = 0,
+
+    fn outputDevice(self: *MockFfOutputSeq) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = mockEmit,
+        .poll_ff = mockPollFf,
+        .close = mockClose,
+    };
+
+    fn mockEmit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+
+    fn mockPollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        const self: *MockFfOutputSeq = @ptrCast(@alignCast(ptr));
+        if (self.call_count < self.events.len) {
+            const ev = self.events[self.call_count];
+            self.call_count += 1;
+            return ev;
+        }
+        return null;
+    }
+
+    fn mockClose(_: *anyopaque) void {}
+};
+
+test "event_loop: stop frame forwarded even within 10ms throttle window" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    // Use a real pipe; each byte written wakes one poll iteration.
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // play then stop — both within a single burst; stop must not be throttled.
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 }, // play
+        .{ .effect_type = 0x50, .strong = 0, .weak = 0 }, // stop
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    // First wakeup → play event
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(2 * std.time.ns_per_ms); // stay well inside 10ms throttle window
+    // Second wakeup → stop event (must bypass throttle)
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Template: "00 08 00 {strong:u8} {weak:u8} 00 00 00" → 8-byte frame
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
+    // Entry 0: play frame
+    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
+    // Entry 1: stop frame
+    const stop_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
+}
+
+test "event_loop: play after stop within throttle window is forwarded" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // stop at T=0, then play at T≈5ms (well within 10ms throttle window)
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .strong = 0, .weak = 0 }, // stop
+        .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 }, // play
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx2 = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx2{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+    const T2 = struct {
+        fn run(c: *RunCtx2) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T2.run, .{&ctx});
+
+    // First wakeup → stop
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(5 * std.time.ns_per_ms); // inside 10ms throttle window
+    // Second wakeup → play (must NOT be throttled because stop doesn't advance last_rumble_ns)
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Both frames must be written: stop then play
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
+    const stop_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
+    const play_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
 }
 
 // --- T8/T9: Adaptive trigger tests ---
