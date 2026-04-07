@@ -21,7 +21,10 @@ pub fn load(allocator: std.mem.Allocator) ?ParseResult {
     defer allocator.free(config_path);
 
     const content = std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024) catch |err| {
-        if (err != error.FileNotFound) std.log.warn("user config: cannot read {s}: {}", .{ config_path, err });
+        if (err == error.FileNotFound)
+            std.log.info("user config: no config.toml found; create {s} to set per-device defaults", .{config_path})
+        else
+            std.log.warn("user config: cannot read {s}: {}", .{ config_path, err });
         return null;
     };
     defer allocator.free(content);
@@ -34,12 +37,13 @@ pub fn load(allocator: std.mem.Allocator) ?ParseResult {
     };
 }
 
-/// Find the default_mapping for a device by name. Returns a slice into the parsed data.
 pub fn findDefaultMapping(result: *const ParseResult, device_name: []const u8) ?[]const u8 {
     const entries = result.value.device orelse return null;
     for (entries) |e| {
-        if (std.mem.eql(u8, e.name, device_name)) return e.default_mapping;
+        if (std.ascii.eqlIgnoreCase(e.name, device_name)) return e.default_mapping;
     }
+    if (entries.len > 0)
+        std.log.warn("user config: no entry for detected device \"{s}\" — add [[device]] name = \"{s}\" to config.toml", .{ device_name, device_name });
     return null;
 }
 
@@ -57,7 +61,7 @@ test "load: returns null when config.toml absent" {
     // If null, that is the expected outcome for a missing config.
 }
 
-test "findDefaultMapping: matches by name" {
+test "findDefaultMapping: exact match" {
     const allocator = std.testing.allocator;
 
     const toml_str =
@@ -77,6 +81,41 @@ test "findDefaultMapping: matches by name" {
 
     try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "Flydigi Vader 5 Pro").?);
     try std.testing.expectEqualStrings("default", findDefaultMapping(&result, "Sony DualSense").?);
+}
+
+test "findDefaultMapping: case-insensitive match" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\[[device]]
+        \\name = "Flydigi Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    // Different casing must still match.
+    try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "flydigi vader 5 pro").?);
+    try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "FLYDIGI VADER 5 PRO").?);
+}
+
+test "findDefaultMapping: no match returns null" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\[[device]]
+        \\name = "Flydigi Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
     try std.testing.expectEqual(@as(?[]const u8, null), findDefaultMapping(&result, "Unknown Device"));
 }
 
