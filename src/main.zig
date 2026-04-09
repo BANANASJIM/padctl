@@ -608,9 +608,12 @@ pub fn main() !void {
 
             if (sw.persist) {
                 if (sw.device_id != null) {
-                    stderr_writer.writeAll("warning: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
+                    stderr_writer.writeAll("error: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
+                    std.process.exit(1);
                 } else {
-                    persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer);
+                    if (!persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer)) {
+                        std.process.exit(1);
+                    }
                 }
             }
         }
@@ -815,7 +818,6 @@ test {
 fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8) ?[]const u8 {
     const socket_client = @import("cli/socket_client.zig");
     const user_config_mod = @import("config/user_config.zig");
-    const paths = @import("config/paths.zig");
 
     // Get the device name from the daemon.
     const fd = socket_client.connectToSocket(socket_path) catch return null;
@@ -824,17 +826,12 @@ fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8) 
     const resp = socket_client.sendCommand(fd, "STATUS\n", &resp_buf) catch return null;
     const device_name = parseDeviceFromStatus(resp) orelse return null;
 
-    // Read user config.
-    const user_dir = paths.userConfigDir(allocator) catch return null;
-    defer allocator.free(user_dir);
-    var result = user_config_mod.loadFromDir(allocator, user_dir) catch return null;
-    if (result) |*r| {
-        // Don't deinit — the returned string points into parsed memory.
-        // Caller must use the name before r goes out of scope.
-        // For a CLI that exits immediately, this is fine.
-        return user_config_mod.findDefaultMapping(r, device_name);
-    }
-    return null;
+    // Use the shared loader which respects the user → system fallback.
+    // Don't deinit — the returned string points into parsed memory.
+    // Caller must use the name before the process exits, which is fine
+    // for a CLI that exits immediately after switch.
+    var result = user_config_mod.load(allocator) orelse return null;
+    return user_config_mod.findDefaultMapping(&result, device_name);
 }
 
 /// Save the current mapping choice to ~/.config/padctl/config.toml so that
@@ -866,7 +863,7 @@ fn saveToUserConfig(allocator: std.mem.Allocator, mapping_name: []const u8, sock
 
 /// Interactive --persist: confirm with user, elevate via sudo, copy mapping
 /// file + config.toml to /etc/padctl/ so the binding survives reboot.
-fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8, socket_path: []const u8, err_writer: anytype) void {
+fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8, socket_path: []const u8, err_writer: anytype) bool {
     const paths = @import("config/paths.zig");
     const mapping_discovery = @import("config/mapping_discovery.zig");
 
@@ -882,7 +879,7 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
     const choice: u8 = if (n > 0) input_buf[0] else 'n';
     if (choice != 'y' and choice != 'Y') {
         err_writer.writeAll("Aborted.\n") catch {};
-        return;
+        return false;
     }
 
     var ok = true;
@@ -927,6 +924,7 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
     } else {
         err_writer.writeAll("Persistence incomplete — check the errors above.\n") catch {};
     }
+    return ok;
 }
 
 fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {

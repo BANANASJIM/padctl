@@ -40,8 +40,9 @@ pub fn load(allocator: std.mem.Allocator) ?ParseResult {
     };
     defer allocator.free(user_dir);
 
-    if (loadFromDir(allocator, user_dir)) |result| {
-        return result;
+    if (loadFromDir(allocator, user_dir)) |maybe_result| {
+        if (maybe_result) |result| return result;
+        // result is null → file not found → fall through to system.
     } else |err| switch (err) {
         // User config exists but is malformed. Do NOT fall through to
         // the system config — a broken user file is a user mistake and

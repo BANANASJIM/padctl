@@ -577,8 +577,9 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
                         .skip;
                     writeBinding(allocator, destdir, name, mapping_name, mode, stdinPrompt) catch |err| {
                         var errbuf: [256]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&errbuf, "warning: could not write binding for \"{s}\": {}\n", .{ mapping_name, err }) catch "warning: binding write failed\n";
+                        const msg = std.fmt.bufPrint(&errbuf, "error: could not write binding for \"{s}\": {}\n", .{ mapping_name, err }) catch "error: binding write failed\n";
                         _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+                        mapping_failed = true;
                     };
                 } else {
                     _ = std.posix.write(std.posix.STDERR_FILENO, "warning: no device config found for mapping '") catch {};

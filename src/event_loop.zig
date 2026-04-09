@@ -454,15 +454,22 @@ pub const EventLoop = struct {
                             }
                         } else {
                             // Play event: throttle applies to play frames.
+                            // The scheduler must only record the deadline when
+                            // the frame is actually forwarded to HID — otherwise
+                            // a throttled (dropped) frame could replace an
+                            // active deadline and later emit a stop for an
+                            // effect the device never received.
+                            var forwarded = false;
                             if (now_ns - self.last_rumble_ns >= min_interval_ns) {
                                 if (ctx.allocator) |alloc| {
                                     if (ctx.device_config) |dcfg| {
                                         emitRumbleFrame(ctx.devices, alloc, dcfg, ff_ev.strong, ff_ev.weak);
                                         self.last_rumble_ns = now_ns;
+                                        forwarded = true;
                                     }
                                 }
                             }
-                            if (scheduler_on) {
+                            if (scheduler_on and forwarded) {
                                 const next_dl = self.rumble_scheduler.onPlay(
                                     ff_ev.effect_id,
                                     ff_ev.duration_ms,
