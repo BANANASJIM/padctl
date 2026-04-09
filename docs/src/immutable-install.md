@@ -109,6 +109,14 @@ default_mapping = "vader5"
 
 The daemon reads this file at startup and auto-applies the mapping — no manual `padctl switch` needed after reboot. User-level overrides in `~/.config/padctl/config.toml` take priority when available.
 
+You can also persist a mapping change after switching at runtime:
+
+```sh
+padctl switch vader5 --persist
+```
+
+This copies your user mapping and config to `/etc/padctl/` via sudo, so the change survives reboots without re-running the installer.
+
 ## Uninstalling
 
 ```sh

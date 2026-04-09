@@ -152,10 +152,13 @@ default_mapping = "fps"
 
 On daemon start, padctl matches the connected device name (case-insensitive) and loads the named mapping profile automatically. The system path is the fallback for environments where `HOME` is not set (e.g. systemd services).
 
+`padctl switch <name>` automatically updates the user config, so the choice is remembered for bare `padctl switch` (re-apply without a name). To make the choice survive reboots, use `padctl switch <name> --persist` which copies the mapping and config to `/etc/padctl/` via sudo.
+
 ## CLI Reference
 
 ```sh
-padctl switch <name> [--device <id>]       # switch mapping at runtime
+padctl switch [name] [--device <id>]       # switch mapping (omit name to re-apply from user config)
+padctl switch <name> --persist             # switch + copy to /etc/padctl/ for reboot persistence (sudo)
 padctl status [--socket <path>]            # show daemon status
 padctl devices [--socket <path>]           # list connected devices
 padctl list-mappings [--config-dir <dir>]  # list available mapping profiles

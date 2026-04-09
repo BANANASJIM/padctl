@@ -37,16 +37,46 @@ padctl searches for mapping profiles in this order (first match wins):
 
 ### Apply a mapping
 
-Switch the active mapping at runtime without restarting the daemon:
+Switch the active mapping at runtime:
 
 ```sh
 padctl switch fps
 ```
 
-To auto-apply on every boot, set a `default_mapping` in a config file. The daemon checks these paths in order:
+Every switch automatically saves your choice to `~/.config/padctl/config.toml`, so you can restore it later with a bare switch:
 
-1. `~/.config/padctl/config.toml` — user overrides
-2. `/etc/padctl/config.toml` — system-wide (written by `padctl install --mapping`)
+```sh
+padctl switch          # re-applies the last-switched mapping from user config
+```
+
+### Persist across reboots (`--persist`)
+
+By default, `padctl switch` only saves to your user config (`~/.config/padctl/config.toml`). The systemd daemon cannot read this at boot because `HOME` is not set in its service environment. To make the mapping survive reboots:
+
+```sh
+padctl switch fps --persist
+```
+
+This will:
+1. Apply the mapping at runtime (same as without `--persist`)
+2. Save to your user config (same as without `--persist`)
+3. Prompt for confirmation, then ask for your sudo password
+4. Copy the mapping file to `/etc/padctl/mappings/`
+5. Copy your user config to `/etc/padctl/config.toml`
+
+The daemon reads `/etc/padctl/` at boot, so the mapping auto-applies on every reboot without manual intervention.
+
+**Limitations:**
+
+- `--persist` is not yet supported with `--device` (multi-controller setups). In multi-device sessions, auto-save and bare `padctl switch` resolve against the first connected device. Use `padctl install --mapping <name>` for explicit per-device persistence in multi-controller setups.
+- A future version may persist by default, but this behavior is uncertain and subject to change.
+
+### Config file precedence
+
+The daemon checks these paths in order when resolving default mappings:
+
+1. `~/.config/padctl/config.toml` — user overrides (highest priority, only available when `HOME` is set)
+2. `/etc/padctl/config.toml` — system-wide defaults (written by `padctl install --mapping` or `padctl switch --persist`)
 
 ```toml
 version = 1
@@ -56,7 +86,9 @@ name = "Flydigi Vader 5 Pro"
 default_mapping = "fps"
 ```
 
-If you installed with `padctl install --mapping vader5`, the system config is already written for you. The daemon auto-applies it on every boot without manual intervention.
+If you installed with `padctl install --mapping vader5`, the system config is already written for you.
+
+### Manual run
 
 Or pass a mapping directly when running padctl manually:
 

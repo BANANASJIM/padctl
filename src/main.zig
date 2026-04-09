@@ -148,7 +148,7 @@ const Cli = struct {
     reload_pid: ?[]const u8 = null,
     pid_file: ?[]const u8 = null,
     config_cmd: ?ConfigCmd = null,
-    switch_cmd: ?struct { name: []const u8, device_id: ?[]const u8 = null } = null,
+    switch_cmd: ?struct { name: ?[]const u8 = null, device_id: ?[]const u8 = null, persist: bool = false } = null,
     status_cmd: bool = false,
     devices_cmd: bool = false,
     socket_path: []const u8 = cli.socket_client.DEFAULT_SOCKET_PATH,
@@ -322,23 +322,25 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 return error.UnknownArgument;
             }
         } else if (std.mem.eql(u8, arg, "switch")) {
-            const name = args.next() orelse {
-                std.log.err("switch: missing mapping name", .{});
-                return error.MissingArgValue;
-            };
+            var name: ?[]const u8 = null;
             var device_id: ?[]const u8 = null;
+            var persist = false;
             while (args.next()) |sub_arg| {
                 if (std.mem.eql(u8, sub_arg, "--device")) {
                     device_id = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
                     parsed_cli.socket_explicit = true;
-                } else {
+                } else if (std.mem.eql(u8, sub_arg, "--persist")) {
+                    persist = true;
+                } else if (sub_arg[0] == '-') {
                     std.log.err("unknown switch argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
+                } else {
+                    name = sub_arg;
                 }
             }
-            parsed_cli.switch_cmd = .{ .name = name, .device_id = device_id };
+            parsed_cli.switch_cmd = .{ .name = name, .device_id = device_id, .persist = persist };
         } else if (std.mem.eql(u8, arg, "status")) {
             parsed_cli.status_cmd = true;
             while (args.next()) |sub_arg| {
@@ -403,7 +405,8 @@ fn printHelp() void {
         \\  list-mappings         List discovered mapping profiles from XDG paths
         \\    --config-dir <dir>  Also show device-specific mappings from this directory
         \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
-        \\  switch <name>         Switch active mapping profile (name must come before options)
+        \\  switch [name]         Switch mapping (omit name to re-apply from user config)
+        \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
         \\    --device <id>       Apply only to specific device
         \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
         \\  status                Show daemon status (current mapping, devices)
@@ -578,7 +581,39 @@ pub fn main() !void {
 
     // switch subcommand
     if (parsed.switch_cmd) |sw| {
-        const rc = cli.switch_mapping.run(sw.name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
+        // Resolve the mapping name: either explicit or from user config.
+        const mapping_name: []const u8 = sw.name orelse blk: {
+            // Bare `padctl switch` — read default_mapping from user config.
+            // NOTE: with multiple connected controllers, this resolves
+            // against the first device in the STATUS response. A future
+            // version should require --device in multi-device setups or
+            // add a device-keyed daemon API.
+            const resolved = resolveDefaultMapping(allocator, parsed.socket_path) orelse {
+                stderr_writer.writeAll("error: no mapping name given and no default_mapping in ~/.config/padctl/config.toml\n") catch {};
+                stderr_writer.writeAll("  usage: padctl switch <name>\n") catch {};
+                std.process.exit(1);
+            };
+            break :blk resolved;
+        };
+
+        const rc = cli.switch_mapping.run(mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
+        if (rc == 0) {
+            // Auto-save to user config so `padctl switch` (no args) can
+            // restore the choice. Skipped when --device targets a specific
+            // controller because we can't reliably map a hidraw id to a
+            // device name without a device-keyed daemon API.
+            if (sw.device_id == null) {
+                saveToUserConfig(allocator, mapping_name, parsed.socket_path, stderr_writer);
+            }
+
+            if (sw.persist) {
+                if (sw.device_id != null) {
+                    stderr_writer.writeAll("warning: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
+                } else {
+                    persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer);
+                }
+            }
+        }
         std.process.exit(rc);
     }
 
@@ -774,9 +809,242 @@ test {
     _ = @import("test/gen/transition_id.zig");
 }
 
+/// Resolve the default mapping name from the user's config.toml for the
+/// currently connected device (queried from daemon STATUS). Used by bare
+/// `padctl switch` (no mapping name given).
+fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8) ?[]const u8 {
+    const socket_client = @import("cli/socket_client.zig");
+    const user_config_mod = @import("config/user_config.zig");
+    const paths = @import("config/paths.zig");
+
+    // Get the device name from the daemon.
+    const fd = socket_client.connectToSocket(socket_path) catch return null;
+    defer std.posix.close(fd);
+    var resp_buf: [4096]u8 = undefined;
+    const resp = socket_client.sendCommand(fd, "STATUS\n", &resp_buf) catch return null;
+    const device_name = parseDeviceFromStatus(resp) orelse return null;
+
+    // Read user config.
+    const user_dir = paths.userConfigDir(allocator) catch return null;
+    defer allocator.free(user_dir);
+    var result = user_config_mod.loadFromDir(allocator, user_dir) catch return null;
+    if (result) |*r| {
+        // Don't deinit — the returned string points into parsed memory.
+        // Caller must use the name before r goes out of scope.
+        // For a CLI that exits immediately, this is fine.
+        return user_config_mod.findDefaultMapping(r, device_name);
+    }
+    return null;
+}
+
+/// Save the current mapping choice to ~/.config/padctl/config.toml so that
+/// bare `padctl switch` can restore it next time.
+fn saveToUserConfig(allocator: std.mem.Allocator, mapping_name: []const u8, socket_path: []const u8, _: anytype) void {
+    const socket_client = @import("cli/socket_client.zig");
+    const paths = @import("config/paths.zig");
+
+    const fd = socket_client.connectToSocket(socket_path) catch return;
+    defer std.posix.close(fd);
+    var resp_buf: [4096]u8 = undefined;
+    const resp = socket_client.sendCommand(fd, "STATUS\n", &resp_buf) catch return;
+    const device_name = parseDeviceFromStatus(resp) orelse return;
+
+    const user_dir = paths.userConfigDir(allocator) catch return;
+    defer allocator.free(user_dir);
+
+    // Ensure dir exists.
+    std.fs.makeDirAbsolute(user_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+
+    writeConfigToml(allocator, user_dir, device_name, mapping_name) catch {
+        std.log.warn("could not save to ~/.config/padctl/config.toml (file may be malformed)", .{});
+        return;
+    };
+}
+
+/// Interactive --persist: confirm with user, elevate via sudo, copy mapping
+/// file + config.toml to /etc/padctl/ so the binding survives reboot.
+fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8, socket_path: []const u8, err_writer: anytype) void {
+    const paths = @import("config/paths.zig");
+    const mapping_discovery = @import("config/mapping_discovery.zig");
+
+    _ = socket_path;
+
+    // Interactive confirmation.
+    err_writer.writeAll("\n--persist will copy your mapping and config to /etc/padctl/\n") catch {};
+    err_writer.writeAll("so the daemon auto-applies it on every boot (requires sudo).\n") catch {};
+    err_writer.writeAll("Continue? [y/N]: ") catch {};
+
+    var input_buf: [16]u8 = undefined;
+    const n = std.posix.read(std.posix.STDIN_FILENO, &input_buf) catch 0;
+    const choice: u8 = if (n > 0) input_buf[0] else 'n';
+    if (choice != 'y' and choice != 'Y') {
+        err_writer.writeAll("Aborted.\n") catch {};
+        return;
+    }
+
+    var ok = true;
+
+    // Ensure destination directories exist.
+    if (!runSudoMkdir("/etc/padctl/mappings", err_writer)) ok = false;
+
+    // Copy mapping file to /etc/padctl/mappings/
+    const mapping_path = mapping_discovery.findMapping(allocator, mapping_name) catch null;
+    defer if (mapping_path) |p| allocator.free(p);
+    if (mapping_path) |src| {
+        const dst = std.fmt.allocPrint(allocator, "/etc/padctl/mappings/{s}.toml", .{mapping_name}) catch null;
+        if (dst) |d| {
+            defer allocator.free(d);
+            if (!runSudoCopy(src, d, err_writer)) ok = false;
+        } else ok = false;
+    } else {
+        err_writer.writeAll("warning: mapping file for '") catch {};
+        err_writer.writeAll(mapping_name) catch {};
+        err_writer.writeAll("' not found, skipping mapping copy\n") catch {};
+        ok = false;
+    }
+
+    // Copy user config.toml to /etc/padctl/config.toml
+    const user_dir = paths.userConfigDir(allocator) catch null;
+    defer if (user_dir) |d| allocator.free(d);
+    if (user_dir) |d| {
+        const user_config = std.fmt.allocPrint(allocator, "{s}/config.toml", .{d}) catch null;
+        defer if (user_config) |p| allocator.free(p);
+        if (user_config) |src| {
+            if (std.fs.accessAbsolute(src, .{})) |_| {
+                if (!runSudoCopy(src, "/etc/padctl/config.toml", err_writer)) ok = false;
+            } else |_| {
+                err_writer.writeAll("warning: no user config.toml to copy\n") catch {};
+                ok = false;
+            }
+        }
+    }
+
+    if (ok) {
+        err_writer.writeAll("Mapping persisted to /etc/padctl/ (survives reboot).\n") catch {};
+    } else {
+        err_writer.writeAll("Persistence incomplete — check the errors above.\n") catch {};
+    }
+}
+
+fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {
+    const argv = [_][]const u8{ "sudo", "cp", src, dst };
+    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    child.spawn() catch {
+        err_writer.writeAll("error: failed to run sudo cp\n") catch {};
+        return false;
+    };
+    const result = child.wait() catch {
+        err_writer.writeAll("error: sudo cp failed\n") catch {};
+        return false;
+    };
+    if (result.Exited != 0) {
+        err_writer.writeAll("error: sudo cp returned non-zero\n") catch {};
+        return false;
+    }
+    return true;
+}
+
+fn runSudoMkdir(dir: []const u8, err_writer: anytype) bool {
+    const argv = [_][]const u8{ "sudo", "mkdir", "-p", dir };
+    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    child.spawn() catch return false;
+    const result = child.wait() catch {
+        err_writer.writeAll("error: sudo mkdir failed\n") catch {};
+        return false;
+    };
+    return result.Exited == 0;
+}
+
+/// Write a config.toml with a single device binding. Reads existing file
+/// to preserve other device entries.
+fn writeConfigToml(
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    device_name: []const u8,
+    mapping_name: []const u8,
+) !void {
+    const user_config_mod = @import("config/user_config.zig");
+
+    // MalformedConfig must NOT be swallowed — a broken hand-edited
+    // config.toml would lose unrelated bindings if we overwrite it.
+    var existing = user_config_mod.loadFromDir(allocator, dir) catch |err| switch (err) {
+        error.MalformedConfig => return error.MalformedConfig,
+    };
+    defer if (existing) |*e| e.deinit();
+
+    const version: i64 = if (existing) |e| e.value.version orelse user_config_mod.CURRENT_VERSION else user_config_mod.CURRENT_VERSION;
+    const devices = if (existing) |e| e.value.device else null;
+
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.print("version = {d}\n", .{version});
+
+    var wrote_target = false;
+    if (devices) |devs| {
+        for (devs) |d| {
+            if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
+                try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+                wrote_target = true;
+            } else {
+                try w.print("\n[[device]]\nname = \"{s}\"\n", .{d.name});
+                if (d.default_mapping) |m| {
+                    try w.print("default_mapping = \"{s}\"\n", .{m});
+                }
+            }
+        }
+    }
+    if (!wrote_target) {
+        try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+    }
+
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
+    defer allocator.free(config_path);
+    var f = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(buf.items);
+}
+
+fn parseDeviceFromStatus(resp: []const u8) ?[]const u8 {
+    // Format: "STATUS device=NAME active=BOOL\n"
+    const prefix = "STATUS device=";
+    var it = std.mem.splitScalar(u8, resp, '\n');
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, prefix)) {
+            const rest = line[prefix.len..];
+            // Find " active=" delimiter
+            if (std.mem.indexOf(u8, rest, " active=")) |end| {
+                return rest[0..end];
+            }
+        }
+    }
+    return null;
+}
+
 // --- CLI tests ---
 
 const testing = std.testing;
+
+test "main: parseDeviceFromStatus extracts device name" {
+    const resp = "STATUS device=Flydigi Vader 5 Pro active=true\n";
+    const name = parseDeviceFromStatus(resp);
+    try testing.expect(name != null);
+    try testing.expectEqualStrings("Flydigi Vader 5 Pro", name.?);
+}
+
+test "main: parseDeviceFromStatus returns null for empty response" {
+    try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus(""));
+    try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("OK\n"));
+}
 
 test "main: parseHexBytes via init_seq" {
     // Smoke-test that init_seq is reachable from main
