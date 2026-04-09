@@ -587,13 +587,20 @@ pub fn main() !void {
     if (parsed.switch_cmd) |sw| {
         // Resolve the mapping name: either explicit or from user config.
         const mapping_name: []const u8 = sw.name orelse blk: {
+            // Bare `padctl switch --device` is ambiguous: resolveDefaultMapping
+            // can't target a specific device. Require an explicit mapping name.
+            if (sw.device_id != null) {
+                stderr_writer.writeAll("error: provide a mapping name when using --device\n") catch {};
+                stderr_writer.writeAll("  usage: padctl switch <name> --device <id>\n") catch {};
+                std.process.exit(1);
+            }
             // Bare `padctl switch` — read default_mapping from user config.
             // NOTE: with multiple connected controllers, this resolves
             // against the first device in the STATUS response. A future
             // version should require --device in multi-device setups or
             // add a device-keyed daemon API.
             const resolved = resolveDefaultMapping(allocator, parsed.socket_path) orelse {
-                stderr_writer.writeAll("error: no mapping name given and no default_mapping in ~/.config/padctl/config.toml\n") catch {};
+                stderr_writer.writeAll("error: no mapping name given and no default_mapping in config.toml\n") catch {};
                 stderr_writer.writeAll("  usage: padctl switch <name>\n") catch {};
                 std.process.exit(1);
             };

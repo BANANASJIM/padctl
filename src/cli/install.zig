@@ -536,7 +536,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     }
 
     // 4d. Install mapping configs (if --mapping specified, repeatable)
+    // Track per-mapping success so 4e only writes bindings for mappings
+    // that were actually installed (avoids a config.toml entry pointing
+    // at a missing mapping file).
     var mapping_failed = false;
+    var installed_mappings = std.ArrayList([]const u8){};
+    defer installed_mappings.deinit(allocator);
     if (opts.mappings.len > 0) {
         const mappings_src = findMappingsSourceDir(allocator, self_dir, null) catch null;
         defer if (mappings_src) |path| allocator.free(path);
@@ -549,7 +554,9 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
                     const msg = std.fmt.bufPrint(&errbuf, "' not installed: {}\n", .{err}) catch "' not installed\n";
                     _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
                     mapping_failed = true;
+                    continue;
                 };
+                installed_mappings.append(allocator, mapping_name) catch {};
             }
         } else {
             _ = std.posix.write(std.posix.STDERR_FILENO, "error: mappings directory not found near executable or current working directory\n") catch {};
@@ -559,13 +566,14 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 
     // 4e. Write device→mapping bindings to /etc/padctl/config.toml so the
     //      daemon auto-applies the mapping at boot without a manual
-    //      `padctl switch`. For each mapping, resolve the device name by
-    //      filename matching against the source devices/ tree.
-    if (opts.mappings.len > 0) {
+    //      `padctl switch`. Only process mappings that were successfully
+    //      installed in 4d — writing a binding for a missing mapping file
+    //      would make reboot auto-apply point at nothing.
+    if (installed_mappings.items.len > 0) {
         const devices_src = findDevicesSourceDir(allocator, self_dir, null) catch null;
         defer if (devices_src) |path| allocator.free(path);
         if (devices_src) |dev_dir| {
-            for (opts.mappings) |mapping_name| {
+            for (installed_mappings.items) |mapping_name| {
                 const device_name = findDeviceNameForMapping(allocator, mapping_name, dev_dir) catch null;
                 defer if (device_name) |n| allocator.free(n);
                 if (device_name) |name| {
