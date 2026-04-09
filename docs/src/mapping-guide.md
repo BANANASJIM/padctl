@@ -43,15 +43,22 @@ Switch the active mapping at runtime without restarting the daemon:
 padctl switch fps
 ```
 
-To apply on startup, set a `default_mapping` in `~/.config/padctl/config.toml`:
+To auto-apply on every boot, set a `default_mapping` in a config file. The daemon checks these paths in order:
+
+1. `~/.config/padctl/config.toml` — user overrides
+2. `/etc/padctl/config.toml` — system-wide (written by `padctl install --mapping`)
 
 ```toml
+version = 1
+
 [[device]]
 name = "Flydigi Vader 5 Pro"
 default_mapping = "fps"
 ```
 
-Or pass it directly when running padctl manually:
+If you installed with `padctl install --mapping vader5`, the system config is already written for you. The daemon auto-applies it on every boot without manual intervention.
+
+Or pass a mapping directly when running padctl manually:
 
 ```sh
 padctl --mapping ~/.config/padctl/mappings/my-config.toml

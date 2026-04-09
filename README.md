@@ -21,9 +21,10 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Exclusive device grab** — grabs the hidraw/evdev node so the original device is hidden from other processes while padctl is running
 - **Multi-device + hotplug** — automatic device detection and per-device threads via netlink
 - **Hot-reload** — `SIGHUP` re-reads configs without restart, diffed per physical device
-- **Force feedback** — FF_RUMBLE passthrough from uinput to physical device
+- **Force feedback** — FF_RUMBLE passthrough from uinput to physical device with userspace auto-stop timer (compensates for uinput not using the kernel's ff-memless driver)
 - **Runtime mapping switch** — `padctl switch <name>` changes profiles without restart
-- **User config** — `~/.config/padctl/config.toml` for per-device default mappings
+- **Persistent mapping** — `padctl install --mapping <name>` writes a device binding to `/etc/padctl/config.toml` that auto-applies on every boot
+- **User config** — `~/.config/padctl/config.toml` for per-device default mappings (system fallback: `/etc/padctl/config.toml`)
 - **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl config init/edit/test`
 
 ## Architecture

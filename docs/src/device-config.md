@@ -189,7 +189,14 @@ type = "hat"   # or "buttons"
 [output.force_feedback]
 type = "rumble"
 max_effects = 16
+auto_stop = true     # default; set false to disable userspace auto-stop
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | — | Force-feedback type: `"rumble"` |
+| `max_effects` | int | 16 | Maximum number of concurrent FF effect slots |
+| `auto_stop` | bool | `true` | Enable userspace rumble auto-stop. When `true`, padctl emits a stop frame to the HID device after each effect's `replay.length` elapses — compensating for the fact that uinput does not use the kernel's `ff-memless` auto-stop timer. Set to `false` only for devices whose firmware handles auto-stop internally. |
 
 ### `[output.aux]`
 

@@ -25,8 +25,9 @@ What the script does:
 2. **Installs dependencies** via Homebrew (Zig compiler, libusb) — no system reboot needed
 3. **Clones and builds** padctl from source with `ReleaseSafe` optimization
 4. **Installs** the daemon, systemd services, udev rules, and reconnect scripts
-5. **Applies** the selected mapping config
-6. **Verifies** the installation
+5. **Persists** the selected mapping as a device binding in `/etc/padctl/config.toml` (auto-applies on every boot)
+6. **Applies** the mapping to the current session
+7. **Verifies** the installation
 
 Safe to re-run for updates — it rebuilds and reinstalls while preserving your mapping configs in `~/.config/padctl/mappings/`.
 
@@ -34,7 +35,7 @@ Safe to re-run for updates — it rebuilds and reinstalls while preserving your 
 
 | Flag | Description |
 |------|-------------|
-| `--mapping <name>` | Install and apply a specific mapping |
+| `--mapping <name>` | Install a mapping and auto-apply on boot |
 | `--repo-url <url>` | Use a fork or alternative repo URL |
 | `--branch <name>` | Clone/checkout a specific branch |
 | `<path>` | Use an existing local repo instead of cloning |
@@ -93,6 +94,20 @@ padctl switch vader5
 ```
 
 The `/etc/padctl/mappings/` copy is used as a fallback by the hotplug reconnect script (which runs as root).
+
+### Auto-apply on boot
+
+When you install with `--mapping`, the installer writes a device binding to `/etc/padctl/config.toml`:
+
+```toml
+version = 1
+
+[[device]]
+name = "Flydigi Vader 5 Pro"
+default_mapping = "vader5"
+```
+
+The daemon reads this file at startup and auto-applies the mapping — no manual `padctl switch` needed after reboot. User-level overrides in `~/.config/padctl/config.toml` take priority when available.
 
 ## Uninstalling
 

@@ -67,7 +67,9 @@ To install a mapping config to `/etc/padctl/mappings/` during install:
 sudo ./zig-out/bin/padctl install --mapping vader5
 ```
 
-The `--mapping` flag is repeatable. Use `--force-mapping` to overwrite existing mappings.
+The `--mapping` flag is repeatable. Use `--force-mapping` to overwrite existing mapping files.
+
+When `--mapping` is given, the installer also writes a device-to-mapping binding in `/etc/padctl/config.toml` so the daemon auto-applies the mapping on every boot. Use `--force-binding` to overwrite an existing binding for the same device.
 
 > **Bazzite / immutable distros:** See the [Bazzite / Immutable Distros guide](immutable-install.md) for special installation steps.
 
@@ -135,15 +137,20 @@ padctl --doc-gen --config devices/sony/dualsense.toml
 
 ## User Config
 
-padctl reads `~/.config/padctl/config.toml` to set per-device defaults:
+padctl reads a config file to set per-device default mappings. The loader checks these paths in order (first found wins):
+
+1. `~/.config/padctl/config.toml` — user overrides (highest priority)
+2. `/etc/padctl/config.toml` — system-wide defaults (written by `padctl install --mapping`)
 
 ```toml
+version = 1
+
 [[device]]
 name = "Flydigi Vader 5 Pro"
 default_mapping = "fps"
 ```
 
-On daemon start, padctl matches the connected device name and loads the named mapping profile automatically from `~/.config/padctl/mappings/fps.toml`.
+On daemon start, padctl matches the connected device name (case-insensitive) and loads the named mapping profile automatically. The system path is the fallback for environments where `HOME` is not set (e.g. systemd services).
 
 ## CLI Reference
 
