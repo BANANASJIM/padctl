@@ -112,13 +112,23 @@ See [Quick Start](#quick-start) below. For other distros, see [CONTRIBUTING.md](
 ## Quick Start
 
 ```sh
-zig build                                    # build from source
-sudo zig-out/bin/padctl install              # install binary, configs, udev rules, systemd service
-sudo systemctl enable --now padctl.service   # start daemon with hotplug support
-padctl config init                           # create ~/.config/padctl/config.toml interactively
-padctl status                                # check daemon and detected devices
-padctl switch <name>                         # switch mapping profile without restart
+zig build                                             # build from source
+sudo zig-out/bin/padctl install                       # install binary, udev rules; writes user service unit
+systemctl --user enable --now padctl.service          # start the user service
+padctl config init                                    # create ~/.config/padctl/config.toml interactively
+padctl status                                         # check daemon and detected devices
+padctl switch <name>                                  # switch mapping profile without restart
 ```
+
+padctl runs as a **systemd user service** (`~/.config/systemd/user/padctl.service`). The binary and udev rules still require root to install, but the service runs as your own user — no `User=` directive or `ProtectHome` needed.
+
+To auto-start at boot without an active login session (headless setups, Steam Deck game mode):
+
+```sh
+sudo loginctl enable-linger $USER
+```
+
+> **Bazzite / Steam Deck:** linger behavior depends on the desktop session configuration. Auto-start at boot without login is not verified on these platforms.
 
 See the [getting started guide](https://bananasjim.github.io/padctl/getting-started.html) for detailed setup.
 
@@ -164,6 +174,8 @@ Replace `vader5` with the mapping for your controller, or omit `--mapping` to in
 See the [Bazzite / Immutable Distros guide](docs/src/immutable-install.md) for full details on what the install does, the `--immutable` flag, security notes, and mapping management.
 
 > **Tested on:** Bazzite (Fedora Atomic / ostree). Other immutable distros may work but are untested.
+>
+> **V2 note:** Bazzite and Steam Deck default linger state has not been verified with the user-service install. `loginctl enable-linger` is required for auto-start without an active session but its interaction with game-mode auto-login is unconfirmed.
 
 ## Documentation
 

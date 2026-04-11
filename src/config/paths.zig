@@ -1,22 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Returns $XDG_CONFIG_HOME/padctl, or ~/.config/padctl.
-/// Under sudo, SUDO_USER's home is tried before $HOME to avoid /root. Caller frees.
+/// Returns $XDG_CONFIG_HOME/padctl, or ~/.config/padctl. Caller frees.
 pub fn userConfigDir(allocator: Allocator) ![]u8 {
     if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
         return std.fmt.allocPrint(allocator, "{s}/padctl", .{xdg});
-    }
-    if (std.posix.getenv("SUDO_USER")) |sudo_user| {
-        // TODO: use getpwnam for non-standard home dirs (e.g. /users/, /export/home/)
-        const candidate = try std.fmt.allocPrint(allocator, "/home/{s}/.config/padctl", .{sudo_user});
-        std.fs.accessAbsolute(candidate, .{}) catch {
-            allocator.free(candidate);
-            // fall through to $HOME
-            const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
-            return std.fmt.allocPrint(allocator, "{s}/.config/padctl", .{home});
-        };
-        return candidate;
     }
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
     return std.fmt.allocPrint(allocator, "{s}/.config/padctl", .{home});
@@ -91,25 +79,25 @@ pub fn findConfig(allocator: Allocator, name: []const u8, dirs: []const []const 
 
 // --- tests ---
 
-test "userConfigDir: XDG_CONFIG_HOME override" {
-    const orig = std.posix.getenv("XDG_CONFIG_HOME");
-    _ = orig; // environment variables can't be set portably in tests; skip mutation
+test "userConfigDir: falls back to HOME/.config/padctl" {
+    const allocator = std.testing.allocator;
+    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const dir = try userConfigDir(allocator);
+    defer allocator.free(dir);
+    const expected = try std.fmt.allocPrint(allocator, "{s}/.config/padctl", .{home});
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, dir);
 }
 
-test "userConfigDir: SUDO_USER nonexistent home falls back to HOME" {
-    // SUDO_USER set to a user whose /home/<user>/.config/padctl does not exist.
-    // Without ability to set env in tests we verify the path-construction logic directly.
+test "userConfigDir: no SUDO_USER branch" {
+    // Verify SUDO_USER is not consulted: the function must use $HOME directly.
     const allocator = std.testing.allocator;
-    // Simulate what the SUDO_USER branch builds for a nonexistent user.
-    const sudo_user = "nonexistent_padctl_test_user_xyz";
-    const candidate = try std.fmt.allocPrint(allocator, "/home/{s}/.config/padctl", .{sudo_user});
-    defer allocator.free(candidate);
-    std.fs.accessAbsolute(candidate, .{}) catch |e| {
-        try std.testing.expectEqual(std.fs.Dir.AccessError.FileNotFound, e);
-        return;
-    };
-    // If the path somehow exists, just confirm it ends correctly.
-    try std.testing.expect(std.mem.endsWith(u8, candidate, "/.config/padctl"));
+    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const dir = try userConfigDir(allocator);
+    defer allocator.free(dir);
+    try std.testing.expect(std.mem.startsWith(u8, dir, home));
+    try std.testing.expect(std.mem.endsWith(u8, dir, "/.config/padctl") or
+        std.posix.getenv("XDG_CONFIG_HOME") != null);
 }
 
 test "resolveDeviceConfigDirs: returns three entries" {

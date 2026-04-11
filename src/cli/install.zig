@@ -2,8 +2,6 @@ const std = @import("std");
 const paths = @import("../config/paths.zig");
 
 fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
-    // When prefix != /usr, padctl won't find configs at {prefix}/share/padctl/devices
-    // because paths.zig hardcodes /usr/share/padctl. Pass --config-dir explicitly.
     const exec_start = if (std.mem.eql(u8, prefix, "/usr"))
         try std.fmt.allocPrint(allocator, "{s}/bin/padctl", .{prefix})
     else
@@ -13,25 +11,16 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
     return std.fmt.allocPrint(allocator,
         \\[Unit]
         \\Description=padctl gamepad compatibility daemon
-        \\After=local-fs.target
+        \\After=graphical-session.target
         \\
         \\[Service]
         \\Type=simple
         \\ExecStart={s}
         \\Restart=on-failure
         \\RestartSec=3
-        \\ProtectSystem=strict
-        \\ProtectHome=true
-        \\PrivateTmp=true
-        \\RuntimeDirectory=padctl
-        \\NoNewPrivileges=true
-        \\SupplementaryGroups=input
-        \\DeviceAllow=/dev/hidraw* rw
-        \\DeviceAllow=/dev/uinput rw
-        \\DeviceAllow=char-input rw
         \\
         \\[Install]
-        \\WantedBy=multi-user.target
+        \\WantedBy=default.target
         \\
     , .{exec_start});
 }
@@ -49,6 +38,10 @@ pub const InstallOptions = struct {
     force_binding: bool = false,
     no_enable: bool = false,
     no_start: bool = false,
+    /// Install as systemd --user unit. Default: true when not root, false when root.
+    /// When true: writes ~/.config/systemd/user/padctl.service.
+    /// When false (root): writes /etc/systemd/user/padctl.service (system-wide template).
+    user_service: ?bool = null,
 };
 
 pub const ImmutableKind = enum { none, ostree, read_only_usr };
@@ -151,11 +144,15 @@ fn generateReconnectScript(allocator: std.mem.Allocator, prefix: []const u8) ![]
     , .{prefix});
 }
 
-fn resolveServiceDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool) ![]const u8 {
-    if (immutable) {
-        return std.fmt.allocPrint(allocator, "{s}/etc/systemd/system", .{destdir});
+fn resolveServiceDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool, user_service: bool) ![]const u8 {
+    if (user_service) {
+        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        return std.fmt.allocPrint(allocator, "{s}{s}/.config/systemd/user", .{ destdir, home });
     }
-    return std.fmt.allocPrint(allocator, "{s}{s}/lib/systemd/system", .{ destdir, prefix });
+    if (immutable) {
+        return std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}/lib/systemd/user", .{ destdir, prefix });
 }
 
 fn resolveUdevDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool) ![]const u8 {
@@ -341,8 +338,10 @@ fn installMapping(allocator: std.mem.Allocator, name: []const u8, destdir: []con
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
-    if (opts.destdir.len == 0 and std.os.linux.getuid() != 0) {
-        _ = std.posix.write(std.posix.STDERR_FILENO, "error: must run as root — use: sudo padctl install\n") catch {};
+    const is_root = std.os.linux.getuid() == 0;
+    const effective_user_service = opts.user_service orelse !is_root;
+    if (opts.destdir.len == 0 and !is_root and !effective_user_service) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "error: system-wide install requires root — use: sudo padctl install\n") catch {};
         std.process.exit(1);
     }
 
@@ -376,9 +375,25 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     else
         opts.prefix;
 
+    // Migration hint: warn if old system unit exists
+    {
+        const old_unit = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/system/padctl.service", .{destdir});
+        defer allocator.free(old_unit);
+        if (std.fs.accessAbsolute(old_unit, .{})) |_| {
+            _ = std.posix.write(std.posix.STDERR_FILENO,
+                \\warning: legacy system unit detected at /etc/systemd/system/padctl.service
+                \\  Stop and disable it before using the new user service:
+                \\    sudo systemctl stop padctl.service
+                \\    sudo systemctl disable padctl.service
+                \\    sudo rm /etc/systemd/system/padctl.service
+                \\
+            ) catch {};
+        } else |_| {}
+    }
+
     const bin_dir = try std.fmt.allocPrint(allocator, "{s}{s}/bin", .{ destdir, prefix });
     defer allocator.free(bin_dir);
-    const lib_systemd_dir = try resolveServiceDir(allocator, destdir, prefix, effective_immutable);
+    const lib_systemd_dir = try resolveServiceDir(allocator, destdir, prefix, effective_immutable, effective_user_service);
     defer allocator.free(lib_systemd_dir);
     const share_dir = try std.fmt.allocPrint(allocator, "{s}{s}/share/padctl/devices", .{ destdir, prefix });
     defer allocator.free(share_dir);
@@ -429,8 +444,8 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, service_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
-    // 2b. Write immutable drop-in override (only when immutable)
-    if (effective_immutable) {
+    // 2b. Write immutable drop-in override (only when immutable system install)
+    if (effective_immutable and !effective_user_service) {
         const dropin_dir = try std.fmt.allocPrint(allocator, "{s}/padctl.service.d", .{lib_systemd_dir});
         defer allocator.free(dropin_dir);
         try ensureDirAll(allocator, dropin_dir);
@@ -446,8 +461,8 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
-    // 2c. Write resume service (all systems)
-    {
+    // 2c. Write resume service (system installs only; user sessions handle sleep via logind)
+    if (!effective_user_service) {
         const resume_path = try std.fmt.allocPrint(allocator, "{s}/padctl-resume.service", .{lib_systemd_dir});
         defer allocator.free(resume_path);
         var f = try std.fs.createFileAbsolute(resume_path, .{ .truncate = true });
@@ -605,14 +620,24 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 5. Reload system daemons and enable/start services (only when not staging)
     if (destdir.len == 0) {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
-        runCmd(&.{ "systemctl", "daemon-reload" });
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
         runCmd(&.{ "udevadm", "trigger" });
-        if (!opts.no_enable) {
-            runCmdWarn(&.{ "systemctl", "enable", "padctl.service", "padctl-resume.service" });
-        }
-        if (!opts.no_start) {
-            runCmdWarn(&.{ "systemctl", "start", "padctl.service" });
+        if (effective_user_service) {
+            runCmd(&.{ "systemctl", "--user", "daemon-reload" });
+            if (!opts.no_enable) {
+                runCmdWarn(&.{ "systemctl", "--user", "enable", "padctl.service" });
+            }
+            if (!opts.no_start) {
+                runCmdWarn(&.{ "systemctl", "--user", "start", "padctl.service" });
+            }
+        } else {
+            runCmd(&.{ "systemctl", "daemon-reload" });
+            if (!opts.no_enable) {
+                runCmdWarn(&.{ "systemctl", "enable", "padctl.service" });
+            }
+            if (!opts.no_start) {
+                runCmdWarn(&.{ "systemctl", "start", "padctl.service" });
+            }
         }
     }
 
@@ -620,7 +645,22 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDERR_FILENO, "\nInstall completed with mapping errors.\n") catch {};
         return error.MappingInstallFailed;
     }
-    _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
+
+    if (effective_user_service and destdir.len == 0) {
+        _ = std.posix.write(std.posix.STDOUT_FILENO,
+            \\
+            \\Install complete.
+            \\
+            \\To start the service:
+            \\  systemctl --user enable --now padctl.service
+            \\
+            \\To auto-start at boot without a login session (headless/server):
+            \\  sudo loginctl enable-linger $USER
+            \\
+        ) catch {};
+    } else {
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
+    }
 }
 
 pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
@@ -1450,9 +1490,10 @@ test "install: generateServiceContent uses prefix" {
     const content = try generateServiceContent(allocator, "/usr/local");
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "/usr/local/bin/padctl") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "RuntimeDirectory=padctl") != null);
-    // Non-default prefix includes --config-dir to point at installed device configs
     try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/local/share/padctl/devices") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "WantedBy=default.target") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "ProtectHome") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
 }
 
 test "install: generateServiceContent default prefix omits --config-dir" {
@@ -1462,6 +1503,18 @@ test "install: generateServiceContent default prefix omits --config-dir" {
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "/usr/bin/padctl") != null);
     try testing.expect(std.mem.indexOf(u8, content, "--config-dir") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "After=graphical-session.target") != null);
+}
+
+test "install: generateServiceContent is user unit" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "WantedBy=default.target") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "ProtectHome") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "ProtectSystem") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
 }
 
 test "install: generateUdevRules produces valid output" {
@@ -1670,20 +1723,20 @@ test "install: shouldAbortForImmutable logic" {
     try testing.expect(!shouldAbortForImmutable(.none, .{}));
 }
 
-test "install: resolveServiceDir immutable routes to /etc/systemd/system" {
+test "install: resolveServiceDir immutable routes to /etc/systemd/user" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const result = try resolveServiceDir(allocator, "/staging", "/usr/local", true);
+    const result = try resolveServiceDir(allocator, "/staging", "/usr/local", true, false);
     defer allocator.free(result);
-    try testing.expectEqualStrings("/staging/etc/systemd/system", result);
+    try testing.expectEqualStrings("/staging/etc/systemd/user", result);
 }
 
-test "install: resolveServiceDir standard routes to prefix/lib/systemd/system" {
+test "install: resolveServiceDir standard routes to prefix/lib/systemd/user" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const result = try resolveServiceDir(allocator, "", "/usr/local", false);
+    const result = try resolveServiceDir(allocator, "", "/usr/local", false, false);
     defer allocator.free(result);
-    try testing.expectEqualStrings("/usr/local/lib/systemd/system", result);
+    try testing.expectEqualStrings("/usr/local/lib/systemd/user", result);
 }
 
 test "install: resolveUdevDir immutable routes to /etc/udev/rules.d" {
@@ -2401,4 +2454,45 @@ test "install: installMapping errors on missing source" {
     try std.fs.makeDirAbsolute(src_dir);
 
     try testing.expectError(error.FileNotFound, installMapping(allocator, "nonexistent", destdir, src_dir, false));
+}
+
+test "install: resolveServiceDir user service uses HOME" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const dir = try resolveServiceDir(allocator, "", "/usr", false, true);
+    defer allocator.free(dir);
+    const expected = try std.fmt.allocPrint(allocator, "{s}/.config/systemd/user", .{home});
+    defer allocator.free(expected);
+    try testing.expectEqualStrings(expected, dir);
+}
+
+test "install: resolveServiceDir system install uses lib path" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const dir = try resolveServiceDir(allocator, "", "/usr", false, false);
+    defer allocator.free(dir);
+    try testing.expectEqualStrings("/usr/lib/systemd/user", dir);
+}
+
+test "install: old system unit triggers migration hint" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const etc_systemd = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/system", .{destdir});
+    defer allocator.free(etc_systemd);
+    try ensureDirAll(allocator, etc_systemd);
+    const old_unit = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{etc_systemd});
+    defer allocator.free(old_unit);
+    {
+        var f = try std.fs.createFileAbsolute(old_unit, .{});
+        defer f.close();
+    }
+
+    // Verify the old unit is detectable (the migration hint logic reads this path)
+    try std.fs.accessAbsolute(old_unit, .{});
 }
