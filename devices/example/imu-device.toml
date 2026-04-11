@@ -1,0 +1,69 @@
+# Example: gamepad with IMU (accelerometer + gyroscope)
+#
+# Adding [output.imu] causes padctl to create a second uinput device
+# alongside the main gamepad. The IMU device has INPUT_PROP_ACCELEROMETER
+# set and exposes:
+#   ABS_X/Y/Z  — accelerometer axes
+#   ABS_RX/Y/Z — gyroscope axes
+#
+# SDL associates the sensor with the gamepad by matching VID:PID, so both
+# devices must share the same vid/pid as the [output] block.
+#
+# Note: for Steam to show gyro controls in its UI, the controller also
+# needs an entry in SDL_GameControllerDB with the appropriate gyro hints.
+
+[device]
+name = "Example Gamepad with IMU"
+vid = 0x1234
+pid = 0x5678
+
+[[device.interface]]
+id = 0
+class = "hid"
+
+[[report]]
+name = "main"
+interface = 0
+size = 32
+
+[report.fields]
+left_x  = { offset = 0,  type = "i16le" }
+left_y  = { offset = 2,  type = "i16le", transform = "negate" }
+right_x = { offset = 4,  type = "i16le" }
+right_y = { offset = 6,  type = "i16le", transform = "negate" }
+gyro_x  = { offset = 8,  type = "i16le" }
+gyro_y  = { offset = 10, type = "i16le" }
+gyro_z  = { offset = 12, type = "i16le" }
+accel_x = { offset = 14, type = "i16le" }
+accel_y = { offset = 16, type = "i16le" }
+accel_z = { offset = 18, type = "i16le" }
+
+[report.button_group]
+source = { offset = 20, size = 2 }
+map = { A = 0, B = 1, X = 2, Y = 3, LB = 4, RB = 5, Select = 6, Start = 7 }
+
+[output]
+name = "Example Gamepad with IMU"
+vid = 0x1234
+pid = 0x5678
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767 }
+
+[output.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_NORTH"
+Y      = "BTN_WEST"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+
+# Creates a separate uinput IMU device with the same VID:PID.
+# Name is optional — defaults to "padctl-imu".
+[output.imu]
+name = "Example Gamepad with IMU Motion Sensors"

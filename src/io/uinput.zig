@@ -113,6 +113,24 @@ pub const AuxOutputDevice = struct {
     }
 };
 
+pub const ImuOutputDevice = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        emit: *const fn (ptr: *anyopaque, s: state.GamepadState) EmitError!void,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn emit(self: ImuOutputDevice, s: state.GamepadState) EmitError!void {
+        return self.vtable.emit(self.ptr, s);
+    }
+
+    pub fn close(self: ImuOutputDevice) void {
+        self.vtable.close(self.ptr);
+    }
+};
+
 // Resolved button mapping: ButtonId index → uinput BTN code (0 = unmapped)
 const BUTTON_COUNT = @typeInfo(state.ButtonId).@"enum".fields.len;
 
@@ -800,6 +818,108 @@ pub const GenericUinputDevice = struct {
     }
 
     pub fn close(self: *GenericUinputDevice) void {
+        _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
+        std.posix.close(self.fd);
+    }
+};
+
+pub const ImuDevice = struct {
+    fd: std.posix.fd_t,
+    prev: Prev = .{},
+
+    const Prev = struct {
+        accel_x: i16 = 0,
+        accel_y: i16 = 0,
+        accel_z: i16 = 0,
+        gyro_x: i16 = 0,
+        gyro_y: i16 = 0,
+        gyro_z: i16 = 0,
+    };
+
+    pub fn create(cfg: *const device.ImuConfig, vid: u16, pid: u16) !ImuDevice {
+        const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
+        const fd = try std.posix.open("/dev/uinput", flags, 0);
+        errdefer std.posix.close(fd);
+
+        // INPUT_PROP_ACCELEROMETER makes SDL recognise this as a sensor device
+        try ioctlInt(fd, UI_SET_PROPBIT, c.INPUT_PROP_ACCELEROMETER);
+        try ioctlInt(fd, UI_SET_EVBIT, c.EV_ABS);
+        // Accelerometer: ABS_X/Y/Z  Gyroscope: ABS_RX/RY/RZ  (no EV_KEY)
+        for ([_]u16{ c.ABS_X, c.ABS_Y, c.ABS_Z, c.ABS_RX, c.ABS_RY, c.ABS_RZ }) |code| {
+            try ioctlInt(fd, UI_SET_ABSBIT, @intCast(code));
+        }
+
+        var setup = std.mem.zeroes(c.uinput_setup);
+        const name = cfg.name orelse "padctl-imu";
+        const copy_len = @min(name.len, setup.name.len - 1);
+        @memcpy(setup.name[0..copy_len], name[0..copy_len]);
+        setup.id.bustype = c.BUS_VIRTUAL;
+        setup.id.vendor = vid;
+        setup.id.product = pid;
+        try ioctlPtr(fd, UI_DEV_SETUP, @intFromPtr(&setup));
+
+        // Configure abs range for all 6 axes
+        for ([_]u16{ c.ABS_X, c.ABS_Y, c.ABS_Z, c.ABS_RX, c.ABS_RY, c.ABS_RZ }) |code| {
+            var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+            abs_setup.code = code;
+            abs_setup.absinfo.minimum = -32767;
+            abs_setup.absinfo.maximum = 32767;
+            try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+        }
+
+        try ioctlPtr(fd, UI_DEV_CREATE, 0);
+        return .{ .fd = fd };
+    }
+
+    pub fn imuOutputDevice(self: *ImuDevice) ImuOutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = ImuOutputDevice.VTable{
+        .emit = emitVtable,
+        .close = closeVtable,
+    };
+
+    fn emitVtable(ptr: *anyopaque, s: state.GamepadState) EmitError!void {
+        const self: *ImuDevice = @ptrCast(@alignCast(ptr));
+        self.emit(s) catch return error.WriteFailed;
+    }
+
+    fn closeVtable(ptr: *anyopaque) void {
+        const self: *ImuDevice = @ptrCast(@alignCast(ptr));
+        self.close();
+    }
+
+    pub fn emit(self: *ImuDevice, s: state.GamepadState) !void {
+        var events: [7]c.input_event = undefined;
+        var n: usize = 0;
+
+        const pairs = [_]struct { curr: i16, prev: i16, code: u16 }{
+            .{ .curr = s.accel_x, .prev = self.prev.accel_x, .code = c.ABS_X },
+            .{ .curr = s.accel_y, .prev = self.prev.accel_y, .code = c.ABS_Y },
+            .{ .curr = s.accel_z, .prev = self.prev.accel_z, .code = c.ABS_Z },
+            .{ .curr = s.gyro_x,  .prev = self.prev.gyro_x,  .code = c.ABS_RX },
+            .{ .curr = s.gyro_y,  .prev = self.prev.gyro_y,  .code = c.ABS_RY },
+            .{ .curr = s.gyro_z,  .prev = self.prev.gyro_z,  .code = c.ABS_RZ },
+        };
+        for (pairs) |p| {
+            if (p.curr != p.prev) {
+                events[n] = .{ .type = c.EV_ABS, .code = p.code, .value = p.curr, .time = std.mem.zeroes(c.timeval) };
+                n += 1;
+            }
+        }
+        if (n > 0) {
+            events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+        }
+        self.prev = .{
+            .accel_x = s.accel_x, .accel_y = s.accel_y, .accel_z = s.accel_z,
+            .gyro_x = s.gyro_x, .gyro_y = s.gyro_y, .gyro_z = s.gyro_z,
+        };
+    }
+
+    pub fn close(self: *ImuDevice) void {
         _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
         std.posix.close(self.fd);
     }
