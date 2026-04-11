@@ -988,7 +988,15 @@ fn escapeTomlString(writer: anytype, s: []const u8) !void {
             '\\' => try writer.writeAll("\\\\"),
             '"' => try writer.writeAll("\\\""),
             '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
             '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0C => try writer.writeAll("\\f"),
+            0...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
+                var buf: [6]u8 = undefined;
+                const escaped = std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c}) catch unreachable;
+                try writer.writeAll(escaped);
+            },
             else => try writer.writeByte(c),
         }
     }
@@ -1093,6 +1101,14 @@ test "escapeTomlString: escapes special characters" {
     defer buf.deinit(testing.allocator);
     try escapeTomlString(buf.writer(testing.allocator), "Device \"X\"\\\nTab\there");
     try testing.expectEqualStrings("Device \\\"X\\\"\\\\\\nTab\\there", buf.items);
+}
+
+test "escapeTomlString: covers full TOML control-char set" {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(testing.allocator);
+    // \r → \r, \b (0x08) → \b, \f (0x0C) → \f, 0x01 → \u0001
+    try escapeTomlString(buf.writer(testing.allocator), "\r\x08\x0C\x01");
+    try testing.expectEqualStrings("\\r\\b\\f\\u0001", buf.items);
 }
 
 test "main: parseHexBytes via init_seq" {
