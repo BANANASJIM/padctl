@@ -130,6 +130,10 @@ pub const TouchpadConfig = struct {
     max_slots: ?i64 = null,
 };
 
+pub const ImuConfig = struct {
+    name: ?[]const u8 = null,
+};
+
 pub const MappingEntry = struct {
     event: []const u8,
     range: ?[]const i64 = null,
@@ -149,6 +153,7 @@ pub const OutputConfig = struct {
     force_feedback: ?FfConfig = null,
     aux: ?AuxConfig = null,
     touchpad: ?TouchpadConfig = null,
+    imu: ?ImuConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
 };
 
