@@ -713,6 +713,9 @@ pub fn main() !void {
                 std.log.err("failed to parse mapping '{s}': {}", .{ path, err });
                 std.process.exit(1);
             };
+            config.mapping.validate(&mapping_pr.?.value) catch |err| {
+                std.log.warn("mapping '{s}' validation warning: {}", .{ path, err });
+            };
             break :blk &mapping_pr.?.value;
         }
         // No --mapping: try user config default
@@ -724,7 +727,12 @@ pub fn main() !void {
                         std.log.warn("failed to parse default mapping '{s}': {}", .{ mp, err });
                         break :blk2 null;
                     };
-                    if (mapping_pr) |*pr| break :blk &pr.value;
+                    if (mapping_pr) |*pr| {
+                        config.mapping.validate(&pr.value) catch |err| {
+                            std.log.warn("mapping '{s}' validation warning: {}", .{ mp, err });
+                        };
+                        break :blk &pr.value;
+                    }
                 } else {
                     std.log.warn("default mapping '{s}' not found in XDG paths", .{name});
                 }
@@ -744,6 +752,7 @@ pub fn main() !void {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("test/macro_e2e_test.zig");
     _ = @import("test/bugfix_regression_test.zig");
     _ = @import("test/properties/config_props.zig");
     _ = @import("test/properties/contract_props.zig");

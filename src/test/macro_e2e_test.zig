@@ -72,6 +72,9 @@ fn testInstance(
         .mapper = null,
         .uinput_dev = null,
         .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
@@ -153,7 +156,7 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
         .{ .tap = "KEY_LEFT" },
     };
     const m = Macro{ .name = "dodge_roll", .steps = &steps };
-    var player = MacroPlayer.init(&m, 1);
+    var player = MacroPlayer.init(&m, 1, 0);
     var q = TimerQueue.init(allocator, -1);
     defer q.deinit();
 
@@ -210,7 +213,7 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
         .{ .up = "KEY_LEFTSHIFT" },
     };
     const m = Macro{ .name = "shift_hold", .steps = &steps };
-    var player = MacroPlayer.init(&m, 1);
+    var player = MacroPlayer.init(&m, 1, 0);
     var q = TimerQueue.init(allocator, -1);
     defer q.deinit();
 
@@ -348,6 +351,9 @@ test "macro: hot-reload — updateMapping swaps config; next apply uses new mapp
         .mapper = try Mapper.init(&parsed_initial.value, loop.timer_fd, allocator),
         .uinput_dev = null,
         .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
         .device_cfg = &parsed_dev.value,
         .pending_mapping = null,
         .stopped = false,
@@ -464,7 +470,7 @@ test "macro: mapper pause_for_release — falling edge calls notifyTriggerReleas
     var ctx = try makeMapper(
         \\[[macro]]
         \\name = "shift_hold"
-        \\steps = [{ hold = "KEY_LEFTSHIFT" }, { pause_for_release = true }, { release = "KEY_LEFTSHIFT" }]
+        \\steps = [{ down = "KEY_LEFTSHIFT" }, "pause_for_release", { up = "KEY_LEFTSHIFT" }]
         \\
         \\[remap]
         \\M1 = "macro:shift_hold"
