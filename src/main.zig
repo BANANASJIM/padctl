@@ -982,6 +982,18 @@ fn runSudoMkdir(dir: []const u8, err_writer: anytype) bool {
     };
 }
 
+fn escapeTomlString(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(c),
+        }
+    }
+}
+
 /// Write a config.toml with a single device binding. Reads existing file
 /// to preserve other device entries.
 fn writeConfigToml(
@@ -1011,18 +1023,30 @@ fn writeConfigToml(
     if (devices) |devs| {
         for (devs) |d| {
             if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
-                try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+                try w.writeAll("\n[[device]]\nname = \"");
+                try escapeTomlString(w, device_name);
+                try w.writeAll("\"\ndefault_mapping = \"");
+                try escapeTomlString(w, mapping_name);
+                try w.writeAll("\"\n");
                 wrote_target = true;
             } else {
-                try w.print("\n[[device]]\nname = \"{s}\"\n", .{d.name});
+                try w.writeAll("\n[[device]]\nname = \"");
+                try escapeTomlString(w, d.name);
+                try w.writeAll("\"\n");
                 if (d.default_mapping) |m| {
-                    try w.print("default_mapping = \"{s}\"\n", .{m});
+                    try w.writeAll("default_mapping = \"");
+                    try escapeTomlString(w, m);
+                    try w.writeAll("\"\n");
                 }
             }
         }
     }
     if (!wrote_target) {
-        try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+        try w.writeAll("\n[[device]]\nname = \"");
+        try escapeTomlString(w, device_name);
+        try w.writeAll("\"\ndefault_mapping = \"");
+        try escapeTomlString(w, mapping_name);
+        try w.writeAll("\"\n");
     }
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
@@ -1062,6 +1086,13 @@ test "main: parseDeviceFromStatus extracts device name" {
 test "main: parseDeviceFromStatus returns null for empty response" {
     try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus(""));
     try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("OK\n"));
+}
+
+test "escapeTomlString: escapes special characters" {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(testing.allocator);
+    try escapeTomlString(buf.writer(testing.allocator), "Device \"X\"\\\nTab\there");
+    try testing.expectEqualStrings("Device \\\"X\\\"\\\\\\nTab\\there", buf.items);
 }
 
 test "main: parseHexBytes via init_seq" {
