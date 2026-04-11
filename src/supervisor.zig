@@ -934,6 +934,9 @@ pub const Supervisor = struct {
                 cs.sendResponse(fd, "ERR mapping-parse-failed\n");
                 return;
             };
+            mapping_cfg.validate(&parsed.value) catch |err| {
+                std.log.warn("mapping \"{s}\" validation warning: {}", .{ path.?, err });
+            };
             const parsed_ptr = self.allocator.create(mapping_cfg.ParseResult) catch {
                 parsed.deinit();
                 cs.sendResponse(fd, "ERR oom\n");
@@ -1063,6 +1066,9 @@ pub const Supervisor = struct {
         }
         defer self.allocator.free(path.?);
         const result = mapping_cfg.parseFile(self.allocator, path.?) catch return null;
+        mapping_cfg.validate(&result.value) catch |err| {
+            std.log.warn("mapping \"{s}\" validation warning: {}", .{ mapping_name, err });
+        };
         std.log.info("mapping discovery: device \"{s}\" mapping \"{s}\" from \"{s}\"", .{ device_name, mapping_name, path.? });
         return result;
     }

@@ -232,15 +232,19 @@ pub const Mapper = struct {
                 },
                 .disabled => {},
                 .macro => |name| {
-                    // Trigger macro on rising edge only.
                     if (pressed and !prev_pressed) {
                         if (self.findMacro(name)) |m| {
                             const token = self.next_token;
                             self.next_token +%= 1;
-                            const player = MacroPlayer.init(m, token);
+                            const player = MacroPlayer.init(m, token, @intCast(i));
                             self.active_macros.append(self.allocator, player) catch |err| {
                                 std.log.warn("macro queue failed: {}", .{err});
                             };
+                        }
+                    } else if (!pressed and prev_pressed) {
+                        for (self.active_macros.items) |*p| {
+                            if (p.trigger_src_idx == @as(u6, @intCast(i)) and p.waiting_for_release)
+                                p.notifyTriggerReleased();
                         }
                     }
                 },

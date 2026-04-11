@@ -457,3 +457,47 @@ test "macro: mapper macro trigger — no second player on held button (no re-tri
     _ = try m.apply(.{ .buttons = m1_mask }, 16);
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
+
+test "macro: mapper pause_for_release — falling edge calls notifyTriggerReleased, player completes" {
+    const allocator = testing.allocator;
+
+    var ctx = try makeMapper(
+        \\[[macro]]
+        \\name = "shift_hold"
+        \\steps = [{ hold = "KEY_LEFTSHIFT" }, { pause_for_release = true }, { release = "KEY_LEFTSHIFT" }]
+        \\
+        \\[remap]
+        \\M1 = "macro:shift_hold"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const m1_mask = btnMask(.M1);
+
+    // Rising edge: macro starts, emits LSHIFT down, then halts at pause_for_release.
+    const ev1 = try m.apply(.{ .buttons = m1_mask }, 16);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+    try testing.expect(m.active_macros.items[0].waiting_for_release);
+    // LSHIFT down event emitted.
+    try testing.expectEqual(@as(usize, 1), ev1.aux.len);
+    switch (ev1.aux.get(0)) {
+        .key => |k| {
+            try testing.expectEqual(KEY_LEFTSHIFT, k.code);
+            try testing.expect(k.pressed);
+        },
+        else => return error.WrongType,
+    }
+
+    // Falling edge: notifyTriggerReleased fired via mapper falling-edge branch.
+    const ev2 = try m.apply(.{ .buttons = 0 }, 16);
+    // Player resumed: LSHIFT up emitted, macro removed.
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+    try testing.expectEqual(@as(usize, 1), ev2.aux.len);
+    switch (ev2.aux.get(0)) {
+        .key => |k| {
+            try testing.expectEqual(KEY_LEFTSHIFT, k.code);
+            try testing.expect(!k.pressed);
+        },
+        else => return error.WrongType,
+    }
+}
