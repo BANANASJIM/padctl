@@ -1,6 +1,20 @@
 const std = @import("std");
 const analyse = @import("analyse");
 
+fn writeTomlString(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => try writer.print("\\u00{x:0>2}", .{c}),
+            else => try writer.writeByte(c),
+        }
+    }
+}
+
 pub const DeviceInfo = struct {
     name: []const u8,
     vid: u16,
@@ -9,9 +23,10 @@ pub const DeviceInfo = struct {
 };
 
 pub fn emitToml(result: analyse.AnalysisResult, info: DeviceInfo, allocator: std.mem.Allocator, writer: anytype) !void {
+    try writer.writeAll("[device]\nname = \"");
+    try writeTomlString(writer, info.name);
     try writer.print(
-        \\[device]
-        \\name = "{s}"
+        \\"
         \\vid = 0x{x:0>4}
         \\pid = 0x{x:0>4}
         \\
@@ -25,7 +40,7 @@ pub fn emitToml(result: analyse.AnalysisResult, info: DeviceInfo, allocator: std
         \\size = {d}
         \\
     ,
-        .{ info.name, info.vid, info.pid, info.interface_id, info.interface_id, result.report_size },
+        .{ info.vid, info.pid, info.interface_id, info.interface_id, result.report_size },
     );
 
     // match section if we have magic bytes
@@ -175,6 +190,27 @@ test "emitToml: axes + buttons — fields and button_group present" {
     try testing.expect(std.mem.indexOf(u8, out, "[report.button_group]") != null);
     try testing.expect(std.mem.indexOf(u8, out, "btn_11_3") != null);
     try testing.expect(std.mem.indexOf(u8, out, "btn_11_5") != null);
+}
+
+test "emitToml: device name with quote/backslash/newline — toml string injection prevented" {
+    const result = AnalysisResult{
+        .report_size = 2,
+        .magic = &.{},
+        .buttons = &.{},
+        .axes = &.{},
+    };
+    const info = DeviceInfo{ .name = "Pad \"Evil\"\nback\\slash", .vid = 0x1234, .pid = 0x5678, .interface_id = 0 };
+    const out = try emitToString(result, info);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\\\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\\\\") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\\n") != null);
+    // raw newline must not appear inside the name value on the same line
+    const name_line_start = std.mem.indexOf(u8, out, "name = \"").?;
+    const name_line_end = std.mem.indexOfPos(u8, out, name_line_start, "\n").?;
+    const name_line = out[name_line_start..name_line_end];
+    try testing.expect(std.mem.indexOfScalar(u8, name_line[8..], '\n') == null);
 }
 
 test "emitToml: single u8 axis — type string correct" {
