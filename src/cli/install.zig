@@ -2571,3 +2571,21 @@ test "install: old system unit triggers migration hint" {
     // Verify the old unit is detectable (the migration hint logic reads this path)
     try std.fs.accessAbsolute(old_unit, .{});
 }
+
+test "install: generateServiceContent /usr prefix omits --config-dir" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "--config-dir") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "ExecStart=/usr/bin/padctl\n") != null);
+}
+
+test "install: generateServiceContent non-usr prefix includes --config-dir for its own share" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr/local");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/local/share/padctl/devices") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/share") == null);
+}

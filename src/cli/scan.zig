@@ -40,6 +40,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         entries.deinit(allocator);
     }
 
+    var access_denied_hint_shown = false;
     var i: u8 = 0;
     while (i < MAX_HIDRAW) : (i += 1) {
         var path_buf: [32]u8 = undefined;
@@ -47,6 +48,13 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
 
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| switch (err) {
             error.FileNotFound => continue,
+            error.AccessDenied => {
+                if (!access_denied_hint_shown) {
+                    std.log.warn("scan: permission denied on {s} — run with sudo or add yourself to the 'input' group", .{path});
+                    access_denied_hint_shown = true;
+                }
+                continue;
+            },
             else => {
                 std.log.warn("scan: open {s} failed: {}", .{ path, err });
                 continue;
@@ -297,9 +305,15 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
     }
 
     for (config_dirs) |dir| {
-        const entries = scan(allocator, dir) catch |err| {
-            std.log.warn("scan: failed to scan config dir '{s}': {}", .{ dir, err });
-            continue;
+        const entries = scan(allocator, dir) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.log.debug("scan: config dir '{s}' not found, skipping", .{dir});
+                continue;
+            },
+            else => {
+                std.log.warn("scan: failed to scan config dir '{s}': {}", .{ dir, err });
+                continue;
+            },
         };
         defer allocator.free(entries);
         for (entries) |e| {
