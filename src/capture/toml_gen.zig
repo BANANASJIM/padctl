@@ -203,14 +203,8 @@ test "emitToml: device name with quote/backslash/newline — toml string injecti
     const out = try emitToString(result, info);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\\\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\\\\") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\\n") != null);
-    // raw newline must not appear inside the name value on the same line
-    const name_line_start = std.mem.indexOf(u8, out, "name = \"").?;
-    const name_line_end = std.mem.indexOfPos(u8, out, name_line_start, "\n").?;
-    const name_line = out[name_line_start..name_line_end];
-    try testing.expect(std.mem.indexOfScalar(u8, name_line[8..], '\n') == null);
+    const expected_name_line = "name = \"Pad \\\"Evil\\\"\\nback\\\\slash\"";
+    try testing.expect(std.mem.indexOf(u8, out, expected_name_line) != null);
 }
 
 test "emitToml: single u8 axis — type string correct" {
