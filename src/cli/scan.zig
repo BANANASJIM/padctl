@@ -304,6 +304,18 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
         all_entries.deinit(allocator);
     }
 
+    // When the user explicitly passes --config-dir, treat a missing path as
+    // a hard error so the failure isn't silently masked as "no devices found".
+    if (config_dirs.len == 1) {
+        std.fs.accessAbsolute(config_dirs[0], .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.log.warn("scan: config dir '{s}' not found", .{config_dirs[0]});
+                return err;
+            },
+            else => {},
+        };
+    }
+
     for (config_dirs) |dir| {
         const entries = scan(allocator, dir) catch |err| switch (err) {
             error.FileNotFound => {
@@ -494,4 +506,11 @@ test "scan: matchInterfaceId: with constraint and null iface returns false" {
 test "scan: freeEntries: empty slice is a no-op" {
     const empty: []ScanEntry = &.{};
     freeEntries(std.testing.allocator, empty);
+}
+
+test "scan: run: explicit single missing config dir surfaces FileNotFound" {
+    var buf: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const dirs = [_][]const u8{"/nonexistent/padctl/devices/path/for/test"};
+    try std.testing.expectError(error.FileNotFound, run(std.testing.allocator, &dirs, fbs.writer()));
 }
