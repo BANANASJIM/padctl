@@ -217,8 +217,11 @@ fn atomicInstallBinary(allocator: std.mem.Allocator, src: []const u8, dst: []con
     }
     try tmp_file.chmod(0o755);
     try tmp_file.sync();
-    tmp_file.close();
+    // Rename before close so that on rename failure the errdefer closes the fd
+    // exactly once. Closing after rename is safe on Linux: the fd keeps the old
+    // inode alive until close, independent of the dirent.
     try std.posix.rename(tmp, dst);
+    tmp_file.close();
 }
 
 fn runCmd(argv: []const []const u8) void {
@@ -2688,4 +2691,92 @@ test "install: atomicInstallBinary rename succeeds while dst has open readers" {
     };
     defer allocator.free(got);
     try testing.expectEqualStrings("payload", got);
+}
+
+// Counts open fds in /proc/self/fd. Used to detect fd leaks in the atomicInstallBinary
+// error paths.
+fn countOpenFds() !usize {
+    var dir = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next()) |_| n += 1;
+    return n;
+}
+
+test "install: atomicInstallBinary closes tmp fd on copy-loop error" {
+    // Reproducer for the errdefer-close bug: passing a directory as src
+    // lets openFileAbsolute succeed (returns a dirfd), createFileAbsolute
+    // succeeds, then src_file.read() fails with error.IsDir inside the
+    // copy loop. Without errdefer tmp_file.close(), the tmp_file fd leaks.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src_is_dir", .{dir});
+    defer allocator.free(src_dir);
+    try std.fs.makeDirAbsolute(src_dir);
+
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.bin", .{dir});
+    defer allocator.free(dst_path);
+
+    const fds_before = try countOpenFds();
+
+    const result = atomicInstallBinary(allocator, src_dir, dst_path);
+    try testing.expect(std.meta.isError(result));
+
+    const fds_after = try countOpenFds();
+    try testing.expectEqual(fds_before, fds_after);
+
+    // errdefer deleteFileAbsolute must also have cleaned the tmp file.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.new", .{dst_path});
+    defer allocator.free(tmp_path);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(tmp_path, .{}));
+}
+
+test "install: atomicInstallBinary does not double-close on rename failure" {
+    // Reproducer for the double-close concern: if rename(tmp, dst) fails,
+    // the errdefer tmp_file.close() fires after the explicit close on the
+    // success path has already run. Zig's File.close is NOT idempotent
+    // (it calls posix.close(handle) unconditionally), so a second close
+    // either returns EBADF silently or panics under safety checks.
+    //
+    // Trigger rename failure by making dst an existing non-empty directory:
+    // rename(file, non-empty-dir) fails with ENOTEMPTY or EISDIR.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src.bin", .{dir});
+    defer allocator.free(src_path);
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+
+    // dst is an existing non-empty directory — rename(file, dir-with-contents) fails.
+    const dst_dir = try std.fmt.allocPrint(allocator, "{s}/dst_is_dir", .{dir});
+    defer allocator.free(dst_dir);
+    try std.fs.makeDirAbsolute(dst_dir);
+    const sentinel = try std.fmt.allocPrint(allocator, "{s}/sentinel", .{dst_dir});
+    defer allocator.free(sentinel);
+    {
+        var f = try std.fs.createFileAbsolute(sentinel, .{});
+        f.close();
+    }
+
+    const fds_before = try countOpenFds();
+
+    const result = atomicInstallBinary(allocator, src_path, dst_dir);
+    try testing.expect(std.meta.isError(result));
+
+    const fds_after = try countOpenFds();
+    try testing.expectEqual(fds_before, fds_after);
 }
