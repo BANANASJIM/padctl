@@ -200,6 +200,26 @@ fn copyFile(src: []const u8, dst: []const u8) !void {
     }
 }
 
+// Write to {dst}.new then rename(2) over dst — avoids ETXTBSY when dst is currently executing.
+fn atomicInstallBinary(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
+    const tmp = try std.fmt.allocPrint(allocator, "{s}.new", .{dst});
+    defer allocator.free(tmp);
+    var src_file = try std.fs.openFileAbsolute(src, .{});
+    defer src_file.close();
+    var tmp_file = try std.fs.createFileAbsolute(tmp, .{ .truncate = true });
+    errdefer std.fs.deleteFileAbsolute(tmp) catch {};
+    var buf: [65536]u8 = undefined;
+    while (true) {
+        const n = try src_file.read(&buf);
+        if (n == 0) break;
+        try tmp_file.writeAll(buf[0..n]);
+    }
+    try tmp_file.chmod(0o755);
+    try tmp_file.sync();
+    tmp_file.close();
+    try std.posix.rename(tmp, dst);
+}
+
 fn runCmd(argv: []const []const u8) void {
     var child = std.process.Child.init(argv, std.heap.page_allocator);
     child.stdin_behavior = .Ignore;
@@ -407,8 +427,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 1. Copy binaries
     const bin_padctl = try std.fmt.allocPrint(allocator, "{s}/padctl", .{bin_dir});
     defer allocator.free(bin_padctl);
-    try copyFile(self_path, bin_padctl);
-    try std.posix.fchmodat(std.fs.cwd().fd, bin_padctl, 0o755, 0);
+    try atomicInstallBinary(allocator, self_path, bin_padctl);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, bin_padctl) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
@@ -418,8 +437,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         defer allocator.free(src);
         const dst = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin_dir, name });
         defer allocator.free(dst);
-        copyFile(src, dst) catch continue;
-        std.posix.fchmodat(std.fs.cwd().fd, dst, 0o755, 0) catch {};
+        atomicInstallBinary(allocator, src, dst) catch continue;
         _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, dst) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
@@ -2588,4 +2606,85 @@ test "install: generateServiceContent non-usr prefix includes --config-dir for i
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/local/share/padctl/devices") != null);
     try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/share") == null);
+}
+
+test "install: atomicInstallBinary replaces destination atomically" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src.bin", .{dir});
+    defer allocator.free(src_path);
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.bin", .{dir});
+    defer allocator.free(dst_path);
+
+    // Write distinct content to src and an existing dst.
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{});
+        defer f.close();
+        try f.writeAll("new-content");
+    }
+    {
+        var f = try std.fs.createFileAbsolute(dst_path, .{});
+        defer f.close();
+        try f.writeAll("old-content");
+    }
+
+    try atomicInstallBinary(allocator, src_path, dst_path);
+
+    // Destination must now contain source bytes.
+    const got = blk: {
+        var f = try std.fs.openFileAbsolute(dst_path, .{});
+        defer f.close();
+        break :blk try f.readToEndAlloc(allocator, 4096);
+    };
+    defer allocator.free(got);
+    try testing.expectEqualStrings("new-content", got);
+
+    // Mode must be 0o755.
+    const stat = try std.fs.cwd().statFile(dst_path);
+    try testing.expectEqual(@as(u32, 0o755), stat.mode & 0o777);
+}
+
+test "install: atomicInstallBinary succeeds with reader holding dst open" {
+    // Exercises the rename-over-open-fd scenario that caused ETXTBSY with truncate.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src2.bin", .{dir});
+    defer allocator.free(src_path);
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst2.bin", .{dir});
+    defer allocator.free(dst_path);
+
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+    {
+        var f = try std.fs.createFileAbsolute(dst_path, .{});
+        defer f.close();
+        try f.writeAll("old");
+    }
+
+    // Hold dst open for reading while install runs — simulates a running process.
+    var held = try std.fs.openFileAbsolute(dst_path, .{});
+    defer held.close();
+
+    try atomicInstallBinary(allocator, src_path, dst_path);
+
+    const got = blk: {
+        var f = try std.fs.openFileAbsolute(dst_path, .{});
+        defer f.close();
+        break :blk try f.readToEndAlloc(allocator, 4096);
+    };
+    defer allocator.free(got);
+    try testing.expectEqualStrings("payload", got);
 }
