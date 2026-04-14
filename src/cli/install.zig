@@ -208,6 +208,7 @@ fn atomicInstallBinary(allocator: std.mem.Allocator, src: []const u8, dst: []con
     defer src_file.close();
     var tmp_file = try std.fs.createFileAbsolute(tmp, .{ .truncate = true });
     errdefer std.fs.deleteFileAbsolute(tmp) catch {};
+    errdefer tmp_file.close();
     var buf: [65536]u8 = undefined;
     while (true) {
         const n = try src_file.read(&buf);
@@ -2649,8 +2650,8 @@ test "install: atomicInstallBinary replaces destination atomically" {
     try testing.expectEqual(@as(u32, 0o755), stat.mode & 0o777);
 }
 
-test "install: atomicInstallBinary succeeds with reader holding dst open" {
-    // Exercises the rename-over-open-fd scenario that caused ETXTBSY with truncate.
+test "install: atomicInstallBinary rename succeeds while dst has open readers" {
+    // Verifies rename(2) over an open read fd succeeds — regression lock for the atomic-rename path.
     const testing = std.testing;
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
