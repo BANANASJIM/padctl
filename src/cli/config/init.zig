@@ -7,6 +7,10 @@ const mapping = @import("../../config/mapping.zig");
 const presets = [_][]const u8{ "xbox-360", "xbox-elite2", "dualsense", "switch-pro" };
 const templates = [_][]const u8{ "default", "fps", "racing", "fighting" };
 
+fn ensureMappingsDir(abs_path: []const u8) !void {
+    try std.fs.cwd().makePath(abs_path);
+}
+
 fn print(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) void {
     buf.writer(allocator).print(fmt, args) catch {};
     _ = posix.write(posix.STDOUT_FILENO, buf.items) catch 0;
@@ -169,9 +173,9 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
     const mappings_dir = try std.fmt.allocPrint(allocator, "{s}/mappings", .{user_dir});
     defer allocator.free(mappings_dir);
 
-    std.fs.makeDirAbsolute(mappings_dir) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return e,
+    ensureMappingsDir(mappings_dir) catch |e| {
+        std.log.err("config init: failed to create {s}: {}", .{ mappings_dir, e });
+        return e;
     };
 
     const out_path = try std.fmt.allocPrint(allocator, "{s}/{s}.toml", .{ mappings_dir, safe });
@@ -222,4 +226,20 @@ test "init: safe name sanitization" {
     const safe = std.mem.trim(u8, safe_buf, "-");
     try std.testing.expect(safe.len > 0);
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, safe, " "));
+}
+
+test "init: ensureMappingsDir creates missing parent dirs" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_abs = try tmp.dir.realpath(".", &tmp_path_buf);
+
+    const mappings = try std.fmt.allocPrint(allocator, "{s}/deep/nested/absent/mappings", .{tmp_abs});
+    defer allocator.free(mappings);
+
+    try ensureMappingsDir(mappings);
+
+    try std.fs.accessAbsolute(mappings, .{});
 }
