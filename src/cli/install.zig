@@ -21,6 +21,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\NoNewPrivileges=true
         \\LockPersonality=true
         \\ProtectClock=true
+        \\LogsDirectory=padctl
         \\
         \\[Install]
         \\WantedBy=default.target
@@ -91,6 +92,8 @@ const immutable_dropin_content =
     \\TimeoutStopSec=3
     \\# SIGTERM main + SIGKILL stuck threads simultaneously
     \\KillMode=mixed
+    \\# Create /var/log/padctl/ writable despite ProtectSystem=strict
+    \\LogsDirectory=padctl
     \\
 ;
 
@@ -139,15 +142,105 @@ fn resolveServiceDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: 
         const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
         return std.fmt.allocPrint(allocator, "{s}{s}/.config/systemd/user", .{ destdir, home });
     }
+    // On immutable OS (Bazzite/Fedora Atomic), /usr/local is a bind mount from
+    // /var/usrlocal which is unavailable during early boot. The service MUST
+    // live in /etc/systemd/system/ so systemd can find it and honour
+    // WantedBy=multi-user.target. Uses the system service template.
     if (immutable) {
-        return std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
+        return std.fmt.allocPrint(allocator, "{s}/etc/systemd/system", .{destdir});
     }
-    // systemd < 253 only scans /usr/lib/systemd/user for system-wide user units.
-    // Any other prefix falls back to /etc/systemd/user which is always scanned.
+    // Non-immutable: user service paths (same as before PR #84).
     if (std.mem.eql(u8, prefix, "/usr")) {
         return std.fmt.allocPrint(allocator, "{s}/usr/lib/systemd/user", .{destdir});
     }
     return std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
+}
+
+/// Update any legacy system service files left behind by pre-user-service
+/// installs. Without this, upgrades leave stale ExecStart (missing --config-dir)
+/// and stale drop-ins (missing LogsDirectory) on the running system service.
+fn updateLegacySystemService(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8) void {
+    // /etc/systemd/system — legacy installs placed the service here
+    const etc_dir = std.fmt.allocPrint(allocator, "{s}/etc/systemd/system", .{destdir}) catch return;
+    defer allocator.free(etc_dir);
+    updateLegacyAt(allocator, prefix, etc_dir);
+
+    // <prefix>/lib/systemd/system — another common legacy location
+    const lib_dir = std.fmt.allocPrint(allocator, "{s}{s}/lib/systemd/system", .{ destdir, prefix }) catch return;
+    defer allocator.free(lib_dir);
+    updateLegacyAt(allocator, prefix, lib_dir);
+}
+
+fn updateLegacyAt(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    base_dir: []const u8,
+) void {
+    // Update service file if it exists.
+    const svc_path = std.fmt.allocPrint(allocator, "{s}/padctl.service", .{base_dir}) catch return;
+    defer allocator.free(svc_path);
+    if (std.fs.accessAbsolute(svc_path, .{})) {
+        const content = generateSystemServiceContent(allocator, prefix) catch return;
+        defer allocator.free(content);
+        if (std.fs.createFileAbsolute(svc_path, .{ .truncate = true })) |f| {
+            defer f.close();
+            f.writeAll(content) catch return;
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, svc_path) catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, " (legacy update)\n") catch {};
+        } else |_| {}
+    } else |_| {}
+
+    // Update drop-in if the directory exists.
+    const dropin_dir = std.fmt.allocPrint(allocator, "{s}/padctl.service.d", .{base_dir}) catch return;
+    defer allocator.free(dropin_dir);
+    if (std.fs.accessAbsolute(dropin_dir, .{})) {
+        const dropin_path = std.fmt.allocPrint(allocator, "{s}/immutable.conf", .{dropin_dir}) catch return;
+        defer allocator.free(dropin_path);
+        if (std.fs.createFileAbsolute(dropin_path, .{ .truncate = true })) |f| {
+            defer f.close();
+            f.writeAll(immutable_dropin_content) catch return;
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, dropin_path) catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, " (legacy update)\n") catch {};
+        } else |_| {}
+    } else |_| {}
+}
+
+/// Generate the system service content matching the legacy format but with
+/// correct ExecStart for the given prefix.
+fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
+    const exec_start = if (std.mem.eql(u8, prefix, "/usr"))
+        try std.fmt.allocPrint(allocator, "{s}/bin/padctl", .{prefix})
+    else
+        try std.fmt.allocPrint(allocator, "{s}/bin/padctl --config-dir {s}/share/padctl/devices", .{ prefix, prefix });
+    defer allocator.free(exec_start);
+
+    return std.fmt.allocPrint(allocator,
+        \\[Unit]
+        \\Description=padctl gamepad compatibility daemon
+        \\After=local-fs.target
+        \\
+        \\[Service]
+        \\Type=simple
+        \\ExecStart={s}
+        \\Restart=on-failure
+        \\RestartSec=3
+        \\ProtectSystem=strict
+        \\ProtectHome=true
+        \\PrivateTmp=true
+        \\RuntimeDirectory=padctl
+        \\LogsDirectory=padctl
+        \\NoNewPrivileges=true
+        \\SupplementaryGroups=input
+        \\DeviceAllow=/dev/hidraw* rw
+        \\DeviceAllow=/dev/uinput rw
+        \\DeviceAllow=char-input rw
+        \\
+        \\[Install]
+        \\WantedBy=multi-user.target
+        \\
+    , .{exec_start});
 }
 
 fn resolveUdevDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool) ![]const u8 {
@@ -450,7 +543,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 2. Write service file with correct prefix paths
     const service_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{lib_systemd_dir});
     defer allocator.free(service_path);
-    const service_content = try generateServiceContent(allocator, prefix);
+    // Immutable root installs use the system service template (WantedBy=multi-user.target,
+    // ProtectSystem=strict, etc.). All others use the user service template.
+    const service_content = if (effective_immutable and !effective_user_service)
+        try generateSystemServiceContent(allocator, prefix)
+    else
+        try generateServiceContent(allocator, prefix);
     defer allocator.free(service_content);
     {
         var f = try std.fs.createFileAbsolute(service_path, .{ .truncate = true });
@@ -476,6 +574,13 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, dropin_path) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+
+        // Also update the legacy system service drop-in if it exists. Old installs
+        // (pre-user-service) placed the drop-in under /etc/systemd/system/ which
+        // the new user-service installer does not touch. Without this, upgrades
+        // leave the old drop-in stale and any new directives (e.g. LogsDirectory)
+        // never take effect on the running system service.
+        updateLegacySystemService(allocator, destdir, prefix);
     }
 
     // 2c. Write resume service (system installs only; user sessions handle sleep via logind)
@@ -1773,15 +1878,15 @@ test "install: shouldAbortForImmutable logic" {
     try testing.expect(!shouldAbortForImmutable(.none, .{}));
 }
 
-test "install: resolveServiceDir immutable routes to /etc/systemd/user" {
+test "install: resolveServiceDir immutable routes to /etc/systemd/system" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const result = try resolveServiceDir(allocator, "/staging", "/usr/local", true, false);
     defer allocator.free(result);
-    try testing.expectEqualStrings("/staging/etc/systemd/user", result);
+    try testing.expectEqualStrings("/staging/etc/systemd/system", result);
 }
 
-test "install: resolveServiceDir /usr routes to /usr/lib/systemd/user" {
+test "install: resolveServiceDir /usr non-immutable routes to /usr/lib/systemd/user" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const result = try resolveServiceDir(allocator, "", "/usr", false, false);
@@ -2514,7 +2619,7 @@ test "install: resolveServiceDir user service uses HOME" {
     try testing.expectEqualStrings(expected, dir);
 }
 
-test "install: resolveServiceDir system install uses lib path" {
+test "install: resolveServiceDir system install uses user lib path" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const dir = try resolveServiceDir(allocator, "", "/usr", false, false);

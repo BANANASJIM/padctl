@@ -2,6 +2,7 @@ const std = @import("std");
 const state = @import("../core/state.zig");
 const device = @import("../config/device.zig");
 const input_codes = @import("../config/input_codes.zig");
+const rumble_log = std.log.scoped(.rumble);
 
 const c = @cImport({
     @cInclude("linux/uinput.h");
@@ -127,6 +128,8 @@ pub const UinputDevice = struct {
     axis_count: usize = 0,
     has_dpad_hat: bool = false,
     ff_effects: [16]FfEffect = [_]FfEffect{.{}} ** 16,
+    /// Device identifier for log correlation (e.g. "Vader 5 Pro/hidraw7").
+    log_tag: []const u8 = "uinput",
 
     const AxisStateField = enum { ax, ay, rx, ry, lt, rt, dpad_x, dpad_y };
 
@@ -364,6 +367,9 @@ pub const UinputDevice = struct {
 
     pub fn pollFf(self: *UinputDevice) !?FfEvent {
         var result: ?FfEvent = null;
+        var ev_count: u32 = 0;
+        var ff_count: u32 = 0;
+        var overwrite_count: u32 = 0;
         while (true) {
             var ev: c.input_event = undefined;
             const n = std.posix.read(self.fd, std.mem.asBytes(&ev)) catch |err| switch (err) {
@@ -371,27 +377,47 @@ pub const UinputDevice = struct {
                 else => return err,
             };
             if (n != @sizeOf(c.input_event)) break;
+            ev_count += 1;
 
             if (ev.type == c.EV_UINPUT) {
                 if (ev.code == c.UI_FF_UPLOAD) {
                     var upload = std.mem.zeroes(c.uinput_ff_upload);
                     upload.request_id = @intCast(ev.value);
-                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    if (begin_rc != 0) {
+                        rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_UPLOAD FAILED rc={d}", .{ self.log_tag, begin_rc });
+                    }
                     if (upload.effect.type == c.FF_RUMBLE and upload.effect.id < 16) {
                         self.ff_effects[@intCast(upload.effect.id)] = .{
                             .strong = upload.effect.u.rumble.strong_magnitude,
                             .weak = upload.effect.u.rumble.weak_magnitude,
                             .length_ms = @intCast(upload.effect.replay.length),
                         };
+                        rumble_log.debug("[{s}] pollFf: UPLOAD id={d} type=FF_RUMBLE strong={d} weak={d} len={d}ms replay.delay={d}ms", .{
+                            self.log_tag,
+                            upload.effect.id,
+                            upload.effect.u.rumble.strong_magnitude,
+                            upload.effect.u.rumble.weak_magnitude,
+                            @as(u16, @intCast(upload.effect.replay.length)),
+                            @as(u16, @intCast(upload.effect.replay.delay)),
+                        });
+                    } else {
+                        rumble_log.debug("[{s}] pollFf: UPLOAD id={d} type={d} (non-rumble or out-of-range)", .{
+                            self.log_tag, upload.effect.id, upload.effect.type,
+                        });
                     }
                     upload.retval = 0;
                     _ = std.os.linux.ioctl(self.fd, UI_END_FF_UPLOAD, @intFromPtr(&upload));
                 } else if (ev.code == c.UI_FF_ERASE) {
                     var erase = std.mem.zeroes(c.uinput_ff_erase);
                     erase.request_id = @intCast(ev.value);
-                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    if (begin_rc != 0) {
+                        rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_ERASE FAILED rc={d}", .{ self.log_tag, begin_rc });
+                    }
                     if (erase.effect_id < 16) {
                         self.ff_effects[@intCast(erase.effect_id)] = .{};
+                        rumble_log.debug("[{s}] pollFf: ERASE id={d}", .{ self.log_tag, erase.effect_id });
                     }
                     erase.retval = 0;
                     _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
@@ -399,11 +425,17 @@ pub const UinputDevice = struct {
             } else if (ev.type == c.EV_FF) {
                 const id: usize = @intCast(ev.code);
                 // Out-of-range FF effect ids must be silently dropped.
-                // Collapsing them into a zero FfEvent would look like
-                // an explicit stop for slot 0 downstream, which would
-                // spuriously cancel the real rumble auto-stop deadline.
-                if (id >= 16) continue;
+                if (id >= 16) {
+                    rumble_log.debug("[{s}] pollFf: OUT_OF_RANGE code={d} value={d} DROPPED", .{ self.log_tag, ev.code, ev.value });
+                    continue;
+                }
+                ff_count += 1;
+                if (result != null) overwrite_count += 1;
+                const prev_tag: []const u8 = if (result != null) "overwritten" else "none";
                 if (ev.value == 0) {
+                    rumble_log.debug("[{s}] pollFf: STOP id={d} (ev#{d}, prev={s})", .{
+                        self.log_tag, id, ff_count, prev_tag,
+                    });
                     result = FfEvent{
                         .effect_type = c.FF_RUMBLE,
                         .effect_id = @intCast(id),
@@ -413,6 +445,9 @@ pub const UinputDevice = struct {
                     };
                 } else {
                     const eff = self.ff_effects[id];
+                    rumble_log.debug("[{s}] pollFf: PLAY id={d} strong={d} weak={d} dur={d}ms (ev#{d}, prev={s})", .{
+                        self.log_tag, id, eff.strong, eff.weak, eff.length_ms, ff_count, prev_tag,
+                    });
                     result = FfEvent{
                         .effect_type = c.FF_RUMBLE,
                         .effect_id = @intCast(id),
@@ -421,6 +456,18 @@ pub const UinputDevice = struct {
                         .duration_ms = eff.length_ms,
                     };
                 }
+            }
+        }
+        if (ev_count > 0) {
+            if (result) |r| {
+                const kind: []const u8 = if (r.strong == 0 and r.weak == 0) "STOP" else "PLAY";
+                rumble_log.debug("[{s}] pollFf: drain end, {d} events read, {d} EV_FF, {d} overwritten, returning {s} id={d}", .{
+                    self.log_tag, ev_count, ff_count, overwrite_count, kind, r.effect_id,
+                });
+            } else {
+                rumble_log.debug("[{s}] pollFf: drain end, {d} events read, {d} EV_FF, returning null", .{
+                    self.log_tag, ev_count, ff_count,
+                });
             }
         }
         return result;
@@ -1566,4 +1613,86 @@ test "uinput: GenericUinputDevice.emitGeneric: no change produces no write" {
     var events: [4]c.input_event = undefined;
     const n = readEvents(pfds[0], &events);
     try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+// --- Instrumentation correctness tests ---
+
+test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
+    const padctl_log = @import("../log.zig");
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[0] = .{ .strong = 0x1234, .weak = 0x5678, .length_ms = 300 };
+
+    // With dump disabled (default).
+    padctl_log.setEnabled(false);
+    const ev = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+    const r1 = (try dev.pollFf()).?;
+
+    // With dump enabled.
+    padctl_log.setEnabled(true);
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+    const r2 = (try dev.pollFf()).?;
+    padctl_log.setEnabled(false);
+
+    // Both must be identical.
+    try std.testing.expectEqual(r1.effect_type, r2.effect_type);
+    try std.testing.expectEqual(r1.effect_id, r2.effect_id);
+    try std.testing.expectEqual(r1.strong, r2.strong);
+    try std.testing.expectEqual(r1.weak, r2.weak);
+    try std.testing.expectEqual(r1.duration_ms, r2.duration_ms);
+}
+
+test "uinput: pollFf drain with overwrite: PLAY then STOP returns STOP" {
+    // Verifies the drain loop correctly overwrites and the stop event wins.
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[0] = .{ .strong = 0xffff, .weak = 0xffff, .length_ms = 500 };
+
+    // Write PLAY then STOP for same id — STOP should win.
+    const play = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const stop = c.input_event{ .type = c.EV_FF, .code = 0, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
+
+    const result = (try dev.pollFf()).?;
+    try std.testing.expectEqual(@as(u16, 0), result.strong);
+    try std.testing.expectEqual(@as(u16, 0), result.weak);
+    try std.testing.expectEqual(@as(u8, 0), result.effect_id);
+}
+
+test "uinput: pollFf drain with overwrite: STOP then PLAY returns PLAY" {
+    // Verifies the opposite overwrite direction.
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[3] = .{ .strong = 0xaaaa, .weak = 0xbbbb, .length_ms = 100 };
+
+    const stop = c.input_event{ .type = c.EV_FF, .code = 3, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    const play = c.input_event{ .type = c.EV_FF, .code = 3, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
+
+    const result = (try dev.pollFf()).?;
+    try std.testing.expectEqual(@as(u16, 0xaaaa), result.strong);
+    try std.testing.expectEqual(@as(u16, 0xbbbb), result.weak);
+    try std.testing.expectEqual(@as(u8, 3), result.effect_id);
+    try std.testing.expectEqual(@as(u16, 100), result.duration_ms);
 }
