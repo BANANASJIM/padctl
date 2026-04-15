@@ -149,9 +149,14 @@ if [[ -d "$PADCTL_REPO/.git" ]]; then
     if [[ -n "$BRANCH" ]]; then
         git -C "$PADCTL_REPO" fetch origin 2>/dev/null || true
         git -C "$PADCTL_REPO" checkout "$BRANCH" 2>/dev/null || warn "checkout $BRANCH failed"
-        git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
     else
-        git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        # Only pull if on a branch that tracks a remote (skip for local-only branches).
+        if git -C "$PADCTL_REPO" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+            timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        else
+            info "Local branch with no upstream — skipping pull"
+        fi
     fi
     ok "Repo up to date"
 elif [[ -f "$PADCTL_REPO/build.zig" ]]; then
