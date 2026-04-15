@@ -427,6 +427,7 @@ fn printHelp() void {
         \\       padctl switch <name> [--device <id>] [--socket <path>]
         \\       padctl status [--socket <path>]
         \\       padctl devices [--socket <path>]
+        \\       padctl dump <enable|disable|status|export|clear>
         \\
         \\Subcommands:
         \\  install               Install binary, service, udev rules, and device configs
@@ -458,6 +459,13 @@ fn printHelp() void {
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  devices               List connected devices via daemon
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+        \\  dump enable           Turn on diagnostic logging (persists across reboots)
+        \\  dump disable          Turn off diagnostic logging (default)
+        \\  dump status           Show dump state, log path, size, and time span
+        \\  dump export           Export filtered logs to stdout or file
+        \\    --period <duration> Time window: Nm, Nh, or Nd (default: 1d)
+        \\    -o <path>           Write to file instead of stdout
+        \\  dump clear            Delete all log files (interactive confirmation)
         \\  config list           List XDG-layer device and mapping configs
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
         \\    --device <name>     Skip device selection prompt
