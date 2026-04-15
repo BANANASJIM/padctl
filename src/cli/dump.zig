@@ -148,10 +148,31 @@ pub fn deleteLogFiles(log_dir: []const u8) u32 {
     for (names) |name| {
         var path_buf: [280]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ log_dir, name }) catch continue;
-        std.fs.deleteFileAbsolute(path) catch continue;
+        // Check file exists before attempting delete.
+        std.fs.accessAbsolute(path, .{}) catch continue;
+        // Try direct delete first; fall back to sudo rm for root-owned files.
+        std.fs.deleteFileAbsolute(path) catch {
+            if (sudoRm(path)) {
+                deleted += 1;
+            }
+            continue;
+        };
         deleted += 1;
     }
     return deleted;
+}
+
+fn sudoRm(path: []const u8) bool {
+    var child = std.process.Child.init(&.{ "sudo", "rm", "-f", path }, std.heap.page_allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    child.spawn() catch return false;
+    const result = child.wait() catch return false;
+    return switch (result) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Aggregate LogStats across two directories.
