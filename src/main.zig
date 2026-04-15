@@ -670,13 +670,42 @@ pub fn main() !void {
             }
         } else |_| {}
 
-        if (cli.dump.writeDiagnosticsConfig(allocator, cfgpaths.systemConfigDir(), enable)) {
-            config_written = true;
-        } else |err| {
-            if (err == error.MalformedConfig) {
-                stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
-            } else {
-                std.log.warn("could not write system config: {}", .{err});
+        // System config: write to a temp file, then sudo cp to /etc/padctl/.
+        // Direct write fails without root (AccessDenied).
+        const sys_dir = cfgpaths.systemConfigDir();
+        if (std.os.linux.getuid() == 0) {
+            // Already root — write directly.
+            if (cli.dump.writeDiagnosticsConfig(allocator, sys_dir, enable)) {
+                config_written = true;
+            } else |err| {
+                if (err == error.MalformedConfig) {
+                    stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
+                } else {
+                    std.log.warn("could not write system config: {}", .{err});
+                }
+            }
+        } else {
+            // Non-root: write to temp dir, sudo cp to system path.
+            const tmp_dir = "/tmp/padctl-dump-config";
+            if (cli.dump.writeDiagnosticsConfig(allocator, tmp_dir, enable)) {
+                const tmp_src = tmp_dir ++ "/config.toml";
+                const sys_dst_buf = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
+                defer if (sys_dst_buf) |b| allocator.free(b);
+                if (sys_dst_buf) |sys_dst| {
+                    if (runSudoMkdir(sys_dir, stderr_writer)) {
+                        if (runSudoCopy(tmp_src, sys_dst, stderr_writer)) {
+                            config_written = true;
+                        }
+                    }
+                }
+                std.fs.deleteFileAbsolute(tmp_src) catch {};
+                std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+            } else |err| {
+                if (err == error.MalformedConfig) {
+                    stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
+                } else {
+                    std.log.warn("could not write system config: {}", .{err});
+                }
             }
         }
 
