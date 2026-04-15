@@ -128,10 +128,10 @@ pub fn runStatus(
             stats.file_count,
             if (stats.file_count != 1) "s" else "",
         }) catch {};
-        if (stats.first_timestamp) |first| {
+        if (stats.firstTimestamp()) |first| {
             stdout.print("First entry: {s}\n", .{first}) catch {};
         }
-        if (stats.last_timestamp) |last| {
+        if (stats.lastTimestamp()) |last| {
             stdout.print("Last entry:  {s}\n", .{last}) catch {};
         }
     } else {
@@ -163,27 +163,26 @@ fn mergeStats(a: ?LogStats, b: ?LogStats) ?LogStats {
     const bs = b.?;
     merged.total_size += bs.total_size;
     merged.file_count += bs.file_count;
+
     // Pick the earliest first_timestamp and latest last_timestamp.
-    if (bs.first_timestamp) |bfirst| {
-        if (merged.first_timestamp) |mfirst| {
-            if (std.mem.order(u8, bfirst, mfirst) == .lt) {
-                @memcpy(merged.first_ts_buf[0..TS_LEN], bfirst);
-                merged.first_timestamp = merged.first_ts_buf[0..TS_LEN];
+    if (bs.has_first_ts) {
+        if (merged.has_first_ts) {
+            if (std.mem.order(u8, bs.first_ts_buf[0..TS_LEN], merged.first_ts_buf[0..TS_LEN]) == .lt) {
+                @memcpy(merged.first_ts_buf[0..TS_LEN], bs.first_ts_buf[0..TS_LEN]);
             }
         } else {
-            @memcpy(merged.first_ts_buf[0..TS_LEN], bfirst);
-            merged.first_timestamp = merged.first_ts_buf[0..TS_LEN];
+            @memcpy(merged.first_ts_buf[0..TS_LEN], bs.first_ts_buf[0..TS_LEN]);
+            merged.has_first_ts = true;
         }
     }
-    if (bs.last_timestamp) |blast| {
-        if (merged.last_timestamp) |mlast| {
-            if (std.mem.order(u8, blast, mlast) == .gt) {
-                @memcpy(merged.last_ts_buf[0..TS_LEN], blast);
-                merged.last_timestamp = merged.last_ts_buf[0..TS_LEN];
+    if (bs.has_last_ts) {
+        if (merged.has_last_ts) {
+            if (std.mem.order(u8, bs.last_ts_buf[0..TS_LEN], merged.last_ts_buf[0..TS_LEN]) == .gt) {
+                @memcpy(merged.last_ts_buf[0..TS_LEN], bs.last_ts_buf[0..TS_LEN]);
             }
         } else {
-            @memcpy(merged.last_ts_buf[0..TS_LEN], blast);
-            merged.last_timestamp = merged.last_ts_buf[0..TS_LEN];
+            @memcpy(merged.last_ts_buf[0..TS_LEN], bs.last_ts_buf[0..TS_LEN]);
+            merged.has_last_ts = true;
         }
     }
     return merged;
@@ -215,8 +214,8 @@ pub fn runClear(
         if (stats.file_count != 1) "s" else "",
         size_str,
     }) catch {};
-    if (stats.first_timestamp) |first| {
-        if (stats.last_timestamp) |last| {
+    if (stats.firstTimestamp()) |first| {
+        if (stats.lastTimestamp()) |last| {
             stdout.print(", spanning {s} to {s}", .{ first, last }) catch {};
         } else {
             stdout.print(", from {s}", .{first}) catch {};
@@ -263,8 +262,8 @@ fn pickActiveLogDir(sys_dir: []const u8, user_dir: ?[]const u8) []const u8 {
     const user_stats = if (user_dir) |ud| getLogStats(ud) else null;
 
     if (sys_stats != null and user_stats != null) {
-        const sys_ts = sys_stats.?.last_timestamp orelse "";
-        const user_ts = user_stats.?.last_timestamp orelse "";
+        const sys_ts = sys_stats.?.lastTimestamp() orelse "";
+        const user_ts = user_stats.?.lastTimestamp() orelse "";
         // ISO 8601 timestamps sort lexicographically.
         if (std.mem.order(u8, user_ts, sys_ts) == .gt) return user_dir.?;
         return sys_dir;
@@ -447,14 +446,18 @@ pub fn filterLogFile(path: []const u8, cutoff: []const u8, writer: anytype) !voi
 pub const LogStats = struct {
     total_size: u64,
     file_count: u32,
-    /// First timestamp found across all log files (from rotated file first).
-    /// Points into first_ts_buf — only valid for the lifetime of this struct.
-    first_timestamp: ?[]const u8,
-    /// Last timestamp found across all log files (from current file last).
-    last_timestamp: ?[]const u8,
-    // Backing storage for timestamp strings.
-    first_ts_buf: [23]u8 = undefined,
-    last_ts_buf: [23]u8 = undefined,
+    has_first_ts: bool = false,
+    has_last_ts: bool = false,
+    first_ts_buf: [TS_LEN]u8 = undefined,
+    last_ts_buf: [TS_LEN]u8 = undefined,
+
+    pub fn firstTimestamp(self: *const LogStats) ?[]const u8 {
+        return if (self.has_first_ts) self.first_ts_buf[0..TS_LEN] else null;
+    }
+
+    pub fn lastTimestamp(self: *const LogStats) ?[]const u8 {
+        return if (self.has_last_ts) self.last_ts_buf[0..TS_LEN] else null;
+    }
 };
 
 const TS_LEN = 23; // "YYYY-MM-DDTHH:MM:SS.mmm"
@@ -463,12 +466,7 @@ const TS_LEN = 23; // "YYYY-MM-DDTHH:MM:SS.mmm"
 /// directory doesn't exist or contains no log files. Reads only the
 /// first and last lines of each file for timestamps (not the full content).
 pub fn getLogStats(log_dir: []const u8) ?LogStats {
-    var stats = LogStats{
-        .total_size = 0,
-        .file_count = 0,
-        .first_timestamp = null,
-        .last_timestamp = null,
-    };
+    var stats = LogStats{ .total_size = 0, .file_count = 0 };
 
     // Check rotated file first (older data → first timestamp).
     var bak_path_buf: [280]u8 = undefined;
@@ -476,13 +474,13 @@ pub fn getLogStats(log_dir: []const u8) ?LogStats {
     if (scanFile(bak_path)) |info| {
         stats.total_size += info.size;
         stats.file_count += 1;
-        if (info.first_ts) |ts| {
-            @memcpy(stats.first_ts_buf[0..TS_LEN], ts);
-            stats.first_timestamp = stats.first_ts_buf[0..TS_LEN];
+        if (info.has_first_ts) {
+            @memcpy(stats.first_ts_buf[0..TS_LEN], info.first_ts_buf[0..TS_LEN]);
+            stats.has_first_ts = true;
         }
-        if (info.last_ts) |ts| {
-            @memcpy(stats.last_ts_buf[0..TS_LEN], ts);
-            stats.last_timestamp = stats.last_ts_buf[0..TS_LEN];
+        if (info.has_last_ts) {
+            @memcpy(stats.last_ts_buf[0..TS_LEN], info.last_ts_buf[0..TS_LEN]);
+            stats.has_last_ts = true;
         }
     }
 
@@ -492,15 +490,13 @@ pub fn getLogStats(log_dir: []const u8) ?LogStats {
     if (scanFile(cur_path)) |info| {
         stats.total_size += info.size;
         stats.file_count += 1;
-        if (info.first_ts) |ts| {
-            if (stats.first_timestamp == null) {
-                @memcpy(stats.first_ts_buf[0..TS_LEN], ts);
-                stats.first_timestamp = stats.first_ts_buf[0..TS_LEN];
-            }
+        if (info.has_first_ts and !stats.has_first_ts) {
+            @memcpy(stats.first_ts_buf[0..TS_LEN], info.first_ts_buf[0..TS_LEN]);
+            stats.has_first_ts = true;
         }
-        if (info.last_ts) |ts| {
-            @memcpy(stats.last_ts_buf[0..TS_LEN], ts);
-            stats.last_timestamp = stats.last_ts_buf[0..TS_LEN];
+        if (info.has_last_ts) {
+            @memcpy(stats.last_ts_buf[0..TS_LEN], info.last_ts_buf[0..TS_LEN]);
+            stats.has_last_ts = true;
         }
     }
 
@@ -510,8 +506,10 @@ pub fn getLogStats(log_dir: []const u8) ?LogStats {
 
 const FileInfo = struct {
     size: u64,
-    first_ts: ?[]const u8,
-    last_ts: ?[]const u8,
+    has_first_ts: bool = false,
+    has_last_ts: bool = false,
+    first_ts_buf: [TS_LEN]u8 = undefined,
+    last_ts_buf: [TS_LEN]u8 = undefined,
 };
 
 /// Extract file size and first/last timestamp from a log file.
@@ -523,14 +521,17 @@ fn scanFile(path: []const u8) ?FileInfo {
     defer f.close();
     const stat = f.stat() catch return null;
 
-    var info = FileInfo{ .size = stat.size, .first_ts = null, .last_ts = null };
+    var info = FileInfo{ .size = stat.size };
     if (stat.size == 0) return info;
 
     // Read first 256 bytes for first timestamp.
     var head_buf: [256]u8 = undefined;
     const head_n = f.readAll(&head_buf) catch 0;
     if (head_n > 0) {
-        info.first_ts = extractTimestamp(head_buf[0..head_n]);
+        if (extractTimestamp(head_buf[0..head_n])) |ts| {
+            @memcpy(info.first_ts_buf[0..TS_LEN], ts);
+            info.has_first_ts = true;
+        }
     }
 
     // Read last 1024 bytes for last timestamp. Rumble HID frame dump lines
@@ -545,7 +546,10 @@ fn scanFile(path: []const u8) ?FileInfo {
     var tail_buf: [1024]u8 = undefined;
     const tail_n = f.readAll(&tail_buf) catch 0;
     if (tail_n > 0) {
-        info.last_ts = extractLastTimestamp(tail_buf[0..tail_n]);
+        if (extractLastTimestamp(tail_buf[0..tail_n])) |ts| {
+            @memcpy(info.last_ts_buf[0..TS_LEN], ts);
+            info.has_last_ts = true;
+        }
     }
 
     return info;
@@ -720,8 +724,8 @@ test "dump: getLogStats reports size and timestamps for a single file" {
     const stats = getLogStats(dir_path).?;
     try testing.expect(stats.total_size > 0);
     try testing.expectEqual(@as(u32, 1), stats.file_count);
-    try testing.expectEqualStrings("2026-04-13T14:00:00.000", stats.first_timestamp.?);
-    try testing.expectEqualStrings("2026-04-13T14:10:00.000", stats.last_timestamp.?);
+    try testing.expectEqualStrings("2026-04-13T14:00:00.000", stats.firstTimestamp().?);
+    try testing.expectEqualStrings("2026-04-13T14:10:00.000", stats.lastTimestamp().?);
 }
 
 test "dump: getLogStats merges current and rotated file" {
@@ -744,8 +748,8 @@ test "dump: getLogStats merges current and rotated file" {
 
     const stats = getLogStats(dir_path).?;
     try testing.expectEqual(@as(u32, 2), stats.file_count);
-    try testing.expectEqualStrings("2026-04-12T10:00:00.000", stats.first_timestamp.?);
-    try testing.expectEqualStrings("2026-04-13T20:00:00.000", stats.last_timestamp.?);
+    try testing.expectEqualStrings("2026-04-12T10:00:00.000", stats.firstTimestamp().?);
+    try testing.expectEqualStrings("2026-04-13T20:00:00.000", stats.lastTimestamp().?);
 }
 
 test "dump: getLogStats finds timestamp on long final line" {
@@ -771,9 +775,9 @@ test "dump: getLogStats finds timestamp on long final line" {
 
     const stats = getLogStats(dir_path).?;
     try testing.expect(stats.total_size > 400);
-    try testing.expectEqualStrings("2026-04-13T14:00:00.000", stats.first_timestamp.?);
+    try testing.expectEqualStrings("2026-04-13T14:00:00.000", stats.firstTimestamp().?);
     // The last timestamp must be found even though it's >256 bytes from EOF.
-    try testing.expectEqualStrings("2026-04-13T14:30:00.000", stats.last_timestamp.?);
+    try testing.expectEqualStrings("2026-04-13T14:30:00.000", stats.lastTimestamp().?);
 }
 
 test "dump: getLogStats handles empty log file" {
@@ -791,8 +795,8 @@ test "dump: getLogStats handles empty log file" {
     const stats = getLogStats(dir_path).?;
     try testing.expectEqual(@as(u64, 0), stats.total_size);
     try testing.expectEqual(@as(u32, 1), stats.file_count);
-    try testing.expectEqual(@as(?[]const u8, null), stats.first_timestamp);
-    try testing.expectEqual(@as(?[]const u8, null), stats.last_timestamp);
+    try testing.expectEqual(@as(?[]const u8, null), stats.firstTimestamp());
+    try testing.expectEqual(@as(?[]const u8, null), stats.lastTimestamp());
 }
 
 // --- Period parsing tests ---
