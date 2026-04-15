@@ -1333,12 +1333,20 @@ fn writeBinding(
         };
     }
 
-    // Serialize: version + all existing entries (replacing the conflict target
-    // if one was found) + new entry if none matched.
+    // Serialize: version + diagnostics + all existing entries (replacing
+    // the conflict target if one was found) + new entry if none matched.
     var buf = std.ArrayList(u8){};
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
     try w.print("version = {d}\n", .{version});
+
+    // Preserve [diagnostics] section if present.
+    if (existing) |e| {
+        const diag = e.value.diagnostics;
+        if (diag.dump or diag.max_log_size_mb != 100) {
+            try w.print("\n[diagnostics]\ndump = {}\nmax_log_size_mb = {d}\n", .{ diag.dump, diag.max_log_size_mb });
+        }
+    }
 
     var wrote_target = false;
     if (devices) |devs| {
