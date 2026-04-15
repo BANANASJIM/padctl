@@ -103,6 +103,8 @@ install_brew_pkg() {
     fi
 }
 
+ZIG_BREW_PKG="zig@0.15"  # padctl requires Zig 0.15.x; 0.16+ has breaking API changes
+
 if command -v brew &>/dev/null; then
     # Pin zig@0.15 — padctl does not yet support 0.16+
     # Versioned formulas are keg-only: install then prepend opt path to PATH
@@ -116,13 +118,28 @@ if command -v brew &>/dev/null; then
     export PATH="$(brew --prefix)/opt/zig@0.15/bin:$PATH"
     ok "zig on PATH: $(zig version)"
     install_brew_pkg libusb
+    # zig@0.15 is keg-only — ensure it's on PATH for this session.
+    if [[ -d "$BREW_PREFIX/opt/$ZIG_BREW_PKG/bin" ]]; then
+        export PATH="$BREW_PREFIX/opt/$ZIG_BREW_PKG/bin:$PATH"
+    fi
 else
     # Non-brew: check if zig and libusb are available
     if ! command -v zig &>/dev/null; then
         err "zig not found. Install Zig 0.15.x from https://ziglang.org/download/"
         exit 1
     fi
-    ok "zig found: $(zig version)"
+    # Warn if version is 0.16+ (breaking changes)
+    zig_ver="$(zig version 2>/dev/null || echo unknown)"
+    case "$zig_ver" in
+        0.15.*) ok "zig found: $zig_ver" ;;
+        0.16.*|0.17.*|1.*)
+            warn "zig $zig_ver detected — padctl requires 0.15.x (0.16+ has breaking build API changes)"
+            warn "Install zig@0.15 via brew, or download from https://ziglang.org/download/"
+            read -rp "Continue anyway? [y/N] " yn
+            [[ "$yn" =~ ^[Yy] ]] || exit 1
+            ;;
+        *) ok "zig found: $zig_ver" ;;
+    esac
 fi
 
 # Verify Zig version >= 0.15.0
@@ -178,7 +195,7 @@ fi
 cd "$PADCTL_REPO"
 
 # --- 5. Build ---
-info "Building padctl (ReleaseSafe)..."
+info "Building padctl (ReleaseSafe) with zig $(zig version)..."
 build_args=(-Doptimize=ReleaseSafe)
 if [[ -d "$BREW_PREFIX" ]]; then
     build_args+=(--search-prefix "$BREW_PREFIX")

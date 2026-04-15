@@ -91,6 +91,12 @@ pub const RumbleScheduler = struct {
         return false;
     }
 
+    /// Returns the raw slot array for diagnostic logging. The caller can
+    /// format it without pulling I/O into the scheduler.
+    pub fn dumpSlots(self: *const RumbleScheduler) [MAX_EFFECTS]i128 {
+        return self.slots;
+    }
+
     /// Returns the earliest finite pending deadline, or null if nothing is
     /// pending. An "infinite" slot does not contribute a deadline because
     /// it never fires from the timer.
@@ -293,4 +299,34 @@ test "rumble_scheduler: short-then-long overlap rearms for the longer deadline" 
     const second = sched.onTimerExpired(t1100);
     try testing.expect(second.emit_stop_frame);
     try testing.expectEqual(@as(?i128, null), second.next_deadline_ns);
+}
+
+test "rumble_scheduler: state identical regardless of dump_enabled" {
+    // The scheduler is pure logic — logging is external.
+    // Verify that the same sequence of operations produces identical
+    // slot state whether dump is on or off.
+    const padctl_log = @import("../log.zig");
+    const t0: i128 = 1_000_000_000;
+
+    // Run with dump off.
+    padctl_log.setEnabled(false);
+    var s1: RumbleScheduler = .{};
+    _ = s1.onPlay(0, 500, t0);
+    _ = s1.onPlay(1, 0, t0);
+    _ = s1.onStop(0);
+    const slots1 = s1.dumpSlots();
+
+    // Run with dump on.
+    padctl_log.setEnabled(true);
+    var s2: RumbleScheduler = .{};
+    _ = s2.onPlay(0, 500, t0);
+    _ = s2.onPlay(1, 0, t0);
+    _ = s2.onStop(0);
+    const slots2 = s2.dumpSlots();
+    padctl_log.setEnabled(false);
+
+    // Slot arrays must be identical.
+    for (slots1, slots2) |a, b| {
+        try testing.expectEqual(a, b);
+    }
 }

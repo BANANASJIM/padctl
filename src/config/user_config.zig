@@ -11,12 +11,18 @@ pub const DeviceEntry = struct {
     default_mapping: ?[]const u8 = null,
 };
 
+pub const DiagnosticsConfig = struct {
+    dump: bool = false,
+    max_log_size_mb: i64 = 100,
+};
+
 pub const UserConfig = struct {
     /// Schema version for forward/backward compatibility. Missing = legacy
     /// v0 (pre-versioned). Current version is 1. The loader accepts any
     /// version and logs a warning when it's newer than expected.
     version: ?i64 = null,
     device: ?[]DeviceEntry = null,
+    diagnostics: DiagnosticsConfig = .{},
 };
 
 pub const ParseResult = toml.Parsed(UserConfig);
@@ -289,6 +295,91 @@ test "findDefaultMapping: null when no devices" {
     defer result.deinit();
 
     try std.testing.expectEqual(@as(?[]const u8, null), findDefaultMapping(&result, "Any Device"));
+}
+
+test "user_config: diagnostics section parses with defaults" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\version = 1
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    // Missing [diagnostics] → defaults: dump=false, max_log_size_mb=100
+    try std.testing.expectEqual(false, result.value.diagnostics.dump);
+    try std.testing.expectEqual(@as(i64, 100), result.value.diagnostics.max_log_size_mb);
+}
+
+test "user_config: diagnostics section parses explicit values" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = true
+        \\max_log_size_mb = 50
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    try std.testing.expectEqual(true, result.value.diagnostics.dump);
+    try std.testing.expectEqual(@as(i64, 50), result.value.diagnostics.max_log_size_mb);
+}
+
+test "user_config: diagnostics alongside device entries" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = true
+        \\
+        \\[[device]]
+        \\name = "Test Pad"
+        \\default_mapping = "fps"
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    try std.testing.expectEqual(true, result.value.diagnostics.dump);
+    try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "Test Pad").?);
+}
+
+test "user_config: unknown fields ignored (forward compatibility)" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\version = 2
+        \\some_future_field = "hello"
+        \\
+        \\[diagnostics]
+        \\dump = true
+        \\max_log_size_mb = 75
+        \\future_diag_option = 42
+        \\
+        \\[[device]]
+        \\name = "Pad"
+        \\default_mapping = "m1"
+        \\unknown_device_field = true
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    // Known fields parsed correctly despite unknown siblings.
+    try std.testing.expectEqual(true, result.value.diagnostics.dump);
+    try std.testing.expectEqual(@as(i64, 75), result.value.diagnostics.max_log_size_mb);
+    try std.testing.expectEqualStrings("m1", findDefaultMapping(&result, "Pad").?);
 }
 
 test "findDefaultMapping: entry without default_mapping returns null" {

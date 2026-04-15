@@ -1,4 +1,10 @@
 const std = @import("std");
+const padctl_log = @import("log.zig");
+
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = padctl_log.logFn,
+};
 
 fn stdoutWrite(_: void, data: []const u8) error{}!usize {
     return std.posix.write(std.posix.STDOUT_FILENO, data) catch data.len;
@@ -24,6 +30,7 @@ pub const cli = struct {
     pub const switch_mapping = @import("cli/switch_mapping.zig");
     pub const status = @import("cli/status.zig");
     pub const devices = @import("cli/devices.zig");
+    pub const dump = @import("cli/dump.zig");
     pub const config = struct {
         pub const list = @import("cli/config/list.zig");
         pub const init = @import("cli/config/init.zig");
@@ -129,6 +136,8 @@ const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
 const VERSION = "0.1.0";
 
+pub const DumpAction = enum { enable, disable, status, @"export", clear };
+
 const Cli = struct {
     allocator: std.mem.Allocator,
     config_path: ?[]const u8 = null,
@@ -151,6 +160,9 @@ const Cli = struct {
     switch_cmd: ?struct { name: ?[]const u8 = null, device_id: ?[]const u8 = null, persist: bool = false } = null,
     status_cmd: bool = false,
     devices_cmd: bool = false,
+    dump_cmd: ?DumpAction = null,
+    dump_period: []const u8 = "1d",
+    dump_output_path: ?[]const u8 = null,
     socket_path: []const u8 = cli.socket_client.DEFAULT_SOCKET_PATH,
     socket_explicit: bool = false,
 
@@ -366,6 +378,35 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     std.log.err("unknown devices argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
                 }
+            }
+        } else if (std.mem.eql(u8, arg, "dump")) {
+            // Collect remaining args into a small buffer for parseDumpFromSlice.
+            var dump_args: [16][]const u8 = undefined;
+            var dump_argc: usize = 0;
+            while (args.next()) |da| {
+                if (dump_argc >= dump_args.len) {
+                    std.log.err("too many dump arguments", .{});
+                    return error.UnknownArgument;
+                }
+                dump_args[dump_argc] = da;
+                dump_argc += 1;
+            }
+            const result = parseDumpFromSlice(dump_args[0..dump_argc]) catch |err| switch (err) {
+                error.MissingArgValue => {
+                    std.log.err("dump requires a subcommand: enable, disable, status, export, clear", .{});
+                    return error.MissingArgValue;
+                },
+                error.UnknownArgument => {
+                    std.log.err("unknown dump argument", .{});
+                    return error.UnknownArgument;
+                },
+            };
+            parsed_cli.dump_cmd = result.cmd;
+            parsed_cli.dump_period = result.period;
+            parsed_cli.dump_output_path = result.output_path;
+            if (result.socket_path) |sp| {
+                parsed_cli.socket_path = sp;
+                parsed_cli.socket_explicit = true;
             }
         } else {
             std.log.err("unknown argument: {s}", .{arg});
@@ -583,6 +624,79 @@ pub fn main() !void {
         std.process.exit(0);
     }
 
+    // dump subcommand
+    if (parsed.dump_cmd) |dump_action| {
+        // dump status: show state + log stats, exit.
+        if (dump_action == .status) {
+            cli.dump.runStatus(allocator, parsed.socket_path, stdout_writer, stderr_writer);
+            std.process.exit(0);
+        }
+
+        // dump clear: show stats, prompt, delete.
+        if (dump_action == .clear) {
+            cli.dump.runClear(allocator, stdout_writer, stderr_writer);
+            std.process.exit(0);
+        }
+
+        // dump export: filter and output logs, exit.
+        if (dump_action == .@"export") {
+            cli.dump.runExport(allocator, parsed.dump_period, parsed.dump_output_path, stdout_writer, stderr_writer);
+            std.process.exit(0);
+        }
+
+        const enable = dump_action == .enable;
+        var config_written = false;
+
+        // Write to both user and system config (best-effort for each).
+        const cfgpaths = config.paths;
+        if (cfgpaths.userConfigDir(allocator)) |user_dir| {
+            defer allocator.free(user_dir);
+            if (cli.dump.writeDiagnosticsConfig(allocator, user_dir, enable)) {
+                config_written = true;
+            } else |err| {
+                if (err == error.MalformedConfig) {
+                    stderr_writer.writeAll("error: user config.toml is malformed — fix or remove it\n") catch {};
+                } else {
+                    std.log.warn("could not write user config: {}", .{err});
+                }
+            }
+        } else |_| {}
+
+        if (cli.dump.writeDiagnosticsConfig(allocator, cfgpaths.systemConfigDir(), enable)) {
+            config_written = true;
+        } else |err| {
+            if (err == error.MalformedConfig) {
+                stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
+            } else {
+                std.log.warn("could not write system config: {}", .{err});
+            }
+        }
+
+        // Send IPC to running daemon (best-effort).
+        var ipc_ok = false;
+        const ipc_cmd: []const u8 = if (enable) "DUMP ON\n" else "DUMP OFF\n";
+        if (cli.socket_client.connectToSocket(parsed.socket_path)) |sock_fd| {
+            defer std.posix.close(sock_fd);
+            var resp_buf: [64]u8 = undefined;
+            if (cli.socket_client.sendCommand(sock_fd, ipc_cmd, &resp_buf)) |resp| {
+                _ = stdout_writer.write(resp) catch {};
+                ipc_ok = true;
+            } else |_| {
+                stderr_writer.writeAll("warning: daemon did not respond\n") catch {};
+            }
+        } else |_| {
+            if (config_written) {
+                stderr_writer.writeAll("info: daemon not running; config written, will apply on next start\n") catch {};
+            }
+        }
+
+        if (!config_written and !ipc_ok) {
+            stderr_writer.writeAll("error: could not persist or apply dump setting\n") catch {};
+            std.process.exit(1);
+        }
+        std.process.exit(0);
+    }
+
     // switch subcommand
     if (parsed.switch_cmd) |sw| {
         // Resolve the mapping name: either explicit or from user config.
@@ -712,6 +826,31 @@ pub fn main() !void {
         };
         std.process.exit(0);
     }
+
+    // Daemon mode logging: two-step init.
+    // Step 1: resolve the log path so that early warnings (e.g. malformed
+    // config.toml) can persist to the log file via lazy open in logFn.
+    padctl_log.initPath(allocator);
+    defer padctl_log.deinit();
+
+    // Step 2: load diagnostics config. Warnings during load now persist.
+    const log_opts: padctl_log.InitOptions = blk: {
+        const user_cfg_mod = @import("config/user_config.zig");
+        if (user_cfg_mod.load(allocator)) |pr| {
+            var ucpr = pr;
+            defer ucpr.deinit();
+            break :blk .{
+                .dump = ucpr.value.diagnostics.dump,
+                .max_log_size_mb = ucpr.value.diagnostics.max_log_size_mb,
+            };
+        }
+        break :blk .{};
+    };
+
+    // Step 3: apply config — sets rotation size, dump toggle, opens file if dump on.
+    padctl_log.applyConfig(log_opts);
+
+    std.log.info("padctl started, PID={d}, dump={}", .{ std.os.linux.getpid(), padctl_log.isEnabled() });
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
     if (parsed.config_dir) |dir_path| {
@@ -1087,9 +1226,97 @@ fn parseDeviceFromStatus(resp: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Parse dump subcommand and options from an argument slice. Testable
+/// variant of the inline dump-parsing block in parseArgs.
+pub fn parseDumpFromSlice(args: []const []const u8) !struct {
+    cmd: ?DumpAction = null,
+    period: []const u8 = "1d",
+    output_path: ?[]const u8 = null,
+    socket_path: ?[]const u8 = null,
+} {
+    var result: @TypeOf(parseDumpFromSlice(args) catch unreachable) = .{};
+    if (args.len == 0) return error.MissingArgValue;
+    const sub = args[0];
+    if (std.mem.eql(u8, sub, "enable")) {
+        result.cmd = .enable;
+    } else if (std.mem.eql(u8, sub, "disable")) {
+        result.cmd = .disable;
+    } else if (std.mem.eql(u8, sub, "status")) {
+        result.cmd = .status;
+    } else if (std.mem.eql(u8, sub, "export")) {
+        result.cmd = .@"export";
+    } else if (std.mem.eql(u8, sub, "clear")) {
+        result.cmd = .clear;
+    } else {
+        return error.UnknownArgument;
+    }
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--period")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            result.period = args[i];
+        } else if (std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            result.output_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--socket")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            result.socket_path = args[i];
+        } else {
+            return error.UnknownArgument;
+        }
+    }
+    return result;
+}
+
 // --- CLI tests ---
 
 const testing = std.testing;
+
+test "main: parseDumpFromSlice: enable" {
+    const r = try parseDumpFromSlice(&.{"enable"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .enable), r.cmd);
+    try testing.expectEqualStrings("1d", r.period);
+    try testing.expectEqual(@as(?[]const u8, null), r.output_path);
+}
+
+test "main: parseDumpFromSlice: disable" {
+    const r = try parseDumpFromSlice(&.{"disable"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .disable), r.cmd);
+}
+
+test "main: parseDumpFromSlice: status" {
+    const r = try parseDumpFromSlice(&.{"status"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .status), r.cmd);
+}
+
+test "main: parseDumpFromSlice: export with period and output" {
+    const r = try parseDumpFromSlice(&.{ "export", "--period", "2h", "-o", "/tmp/out.log" });
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .@"export"), r.cmd);
+    try testing.expectEqualStrings("2h", r.period);
+    try testing.expectEqualStrings("/tmp/out.log", r.output_path.?);
+}
+
+test "main: parseDumpFromSlice: export default period" {
+    const r = try parseDumpFromSlice(&.{"export"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .@"export"), r.cmd);
+    try testing.expectEqualStrings("1d", r.period);
+}
+
+test "main: parseDumpFromSlice: clear" {
+    const r = try parseDumpFromSlice(&.{"clear"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .clear), r.cmd);
+}
+
+test "main: parseDumpFromSlice: missing subcommand" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{}));
+}
+
+test "main: parseDumpFromSlice: unknown subcommand" {
+    try testing.expectError(error.UnknownArgument, parseDumpFromSlice(&.{"foobar"}));
+}
 
 test "main: parseDeviceFromStatus extracts device name" {
     const resp = "STATUS device=Flydigi Vader 5 Pro active=true\n";

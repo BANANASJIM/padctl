@@ -18,6 +18,25 @@ pub fn dataDir() []const u8 {
     return "/usr/share/padctl";
 }
 
+/// Returns the directory for padctl log/state files.
+/// Priority: $LOGS_DIRECTORY (systemd LogsDirectory=) > $XDG_STATE_HOME/padctl
+/// > ~/.local/state/padctl > /var/log/padctl.
+/// Caller frees.
+pub fn stateDir(allocator: Allocator) ![]u8 {
+    // systemd sets LOGS_DIRECTORY=/var/log/padctl when LogsDirectory=padctl
+    // is in the unit file. This path is writable even under ProtectSystem=strict.
+    if (std.posix.getenv("LOGS_DIRECTORY")) |logs_dir| {
+        return allocator.dupe(u8, logs_dir);
+    }
+    if (std.posix.getenv("XDG_STATE_HOME")) |xdg| {
+        return std.fmt.allocPrint(allocator, "{s}/padctl", .{xdg});
+    }
+    const home = std.posix.getenv("HOME") orelse {
+        return allocator.dupe(u8, "/var/log/padctl");
+    };
+    return std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home});
+}
+
 /// Returns search dirs for devices/ in priority order: user > system > builtin.
 /// Caller frees the slice and each element.
 pub fn resolveDeviceConfigDirs(allocator: Allocator) ![][]const u8 {

@@ -871,6 +871,9 @@ pub const Supervisor = struct {
             .status => self.handleStatus(fd),
             .list => self.handleList(fd),
             .devices => self.handleDevices(fd),
+            .dump_on => self.handleDump(fd, true),
+            .dump_off => self.handleDump(fd, false),
+            .dump_status => self.handleDumpStatus(fd),
             .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
         }
     }
@@ -1088,6 +1091,28 @@ pub const Supervisor = struct {
         resp_buf[pos] = '\n';
         pos += 1;
         cs.sendResponse(fd, resp_buf[0..pos]);
+    }
+
+    fn handleDumpStatus(self: *Supervisor, fd: posix.fd_t) void {
+        const padctl_log = @import("log.zig");
+        var cs = &self.ctrl_sock.?;
+        var resp_buf: [64]u8 = undefined;
+        const state_str: []const u8 = if (padctl_log.isEnabled()) "on" else "off";
+        const resp = std.fmt.bufPrint(&resp_buf, "OK dump={s}\n", .{state_str}) catch return;
+        cs.sendResponse(fd, resp);
+    }
+
+    fn handleDump(self: *Supervisor, fd: posix.fd_t, enable: bool) void {
+        const padctl_log = @import("log.zig");
+        padctl_log.setEnabled(enable);
+        var cs = &self.ctrl_sock.?;
+        if (enable) {
+            cs.sendResponse(fd, "OK dump=on\n");
+            std.log.info("dump logging enabled via IPC", .{});
+        } else {
+            cs.sendResponse(fd, "OK dump=off\n");
+            std.log.info("dump logging disabled via IPC", .{});
+        }
     }
 
     /// Look up the user config's default_mapping for device_name, find and parse the mapping file.
@@ -1715,6 +1740,14 @@ pub const Supervisor = struct {
             return err;
         };
         std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
+        // Log FF config for rumble diagnostics.
+        if (cfg.?.output) |out| {
+            if (out.force_feedback) |ff| {
+                std.log.info("device FF config: type={s} max_effects={?d} auto_stop={}", .{
+                    ff.type, ff.max_effects, ff.auto_stop,
+                });
+            }
+        }
     }
 };
 

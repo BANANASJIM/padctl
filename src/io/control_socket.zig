@@ -146,6 +146,9 @@ pub const CommandTag = enum {
     status,
     list,
     devices,
+    dump_on,
+    dump_off,
+    dump_status,
     unknown,
 };
 
@@ -182,6 +185,12 @@ pub fn parseCommand(raw: []const u8) Command {
         return .{ .tag = .list };
     } else if (std.ascii.eqlIgnoreCase(verb, "DEVICES")) {
         return .{ .tag = .devices };
+    } else if (std.ascii.eqlIgnoreCase(verb, "DUMP")) {
+        const mode = it.next() orelse return .{ .tag = .unknown };
+        if (std.ascii.eqlIgnoreCase(mode, "ON")) return .{ .tag = .dump_on };
+        if (std.ascii.eqlIgnoreCase(mode, "OFF")) return .{ .tag = .dump_off };
+        if (std.ascii.eqlIgnoreCase(mode, "STATUS")) return .{ .tag = .dump_status };
+        return .{ .tag = .unknown };
     }
     return .{ .tag = .unknown };
 }
@@ -242,6 +251,38 @@ test "control_socket: parseCommand: case insensitive" {
     const cmd = parseCommand("switch FPS\n");
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("FPS", cmd.name);
+}
+
+test "control_socket: parseCommand: DUMP ON" {
+    const cmd = parseCommand("DUMP ON\n");
+    try testing.expectEqual(CommandTag.dump_on, cmd.tag);
+}
+
+test "control_socket: parseCommand: DUMP OFF" {
+    const cmd = parseCommand("DUMP OFF\n");
+    try testing.expectEqual(CommandTag.dump_off, cmd.tag);
+}
+
+test "control_socket: parseCommand: DUMP case insensitive" {
+    const on = parseCommand("dump on\n");
+    try testing.expectEqual(CommandTag.dump_on, on.tag);
+    const off = parseCommand("Dump Off\n");
+    try testing.expectEqual(CommandTag.dump_off, off.tag);
+}
+
+test "control_socket: parseCommand: DUMP STATUS" {
+    const cmd = parseCommand("DUMP STATUS\n");
+    try testing.expectEqual(CommandTag.dump_status, cmd.tag);
+}
+
+test "control_socket: parseCommand: DUMP without arg is unknown" {
+    const cmd = parseCommand("DUMP\n");
+    try testing.expectEqual(CommandTag.unknown, cmd.tag);
+}
+
+test "control_socket: parseCommand: DUMP invalid arg is unknown" {
+    const cmd = parseCommand("DUMP MAYBE\n");
+    try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
 test "control_socket: parseCommand: SWITCH missing name" {
