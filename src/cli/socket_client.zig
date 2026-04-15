@@ -4,20 +4,20 @@ const linux = std.os.linux;
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
-/// Non-root: prefer $XDG_RUNTIME_DIR/padctl.sock if it exists, else fall back
-/// to the system path. The daemon always creates the socket at the system path
-/// (/run/padctl/padctl.sock), so the fallback is needed for non-root clients
-/// to reach a root-running daemon.
+/// Non-root user with XDG_RUNTIME_DIR set → use XDG socket path
+/// (daemon binds there before the file exists; no existence check here).
+/// Root or missing XDG_RUNTIME_DIR → system path for system-service compatibility.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
     if (posix.geteuid() != 0) {
         if (posix.getenv("XDG_RUNTIME_DIR")) |xrd| {
-            const xrd_path = std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch return DEFAULT_SOCKET_PATH;
-            // Only use XDG path if the socket actually exists there
-            std.fs.accessAbsolute(xrd_path, .{}) catch return DEFAULT_SOCKET_PATH;
-            return xrd_path;
+            return resolveSocketPathForXrd(buf, xrd);
         }
     }
     return DEFAULT_SOCKET_PATH;
+}
+
+fn resolveSocketPathForXrd(buf: []u8, xrd: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch DEFAULT_SOCKET_PATH;
 }
 
 pub const ConnectError = posix.SocketError || posix.ConnectError || error{ PathTooLong, InvalidPath };
@@ -75,6 +75,15 @@ const testing = std.testing;
 test "resolveSocketPath: root returns system path" {
     // This test only verifies the default fallback path constant.
     try testing.expectEqualStrings("/run/padctl/padctl.sock", DEFAULT_SOCKET_PATH);
+}
+
+test "resolveSocketPath: XDG path returned even when socket does not exist" {
+    // Regression for chicken-and-egg: old code called accessAbsolute, which
+    // caused fall-through to DEFAULT_SOCKET_PATH when the socket didn't exist yet.
+    // Test the pure helper directly to avoid env manipulation in the test suite.
+    var buf: [256]u8 = undefined;
+    const result = resolveSocketPathForXrd(&buf, "/nonexistent/padctl-test-xdg");
+    try testing.expectEqualStrings("/nonexistent/padctl-test-xdg/padctl.sock", result);
 }
 
 test "resolveSocketPath: buf large enough for XDG path" {

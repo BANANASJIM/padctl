@@ -412,11 +412,11 @@ fn printHelp() void {
         \\  switch [name]         Switch mapping (omit name to re-apply from user config)
         \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
         \\    --device <id>       Apply only to specific device
-        \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
+        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  status                Show daemon status (current mapping, devices)
-        \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
+        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  devices               List connected devices via daemon
-        \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
+        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  config list           List XDG-layer device and mapping configs
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
         \\    --device <name>     Skip device selection prompt
