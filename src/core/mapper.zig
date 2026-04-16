@@ -10,6 +10,13 @@ const timer_queue_mod = @import("timer_queue.zig");
 const aux_event_mod = @import("aux_event.zig");
 const c = @cImport(@cInclude("linux/input-event-codes.h"));
 
+const posix = std.posix;
+
+fn monotonicNs() i128 {
+    const ts = posix.clock_gettime(.MONOTONIC) catch return 0;
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
 const REL_X: u16 = c.REL_X;
 const REL_Y: u16 = c.REL_Y;
 const REL_WHEEL: u16 = c.REL_WHEEL;
@@ -97,7 +104,7 @@ pub const Mapper = struct {
 
         // [2] layer trigger processing
         const configs = self.config.layer orelse &.{};
-        const now_ns = std.time.nanoTimestamp();
+        const now_ns = monotonicNs();
         const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons, now_ns);
         var timer_request: ?TimerRequest = null;
         if (action.arm_timer_ms) |ms| {
