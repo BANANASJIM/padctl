@@ -435,7 +435,7 @@ pub const UinputDevice = struct {
 pub const AuxDevice = struct {
     fd: std.posix.fd_t,
 
-    pub fn create(key_codes: []const u16) !AuxDevice {
+    pub fn create(key_codes: []const u16, needs_rel: bool) !AuxDevice {
         const flags = std.posix.O{ .ACCMODE = .WRONLY, .NONBLOCK = true };
         const fd = try std.posix.open("/dev/uinput", flags, 0);
         errdefer std.posix.close(fd);
@@ -445,9 +445,11 @@ pub const AuxDevice = struct {
             try ioctlInt(fd, UI_SET_KEYBIT, @intCast(code));
         }
 
-        try ioctlInt(fd, UI_SET_EVBIT, c.EV_REL);
-        for ([_]u16{ c.REL_X, c.REL_Y, c.REL_WHEEL, c.REL_HWHEEL }) |rel_code| {
-            try ioctlInt(fd, UI_SET_RELBIT, @intCast(rel_code));
+        if (needs_rel) {
+            try ioctlInt(fd, UI_SET_EVBIT, c.EV_REL);
+            for ([_]u16{ c.REL_X, c.REL_Y, c.REL_WHEEL, c.REL_HWHEEL }) |rel_code| {
+                try ioctlInt(fd, UI_SET_RELBIT, @intCast(rel_code));
+            }
         }
 
         var setup = std.mem.zeroes(c.uinput_setup);

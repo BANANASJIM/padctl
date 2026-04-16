@@ -154,7 +154,7 @@ pub const DeviceInstance = struct {
                 if (out_cfg.aux != null or caps.needsAux()) {
                     var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
                     const key_codes = mapping_mod.buildAuxKeyCodes(caps, &buf);
-                    aux_dev = try AuxDevice.create(key_codes);
+                    aux_dev = try AuxDevice.create(key_codes, caps.needs_rel);
                     var cap_buf: [64]u8 = undefined;
                     var cap_fbs = std.io.fixedBufferStream(&cap_buf);
                     const cap_w = cap_fbs.writer();
@@ -292,7 +292,7 @@ pub const DeviceInstance = struct {
         if (new_caps.needsAux() or self.device_cfg.output.?.aux != null) {
             var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
             const key_codes = mapping_mod.buildAuxKeyCodes(new_caps, &buf);
-            if (AuxDevice.create(key_codes)) |dev| {
+            if (AuxDevice.create(key_codes, new_caps.needs_rel)) |dev| {
                 self.aux_dev = dev;
             } else |err| {
                 std.log.warn("aux device rebuild failed: {}, old device closed", .{err});
@@ -310,7 +310,7 @@ pub const DeviceInstance = struct {
         if (!caps.needsAux() and out_cfg.aux == null) return;
         var buf: [mapping_mod.AUX_KEY_CODES_MAX]u16 = undefined;
         const key_codes = mapping_mod.buildAuxKeyCodes(caps, &buf);
-        self.aux_dev = try AuxDevice.create(key_codes);
+        self.aux_dev = try AuxDevice.create(key_codes, caps.needs_rel);
     }
 
     /// Signal the event loop to stop. run() returns after the current ppoll.

@@ -751,6 +751,20 @@ test "deriveAuxFromMapping: BTN_FORWARD alias sets bit 32" {
     try std.testing.expect(caps.mouse_buttons & 32 != 0);
 }
 
+test "deriveAuxFromMapping: pure KEY_ remap yields needs_rel=false and needs_keyboard=true" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = "KEY_M"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(!caps.needs_rel);
+    try std.testing.expect(caps.needs_keyboard);
+    try std.testing.expect(caps.mouse_buttons == 0);
+    try std.testing.expect(caps.needsAux());
+}
+
 test "deriveAuxFromMapping: BTN_BACK alias sets bit 64" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator,
