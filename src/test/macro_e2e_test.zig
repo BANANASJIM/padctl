@@ -281,7 +281,7 @@ test "macro: layer switch while macro active — held keys released, macros clea
 
     // Now activate layer (LT hold) — active_changed fires → macros cleared, releases emitted.
     const configs = ctx.parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     const ev = try m.apply(.{ .buttons = m1_mask }, 16);

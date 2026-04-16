@@ -91,6 +91,19 @@ fn templateContent(idx: usize) []const u8 {
     };
 }
 
+fn formatGuidance(allocator: std.mem.Allocator, safe_name: []const u8, device_name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator,
+        \\
+        \\Next steps:
+        \\  padctl switch {s}              activate this mapping now
+        \\  Or add to ~/.config/padctl/config.toml:
+        \\    [[device]]
+        \\    name = "{s}"
+        \\    default_mapping = "{s}"
+        \\
+    , .{ safe_name, device_name, safe_name });
+}
+
 pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[]const u8) !void {
     var pbuf: std.ArrayList(u8) = .{};
     defer pbuf.deinit(allocator);
@@ -204,6 +217,10 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
     } else |err| {
         print(allocator, &pbuf, "Validation warning: {}\n", .{err});
     }
+
+    const guidance = try formatGuidance(allocator, safe, device_name);
+    defer allocator.free(guidance);
+    _ = posix.write(posix.STDOUT_FILENO, guidance) catch 0;
 }
 
 // --- tests ---
@@ -242,4 +259,14 @@ test "init: ensureMappingsDir creates missing parent dirs" {
     try ensureMappingsDir(mappings);
 
     try std.fs.accessAbsolute(mappings, .{});
+}
+
+test "init: formatGuidance contains expected substrings" {
+    const allocator = std.testing.allocator;
+    const guidance = try formatGuidance(allocator, "vader-5-pro", "Vader 5 Pro");
+    defer allocator.free(guidance);
+
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "padctl switch vader-5-pro") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "name = \"Vader 5 Pro\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guidance, "default_mapping = \"vader-5-pro\"") != null);
 }

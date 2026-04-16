@@ -10,6 +10,13 @@ const timer_queue_mod = @import("timer_queue.zig");
 const aux_event_mod = @import("aux_event.zig");
 const c = @cImport(@cInclude("linux/input-event-codes.h"));
 
+const posix = std.posix;
+
+fn monotonicNs() i128 {
+    const ts = posix.clock_gettime(.MONOTONIC) catch return 0;
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
 const REL_X: u16 = c.REL_X;
 const REL_Y: u16 = c.REL_Y;
 const REL_WHEEL: u16 = c.REL_WHEEL;
@@ -97,7 +104,8 @@ pub const Mapper = struct {
 
         // [2] layer trigger processing
         const configs = self.config.layer orelse &.{};
-        const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons);
+        const now_ns = monotonicNs();
+        const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons, now_ns);
         var timer_request: ?TimerRequest = null;
         if (action.arm_timer_ms) |ms| {
             timer_request = .{ .arm = @intCast(ms) };
@@ -587,7 +595,7 @@ test "mapper: layer remap overrides base: base A->B, layer A->C" {
 
     // Activate hold layer by simulating PENDING → ACTIVE manually
     const configs = parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
@@ -624,7 +632,7 @@ test "mapper: suppress accumulates: base suppress A + layer suppress B" {
     defer m.deinit();
 
     const configs = parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
@@ -657,7 +665,7 @@ test "mapper: inject last-write wins: layer inject overrides base inject for sam
     defer m.deinit();
 
     const configs = parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
@@ -714,7 +722,7 @@ test "mapper: onTimerExpired: PENDING -> ACTIVE activates layer" {
 
     const configs = parsed.value.layer.?;
     // Press LT — goes PENDING
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     try testing.expect(m.layer.tap_hold != null);
     try testing.expect(!m.layer.tap_hold.?.layer_activated);
 
@@ -751,7 +759,7 @@ test "mapper: layer gyro override: active layer gyro config used" {
     defer m.deinit();
 
     const configs = parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     // With layer active, gyro should be in mouse mode with the configured sensitivity
@@ -781,7 +789,7 @@ test "mapper: layer dpad override: active layer dpad config used" {
     defer m.deinit();
 
     const configs = parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     const dcfg = m.effectiveDpadConfig();

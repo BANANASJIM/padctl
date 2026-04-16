@@ -92,10 +92,10 @@ test "property: rapid hold layer toggle — state stays consistent" {
 
     for (0..1000) |_| {
         if (rng.boolean()) {
-            _ = m.layer.processLayerTriggers(configs, btnMask(.LT), 0);
+            _ = m.layer.processLayerTriggers(configs, btnMask(.LT), 0, 0);
             if (rng.boolean()) _ = m.layer.onTimerExpired();
         } else {
-            _ = m.layer.processLayerTriggers(configs, 0, btnMask(.LT));
+            _ = m.layer.processLayerTriggers(configs, 0, btnMask(.LT), 0);
         }
 
         // layer state must never reference out-of-bounds config
@@ -125,10 +125,10 @@ test "property: rapid toggle layer — state stays consistent" {
         const sel = btnMask(.Select);
         if (rng.boolean()) {
             // press
-            _ = m.layer.processLayerTriggers(configs, sel, 0);
+            _ = m.layer.processLayerTriggers(configs, sel, 0, 0);
         } else {
             // release (toggle fires on release)
-            _ = m.layer.processLayerTriggers(configs, 0, sel);
+            _ = m.layer.processLayerTriggers(configs, 0, sel, 0);
         }
 
         if (m.layer.getActive(configs)) |active| {
@@ -354,7 +354,7 @@ test "property: layer and base remap to same target — no crash" {
     const configs = ctx.parsed.value.layer.?;
 
     // activate layer
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     // both A and B pressed — both map to KEY_F1
