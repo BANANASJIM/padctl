@@ -128,17 +128,20 @@ else
         err "zig not found. Install Zig 0.15.x from https://ziglang.org/download/"
         exit 1
     fi
-    # Warn if version is 0.16+ (breaking changes)
-    zig_ver="$(zig version 2>/dev/null || echo unknown)"
+    # padctl requires Zig 0.15.x. Reject anything else upfront so users hit a
+    # clear error instead of a cryptic build failure downstream.
+    if ! zig_ver="$(zig version 2>/dev/null)"; then
+        err "failed to determine zig version"
+        exit 1
+    fi
     case "$zig_ver" in
         0.15.*) ok "zig found: $zig_ver" ;;
-        0.16.*|0.17.*|1.*)
-            warn "zig $zig_ver detected — padctl requires 0.15.x (0.16+ has breaking build API changes)"
+        *)
+            warn "zig $zig_ver detected — padctl requires 0.15.x"
             warn "Install zig@0.15 via brew, or download from https://ziglang.org/download/"
             read -rp "Continue anyway? [y/N] " yn
             [[ "$yn" =~ ^[Yy] ]] || exit 1
             ;;
-        *) ok "zig found: $zig_ver" ;;
     esac
 fi
 
@@ -171,19 +174,32 @@ fi
 
 if [[ -d "$PADCTL_REPO/.git" ]]; then
     info "Updating existing repo at $PADCTL_REPO..."
+    repo_updated=false
     if [[ -n "$BRANCH" ]]; then
         git -C "$PADCTL_REPO" fetch origin 2>/dev/null || true
         git -C "$PADCTL_REPO" checkout "$BRANCH" 2>/dev/null || warn "checkout $BRANCH failed"
-        timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        if timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null; then
+            repo_updated=true
+        else
+            warn "git pull failed (might have local changes)"
+        fi
     else
         # Only pull if on a branch that tracks a remote (skip for local-only branches).
         if git -C "$PADCTL_REPO" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
-            timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+            if timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null; then
+                repo_updated=true
+            else
+                warn "git pull failed (might have local changes)"
+            fi
         else
             info "Local branch with no upstream — skipping pull"
         fi
     fi
-    ok "Repo up to date"
+    if $repo_updated; then
+        ok "Repo up to date"
+    else
+        info "Using existing repo state"
+    fi
 elif [[ -f "$PADCTL_REPO/build.zig" ]]; then
     ok "Using existing repo at $PADCTL_REPO (not a git repo)"
 else

@@ -654,8 +654,13 @@ pub fn main() !void {
 
         const enable = dump_action == .enable;
         var config_written = false;
+        // Malformed user config blocks the persistence chain: user_config.load()
+        // refuses to fall through to the system config when the user file is
+        // broken, so writing only the system file would not actually take effect
+        // on the next daemon restart. Track this and refuse to claim persistence.
+        var user_config_blocks_fallback = false;
 
-        // Write to both user and system config (best-effort for each).
+        // Write to user config first (no sudo needed).
         const cfgpaths = config.paths;
         if (cfgpaths.userConfigDir(allocator)) |user_dir| {
             defer allocator.free(user_dir);
@@ -663,7 +668,8 @@ pub fn main() !void {
                 config_written = true;
             } else |err| {
                 if (err == error.MalformedConfig) {
-                    stderr_writer.writeAll("error: user config.toml is malformed — fix or remove it\n") catch {};
+                    user_config_blocks_fallback = true;
+                    stderr_writer.writeAll("error: user config.toml is malformed — fix or remove it before enabling dump persistence\n") catch {};
                 } else {
                     std.log.warn("could not write user config: {}", .{err});
                 }
@@ -673,7 +679,12 @@ pub fn main() !void {
         // System config: write to a temp file, then sudo cp to /etc/padctl/.
         // Direct write fails without root (AccessDenied).
         const sys_dir = cfgpaths.systemConfigDir();
-        if (std.os.linux.getuid() == 0) {
+        if (user_config_blocks_fallback) {
+            // Skip system write entirely regardless of privilege: the daemon
+            // won't read it because user_config.load() stops on MalformedConfig
+            // in the user file and refuses to fall through to the system file.
+            stderr_writer.writeAll("info: skipping system config write — broken user config would mask it\n") catch {};
+        } else if (std.os.linux.getuid() == 0) {
             // Already root — write directly.
             if (cli.dump.writeDiagnosticsConfig(allocator, sys_dir, enable)) {
                 config_written = true;
@@ -685,27 +696,35 @@ pub fn main() !void {
                 }
             }
         } else {
-            // Non-root: write to temp dir, sudo cp to system path.
-            const tmp_dir = "/tmp/padctl-dump-config";
-            if (cli.dump.writeDiagnosticsConfig(allocator, tmp_dir, enable)) {
-                const tmp_src = tmp_dir ++ "/config.toml";
-                const sys_dst_buf = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
-                defer if (sys_dst_buf) |b| allocator.free(b);
-                if (sys_dst_buf) |sys_dst| {
-                    if (runSudoMkdir(sys_dir, stderr_writer)) {
-                        if (runSudoCopy(tmp_src, sys_dst, stderr_writer)) {
-                            config_written = true;
+            // Non-root: write to a unique temp dir (avoids symlink/TOCTOU on
+            // a shared /tmp path), sudo cp to system path, then cleanup.
+            if (makeTempDir(allocator)) |tmp_dir| {
+                defer {
+                    // Best-effort cleanup of the temp dir tree.
+                    std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+                    allocator.free(tmp_dir);
+                }
+                if (cli.dump.writeDiagnosticsConfig(allocator, tmp_dir, enable)) {
+                    const tmp_src = std.fmt.allocPrint(allocator, "{s}/config.toml", .{tmp_dir}) catch null;
+                    defer if (tmp_src) |s| allocator.free(s);
+                    const sys_dst = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
+                    defer if (sys_dst) |b| allocator.free(b);
+                    if (tmp_src != null and sys_dst != null) {
+                        if (runSudoMkdir(sys_dir, stderr_writer)) {
+                            if (runSudoCopy(tmp_src.?, sys_dst.?, stderr_writer)) {
+                                config_written = true;
+                            }
                         }
                     }
+                } else |err| {
+                    if (err == error.MalformedConfig) {
+                        stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
+                    } else {
+                        std.log.warn("could not write system config: {}", .{err});
+                    }
                 }
-                std.fs.deleteFileAbsolute(tmp_src) catch {};
-                std.fs.deleteTreeAbsolute(tmp_dir) catch {};
             } else |err| {
-                if (err == error.MalformedConfig) {
-                    stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
-                } else {
-                    std.log.warn("could not write system config: {}", .{err});
-                }
+                std.log.warn("could not create temp dir for config write: {}", .{err});
             }
         }
 
@@ -730,6 +749,12 @@ pub fn main() !void {
         if (!config_written and !ipc_ok) {
             stderr_writer.writeAll("error: could not persist or apply dump setting\n") catch {};
             std.process.exit(1);
+        }
+        if (!config_written and user_config_blocks_fallback) {
+            // IPC may have succeeded (live-only apply), but the setting will
+            // be lost on next daemon restart. Surface this loudly so users
+            // don't assume the toggle is durable.
+            stderr_writer.writeAll("warning: dump setting was NOT persisted across restarts — fix the malformed user config.toml first\n") catch {};
         }
         std.process.exit(0);
     }
@@ -1163,6 +1188,29 @@ fn runSudoMkdir(dir: []const u8, err_writer: anytype) bool {
         .Exited => |code| code == 0,
         else => false,
     };
+}
+
+/// Create a unique, exclusive temp directory owned by the current user.
+/// Using `mkdir` (exclusive) + random suffix avoids symlink/TOCTOU races on a
+/// shared predictable path like `/tmp/padctl-dump-config`. Mode 0o700 keeps
+/// the tree private even though the config.toml contents are non-sensitive.
+/// Caller owns and must free the returned path.
+fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
+    const tmp = std.posix.getenv("TMPDIR") orelse "/tmp";
+    var rand_bytes: [8]u8 = undefined;
+    var attempts: u32 = 0;
+    while (attempts < 16) : (attempts += 1) {
+        std.crypto.random.bytes(&rand_bytes);
+        const suffix = std.mem.readInt(u64, &rand_bytes, .little);
+        const path = try std.fmt.allocPrint(allocator, "{s}/padctl-dump-{x}", .{ tmp, suffix });
+        std.posix.mkdir(path, 0o700) catch |err| {
+            allocator.free(path);
+            if (err == error.PathAlreadyExists) continue;
+            return err;
+        };
+        return path;
+    }
+    return error.TempDirCreationFailed;
 }
 
 fn escapeTomlString(writer: anytype, s: []const u8) !void {
