@@ -18,6 +18,8 @@ pub const TapHoldState = struct {
     layer_name: []const u8,
     layer_activated: bool = false,
     phase: TapHoldPhase = .pending,
+    press_ns: i128 = 0,
+    hold_timeout_ns: i128 = 0,
 };
 
 pub const TapHoldResult = struct {
@@ -69,6 +71,7 @@ pub const LayerState = struct {
         configs: []const LayerConfig,
         buttons: u64,
         prev_buttons: u64,
+        now_ns: i128,
     ) LayerAction {
         var action = LayerAction{};
 
@@ -85,7 +88,7 @@ pub const LayerState = struct {
                         if (!std.mem.eql(u8, th.layer_name, cfg.name)) continue;
                     }
                     const timeout: u64 = @intCast(cfg.hold_timeout orelse 200);
-                    const res = self.onTriggerPress(cfg.name, timeout);
+                    const res = self.onTriggerPress(cfg.name, timeout, now_ns);
                     if (res.arm_timer_ms) |ms| {
                         action.arm_timer_ms = ms;
                         action.active_changed = true;
@@ -98,7 +101,7 @@ pub const LayerState = struct {
                         remap.resolveTarget(t) catch null
                     else
                         null;
-                    const res = self.onTriggerRelease(tap_target);
+                    const res = self.onTriggerRelease(tap_target, now_ns);
                     if (res.disarm_timer) action.disarm_timer = true;
                     if (res.tap_event) |ev| action.tap_event = ev;
                     if (res.layer_activated or res.layer_deactivated) action.active_changed = true;
@@ -124,32 +127,36 @@ pub const LayerState = struct {
         return action;
     }
 
-    /// IDLE → PENDING: arm timerfd
-    pub fn onTriggerPress(self: *LayerState, layer_name: []const u8, hold_timeout_ms: u64) TapHoldResult {
-        // already PENDING or ACTIVE for this layer: ignore re-press
+    pub fn onTriggerPress(self: *LayerState, layer_name: []const u8, hold_timeout_ms: u64, now_ns: i128) TapHoldResult {
         if (self.tap_hold) |th| {
             if (std.mem.eql(u8, th.layer_name, layer_name)) return .{};
         }
-        self.tap_hold = .{ .layer_name = layer_name, .phase = .pending };
+        self.tap_hold = .{
+            .layer_name = layer_name,
+            .phase = .pending,
+            .press_ns = now_ns,
+            .hold_timeout_ns = @as(i128, hold_timeout_ms) * 1_000_000,
+        };
         return .{ .arm_timer_ms = hold_timeout_ms };
     }
 
-    /// PENDING → IDLE + tap, or ACTIVE → IDLE
-    pub fn onTriggerRelease(self: *LayerState, tap_target: ?RemapTarget) TapHoldResult {
-        const th = self.tap_hold orelse return .{}; // IDLE: no-op
+    pub fn onTriggerRelease(self: *LayerState, tap_target: ?RemapTarget, now_ns: i128) TapHoldResult {
+        const th = self.tap_hold orelse return .{};
         defer self.tap_hold = null;
         return switch (th.phase) {
             .pending => .{
                 .disarm_timer = true,
                 .tap_event = tap_target,
             },
-            .active => .{
+            .active => if (th.hold_timeout_ns > 0 and (now_ns - th.press_ns) < th.hold_timeout_ns) .{
+                .tap_event = tap_target,
+                .layer_deactivated = true,
+            } else .{
                 .layer_deactivated = true,
             },
         };
     }
 
-    /// PENDING → ACTIVE; stale timer (IDLE) is ignored
     pub fn onTimerExpired(self: *LayerState) TapHoldResult {
         const th = &(self.tap_hold orelse return .{}); // IDLE: stale, no-op
         if (th.phase != .pending) return .{};
@@ -264,7 +271,7 @@ test "layer: tap-hold: press → PENDING, arm_timer_ms set" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
 
-    const res = ls.onTriggerPress("aim", 200);
+    const res = ls.onTriggerPress("aim", 200, 0);
     try testing.expectEqual(@as(?u64, 200), res.arm_timer_ms);
     try testing.expect(!res.disarm_timer);
     try testing.expect(res.tap_event == null);
@@ -277,7 +284,7 @@ test "layer: tap-hold: press → PENDING, arm_timer_ms set" {
 test "layer: tap-hold: PENDING + timer expired → ACTIVE, layer_activated = true" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
-    _ = ls.onTriggerPress("aim", 200);
+    _ = ls.onTriggerPress("aim", 200, 0);
 
     const res = ls.onTimerExpired();
     try testing.expect(res.layer_activated);
@@ -292,9 +299,9 @@ test "layer: tap-hold: PENDING + timer expired → ACTIVE, layer_activated = tru
 test "layer: tap-hold: PENDING + release → IDLE, tap_event has value" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
-    _ = ls.onTriggerPress("aim", 200);
+    _ = ls.onTriggerPress("aim", 200, 0);
 
-    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 });
+    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 }, 100_000_000);
     try testing.expect(res.disarm_timer);
     try testing.expect(res.tap_event != null);
     try testing.expect(!res.layer_activated);
@@ -305,21 +312,21 @@ test "layer: tap-hold: PENDING + release → IDLE, tap_event has value" {
 test "layer: tap-hold: PENDING + release with no tap target → IDLE, no tap_event" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
-    _ = ls.onTriggerPress("aim", 200);
+    _ = ls.onTriggerPress("aim", 200, 0);
 
-    const res = ls.onTriggerRelease(null);
+    const res = ls.onTriggerRelease(null, 100_000_000);
     try testing.expect(res.disarm_timer);
     try testing.expect(res.tap_event == null);
     try testing.expect(ls.tap_hold == null);
 }
 
-test "layer: tap-hold: ACTIVE + release → IDLE, layer_deactivated = true" {
+test "layer: tap-hold: ACTIVE + release (past timeout) → IDLE, no tap" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
-    _ = ls.onTriggerPress("aim", 200);
+    _ = ls.onTriggerPress("aim", 200, 0);
     _ = ls.onTimerExpired();
 
-    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 });
+    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 }, 500_000_000);
     try testing.expect(res.layer_deactivated);
     try testing.expect(!res.layer_activated);
     try testing.expect(!res.disarm_timer);
@@ -327,11 +334,25 @@ test "layer: tap-hold: ACTIVE + release → IDLE, layer_deactivated = true" {
     try testing.expect(ls.tap_hold == null);
 }
 
+test "layer: tap-hold: ACTIVE + release within timeout (race) → tap emitted (#79)" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const press_time: i128 = 1_000_000_000;
+    _ = ls.onTriggerPress("aim", 200, press_time);
+    _ = ls.onTimerExpired();
+
+    const release_time: i128 = press_time + 150_000_000;
+    const res2 = ls.onTriggerRelease(RemapTarget{ .key = 183 }, release_time);
+    try testing.expect(res2.layer_deactivated);
+    try testing.expect(res2.tap_event != null);
+    try testing.expect(ls.tap_hold == null);
+}
+
 test "layer: tap-hold: IDLE + release → no-op" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
 
-    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 });
+    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 }, 0);
     try testing.expect(!res.disarm_timer);
     try testing.expect(res.tap_event == null);
     try testing.expect(!res.layer_activated);
@@ -350,10 +371,10 @@ test "layer: tap-hold: IDLE + timer expired → no-op (stale timer)" {
 test "layer: tap-hold: ACTIVE re-press same trigger → ignored" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
-    _ = ls.onTriggerPress("aim", 200);
+    _ = ls.onTriggerPress("aim", 200, 0);
     _ = ls.onTimerExpired();
 
-    const res = ls.onTriggerPress("aim", 200);
+    const res = ls.onTriggerPress("aim", 200, 0);
     try testing.expect(res.arm_timer_ms == null);
     try testing.expectEqual(TapHoldPhase.active, ls.tap_hold.?.phase);
 }
@@ -380,7 +401,7 @@ test "layer: processLayerTriggers: Hold press → PENDING, arm timer" {
     const configs = [_]LayerConfig{hold_aim};
     const lt = ltMask();
 
-    const action = ls.processLayerTriggers(&configs, lt, 0);
+    const action = ls.processLayerTriggers(&configs, lt, 0, 0);
     try testing.expect(action.arm_timer_ms != null);
     try testing.expectEqual(@as(?u64, 200), action.arm_timer_ms);
     try testing.expect(action.active_changed);
@@ -394,7 +415,7 @@ test "layer: processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive re
     const configs = [_]LayerConfig{hold_aim};
     const lt = ltMask();
 
-    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
     _ = ls.onTimerExpired();
 
     try testing.expect(ls.getActive(&configs) != null);
@@ -407,10 +428,10 @@ test "layer: processLayerTriggers: Hold ACTIVE + release → IDLE" {
     const configs = [_]LayerConfig{hold_aim};
     const lt = ltMask();
 
-    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
     _ = ls.onTimerExpired();
 
-    const action = ls.processLayerTriggers(&configs, 0, lt);
+    const action = ls.processLayerTriggers(&configs, 0, lt, 0);
     try testing.expect(action.active_changed);
     try testing.expect(ls.tap_hold == null);
     try testing.expect(ls.getActive(&configs) == null);
@@ -423,8 +444,8 @@ test "layer: processLayerTriggers: Hold PENDING release → tap event + disarm" 
     const configs = [_]LayerConfig{tap_cfg};
     const lt = ltMask();
 
-    _ = ls.processLayerTriggers(&configs, lt, 0);
-    const action = ls.processLayerTriggers(&configs, 0, lt);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
+    const action = ls.processLayerTriggers(&configs, 0, lt, 0);
 
     try testing.expect(action.disarm_timer);
     try testing.expect(action.tap_event != null);
@@ -438,11 +459,11 @@ test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold pres
     const lt = ltMask();
     const rb = rbMask();
 
-    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
     try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 
     // RB pressed while LT PENDING — must be ignored
-    const action = ls.processLayerTriggers(&configs, lt | rb, lt);
+    const action = ls.processLayerTriggers(&configs, lt | rb, lt, 0);
     try testing.expect(action.arm_timer_ms == null);
     try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 }
@@ -454,10 +475,10 @@ test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold pres
     const lt = ltMask();
     const rb = rbMask();
 
-    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
     _ = ls.onTimerExpired();
 
-    const action = ls.processLayerTriggers(&configs, lt | rb, lt);
+    const action = ls.processLayerTriggers(&configs, lt | rb, lt, 0);
     try testing.expect(action.arm_timer_ms == null);
     try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 }
@@ -468,7 +489,7 @@ test "layer: processLayerTriggers: Toggle release → layer on" {
     const configs = [_]LayerConfig{toggle_sel};
     const sel = selMask();
 
-    const action = ls.processLayerTriggers(&configs, 0, sel);
+    const action = ls.processLayerTriggers(&configs, 0, sel, 0);
     try testing.expect(action.active_changed);
     try testing.expect(ls.toggled.contains("sel"));
     try testing.expect(ls.getActive(&configs) != null);
@@ -480,8 +501,8 @@ test "layer: processLayerTriggers: Toggle second release → layer off" {
     const configs = [_]LayerConfig{toggle_sel};
     const sel = selMask();
 
-    _ = ls.processLayerTriggers(&configs, 0, sel);
-    const action = ls.processLayerTriggers(&configs, 0, sel);
+    _ = ls.processLayerTriggers(&configs, 0, sel, 0);
+    const action = ls.processLayerTriggers(&configs, 0, sel, 0);
     try testing.expect(action.active_changed);
     try testing.expect(!ls.toggled.contains("sel"));
     try testing.expect(ls.getActive(&configs) == null);
@@ -494,11 +515,11 @@ test "layer: processLayerTriggers: Toggle on blocked while Hold ACTIVE" {
     const lt = ltMask();
     const sel = selMask();
 
-    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
     _ = ls.onTimerExpired();
 
     // Toggle release while Hold ACTIVE — must be blocked
-    _ = ls.processLayerTriggers(&configs, lt, lt | sel);
+    _ = ls.processLayerTriggers(&configs, lt, lt | sel, 0);
     try testing.expect(!ls.toggled.contains("sel"));
     try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
 }
@@ -511,11 +532,11 @@ test "layer: processLayerTriggers: Toggle + Hold coexist, Hold takes priority in
     const sel = selMask();
 
     // Toggle on first (no active layer yet)
-    _ = ls.processLayerTriggers(&configs, 0, sel);
+    _ = ls.processLayerTriggers(&configs, 0, sel, 0);
     try testing.expect(ls.toggled.contains("sel"));
 
     // Hold press + activate
-    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.processLayerTriggers(&configs, lt, 0, 0);
     _ = ls.onTimerExpired();
 
     // Hold must take priority
@@ -532,11 +553,11 @@ test "layer: processLayerTriggers: multiple Toggles on — declaration order win
     const rb = rbMask();
 
     // Toggle "a" on
-    _ = ls.processLayerTriggers(&configs, 0, lb);
+    _ = ls.processLayerTriggers(&configs, 0, lb, 0);
     try testing.expect(ls.toggled.contains("a"));
 
     // "a" is active now; "b" toggle-on should be blocked
-    _ = ls.processLayerTriggers(&configs, 0, rb);
+    _ = ls.processLayerTriggers(&configs, 0, rb, 0);
     try testing.expect(!ls.toggled.contains("b"));
     try testing.expectEqualStrings("a", ls.getActive(&configs).?.name);
 }

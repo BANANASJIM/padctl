@@ -49,7 +49,7 @@ test "e2e: layer hold — PENDING → ACTIVE, layer remap activates" {
     const configs = ctx.parsed.value.layer.?;
 
     // Frame 1: LT press → PENDING
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     try testing.expect(m.layer.tap_hold != null);
     try testing.expect(!m.layer.tap_hold.?.layer_activated);
 
@@ -73,7 +73,7 @@ test "e2e: layer hold — PENDING → ACTIVE, layer remap activates" {
     try testing.expect(found_mouse_left);
 
     // Frame 3: LT release → layer IDLE, A restores
-    _ = m.layer.onTriggerRelease(null);
+    _ = m.layer.onTriggerRelease(null, 500_000_000);
     try testing.expect(m.layer.tap_hold == null);
     const ev2 = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     try testing.expect((ev2.gamepad.buttons & btnMask(.A)) != 0);
@@ -96,11 +96,11 @@ test "e2e: layer tap — quick release emits tap event" {
     const configs = ctx.parsed.value.layer.?;
 
     // Frame 1: LT press → PENDING
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
 
     // Frame 2: LT release before timer → tap event
     const tap_target = mapper_mod.resolveTarget("mouse_left") catch unreachable;
-    const res = m.layer.onTriggerRelease(tap_target);
+    const res = m.layer.onTriggerRelease(tap_target, 100_000_000);
     try testing.expect(res.disarm_timer);
     try testing.expect(res.tap_event != null);
     try testing.expect(m.layer.tap_hold == null);
@@ -125,10 +125,10 @@ test "e2e: layer tap — no tap after timeout (ACTIVE release)" {
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired(); // ACTIVE
 
-    const res = m.layer.onTriggerRelease(null);
+    const res = m.layer.onTriggerRelease(null, 500_000_000);
     try testing.expect(!res.disarm_timer);
     try testing.expect(res.tap_event == null);
     try testing.expect(res.layer_deactivated);
@@ -179,7 +179,7 @@ test "e2e: suppress/inject — layer ACTIVE: A→mouse_left overrides base A→K
     const configs = ctx.parsed.value.layer.?;
 
     // Activate layer
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
@@ -445,7 +445,7 @@ test "e2e: prev-frame mask — layer activates mid-stream, no spurious release f
     try testing.expect((ev1.gamepad.buttons & btnMask(.B)) != 0);
 
     // Layer activates (simulate timer)
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     // Frame N: B still held + layer ACTIVE → B suppressed in both current and masked_prev
@@ -476,8 +476,8 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
     const sel = btnMask(.Select);
 
     // Toggle on: Select press then release
-    _ = m.layer.processLayerTriggers(configs, sel, 0); // press
-    _ = m.layer.processLayerTriggers(configs, 0, sel); // release → toggle on
+    _ = m.layer.processLayerTriggers(configs, sel, 0, 0); // press
+    _ = m.layer.processLayerTriggers(configs, 0, sel, 0); // release → toggle on
     try testing.expect(m.layer.toggled.contains("fn"));
 
     // A press → KEY_F1 in aux
@@ -495,8 +495,8 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
     try testing.expectEqual(@as(u64, 0), ev1.gamepad.buttons & btnMask(.A));
 
     // Toggle off: Select press then release again
-    _ = m.layer.processLayerTriggers(configs, sel, 0);
-    _ = m.layer.processLayerTriggers(configs, 0, sel); // release → toggle off
+    _ = m.layer.processLayerTriggers(configs, sel, 0, 0);
+    _ = m.layer.processLayerTriggers(configs, 0, sel, 0); // release → toggle off
     try testing.expect(!m.layer.toggled.contains("fn"));
 
     // A press now → A passes through on main device
@@ -534,7 +534,7 @@ test "e2e: layer remap fall-through — button not in layer remap uses base rema
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     // X pressed — not in layer remap, should fall through to base (KEY_F13)
@@ -599,7 +599,7 @@ test "e2e: layer active — dpad mode switches to arrows" {
     var m = &ctx.mapper;
     const configs = ctx.parsed.value.layer.?;
 
-    _ = m.layer.onTriggerPress(configs[0].name, 200);
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
     // dpad_y = -1 → KEY_UP (arrows mode active via layer)

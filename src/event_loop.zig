@@ -811,7 +811,7 @@ test "event_loop: EventLoop timerfd: mapper.onTimerExpired invoked on timer expi
     defer m.deinit();
 
     // Put layer in PENDING so timer expiry advances it to ACTIVE
-    _ = m.layer.onTriggerPress("aim", 200);
+    _ = m.layer.onTriggerPress("aim", 200, 0);
 
     const parsed = try device_mod.parseString(allocator, minimal_toml);
     defer parsed.deinit();
