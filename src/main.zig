@@ -599,12 +599,7 @@ pub fn main() !void {
             // against the first device in the STATUS response. A future
             // version should require --device in multi-device setups or
             // add a device-keyed daemon API.
-            const resolved = resolveDefaultMapping(allocator, parsed.socket_path) orelse {
-                stderr_writer.writeAll("error: no mapping name given and no default_mapping in config.toml\n") catch {};
-                stderr_writer.writeAll("  usage: padctl switch <name>\n") catch {};
-                std.process.exit(1);
-            };
-            break :blk resolved;
+            break :blk resolveDefaultMapping(allocator, parsed.socket_path, stderr_writer);
         };
 
         const rc = cli.switch_mapping.run(mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
@@ -826,23 +821,35 @@ test {
 /// Resolve the default mapping name from the user's config.toml for the
 /// currently connected device (queried from daemon STATUS). Used by bare
 /// `padctl switch` (no mapping name given).
-fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8) ?[]const u8 {
+fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8, err_writer: anytype) []const u8 {
     const socket_client = @import("cli/socket_client.zig");
     const user_config_mod = @import("config/user_config.zig");
 
-    // Get the device name from the daemon.
-    const fd = socket_client.connectToSocket(socket_path) catch return null;
+    const fd = socket_client.connectToSocket(socket_path) catch {
+        err_writer.writeAll("error: cannot connect to daemon (is padctl running?)\n") catch {};
+        std.process.exit(1);
+    };
     defer std.posix.close(fd);
     var resp_buf: [4096]u8 = undefined;
-    const resp = socket_client.sendCommand(fd, "STATUS\n", &resp_buf) catch return null;
-    const device_name = parseDeviceFromStatus(resp) orelse return null;
+    const resp = socket_client.sendCommand(fd, "STATUS\n", &resp_buf) catch {
+        err_writer.writeAll("error: daemon did not respond to STATUS query\n") catch {};
+        std.process.exit(1);
+    };
+    const device_name = parseDeviceFromStatus(resp) orelse {
+        err_writer.writeAll("error: no devices connected\n") catch {};
+        std.process.exit(1);
+    };
 
-    // Use the shared loader which respects the user → system fallback.
-    // Don't deinit — the returned string points into parsed memory.
-    // Caller must use the name before the process exits, which is fine
-    // for a CLI that exits immediately after switch.
-    var result = user_config_mod.load(allocator) orelse return null;
-    return user_config_mod.findDefaultMapping(&result, device_name);
+    var result = user_config_mod.load(allocator) orelse {
+        err_writer.writeAll("error: no config.toml found; provide a mapping name explicitly\n") catch {};
+        err_writer.writeAll("  usage: padctl switch <name>\n") catch {};
+        std.process.exit(1);
+    };
+    return user_config_mod.findDefaultMapping(&result, device_name) orelse {
+        err_writer.print("error: no default_mapping in config.toml for device \"{s}\"\n", .{device_name}) catch {};
+        err_writer.writeAll("  usage: padctl switch <name>\n") catch {};
+        std.process.exit(1);
+    };
 }
 
 /// Save the current mapping choice to ~/.config/padctl/config.toml so that
@@ -1094,6 +1101,10 @@ test "main: parseDeviceFromStatus extracts device name" {
 test "main: parseDeviceFromStatus returns null for empty response" {
     try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus(""));
     try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("OK\n"));
+}
+
+test "main: parseDeviceFromStatus: bare STATUS response returns null (no devices)" {
+    try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("STATUS\n"));
 }
 
 test "escapeTomlString: escapes special characters" {
