@@ -5,6 +5,7 @@
 - [Getting Started](getting-started.md)
 - [Bazzite / Immutable Distros](immutable-install.md)
 - [Mapping Guide](mapping-guide.md)
+- [Diagnostic Logging](diagnostic-logging.md)
 - [Device Config Reference](device-config.md)
 - [Mapping Config Reference](mapping-config.md)
 - [Device Reference](devices/README.md)
