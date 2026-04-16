@@ -4,10 +4,21 @@ const linux = std.os.linux;
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
 
-/// Non-root user with XDG_RUNTIME_DIR set → use XDG socket path
-/// (daemon binds there before the file exists; no existence check here).
-/// Root or missing XDG_RUNTIME_DIR → system path for system-service compatibility.
+/// Resolve the default socket path for the current caller.
+///
+/// On immutable OS (Bazzite/Fedora Atomic), the daemon always runs as a
+/// system service at /run/padctl/padctl.sock. We detect this via
+/// /run/ostree-booted and return the system path directly — non-root CLI
+/// calls would otherwise fall through the XDG path which doesn't exist.
+///
+/// Otherwise: non-root user with XDG_RUNTIME_DIR → XDG path (user-service
+/// deployment); root or missing XDG_RUNTIME_DIR → system path.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
+    // Immutable OS always uses the system service.
+    if (std.fs.cwd().access("/run/ostree-booted", .{})) |_| {
+        return DEFAULT_SOCKET_PATH;
+    } else |_| {}
+
     if (posix.geteuid() != 0) {
         if (posix.getenv("XDG_RUNTIME_DIR")) |xrd| {
             return resolveSocketPathForXrd(buf, xrd);
