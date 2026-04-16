@@ -406,7 +406,11 @@ pub const UinputDevice = struct {
                     upload.request_id = @intCast(ev.value);
                     const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
                     if (begin_rc != 0) {
+                        // BEGIN failed — the upload struct is still zeroed. Skip the
+                        // rest of the branch so we don't touch ff_effects or call END
+                        // with retval=0 (which would falsely acknowledge the request).
                         rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_UPLOAD FAILED rc={d}", .{ self.log_tag, begin_rc });
+                        continue;
                     }
                     if (upload.effect.type == c.FF_RUMBLE and upload.effect.id < 16) {
                         self.ff_effects[@intCast(upload.effect.id)] = .{
@@ -435,6 +439,7 @@ pub const UinputDevice = struct {
                     const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
                     if (begin_rc != 0) {
                         rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_ERASE FAILED rc={d}", .{ self.log_tag, begin_rc });
+                        continue;
                     }
                     if (erase.effect_id < 16) {
                         self.ff_effects[@intCast(erase.effect_id)] = .{};
