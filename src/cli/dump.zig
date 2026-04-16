@@ -276,21 +276,42 @@ pub fn runClear(
     }
 }
 
-/// Pick whichever log directory has the newest last_timestamp.
-/// Falls back to sys_dir if both are empty or only sys exists.
+/// Pick whichever log directory holds the log file that is actively being
+/// written to, by comparing `padctl.log` mtimes. mtime beats text-content
+/// timestamps here because the daemon keeps appending even when the last
+/// in-text timestamp hasn't rotated through yet (e.g. between 1 Hz
+/// heartbeats) — and a one-shot foreground `padctl` invocation that fails
+/// early can briefly produce a user log with a newer *text* timestamp than
+/// the system log's most recent flushed line, even though the system
+/// daemon is still the authoritative writer.
 fn pickActiveLogDir(sys_dir: []const u8, user_dir: ?[]const u8) []const u8 {
-    const sys_stats = getLogStats(sys_dir);
-    const user_stats = if (user_dir) |ud| getLogStats(ud) else null;
+    const sys_mtime = getCurrentLogMtime(sys_dir);
+    const user_mtime = if (user_dir) |ud| getCurrentLogMtime(ud) else null;
 
-    if (sys_stats != null and user_stats != null) {
-        const sys_ts = sys_stats.?.lastTimestamp() orelse "";
-        const user_ts = user_stats.?.lastTimestamp() orelse "";
-        // ISO 8601 timestamps sort lexicographically.
-        if (std.mem.order(u8, user_ts, sys_ts) == .gt) return user_dir.?;
-        return sys_dir;
+    if (sys_mtime != null and user_mtime != null) {
+        return if (user_mtime.? > sys_mtime.?) user_dir.? else sys_dir;
     }
-    if (user_stats != null) return user_dir.?;
+    if (user_mtime != null) return user_dir.?;
+    if (sys_mtime != null) return sys_dir;
+
+    // Neither current file exists. Fall back to whichever directory has any
+    // log content at all (e.g. rotated .1 only), preferring sys.
+    if (getLogStats(sys_dir) != null) return sys_dir;
+    if (user_dir) |ud| {
+        if (getLogStats(ud) != null) return ud;
+    }
     return sys_dir;
+}
+
+/// Return the mtime (ns) of `<dir>/padctl.log`, or null if it doesn't exist
+/// or can't be stat'd.
+fn getCurrentLogMtime(dir: []const u8) ?i128 {
+    var path_buf: [280]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/padctl.log", .{dir}) catch return null;
+    const f = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer f.close();
+    const st = f.stat() catch return null;
+    return st.mtime;
 }
 
 fn formatSize(buf: *[32]u8, bytes: u64) []const u8 {
@@ -799,6 +820,67 @@ test "dump: getLogStats finds timestamp on long final line" {
     try testing.expectEqualStrings("2026-04-13T14:00:00.000", stats.firstTimestamp().?);
     // The last timestamp must be found even though it's >256 bytes from EOF.
     try testing.expectEqualStrings("2026-04-13T14:30:00.000", stats.lastTimestamp().?);
+}
+
+test "dump: pickActiveLogDir picks the dir with the newer padctl.log mtime" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Two sibling dirs, each with a padctl.log. We give the "user" file an
+    // obviously newer text timestamp but an older mtime; "sys" gets the
+    // newer mtime. The correct pick is sys — mtime beats text timestamp.
+    try tmp.dir.makeDir("sys");
+    try tmp.dir.makeDir("user");
+    const sys_path = try tmp.dir.realpathAlloc(allocator, "sys");
+    defer allocator.free(sys_path);
+    const user_path = try tmp.dir.realpathAlloc(allocator, "user");
+    defer allocator.free(user_path);
+
+    // user log: newer in text, older mtime (written first + backdated).
+    {
+        var f = try tmp.dir.createFile("user/padctl.log", .{});
+        defer f.close();
+        try f.writeAll("[2026-05-16T23:59:59.999] info: foreground-oneshot\n");
+    }
+    // Force user mtime into the past.
+    const user_log_path = try std.fmt.allocPrint(allocator, "{s}/padctl.log", .{user_path});
+    defer allocator.free(user_log_path);
+    {
+        var f = try std.fs.openFileAbsolute(user_log_path, .{ .mode = .read_write });
+        defer f.close();
+        const past_ns: i128 = 1_700_000_000 * std.time.ns_per_s;
+        const ts = std.posix.timespec{ .sec = @intCast(@divTrunc(past_ns, std.time.ns_per_s)), .nsec = @intCast(@mod(past_ns, std.time.ns_per_s)) };
+        try std.posix.futimens(f.handle, &.{ ts, ts });
+    }
+
+    // sys log: older in text, but written after → newer mtime.
+    {
+        var f = try tmp.dir.createFile("sys/padctl.log", .{});
+        defer f.close();
+        try f.writeAll("[2026-04-01T00:00:00.000] info: system-daemon\n");
+    }
+
+    const picked = pickActiveLogDir(sys_path, user_path);
+    try testing.expectEqualStrings(sys_path, picked);
+}
+
+test "dump: pickActiveLogDir falls back to user dir when only user log exists" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("user");
+    const user_path = try tmp.dir.realpathAlloc(allocator, "user");
+    defer allocator.free(user_path);
+
+    {
+        var f = try tmp.dir.createFile("user/padctl.log", .{});
+        defer f.close();
+        try f.writeAll("[2026-04-01T00:00:00.000] info: x\n");
+    }
+
+    const picked = pickActiveLogDir("/var/log/padctl-nonexistent-test-xyz", user_path);
+    try testing.expectEqualStrings(user_path, picked);
 }
 
 test "dump: getLogStats handles empty log file" {
