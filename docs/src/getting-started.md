@@ -167,7 +167,13 @@ padctl config list                         # show XDG config search paths
 padctl config init [--device] [--preset]   # interactive mapping creator
 padctl config edit [name]                  # open mapping in $VISUAL/$EDITOR
 padctl config test [--config] [--mapping]  # live input preview
+padctl dump enable|disable                 # toggle diagnostic logging (persists)
+padctl dump status                         # show dump state, log path, size, time span
+padctl dump export --period Nm|Nh|Nd [-o]  # export filtered log window
+padctl dump clear                          # delete all log files
 ```
+
+See the [Diagnostic Logging guide](diagnostic-logging.md) for the full `padctl dump` workflow, log paths, and the `[diagnostics]` config section.
 
 ## udev Permissions
 
