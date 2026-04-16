@@ -392,8 +392,12 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 dump_argc += 1;
             }
             const result = parseDumpFromSlice(dump_args[0..dump_argc]) catch |err| switch (err) {
-                error.MissingArgValue => {
+                error.MissingSubcommand => {
                     std.log.err("dump requires a subcommand: enable, disable, status, export, clear", .{});
+                    return error.MissingArgValue;
+                },
+                error.MissingArgValue => {
+                    std.log.err("dump: missing value for option (expected an argument after --period, --socket, or -o)", .{});
                     return error.MissingArgValue;
                 },
                 error.UnknownArgument => {
@@ -1320,7 +1324,9 @@ pub fn parseDumpFromSlice(args: []const []const u8) !struct {
     socket_path: ?[]const u8 = null,
 } {
     var result: @TypeOf(parseDumpFromSlice(args) catch unreachable) = .{};
-    if (args.len == 0) return error.MissingArgValue;
+    // Distinct errors so the caller can produce accurate messages: missing
+    // the `dump <sub>` token is not the same as a trailing flag with no value.
+    if (args.len == 0) return error.MissingSubcommand;
     const sub = args[0];
     if (std.mem.eql(u8, sub, "enable")) {
         result.cmd = .enable;
@@ -1396,7 +1402,19 @@ test "main: parseDumpFromSlice: clear" {
 }
 
 test "main: parseDumpFromSlice: missing subcommand" {
-    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{}));
+    try testing.expectError(error.MissingSubcommand, parseDumpFromSlice(&.{}));
+}
+
+test "main: parseDumpFromSlice: missing value for --period" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{ "export", "--period" }));
+}
+
+test "main: parseDumpFromSlice: missing value for -o" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{ "export", "-o" }));
+}
+
+test "main: parseDumpFromSlice: missing value for --socket" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{ "status", "--socket" }));
 }
 
 test "main: parseDumpFromSlice: unknown subcommand" {
