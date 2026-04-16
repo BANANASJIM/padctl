@@ -143,6 +143,7 @@ pub const Mapper = struct {
         // [3] mode processing
         var suppress_dpad_hat: bool = false;
         var suppress_right_stick_gyro: bool = false;
+        var suppress_left_stick_gyro: bool = false;
         var gyro_joy_x: ?i16 = null;
         var gyro_joy_y: ?i16 = null;
         {
@@ -161,11 +162,17 @@ pub const Mapper = struct {
                 } else if (std.mem.eql(u8, gcfg.mode, "joystick")) {
                     if (gout.joy_x) |jx| {
                         gyro_joy_x = jx;
-                        suppress_right_stick_gyro = true;
+                        switch (gcfg.target) {
+                            .right_stick => suppress_right_stick_gyro = true,
+                            .left_stick => suppress_left_stick_gyro = true,
+                        }
                     }
                     if (gout.joy_y) |jy| {
                         gyro_joy_y = jy;
-                        suppress_right_stick_gyro = true;
+                        switch (gcfg.target) {
+                            .right_stick => suppress_right_stick_gyro = true,
+                            .left_stick => suppress_left_stick_gyro = true,
+                        }
                     }
                 }
             } else {
@@ -283,16 +290,20 @@ pub const Mapper = struct {
             emit_state.dpad_y = 0;
         }
 
-        // gyro joystick mode: override right stick axes, suppress originals
+        // gyro joystick mode: override stick axes, suppress originals
         if (suppress_right_stick_gyro) {
             if (gyro_joy_x) |jx| emit_state.rx = jx;
             if (gyro_joy_y) |jy| emit_state.ry = jy;
+        }
+        if (suppress_left_stick_gyro) {
+            if (gyro_joy_x) |jx| emit_state.ax = jx;
+            if (gyro_joy_y) |jy| emit_state.ay = jy;
         }
 
         // suppress stick axes when mode != gamepad
         const left_cfg = self.effectiveStickConfig(.left);
         const right_cfg = self.effectiveStickConfig(.right);
-        if (left_cfg.suppress_gamepad or !std.mem.eql(u8, left_cfg.mode, "gamepad")) {
+        if (!suppress_left_stick_gyro and (left_cfg.suppress_gamepad or !std.mem.eql(u8, left_cfg.mode, "gamepad"))) {
             emit_state.ax = 0;
             emit_state.ay = 0;
         }
@@ -406,6 +417,7 @@ fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
         .max_val = if (mc.max_val) |v| @floatCast(v) else 32767.0,
         .invert_x = mc.invert_x orelse false,
         .invert_y = mc.invert_y orelse false,
+        .target = if (mc.target) |t| (if (std.mem.eql(u8, t, "left_stick")) .left_stick else .right_stick) else .right_stick,
     };
 }
 
