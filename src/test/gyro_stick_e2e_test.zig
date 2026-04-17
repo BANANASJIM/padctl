@@ -201,6 +201,60 @@ test "e2e: gyro joystick — zero gyro leaves rx/ry at zero (deadzone)" {
     try testing.expectEqual(@as(i16, 0), ev.gamepad.ry);
 }
 
+test "e2e: gyro joystick target=left_stick — gyro overrides ax/ay, not rx/ry" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\target = "left_stick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .ax = 5000, .ay = 5000, .rx = 1234, .ry = 4321 }, 16);
+
+    // ax/ay overridden by gyro (not original 5000)
+    try testing.expect(ev.gamepad.ax != 5000);
+    try testing.expect(ev.gamepad.ay != 5000);
+
+    // rx/ry untouched by gyro
+    try testing.expectEqual(@as(i16, 1234), ev.gamepad.rx);
+    try testing.expectEqual(@as(i16, 4321), ev.gamepad.ry);
+
+    // no REL events
+    for (ev.aux.slice()) |e| switch (e) {
+        .rel => return error.UnexpectedRelEvent,
+        else => {},
+    };
+}
+
+test "e2e: gyro joystick target=right_stick (explicit) — same as default" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\target = "right_stick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000, .ax = 1234, .ay = 4321 }, 16);
+
+    // rx/ry overridden by gyro
+    try testing.expect(ev.gamepad.rx != 5000);
+    try testing.expect(ev.gamepad.ry != 5000);
+
+    // ax/ay untouched
+    try testing.expectEqual(@as(i16, 1234), ev.gamepad.ax);
+    try testing.expectEqual(@as(i16, 4321), ev.gamepad.ay);
+}
+
 // --- Layer switch reset (L0) ---
 
 test "e2e: layer switch resets gyro EMA — no jump after activation" {

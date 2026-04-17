@@ -116,6 +116,7 @@ pub fn buildAuxKeyCodes(caps: DerivedAuxCaps, buf: []u16) []u16 {
 
 pub const GyroConfig = struct {
     mode: []const u8 = "off",
+    target: ?[]const u8 = null, // "right_stick" (default) or "left_stick"
     activate: ?[]const u8 = null,
     sensitivity: ?f64 = null,
     sensitivity_x: ?f64 = null,

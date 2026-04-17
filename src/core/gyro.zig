@@ -1,7 +1,10 @@
 const std = @import("std");
 
+pub const GyroTarget = enum { right_stick, left_stick };
+
 pub const GyroConfig = struct {
     mode: []const u8 = "off", // "off" | "mouse" | "joystick"
+    target: GyroTarget = .right_stick,
     sensitivity_x: f32 = 1.5,
     sensitivity_y: f32 = 1.5,
     deadzone: i16 = 0,
