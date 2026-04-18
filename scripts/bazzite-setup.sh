@@ -104,12 +104,19 @@ install_brew_pkg() {
 }
 
 if command -v brew &>/dev/null; then
-    install_brew_pkg zig
+    # Pin zig@0.15 — padctl does not yet support 0.16+
+    if command -v zig &>/dev/null; then
+        ok "zig already installed: $(zig version)"
+    else
+        info "Installing zig@0.15 via brew..."
+        brew install zig@0.15 || brew install zig
+        ok "zig installed: $(zig version)"
+    fi
     install_brew_pkg libusb
 else
     # Non-brew: check if zig and libusb are available
     if ! command -v zig &>/dev/null; then
-        err "zig not found. Install Zig 0.15+ from https://ziglang.org/download/"
+        err "zig not found. Install Zig 0.15.x from https://ziglang.org/download/"
         exit 1
     fi
     ok "zig found: $(zig version)"
@@ -120,11 +127,15 @@ ZIG_VER=$(zig version 2>/dev/null || echo "0.0.0")
 ZIG_MAJOR=$(echo "$ZIG_VER" | cut -d. -f1)
 ZIG_MINOR=$(echo "$ZIG_VER" | cut -d. -f2)
 if [ "$ZIG_MAJOR" -eq 0 ] && [ "$ZIG_MINOR" -lt 15 ]; then
-    err "padctl requires Zig >= 0.15.0, found $ZIG_VER"
+    err "padctl requires Zig 0.15.x, found $ZIG_VER"
     echo "Install from https://ziglang.org/download/ or update Homebrew formula"
     exit 1
+elif [ "$ZIG_MAJOR" -eq 0 ] && [ "$ZIG_MINOR" -gt 15 ]; then
+    err "padctl does not yet support Zig $ZIG_VER — please use Zig 0.15.x"
+    echo "Install via: brew install zig@0.15"
+    exit 1
 fi
-ok "Zig version $ZIG_VER meets minimum requirement (>= 0.15.0)"
+ok "Zig version $ZIG_VER meets requirement (0.15.x)"
 
 # --- 4. Locate or clone padctl repo ---
 if [[ -z "$PADCTL_REPO" ]]; then
@@ -173,9 +184,9 @@ zig build "${build_args[@]}"
 ok "Build complete"
 
 # --- 6. Stop existing service (if running) ---
-if systemctl is-active padctl.service &>/dev/null; then
+if systemctl --user is-active padctl.service &>/dev/null; then
     info "Stopping existing padctl service..."
-    sudo systemctl stop padctl.service 2>/dev/null || true
+    systemctl --user stop padctl.service 2>/dev/null || true
     ok "Service stopped"
 fi
 
@@ -237,20 +248,20 @@ else
 fi
 
 # Check service
-if systemctl is-enabled padctl.service &>/dev/null; then
+if systemctl --user is-enabled padctl.service &>/dev/null; then
     ok "Service: enabled"
 else
     warn "Service: not enabled (may need manual enable)"
 fi
 
-if systemctl is-active padctl.service &>/dev/null; then
+if systemctl --user is-active padctl.service &>/dev/null; then
     ok "Service: running"
 else
     warn "Service: not running (plug in a controller)"
 fi
 
 # Check resume service
-if systemctl is-enabled padctl-resume.service &>/dev/null; then
+if systemctl --user is-enabled padctl-resume.service &>/dev/null; then
     ok "Resume service: enabled"
 fi
 
