@@ -639,22 +639,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
         runCmd(&.{ "udevadm", "trigger" });
-        if (effective_user_service) {
-            runCmd(&.{ "systemctl", "--user", "daemon-reload" });
-            if (!opts.no_enable) {
-                runCmdWarn(&.{ "systemctl", "--user", "enable", "padctl.service" });
-            }
-            if (!opts.no_start) {
-                runCmdWarn(&.{ "systemctl", "--user", "start", "padctl.service" });
-            }
-        } else {
-            runCmd(&.{ "systemctl", "daemon-reload" });
-            if (!opts.no_enable) {
-                runCmdWarn(&.{ "systemctl", "enable", "padctl.service" });
-            }
-            if (!opts.no_start) {
-                runCmdWarn(&.{ "systemctl", "start", "padctl.service" });
-            }
+        runCmd(&.{ "systemctl", "--user", "daemon-reload" });
+        if (!opts.no_enable) {
+            runCmdWarn(&.{ "systemctl", "--user", "enable", "padctl.service" });
+        }
+        if (!opts.no_start) {
+            runCmdWarn(&.{ "systemctl", "--user", "start", "padctl.service" });
         }
     }
 
@@ -707,13 +697,8 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 
     // Stop and disable services (ignore errors — may not be running)
     if (destdir.len == 0) {
-        if (effective_user_service) {
-            runCmd(&.{ "systemctl", "--user", "stop", "padctl.service" });
-            runCmd(&.{ "systemctl", "--user", "disable", "padctl.service" });
-        } else {
-            runCmd(&.{ "systemctl", "stop", "padctl.service", "padctl-resume.service" });
-            runCmd(&.{ "systemctl", "disable", "padctl.service", "padctl-resume.service" });
-        }
+        runCmd(&.{ "systemctl", "--user", "stop", "padctl.service" });
+        runCmd(&.{ "systemctl", "--user", "disable", "padctl.service" });
     }
 
     // Standard prefix-based files (always removed)
@@ -805,11 +790,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     std.fs.deleteFileAbsolute("/run/padctl/padctl.sock") catch {};
 
     if (destdir.len == 0) {
-        if (effective_user_service) {
-            runCmd(&.{ "systemctl", "--user", "daemon-reload" });
-        } else {
-            runCmd(&.{ "systemctl", "daemon-reload" });
-        }
+        runCmd(&.{ "systemctl", "--user", "daemon-reload" });
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
     }
 
@@ -2779,4 +2760,32 @@ test "install: atomicInstallBinary does not double-close on rename failure" {
 
     const fds_after = try countOpenFds();
     try testing.expectEqual(fds_before, fds_after);
+}
+
+test "install: all systemctl calls use --user scope" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Read our own source to verify no system-scope systemctl calls remain.
+    // Zig embeds the absolute path in @src().file for addTest modules.
+    const src_path = @src().file;
+    var file = if (std.fs.path.isAbsolute(src_path))
+        std.fs.openFileAbsolute(src_path, .{}) catch return
+    else
+        std.fs.cwd().openFile(src_path, .{}) catch return;
+    defer file.close();
+    const src = try file.readToEndAlloc(allocator, 1 << 20);
+    defer allocator.free(src);
+
+    var iter = std.mem.splitScalar(u8, src, '\n');
+    var checked: usize = 0;
+    while (iter.next()) |line| {
+        const has_runcmd = std.mem.indexOf(u8, line, "runCmd") != null;
+        const has_systemctl = std.mem.indexOf(u8, line, "systemctl") != null;
+        if (has_runcmd and has_systemctl) {
+            checked += 1;
+            try testing.expect(std.mem.indexOf(u8, line, "--user") != null);
+        }
+    }
+    try testing.expect(checked >= 5);
 }
