@@ -3,7 +3,10 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 
-const DeviceInstance = @import("device_instance.zig").DeviceInstance;
+const device_instance_mod = @import("device_instance.zig");
+const DeviceInstance = device_instance_mod.DeviceInstance;
+const openDeviceWithRetry = device_instance_mod.openDeviceWithRetry;
+const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const MappingConfig = @import("config/mapping.zig").MappingConfig;
 const mapping_cfg = @import("config/mapping.zig");
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
@@ -31,6 +34,7 @@ pub const ManagedInstance = struct {
     mapping_arena: std.heap.ArenaAllocator,
     switch_mapping: ?*mapping_cfg.ParseResult = null,
     default_mapping_pr: ?*mapping_cfg.ParseResult = null,
+    suspended: bool = false,
 };
 
 /// Config snapshot used for hot-reload diffing.
@@ -282,7 +286,10 @@ pub const Supervisor = struct {
         self.managed.items[self.managed.items.len - 1].devname = dn_copy;
     }
 
-    /// Stop and free the instance attached under devname. No-op if not found.
+    /// Stop and suspend the instance attached under devname. The uinput fds
+    /// stay open so consumers (e.g. Steam) keep their cached eventN
+    /// references. On reconnect, attachWithRoot() rebinds the new hidraw fds
+    /// to the existing instance.
     pub fn detach(self: *Supervisor, devname: []const u8) void {
         const entry = self.devname_map.fetchRemove(devname) orelse {
             std.log.debug("detach: {s} not in devname_map", .{devname});
@@ -292,21 +299,42 @@ pub const Supervisor = struct {
         const phys_key = entry.value;
         defer self.allocator.free(phys_key);
 
+        for (self.managed.items) |*m| {
+            if (!std.mem.eql(u8, m.phys_key, phys_key)) continue;
+            std.log.info("device suspended: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
+            m.instance.stop();
+            m.thread.join();
+            m.instance.closeDeviceIO();
+            m.suspended = true;
+            if (m.devname) |dn| {
+                self.allocator.free(dn);
+                m.devname = null;
+            }
+            return;
+        }
+        std.log.debug("detach: no managed instance for phys {s}", .{phys_key});
+    }
+
+    /// Unconditionally tear down and remove a managed instance (used by
+    /// stopAll/reload — not by hotplug detach).
+    pub fn detachFull(self: *Supervisor, devname: []const u8) void {
+        const entry = self.devname_map.fetchRemove(devname) orelse return;
+        self.allocator.free(entry.key);
+        const phys_key = entry.value;
+        defer self.allocator.free(phys_key);
+
         var i: usize = self.managed.items.len;
-        var found = false;
         while (i > 0) {
             i -= 1;
             const m = &self.managed.items[i];
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
-                std.log.info("device detached: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
                 m.instance.stop();
                 m.thread.join();
                 self.teardownManaged(m);
                 _ = self.managed.swapRemove(i);
-                found = true;
+                return;
             }
         }
-        if (!found) std.log.debug("detach: no managed instance for phys {s}", .{phys_key});
     }
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
@@ -369,6 +397,7 @@ pub const Supervisor = struct {
         var cs = &self.ctrl_sock.?;
         var found = false;
         for (self.managed.items) |*m| {
+            if (m.suspended) continue;
             if (device_id) |dev_id| {
                 const dn = m.devname orelse continue;
                 if (!std.mem.eql(u8, dn, dev_id)) continue;
@@ -521,8 +550,12 @@ pub const Supervisor = struct {
     }
 
     pub fn stopAll(self: *Supervisor) void {
-        for (self.managed.items) |*m| m.instance.stop();
-        for (self.managed.items) |*m| m.thread.join();
+        for (self.managed.items) |*m| {
+            if (!m.suspended) m.instance.stop();
+        }
+        for (self.managed.items) |*m| {
+            if (!m.suspended) m.thread.join();
+        }
         for (self.managed.items) |*m| self.teardownManaged(m);
         self.managed.clearRetainingCapacity();
     }
@@ -548,8 +581,10 @@ pub const Supervisor = struct {
             r -= 1;
             const idx = to_remove.items[r];
             const m = &self.managed.items[idx];
-            m.instance.stop();
-            m.thread.join();
+            if (!m.suspended) {
+                m.instance.stop();
+                m.thread.join();
+            }
             self.teardownManaged(m);
             _ = self.managed.swapRemove(idx);
         }
@@ -568,6 +603,7 @@ pub const Supervisor = struct {
                 try self.spawnInstance(nc.phys_key, instance, null);
             } else if (nc.mapping_cfg) |new_map| {
                 const m = found.?;
+                if (m.suspended) continue;
                 // Stop-Swap-Restart: stop thread before touching arena
                 m.instance.stop();
                 m.thread.join();
@@ -600,6 +636,7 @@ pub const Supervisor = struct {
                 }
             } else {
                 const m = found.?;
+                if (m.suspended) continue;
                 m.instance.stop();
                 m.thread.join();
                 self.clearSwitchMapping(m);
@@ -914,7 +951,8 @@ pub const Supervisor = struct {
                 return;
             }
         } else {
-            for (self.managed.items, 0..) |_, idx| {
+            for (self.managed.items, 0..) |*m, idx| {
+                if (m.suspended) continue;
                 targets.append(self.allocator, idx) catch {
                     cs.sendResponse(fd, "ERR oom\n");
                     return;
@@ -997,7 +1035,8 @@ pub const Supervisor = struct {
         w.writeAll("STATUS") catch return;
         for (self.managed.items) |*m| {
             const name = m.instance.device_cfg.device.name;
-            w.print(" device={s} active=true", .{name}) catch break;
+            const state_str: []const u8 = if (m.suspended) "suspended" else "active";
+            w.print(" device={s} state={s}", .{ name, state_str }) catch break;
         }
         w.writeByte('\n') catch return;
         cs.sendResponse(fd, stream.getWritten());
@@ -1569,6 +1608,65 @@ pub const Supervisor = struct {
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
+        // Check for a suspended instance with the same VID:PID to rebind
+        for (self.managed.items) |*m| {
+            if (!m.suspended) continue;
+            const mcfg = m.instance.device_cfg;
+            if (@as(u16, @intCast(mcfg.device.vid)) != vid or
+                @as(u16, @intCast(mcfg.device.pid)) != pid) continue;
+
+            // Reopen all interface fds for the suspended instance
+            const new_devices = self.allocator.alloc(DeviceIO, mcfg.device.interface.len) catch return;
+            var opened: usize = 0;
+            errdefer {
+                for (new_devices[0..opened]) |dev| dev.close();
+                self.allocator.free(new_devices);
+            }
+            for (mcfg.device.interface, 0..) |iface, idx| {
+                new_devices[idx] = openDeviceWithRetry(self.allocator, iface, vid, pid) catch |err| {
+                    std.log.warn("rebind: open interface {d} failed: {}", .{ iface.id, err });
+                    for (new_devices[0..opened]) |dev| dev.close();
+                    self.allocator.free(new_devices);
+                    if (isTransientOpenError(err)) return error.HotplugTransient;
+                    return;
+                };
+                opened += 1;
+            }
+
+            m.instance.rebindDeviceIO(new_devices);
+            self.allocator.free(new_devices);
+            m.instance.rerunInitSequence();
+            m.suspended = false;
+
+            const dn_copy = self.allocator.dupe(u8, devname) catch return;
+            m.devname = dn_copy;
+            const dev_copy = self.allocator.dupe(u8, devname) catch {
+                self.allocator.free(dn_copy);
+                m.devname = null;
+                return;
+            };
+            const phys_copy = self.allocator.dupe(u8, phys) catch {
+                self.allocator.free(dn_copy);
+                self.allocator.free(dev_copy);
+                m.devname = null;
+                return;
+            };
+            self.devname_map.put(dev_copy, phys_copy) catch {
+                self.allocator.free(dn_copy);
+                self.allocator.free(dev_copy);
+                self.allocator.free(phys_copy);
+                m.devname = null;
+                return;
+            };
+
+            restartManagedThread(m) catch |err| {
+                std.log.err("rebind restart failed: {}", .{err});
+                return;
+            };
+            std.log.info("device resumed: \"{s}\" {s}/{s}", .{ mcfg.device.name, dev_root, devname });
+            return;
+        }
+
         const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
             const pr = self.loadUserDefaultMapping(cfg.?.device.name) orelse break :blk null;
             const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
@@ -1609,7 +1707,6 @@ const mapper_mod = @import("core/mapper.zig");
 const device_mod = @import("config/device.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
-const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const uinput = @import("io/uinput.zig");
 const state_mod = @import("core/state.zig");
 
@@ -2104,7 +2201,7 @@ test "supervisor: Supervisor: detach unknown devname — no panic" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "supervisor: Supervisor: attach-detach-attach same devname — new instance after re-attach" {
+test "supervisor: Supervisor: detach suspends instance, keeps it in managed list" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -2112,24 +2209,140 @@ test "supervisor: Supervisor: attach-detach-attach same devname — new instance
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
     defer mock_a.deinit();
-    var mock_b = try MockDeviceIO.init(allocator, &.{});
-    defer mock_b.deinit();
     var sup = try Supervisor.initForTest(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(!sup.managed.items[0].suspended);
 
     sup.detach("hidraw3");
-    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    // Instance stays in managed list but is suspended
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(@as(?[]const u8, null), sup.managed.items[0].devname);
+    // devname removed from map
+    try testing.expect(!sup.devname_map.contains("hidraw3"));
 
-    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();
     }
-    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+}
+
+test "supervisor: Supervisor: suspend preserves instance, resume rebinds device IO" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+    const inst_ptr = sup.managed.items[0].instance;
+
+    // Detach suspends — instance stays, thread stops
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(inst_ptr, sup.managed.items[0].instance);
+    try testing.expect(!sup.devname_map.contains("hidraw3"));
+
+    // Rebind with new mock device IO
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var new_devs = [_]DeviceIO{mock_b.deviceIO()};
+    inst_ptr.rebindDeviceIO(&new_devs);
+    sup.managed.items[0].suspended = false;
+
+    const dn = try allocator.dupe(u8, "hidraw5");
+    sup.managed.items[0].devname = dn;
+    const dk = try allocator.dupe(u8, "hidraw5");
+    const pk = try allocator.dupe(u8, "usb-1-1");
+    try sup.devname_map.put(dk, pk);
+
+    Supervisor.restartManagedThread(&sup.managed.items[0]) catch |err| {
+        std.log.err("restart failed: {}", .{err});
+        return err;
+    };
+
+    // Same instance pointer reused
+    try testing.expectEqual(inst_ptr, sup.managed.items[0].instance);
+    try testing.expect(!sup.managed.items[0].suspended);
+
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+}
+
+test "supervisor: Supervisor: stopAll handles suspended instances" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+
+    // stopAll must not crash on suspended instances
+    sup.stopAll();
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    sup.deinit();
+}
+
+test "supervisor: Supervisor: status shows suspended state" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    // Create a control socket for status test
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    // Status before suspend
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    var n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "state=active") != null);
+
+    // Suspend
+    sup.detach("hidraw3");
+
+    // Status after suspend
+    sup.handleStatus(resp_fds[0]);
+    n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "state=suspended") != null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
 }
 
 test "supervisor: Supervisor: two devnames attached simultaneously — independent threads" {
