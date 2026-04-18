@@ -96,7 +96,7 @@ jobs:
           for bin in padctl padctl-capture padctl-debug; do
             [ -f "zig-out/bin/${bin}" ] && cp "zig-out/bin/${bin}" "${STAGING}/bin/"
           done
-          cp staging/usr/lib/systemd/system/*.service "${STAGING}/install/"
+          cp staging/usr/lib/systemd/user/*.service "${STAGING}/install/"
           cp staging/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
           [ -f staging/usr/bin/padctl-reconnect ] && cp staging/usr/bin/padctl-reconnect "${STAGING}/install/"
           cp -r devices "${STAGING}/"
@@ -158,7 +158,7 @@ jobs:
           sed -i "s/^Version:.*/Version: ${VERSION}/" "${DEST}/DEBIAN/control"
           sed -i "s/^Architecture:.*/Architecture: ${DEB_ARCH}/" "${DEST}/DEBIAN/control"
 
-          mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/system" \
+          mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/user" \
                    "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/share/padctl" \
                    "${DEST}/usr/share/doc/padctl"
 
@@ -167,7 +167,7 @@ jobs:
           done
           [ -f "${SRC}/install/padctl-reconnect" ] && install -Dm755 "${SRC}/install/padctl-reconnect" "${DEST}/usr/bin/padctl-reconnect"
 
-          cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/system/"
+          cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
           cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
 
           cp -r "${SRC}/devices/"* "${DEST}/usr/share/padctl/"
