@@ -313,6 +313,37 @@ pub const DeviceInstance = struct {
         self.aux_dev = try AuxDevice.create(key_codes, caps.needs_rel);
     }
 
+    /// Close physical device fds only, keeping uinput/aux/touchpad alive.
+    /// Used when suspending an instance across device sleep/wake.
+    pub fn closeDeviceIO(self: *DeviceInstance) void {
+        for (self.devices) |dev| dev.close();
+    }
+
+    /// Replace physical device fds with new ones and re-register them in the
+    /// event loop. Caller must provide the same number of DeviceIO entries as
+    /// the original devices[] slice.
+    pub fn rebindDeviceIO(self: *DeviceInstance, new_devices: []DeviceIO) void {
+        @memcpy(self.devices, new_devices);
+        self.loop.rebindDevices(self.devices);
+    }
+
+    /// Re-run the device init sequence (e.g. handshake packets) using the
+    /// current devices[] fds and device_cfg.
+    pub fn rerunInitSequence(self: *DeviceInstance) void {
+        if (self.device_cfg.device.init) |init_cfg| {
+            for (self.device_cfg.device.interface, self.devices) |iface, dev| {
+                const match = if (init_cfg.interface) |init_iface|
+                    iface.id == init_iface
+                else
+                    std.mem.eql(u8, iface.class, "vendor");
+                if (!match) continue;
+                init_seq.runInitSequence(self.allocator, dev, init_cfg) catch |err| {
+                    std.log.debug("re-init on interface {d}: {}", .{ iface.id, err });
+                };
+            }
+        }
+    }
+
     /// Signal the event loop to stop. run() returns after the current ppoll.
     pub fn stop(self: *DeviceInstance) void {
         @atomicStore(bool, &self.stopped, true, .release);
@@ -592,4 +623,54 @@ test "DeviceInstance: rebuildAuxIfChanged is no-op when device has no output con
     // no output config on minimal_toml device — rebuildAuxIfChanged must return without error
     try inst.rebuildAuxIfChanged(&mapping_parsed.value, null);
     try testing.expectEqual(@as(?AuxDevice, null), inst.aux_dev);
+}
+
+test "DeviceInstance: closeDeviceIO closes device fds without touching uinput" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    // closeDeviceIO must not crash; uinput_dev stays null (not touched)
+    inst.closeDeviceIO();
+    try testing.expectEqual(@as(?@import("io/uinput.zig").UinputDevice, null), inst.uinput_dev);
+}
+
+test "DeviceInstance: rebindDeviceIO replaces device fds" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+
+    var inst = try testInstance(allocator, &mock_a, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    // Close old device IO
+    inst.closeDeviceIO();
+
+    // Create new mock and rebind
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var new_devs = [_]DeviceIO{mock_b.deviceIO()};
+    inst.rebindDeviceIO(&new_devs);
+
+    // Verify the device was replaced (new mock's pollfd)
+    const pfd = inst.devices[0].pollfd();
+    const expected_pfd = mock_b.deviceIO().pollfd();
+    try testing.expectEqual(expected_pfd.fd, pfd.fd);
 }

@@ -122,7 +122,7 @@ test "SM: attach → attach-duplicate is no-op" {
     sup.stopAll();
 }
 
-test "SM: attach → detach → count == 0" {
+test "SM: attach → detach → suspended, count == 1" {
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);
     defer parsed.deinit();
@@ -134,10 +134,12 @@ test "SM: attach → detach → count == 0" {
 
     try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
     sup.detach("hidraw0");
-    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].suspended);
+    sup.stopAll();
 }
 
-test "SM: attach → detach → attach — second instance accepted" {
+test "SM: attach → detach → suspended instance blocks re-attach with same phys_key" {
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);
     defer parsed.deinit();
@@ -151,7 +153,15 @@ test "SM: attach → detach → attach — second instance accepted" {
 
     try attach(&sup, allocator, &mock_a, &parsed.value, "hidraw0", "key0");
     sup.detach("hidraw0");
-    try attach(&sup, allocator, &mock_b, &parsed.value, "hidraw0", "key0");
+    try testing.expect(sup.managed.items[0].suspended);
+    // Same phys_key is rejected by dedup guard (suspended instance holds it)
+    const inst_b = try makeInstance(allocator, &mock_b, &parsed.value);
+    defer {
+        inst_b.deinit();
+        allocator.destroy(inst_b);
+    }
+    try sup.attachWithInstance("hidraw0", "key0", inst_b, null);
+    // Still only 1 instance (the suspended one)
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     sup.stopAll();
 }
@@ -252,7 +262,7 @@ test "SM: stopAll on empty supervisor is no-op" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-test "SM: attach two devices → detach one → count == 1" {
+test "SM: attach two devices → detach one → count still 2, one suspended" {
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);
     defer parsed.deinit();
@@ -269,6 +279,12 @@ test "SM: attach two devices → detach one → count == 1" {
     try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
 
     sup.detach("hidraw0");
-    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+    // One is suspended, the other is still active
+    var suspended_count: usize = 0;
+    for (sup.managed.items) |*m| {
+        if (m.suspended) suspended_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), suspended_count);
     sup.stopAll();
 }
