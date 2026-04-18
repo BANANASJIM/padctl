@@ -115,6 +115,17 @@ else
     ok "zig found: $(zig version)"
 fi
 
+# Verify Zig version >= 0.15.0
+ZIG_VER=$(zig version 2>/dev/null || echo "0.0.0")
+ZIG_MAJOR=$(echo "$ZIG_VER" | cut -d. -f1)
+ZIG_MINOR=$(echo "$ZIG_VER" | cut -d. -f2)
+if [ "$ZIG_MAJOR" -eq 0 ] && [ "$ZIG_MINOR" -lt 15 ]; then
+    err "padctl requires Zig >= 0.15.0, found $ZIG_VER"
+    echo "Install from https://ziglang.org/download/ or update Homebrew formula"
+    exit 1
+fi
+ok "Zig version $ZIG_VER meets minimum requirement (>= 0.15.0)"
+
 # --- 4. Locate or clone padctl repo ---
 if [[ -z "$PADCTL_REPO" ]]; then
     # Try to detect: are we in the repo?
