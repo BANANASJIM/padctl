@@ -141,6 +141,7 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             uinput_dev = try UinputDevice.create(out_cfg);
+            uinput_dev.?.log_tag = cfg.device.name;
             if (out_cfg.force_feedback != null) {
                 errdefer uinput_dev.?.close();
                 try loop.addUinputFf(uinput_dev.?.pollFfFd());
@@ -267,6 +268,7 @@ pub const DeviceInstance = struct {
                 .poll_timeout_ms = self.poll_timeout_ms,
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
+                .device_tag = self.device_cfg.device.name,
             }) catch |err| {
                 std.log.err("event loop failed: {}", .{err});
                 break;
@@ -331,8 +333,8 @@ const null_output_vtable = OutputDevice.VTable{
         fn f(_: *anyopaque, _: GamepadState) uinput.EmitError!void {}
     }.f,
     .poll_ff = struct {
-        fn f(_: *anyopaque) uinput.PollFfError!?FfEvent {
-            return null;
+        fn f(_: *anyopaque) uinput.PollFfError!uinput.FfEventBatch {
+            return .{};
         }
     }.f,
     .close = struct {

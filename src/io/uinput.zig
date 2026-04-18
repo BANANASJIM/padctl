@@ -2,6 +2,7 @@ const std = @import("std");
 const state = @import("../core/state.zig");
 const device = @import("../config/device.zig");
 const input_codes = @import("../config/input_codes.zig");
+const rumble_log = std.log.scoped(.rumble);
 
 const c = @cImport({
     @cInclude("linux/uinput.h");
@@ -67,6 +68,17 @@ pub const FfEvent = struct {
     duration_ms: u16 = 0,
 };
 
+pub const FfEventBatch = struct {
+    events: [MAX_BATCH]FfEvent = undefined,
+    len: usize = 0,
+
+    pub const MAX_BATCH = 32;
+
+    pub fn slice(self: *const FfEventBatch) []const FfEvent {
+        return self.events[0..self.len];
+    }
+};
+
 pub const EmitError = error{ WriteFailed, DeviceGone };
 pub const PollFfError = error{ ReadFailed, DeviceGone };
 
@@ -76,7 +88,7 @@ pub const OutputDevice = struct {
 
     pub const VTable = struct {
         emit: *const fn (ptr: *anyopaque, s: state.GamepadState) EmitError!void,
-        poll_ff: *const fn (ptr: *anyopaque) PollFfError!?FfEvent,
+        poll_ff: *const fn (ptr: *anyopaque) PollFfError!FfEventBatch,
         close: *const fn (ptr: *anyopaque) void,
     };
 
@@ -84,7 +96,7 @@ pub const OutputDevice = struct {
         return self.vtable.emit(self.ptr, s);
     }
 
-    pub fn pollFf(self: OutputDevice) PollFfError!?FfEvent {
+    pub fn pollFf(self: OutputDevice) PollFfError!FfEventBatch {
         return self.vtable.poll_ff(self.ptr);
     }
 
@@ -121,12 +133,17 @@ pub const UinputDevice = struct {
     prev: state.GamepadState = .{},
     // button_codes[i] = BTN code for ButtonId with tag value i (0 = not mapped)
     button_codes: [BUTTON_COUNT]u16,
+    /// Buffered event from a previous pollFf call when the batch was full.
+    /// Processed first on the next pollFf call.
+    pending_ff: ?FfEvent = null,
     // ABS axis info: parallel arrays indexed by OutputConfig axes order
     axis_codes: [16]u16 = undefined,
     axis_state_offsets: [16]AxisStateField = undefined,
     axis_count: usize = 0,
     has_dpad_hat: bool = false,
     ff_effects: [16]FfEffect = [_]FfEffect{.{}} ** 16,
+    /// Device identifier for log correlation (e.g. "Vader 5 Pro/hidraw7").
+    log_tag: []const u8 = "uinput",
 
     const AxisStateField = enum { ax, ay, rx, ry, lt, rt, dpad_x, dpad_y };
 
@@ -290,7 +307,7 @@ pub const UinputDevice = struct {
         self.emit(s) catch return error.WriteFailed;
     }
 
-    fn pollFfVtable(ptr: *anyopaque) PollFfError!?FfEvent {
+    fn pollFfVtable(ptr: *anyopaque) PollFfError!FfEventBatch {
         const self: *UinputDevice = @ptrCast(@alignCast(ptr));
         return self.pollFf() catch return error.ReadFailed;
     }
@@ -362,8 +379,18 @@ pub const UinputDevice = struct {
         return self.fd;
     }
 
-    pub fn pollFf(self: *UinputDevice) !?FfEvent {
-        var result: ?FfEvent = null;
+    pub fn pollFf(self: *UinputDevice) !FfEventBatch {
+        var batch = FfEventBatch{};
+        var ev_count: u32 = 0;
+
+        // Drain any event buffered from a previous overflow.
+        if (self.pending_ff) |pev| {
+            batch.events[0] = pev;
+            batch.len = 1;
+            self.pending_ff = null;
+            rumble_log.debug("[{s}] pollFf: dequeued pending event id={d}", .{ self.log_tag, pev.effect_id });
+        }
+
         while (true) {
             var ev: c.input_event = undefined;
             const n = std.posix.read(self.fd, std.mem.asBytes(&ev)) catch |err| switch (err) {
@@ -371,59 +398,97 @@ pub const UinputDevice = struct {
                 else => return err,
             };
             if (n != @sizeOf(c.input_event)) break;
+            ev_count += 1;
 
             if (ev.type == c.EV_UINPUT) {
                 if (ev.code == c.UI_FF_UPLOAD) {
                     var upload = std.mem.zeroes(c.uinput_ff_upload);
                     upload.request_id = @intCast(ev.value);
-                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    if (begin_rc != 0) {
+                        // BEGIN failed — the upload struct is still zeroed. Skip the
+                        // rest of the branch so we don't touch ff_effects or call END
+                        // with retval=0 (which would falsely acknowledge the request).
+                        rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_UPLOAD FAILED rc={d}", .{ self.log_tag, begin_rc });
+                        continue;
+                    }
                     if (upload.effect.type == c.FF_RUMBLE and upload.effect.id < 16) {
                         self.ff_effects[@intCast(upload.effect.id)] = .{
                             .strong = upload.effect.u.rumble.strong_magnitude,
                             .weak = upload.effect.u.rumble.weak_magnitude,
                             .length_ms = @intCast(upload.effect.replay.length),
                         };
+                        rumble_log.debug("[{s}] pollFf: UPLOAD id={d} type=FF_RUMBLE strong={d} weak={d} len={d}ms replay.delay={d}ms", .{
+                            self.log_tag,
+                            upload.effect.id,
+                            upload.effect.u.rumble.strong_magnitude,
+                            upload.effect.u.rumble.weak_magnitude,
+                            @as(u16, @intCast(upload.effect.replay.length)),
+                            @as(u16, @intCast(upload.effect.replay.delay)),
+                        });
+                    } else {
+                        rumble_log.debug("[{s}] pollFf: UPLOAD id={d} type={d} (non-rumble or out-of-range)", .{
+                            self.log_tag, upload.effect.id, upload.effect.type,
+                        });
                     }
                     upload.retval = 0;
                     _ = std.os.linux.ioctl(self.fd, UI_END_FF_UPLOAD, @intFromPtr(&upload));
                 } else if (ev.code == c.UI_FF_ERASE) {
                     var erase = std.mem.zeroes(c.uinput_ff_erase);
                     erase.request_id = @intCast(ev.value);
-                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    if (begin_rc != 0) {
+                        rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_ERASE FAILED rc={d}", .{ self.log_tag, begin_rc });
+                        continue;
+                    }
                     if (erase.effect_id < 16) {
                         self.ff_effects[@intCast(erase.effect_id)] = .{};
+                        rumble_log.debug("[{s}] pollFf: ERASE id={d}", .{ self.log_tag, erase.effect_id });
                     }
                     erase.retval = 0;
                     _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
                 }
             } else if (ev.type == c.EV_FF) {
                 const id: usize = @intCast(ev.code);
-                // Out-of-range FF effect ids must be silently dropped.
-                // Collapsing them into a zero FfEvent would look like
-                // an explicit stop for slot 0 downstream, which would
-                // spuriously cancel the real rumble auto-stop deadline.
-                if (id >= 16) continue;
-                if (ev.value == 0) {
-                    result = FfEvent{
-                        .effect_type = c.FF_RUMBLE,
-                        .effect_id = @intCast(id),
-                        .strong = 0,
-                        .weak = 0,
-                        .duration_ms = 0,
-                    };
-                } else {
+                if (id >= 16) {
+                    rumble_log.debug("[{s}] pollFf: OUT_OF_RANGE code={d} value={d} DROPPED", .{ self.log_tag, ev.code, ev.value });
+                    continue;
+                }
+                const ff_ev = if (ev.value == 0) FfEvent{
+                    .effect_type = c.FF_RUMBLE,
+                    .effect_id = @intCast(id),
+                    .strong = 0,
+                    .weak = 0,
+                    .duration_ms = 0,
+                } else blk: {
                     const eff = self.ff_effects[id];
-                    result = FfEvent{
+                    break :blk FfEvent{
                         .effect_type = c.FF_RUMBLE,
                         .effect_id = @intCast(id),
                         .strong = eff.strong,
                         .weak = eff.weak,
                         .duration_ms = eff.length_ms,
                     };
+                };
+                // Buffer the event if the batch is full — it will be
+                // returned first on the next pollFf call.
+                if (batch.len >= FfEventBatch.MAX_BATCH) {
+                    self.pending_ff = ff_ev;
+                    rumble_log.debug("[{s}] pollFf: batch full ({d}), buffering event id={d} for next call", .{ self.log_tag, FfEventBatch.MAX_BATCH, id });
+                    break;
                 }
+                const kind: []const u8 = if (ev.value == 0) "STOP" else "PLAY";
+                rumble_log.debug("[{s}] pollFf: {s} id={d} (ev#{d})", .{ self.log_tag, kind, id, batch.len + 1 });
+                batch.events[batch.len] = ff_ev;
+                batch.len += 1;
             }
         }
-        return result;
+        if (ev_count > 0) {
+            rumble_log.debug("[{s}] pollFf: drain end, {d} events read, {d} EV_FF in batch", .{
+                self.log_tag, ev_count, batch.len,
+            });
+        }
+        return batch;
     }
 
     pub fn close(self: *UinputDevice) void {
@@ -839,8 +904,8 @@ const MockOutputDevice = struct {
         self.prev = s;
     }
 
-    fn mockPollFf(_: *anyopaque) PollFfError!?FfEvent {
-        return null;
+    fn mockPollFf(_: *anyopaque) PollFfError!FfEventBatch {
+        return .{};
     }
 
     fn mockClose(_: *anyopaque) void {}
@@ -1039,7 +1104,7 @@ test "uinput: pollFf drain loop: empty pipe returns null without blocking" {
         .button_codes = [_]u16{0} ** BUTTON_COUNT,
     };
     const result = try dev.pollFf();
-    try std.testing.expectEqual(@as(?FfEvent, null), result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
 }
 
 test "uinput: pollFf drain loop: drains multiple events and returns last EV_FF" {
@@ -1059,8 +1124,8 @@ test "uinput: pollFf drain loop: drains multiple events and returns last EV_FF" 
     };
     const result = try dev.pollFf();
     // Both events processed; last one wins — result is non-null FfEvent
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.?.effect_type);
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.events[0].effect_type);
 }
 
 test "uinput: pollFfFd returns the fd" {
@@ -1106,10 +1171,10 @@ test "uinput: pollFf play: returns stored ff_effects values" {
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
 
     const result = try dev.pollFf();
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.?.effect_type);
-    try std.testing.expectEqual(@as(u16, 0xffff), result.?.strong);
-    try std.testing.expectEqual(@as(u16, 0x8000), result.?.weak);
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.events[0].effect_type);
+    try std.testing.expectEqual(@as(u16, 0xffff), result.events[0].strong);
+    try std.testing.expectEqual(@as(u16, 0x8000), result.events[0].weak);
 }
 
 test "uinput: pollFf play: carries effect_id and duration_ms for scheduler" {
@@ -1128,9 +1193,9 @@ test "uinput: pollFf play: carries effect_id and duration_ms for scheduler" {
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
 
     const result = try dev.pollFf();
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u8, 3), result.?.effect_id);
-    try std.testing.expectEqual(@as(u16, 500), result.?.duration_ms);
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqual(@as(u8, 3), result.events[0].effect_id);
+    try std.testing.expectEqual(@as(u16, 500), result.events[0].duration_ms);
 }
 
 test "uinput: pollFf play stop (value=0): returns zeros" {
@@ -1148,9 +1213,9 @@ test "uinput: pollFf play stop (value=0): returns zeros" {
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
 
     const result = try dev.pollFf();
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u16, 0), result.?.strong);
-    try std.testing.expectEqual(@as(u16, 0), result.?.weak);
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqual(@as(u16, 0), result.events[0].strong);
+    try std.testing.expectEqual(@as(u16, 0), result.events[0].weak);
 }
 
 test "uinput: pollFf stop: carries effect_id from EV_FF code, duration_ms=0" {
@@ -1171,11 +1236,11 @@ test "uinput: pollFf stop: carries effect_id from EV_FF code, duration_ms=0" {
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
 
     const result = try dev.pollFf();
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u8, 4), result.?.effect_id);
-    try std.testing.expectEqual(@as(u16, 0), result.?.duration_ms);
-    try std.testing.expectEqual(@as(u16, 0), result.?.strong);
-    try std.testing.expectEqual(@as(u16, 0), result.?.weak);
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqual(@as(u8, 4), result.events[0].effect_id);
+    try std.testing.expectEqual(@as(u16, 0), result.events[0].duration_ms);
+    try std.testing.expectEqual(@as(u16, 0), result.events[0].strong);
+    try std.testing.expectEqual(@as(u16, 0), result.events[0].weak);
 }
 
 test "uinput: pollFf: out-of-range EV_FF code is dropped (returns null)" {
@@ -1196,7 +1261,7 @@ test "uinput: pollFf: out-of-range EV_FF code is dropped (returns null)" {
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
 
     const result = try dev.pollFf();
-    try std.testing.expectEqual(@as(?FfEvent, null), result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
 }
 
 test "uinput: pollFf: out-of-range id does not shadow a preceding valid play event" {
@@ -1219,11 +1284,11 @@ test "uinput: pollFf: out-of-range id does not shadow a preceding valid play eve
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&garbage));
 
     const result = try dev.pollFf();
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u8, 2), result.?.effect_id);
-    try std.testing.expectEqual(@as(u16, 0xaaaa), result.?.strong);
-    try std.testing.expectEqual(@as(u16, 0x5555), result.?.weak);
-    try std.testing.expectEqual(@as(u16, 200), result.?.duration_ms);
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqual(@as(u8, 2), result.events[0].effect_id);
+    try std.testing.expectEqual(@as(u16, 0xaaaa), result.events[0].strong);
+    try std.testing.expectEqual(@as(u16, 0x5555), result.events[0].weak);
+    try std.testing.expectEqual(@as(u16, 200), result.events[0].duration_ms);
 }
 
 test "uinput: ff_effects: erase clears slot" {
@@ -1566,4 +1631,179 @@ test "uinput: GenericUinputDevice.emitGeneric: no change produces no write" {
     var events: [4]c.input_event = undefined;
     const n = readEvents(pfds[0], &events);
     try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+// --- Instrumentation correctness tests ---
+
+test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
+    const padctl_log = @import("../log.zig");
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[0] = .{ .strong = 0x1234, .weak = 0x5678, .length_ms = 300 };
+
+    // With dump disabled (default).
+    padctl_log.setEnabled(false);
+    const ev = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+    const r1 = (try dev.pollFf()).events[0];
+
+    // With dump enabled.
+    padctl_log.setEnabled(true);
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+    const r2 = (try dev.pollFf()).events[0];
+    padctl_log.setEnabled(false);
+
+    // Both must be identical.
+    try std.testing.expectEqual(r1.effect_type, r2.effect_type);
+    try std.testing.expectEqual(r1.effect_id, r2.effect_id);
+    try std.testing.expectEqual(r1.strong, r2.strong);
+    try std.testing.expectEqual(r1.weak, r2.weak);
+    try std.testing.expectEqual(r1.duration_ms, r2.duration_ms);
+}
+
+test "uinput: pollFf batch preserves PLAY+STOP (no longer overwrites)" {
+    // With the batch API, both events are returned — no overwrite.
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[0] = .{ .strong = 0xffff, .weak = 0xffff, .length_ms = 500 };
+
+    const play = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const stop = c.input_event{ .type = c.EV_FF, .code = 0, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
+
+    const batch = try dev.pollFf();
+    // Both events preserved in order — this is the core fix.
+    try std.testing.expectEqual(@as(usize, 2), batch.len);
+    try std.testing.expectEqual(@as(u16, 0xffff), batch.events[0].strong); // PLAY
+    try std.testing.expectEqual(@as(u16, 0), batch.events[1].strong); // STOP
+}
+
+test "uinput: pollFf batch preserves STOP+PLAY (no longer overwrites)" {
+    // Both events returned in order — stop then play.
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[3] = .{ .strong = 0xaaaa, .weak = 0xbbbb, .length_ms = 100 };
+
+    const stop = c.input_event{ .type = c.EV_FF, .code = 3, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    const play = c.input_event{ .type = c.EV_FF, .code = 3, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
+
+    const batch = try dev.pollFf();
+    try std.testing.expectEqual(@as(usize, 2), batch.len);
+    try std.testing.expectEqual(@as(u16, 0), batch.events[0].strong); // STOP
+    try std.testing.expectEqual(@as(u16, 0xaaaa), batch.events[1].strong); // PLAY
+    try std.testing.expectEqual(@as(u8, 3), batch.events[1].effect_id);
+}
+
+// --- Phase 7: batch return tests ---
+
+test "uinput: pollFf batch: PLAY+STOP returns both events in order" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[0] = .{ .strong = 0xffff, .weak = 0x8000, .length_ms = 200 };
+
+    const play = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const stop = c.input_event{ .type = c.EV_FF, .code = 0, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
+
+    const batch = try dev.pollFf();
+    // Both events must be in the batch, in order.
+    try std.testing.expectEqual(@as(usize, 2), batch.len);
+    // First: PLAY with magnitudes.
+    try std.testing.expectEqual(@as(u16, 0xffff), batch.events[0].strong);
+    try std.testing.expectEqual(@as(u16, 0x8000), batch.events[0].weak);
+    // Second: STOP with zeros.
+    try std.testing.expectEqual(@as(u16, 0), batch.events[1].strong);
+    try std.testing.expectEqual(@as(u16, 0), batch.events[1].weak);
+}
+
+test "uinput: pollFf batch: empty pipe returns empty batch" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    const batch = try dev.pollFf();
+    try std.testing.expectEqual(@as(usize, 0), batch.len);
+}
+
+test "uinput: pollFf batch: three events PLAY-STOP-PLAY across two IDs" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[0] = .{ .strong = 0x1000, .weak = 0, .length_ms = 100 };
+    dev.ff_effects[1] = .{ .strong = 0x2000, .weak = 0, .length_ms = 200 };
+
+    const play0 = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const stop0 = c.input_event{ .type = c.EV_FF, .code = 0, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    const play1 = c.input_event{ .type = c.EV_FF, .code = 1, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play0));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop0));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play1));
+
+    const batch = try dev.pollFf();
+    try std.testing.expectEqual(@as(usize, 3), batch.len);
+    try std.testing.expectEqual(@as(u8, 0), batch.events[0].effect_id);
+    try std.testing.expectEqual(@as(u16, 0x1000), batch.events[0].strong);
+    try std.testing.expectEqual(@as(u8, 0), batch.events[1].effect_id);
+    try std.testing.expectEqual(@as(u16, 0), batch.events[1].strong); // STOP
+    try std.testing.expectEqual(@as(u8, 1), batch.events[2].effect_id);
+    try std.testing.expectEqual(@as(u16, 0x2000), batch.events[2].strong);
+}
+
+test "uinput: pollFf batch: out-of-range IDs excluded from batch" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[2] = .{ .strong = 0xaaaa, .weak = 0, .length_ms = 50 };
+
+    const valid = c.input_event{ .type = c.EV_FF, .code = 2, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const invalid = c.input_event{ .type = c.EV_FF, .code = 42, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&valid));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&invalid));
+
+    const batch = try dev.pollFf();
+    // Only the valid event in the batch.
+    try std.testing.expectEqual(@as(usize, 1), batch.len);
+    try std.testing.expectEqual(@as(u8, 2), batch.events[0].effect_id);
 }

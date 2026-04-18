@@ -103,16 +103,36 @@ install_brew_pkg() {
     fi
 }
 
+ZIG_BREW_PKG="zig@0.15"  # padctl requires Zig 0.15.x; 0.16+ has breaking API changes
+
 if command -v brew &>/dev/null; then
-    install_brew_pkg zig
+    install_brew_pkg "$ZIG_BREW_PKG"
     install_brew_pkg libusb
+    # zig@0.15 is keg-only — ensure it's on PATH for this session.
+    if [[ -d "$BREW_PREFIX/opt/$ZIG_BREW_PKG/bin" ]]; then
+        export PATH="$BREW_PREFIX/opt/$ZIG_BREW_PKG/bin:$PATH"
+    fi
 else
     # Non-brew: check if zig and libusb are available
     if ! command -v zig &>/dev/null; then
-        err "zig not found. Install Zig 0.15+ from https://ziglang.org/download/"
+        err "zig not found. Install Zig 0.15.x from https://ziglang.org/download/"
         exit 1
     fi
-    ok "zig found: $(zig version)"
+    # padctl requires Zig 0.15.x. Reject anything else upfront so users hit a
+    # clear error instead of a cryptic build failure downstream.
+    if ! zig_ver="$(zig version 2>/dev/null)"; then
+        err "failed to determine zig version"
+        exit 1
+    fi
+    case "$zig_ver" in
+        0.15.*) ok "zig found: $zig_ver" ;;
+        *)
+            warn "zig $zig_ver detected — padctl requires 0.15.x"
+            warn "Install zig@0.15 via brew, or download from https://ziglang.org/download/"
+            read -rp "Continue anyway? [y/N] " yn
+            [[ "$yn" =~ ^[Yy] ]] || exit 1
+            ;;
+    esac
 fi
 
 # Verify Zig version >= 0.15.0
@@ -140,14 +160,32 @@ fi
 
 if [[ -d "$PADCTL_REPO/.git" ]]; then
     info "Updating existing repo at $PADCTL_REPO..."
+    repo_updated=false
     if [[ -n "$BRANCH" ]]; then
         git -C "$PADCTL_REPO" fetch origin 2>/dev/null || true
         git -C "$PADCTL_REPO" checkout "$BRANCH" 2>/dev/null || warn "checkout $BRANCH failed"
-        git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        if timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null; then
+            repo_updated=true
+        else
+            warn "git pull failed (might have local changes)"
+        fi
     else
-        git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        # Only pull if on a branch that tracks a remote (skip for local-only branches).
+        if git -C "$PADCTL_REPO" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+            if timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null; then
+                repo_updated=true
+            else
+                warn "git pull failed (might have local changes)"
+            fi
+        else
+            info "Local branch with no upstream — skipping pull"
+        fi
     fi
-    ok "Repo up to date"
+    if $repo_updated; then
+        ok "Repo up to date"
+    else
+        info "Using existing repo state"
+    fi
 elif [[ -f "$PADCTL_REPO/build.zig" ]]; then
     ok "Using existing repo at $PADCTL_REPO (not a git repo)"
 else
@@ -164,7 +202,7 @@ fi
 cd "$PADCTL_REPO"
 
 # --- 5. Build ---
-info "Building padctl (ReleaseSafe)..."
+info "Building padctl (ReleaseSafe) with zig $(zig version)..."
 build_args=(-Doptimize=ReleaseSafe)
 if [[ -d "$BREW_PREFIX" ]]; then
     build_args+=(--search-prefix "$BREW_PREFIX")

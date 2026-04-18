@@ -38,8 +38,8 @@ pub const MockOutput = struct {
         self.prev = s;
     }
 
-    fn mockPollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
-        return null;
+    fn mockPollFf(_: *anyopaque) uinput.PollFfError!uinput.FfEventBatch {
+        return .{};
     }
 
     fn mockClose(_: *anyopaque) void {}

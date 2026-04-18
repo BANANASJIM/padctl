@@ -145,7 +145,7 @@ test "contract OutputDevice: poll_ff on fresh mock returns null" {
 
     const dev = out.outputDevice();
     const ff = try dev.pollFf();
-    try testing.expect(ff == null);
+    try testing.expectEqual(@as(usize, 0), ff.len);
 }
 
 // C10: emit() records exact state — no mutation of the passed value.
