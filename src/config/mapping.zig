@@ -185,6 +185,7 @@ pub const MappingConfig = struct {
     layer: ?[]const LayerConfig = null,
     macro: ?[]const Macro = null,
     adaptive_trigger: ?AdaptiveTriggerConfig = null,
+    trigger_threshold: ?u8 = null,
 };
 
 pub const ParseResult = toml.Parsed(MappingConfig);
@@ -775,6 +776,20 @@ test "deriveAuxFromMapping: BTN_BACK alias sets bit 64" {
     defer result.deinit();
     const caps = deriveAuxFromMapping(&result.value);
     try std.testing.expect(caps.mouse_buttons & 64 != 0);
+}
+
+test "mapping: trigger_threshold parses from TOML" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, "trigger_threshold = 128");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?u8, 128), result.value.trigger_threshold);
+}
+
+test "mapping: trigger_threshold defaults to null" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, "");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?u8, null), result.value.trigger_threshold);
 }
 
 test "mapping: fuzz parseString: no panic on arbitrary input" {

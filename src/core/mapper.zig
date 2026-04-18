@@ -102,6 +102,22 @@ pub const Mapper = struct {
         // [1] merge delta into current state
         self.state.applyDelta(delta);
 
+        // [1.5] trigger threshold: synthesize LT/RT as digital buttons
+        if (self.config.trigger_threshold) |threshold| {
+            const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+            const rt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.RT));
+            if (self.state.lt > threshold) {
+                self.state.buttons |= lt_bit;
+            } else {
+                self.state.buttons &= ~lt_bit;
+            }
+            if (self.state.rt > threshold) {
+                self.state.buttons |= rt_bit;
+            } else {
+                self.state.buttons &= ~rt_bit;
+            }
+        }
+
         // [2] layer trigger processing
         const configs = self.config.layer orelse &.{};
         const now_ns = monotonicNs();
@@ -1408,4 +1424,76 @@ test "mapper: invalid remap target does not suppress source button" {
     const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
     // A must still pass through — bad target must not suppress the source
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << a_idx)) != 0);
+}
+
+test "mapper: trigger_threshold: lt above threshold sets LT button" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\trigger_threshold = 128
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+    const rt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.RT));
+
+    const events = try m.apply(.{ .lt = 200, .rt = 50 }, 16);
+    try testing.expect((events.gamepad.buttons & lt_bit) != 0);
+    try testing.expect((events.gamepad.buttons & rt_bit) == 0);
+}
+
+test "mapper: trigger_threshold: null threshold does not synthesize buttons" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping("", allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+
+    const events = try m.apply(.{ .lt = 200 }, 16);
+    try testing.expect((events.gamepad.buttons & lt_bit) == 0);
+}
+
+test "mapper: trigger_threshold: boundary — equal to threshold does not trigger" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\trigger_threshold = 128
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+
+    // lt == threshold: should NOT trigger (strictly greater required)
+    const e1 = try m.apply(.{ .lt = 128 }, 16);
+    try testing.expect((e1.gamepad.buttons & lt_bit) == 0);
+
+    // lt == threshold + 1: should trigger
+    const e2 = try m.apply(.{ .lt = 129 }, 16);
+    try testing.expect((e2.gamepad.buttons & lt_bit) != 0);
+}
+
+test "mapper: trigger_threshold: release clears button bit" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\trigger_threshold = 128
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+
+    const e1 = try m.apply(.{ .lt = 200 }, 16);
+    try testing.expect((e1.gamepad.buttons & lt_bit) != 0);
+
+    const e2 = try m.apply(.{ .lt = 50 }, 16);
+    try testing.expect((e2.gamepad.buttons & lt_bit) == 0);
 }
