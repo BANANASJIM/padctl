@@ -328,6 +328,14 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
+    /// Replace pollfd entries for device slots with fds from new DeviceIO
+    /// slice. The number of devices must match the original count.
+    pub fn rebindDevices(self: *EventLoop, devices: []DeviceIO) void {
+        for (devices, 0..) |dev, i| {
+            self.pollfds[self.device_base + i] = dev.pollfd();
+        }
+    }
+
     pub fn addUinputFf(self: *EventLoop, fd: posix.fd_t) !void {
         const slot = self.fd_count;
         if (slot >= MAX_FDS) return error.TooManyFds;
