@@ -14,15 +14,16 @@ pub const MacroPlayer = struct {
     macro: *const Macro,
     step_index: usize,
     waiting_for_release: bool,
-    /// Token used when a delay deadline is armed in the TimerQueue.
     timer_token: u32,
+    trigger_src_idx: u6,
 
-    pub fn init(m: *const Macro, token: u32) MacroPlayer {
+    pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
         return .{
             .macro = m,
             .step_index = 0,
             .waiting_for_release = false,
             .timer_token = token,
+            .trigger_src_idx = src_idx,
         };
     }
 
@@ -122,7 +123,7 @@ const testing = std.testing;
 const mapping = @import("../config/mapping.zig");
 
 fn makePlayer(m: *const Macro) MacroPlayer {
-    return MacroPlayer.init(m, 1);
+    return MacroPlayer.init(m, 1, 0);
 }
 
 fn dummyQueue(allocator: std.mem.Allocator) TimerQueue {
@@ -236,14 +237,42 @@ test "macro_player: emitPendingReleases down without up emits release" {
     }
 }
 
+test "macro_player: shift_hold — down pause_for_release up" {
+    const allocator = testing.allocator;
+    const steps = [_]MacroStep{ .{ .down = "KEY_LEFTSHIFT" }, .pause_for_release, .{ .up = "KEY_LEFTSHIFT" } };
+    const m = Macro{ .name = "shift_hold", .steps = &steps };
+    var player = makePlayer(&m);
+    var aux = AuxEventList{};
+    var q = dummyQueue(allocator);
+    defer q.deinit();
+
+    const done1 = try player.step(&aux, &q);
+    try testing.expect(!done1);
+    try testing.expectEqual(@as(usize, 1), aux.len);
+    switch (aux.get(0)) {
+        .key => |k| try testing.expect(k.pressed),
+        else => return error.WrongType,
+    }
+
+    player.notifyTriggerReleased();
+    var aux2 = AuxEventList{};
+    const done2 = try player.step(&aux2, &q);
+    try testing.expect(done2);
+    try testing.expectEqual(@as(usize, 1), aux2.len);
+    switch (aux2.get(0)) {
+        .key => |k| try testing.expect(!k.pressed),
+        else => return error.WrongType,
+    }
+}
+
 test "macro_player: two players advance step_index independently" {
     const allocator = testing.allocator;
     const steps_a = [_]MacroStep{ .{ .tap = "KEY_A" }, .{ .tap = "KEY_B" } };
     const steps_b = [_]MacroStep{.{ .tap = "KEY_C" }};
     const ma = Macro{ .name = "a", .steps = &steps_a };
     const mb = Macro{ .name = "b", .steps = &steps_b };
-    var pa = MacroPlayer.init(&ma, 1);
-    var pb = MacroPlayer.init(&mb, 2);
+    var pa = MacroPlayer.init(&ma, 1, 0);
+    var pb = MacroPlayer.init(&mb, 2, 1);
     var q = dummyQueue(allocator);
     defer q.deinit();
 
