@@ -31,7 +31,7 @@ pub fn deriveAuxFromMapping(cfg: *const MappingConfig) DerivedAuxCaps {
         if (std.mem.eql(u8, d.mode, "arrows")) caps.needs_keyboard = true;
     }
 
-    if (cfg.remap) |*remap| scanRemapTargets(&caps, remap);
+    if (cfg.remap) |*remap| scanRemapTargets(&caps, cfg, remap);
 
     if (cfg.layer) |layers| {
         for (layers) |*layer| {
@@ -43,7 +43,7 @@ pub fn deriveAuxFromMapping(cfg: *const MappingConfig) DerivedAuxCaps {
             if (layer.dpad) |d| {
                 if (std.mem.eql(u8, d.mode, "arrows")) caps.needs_keyboard = true;
             }
-            if (layer.remap) |*remap| scanRemapTargets(&caps, remap);
+            if (layer.remap) |*remap| scanRemapTargets(&caps, cfg, remap);
         }
     }
 
@@ -56,26 +56,47 @@ fn scanStick(caps: *DerivedAuxCaps, stick: ?StickConfig) void {
         caps.needs_rel = true;
 }
 
-fn scanRemapTargets(caps: *DerivedAuxCaps, remap: *const toml.HashMap([]const u8)) void {
+fn scanTarget(caps: *DerivedAuxCaps, target: []const u8) void {
+    if (std.mem.startsWith(u8, target, "KEY_")) {
+        caps.needs_keyboard = true;
+    } else if (std.mem.eql(u8, target, "mouse_left") or std.mem.eql(u8, target, "BTN_LEFT")) {
+        caps.mouse_buttons |= 1;
+    } else if (std.mem.eql(u8, target, "mouse_right") or std.mem.eql(u8, target, "BTN_RIGHT")) {
+        caps.mouse_buttons |= 2;
+    } else if (std.mem.eql(u8, target, "mouse_middle") or std.mem.eql(u8, target, "BTN_MIDDLE")) {
+        caps.mouse_buttons |= 4;
+    } else if (std.mem.eql(u8, target, "mouse_side") or std.mem.eql(u8, target, "BTN_SIDE")) {
+        caps.mouse_buttons |= 8;
+    } else if (std.mem.eql(u8, target, "mouse_extra") or std.mem.eql(u8, target, "BTN_EXTRA")) {
+        caps.mouse_buttons |= 16;
+    } else if (std.mem.eql(u8, target, "mouse_forward") or std.mem.eql(u8, target, "BTN_FORWARD")) {
+        caps.mouse_buttons |= 32;
+    } else if (std.mem.eql(u8, target, "mouse_back") or std.mem.eql(u8, target, "BTN_BACK")) {
+        caps.mouse_buttons |= 64;
+    }
+}
+
+fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *const toml.HashMap([]const u8)) void {
     var it = remap.map.iterator();
     while (it.next()) |entry| {
         const target = entry.value_ptr.*;
-        if (std.mem.startsWith(u8, target, "KEY_")) {
-            caps.needs_keyboard = true;
-        } else if (std.mem.eql(u8, target, "mouse_left") or std.mem.eql(u8, target, "BTN_LEFT")) {
-            caps.mouse_buttons |= 1;
-        } else if (std.mem.eql(u8, target, "mouse_right") or std.mem.eql(u8, target, "BTN_RIGHT")) {
-            caps.mouse_buttons |= 2;
-        } else if (std.mem.eql(u8, target, "mouse_middle") or std.mem.eql(u8, target, "BTN_MIDDLE")) {
-            caps.mouse_buttons |= 4;
-        } else if (std.mem.eql(u8, target, "mouse_side") or std.mem.eql(u8, target, "BTN_SIDE")) {
-            caps.mouse_buttons |= 8;
-        } else if (std.mem.eql(u8, target, "mouse_extra") or std.mem.eql(u8, target, "BTN_EXTRA")) {
-            caps.mouse_buttons |= 16;
-        } else if (std.mem.eql(u8, target, "mouse_forward") or std.mem.eql(u8, target, "BTN_FORWARD")) {
-            caps.mouse_buttons |= 32;
-        } else if (std.mem.eql(u8, target, "mouse_back") or std.mem.eql(u8, target, "BTN_BACK")) {
-            caps.mouse_buttons |= 64;
+        if (std.mem.startsWith(u8, target, "macro:")) {
+            const macro_name = target["macro:".len..];
+            const macros = cfg.macro orelse continue;
+            for (macros) |*m| {
+                if (!std.mem.eql(u8, m.name, macro_name)) continue;
+                for (m.steps) |s| {
+                    switch (s) {
+                        .tap => |name| scanTarget(caps, name),
+                        .down => |name| scanTarget(caps, name),
+                        .up => |name| scanTarget(caps, name),
+                        .delay, .pause_for_release => {},
+                    }
+                }
+                break;
+            }
+        } else {
+            scanTarget(caps, target);
         }
     }
 }
@@ -790,6 +811,22 @@ test "mapping: trigger_threshold defaults to null" {
     const result = try parseString(allocator, "");
     defer result.deinit();
     try std.testing.expectEqual(@as(?u8, null), result.value.trigger_threshold);
+}
+
+test "deriveAuxFromMapping: macro:dodge_roll emitting KEY_B sets needs_keyboard" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[macro]]
+        \\name = "dodge_roll"
+        \\steps = [{ tap = "KEY_B" }]
+        \\
+        \\[remap]
+        \\M1 = "macro:dodge_roll"
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.needs_keyboard);
+    try std.testing.expect(caps.needsAux());
 }
 
 test "mapping: fuzz parseString: no panic on arbitrary input" {
