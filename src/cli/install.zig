@@ -21,7 +21,6 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\NoNewPrivileges=true
         \\LockPersonality=true
         \\ProtectClock=true
-        \\SupplementaryGroups=input
         \\
         \\[Install]
         \\WantedBy=default.target
@@ -2552,7 +2551,7 @@ test "install: service content has hardening directives" {
     try testing.expect(std.mem.indexOf(u8, content, "NoNewPrivileges=true") != null);
     try testing.expect(std.mem.indexOf(u8, content, "LockPersonality=true") != null);
     try testing.expect(std.mem.indexOf(u8, content, "ProtectClock=true") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "SupplementaryGroups=input") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "SupplementaryGroups") == null);
 }
 
 test "install: old system unit triggers migration hint" {
