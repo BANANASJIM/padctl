@@ -1612,8 +1612,9 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| {
             if (!m.suspended) continue;
             const mcfg = m.instance.device_cfg;
-            if (@as(u16, @intCast(mcfg.device.vid)) != vid or
-                @as(u16, @intCast(mcfg.device.pid)) != pid) continue;
+            // Match by physical topology path (stable across sleep/wake)
+            // rather than VID:PID (ambiguous with identical controllers)
+            if (!std.mem.eql(u8, m.phys_key, phys)) continue;
 
             // Reopen all interface fds for the suspended instance
             const new_devices = self.allocator.alloc(DeviceIO, mcfg.device.interface.len) catch return;
@@ -1661,6 +1662,8 @@ pub const Supervisor = struct {
 
             restartManagedThread(m) catch |err| {
                 std.log.err("rebind restart failed: {}", .{err});
+                m.suspended = true;
+                m.instance.closeDeviceIO();
                 return;
             };
             std.log.info("device resumed: \"{s}\" {s}/{s}", .{ mcfg.device.name, dev_root, devname });
