@@ -105,13 +105,16 @@ install_brew_pkg() {
 
 if command -v brew &>/dev/null; then
     # Pin zig@0.15 — padctl does not yet support 0.16+
-    if command -v zig &>/dev/null; then
-        ok "zig already installed: $(zig version)"
+    # Versioned formulas are keg-only: install then prepend opt path to PATH
+    if brew list zig@0.15 &>/dev/null; then
+        ok "zig@0.15 already installed"
     else
         info "Installing zig@0.15 via brew..."
         brew install zig@0.15 || brew install zig
-        ok "zig installed: $(zig version)"
+        ok "zig@0.15 installed"
     fi
+    export PATH="$(brew --prefix)/opt/zig@0.15/bin:$PATH"
+    ok "zig on PATH: $(zig version)"
     install_brew_pkg libusb
 else
     # Non-brew: check if zig and libusb are available
