@@ -376,7 +376,14 @@ pub const UinputDevice = struct {
                 if (ev.code == c.UI_FF_UPLOAD) {
                     var upload = std.mem.zeroes(c.uinput_ff_upload);
                     upload.request_id = @intCast(ev.value);
-                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    if (begin_rc != 0) {
+                        // BEGIN failed — the upload struct is still zeroed. Skip
+                        // the rest of the branch so we don't touch ff_effects or
+                        // call UI_END_FF_UPLOAD with retval=0 (which would
+                        // falsely acknowledge the kernel request).
+                        continue;
+                    }
                     if (upload.effect.type == c.FF_RUMBLE and upload.effect.id < 16) {
                         self.ff_effects[@intCast(upload.effect.id)] = .{
                             .strong = upload.effect.u.rumble.strong_magnitude,
@@ -389,7 +396,11 @@ pub const UinputDevice = struct {
                 } else if (ev.code == c.UI_FF_ERASE) {
                     var erase = std.mem.zeroes(c.uinput_ff_erase);
                     erase.request_id = @intCast(ev.value);
-                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    const begin_rc = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    if (begin_rc != 0) {
+                        // BEGIN failed — see comment above for UPLOAD path.
+                        continue;
+                    }
                     if (erase.effect_id < 16) {
                         self.ff_effects[@intCast(erase.effect_id)] = .{};
                     }
@@ -421,6 +432,13 @@ pub const UinputDevice = struct {
                         .duration_ms = eff.length_ms,
                     };
                 }
+                // Return on the first EV_FF observed. Any remaining events
+                // stay in the kernel socket buffer; level-triggered ppoll
+                // on the fd will re-fire on the next loop iteration so
+                // they are drained one-per-call in FIFO order (fix for
+                // issue #65: rapid PLAY+STOP bursts used to collapse to
+                // the last event and lose the earlier one).
+                break;
             }
         }
         return result;
@@ -1042,12 +1060,16 @@ test "uinput: pollFf drain loop: empty pipe returns null without blocking" {
     try std.testing.expectEqual(@as(?FfEvent, null), result);
 }
 
-test "uinput: pollFf drain loop: drains multiple events and returns last EV_FF" {
+test "uinput: pollFf: two EV_FF events on the wire are observed one per call (no coalescing)" {
+    // Regression for #65: when multiple EV_FF events arrive in a single
+    // ppoll wake, each successive pollFf() call must return the next one
+    // in FIFO order — the drain loop must NOT collapse the batch into
+    // the last event and discard the rest. Level-triggered ppoll will
+    // re-fire as long as any remaining event is still unread.
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
 
-    // Write two EV_FF events to the pipe
     const ev1 = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
     const ev2 = c.input_event{ .type = c.EV_FF, .code = 1, .value = 0, .time = std.mem.zeroes(c.timeval) };
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev1));
@@ -1057,10 +1079,59 @@ test "uinput: pollFf drain loop: drains multiple events and returns last EV_FF" 
         .fd = pfds[0],
         .button_codes = [_]u16{0} ** BUTTON_COUNT,
     };
-    const result = try dev.pollFf();
-    // Both events processed; last one wins — result is non-null FfEvent
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.?.effect_type);
+
+    const first = try dev.pollFf();
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(@as(u8, 0), first.?.effect_id);
+
+    const second = try dev.pollFf();
+    try std.testing.expect(second != null);
+    try std.testing.expectEqual(@as(u8, 1), second.?.effect_id);
+
+    const third = try dev.pollFf();
+    try std.testing.expectEqual(@as(?FfEvent, null), third);
+}
+
+test "uinput: pollFf: rapid PLAY+STOP on same slot both observed" {
+    // Regression for #65 (Vader 5 Pro stuck rumble class of bug). A game
+    // sending PLAY followed by STOP for the same effect slot in one
+    // ppoll wake must have BOTH events reach the scheduler, otherwise
+    // the rumble motor stays on until the next unrelated event clears
+    // the slot by coincidence. The old drain loop lost the PLAY because
+    // the STOP overwrote `result` before returning.
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    // Game uploaded a 65.5s rumble on slot 0, then told uinput to play
+    // it, then stopped it ~50ms later. The scheduler needs to see both.
+    dev.ff_effects[0] = .{ .strong = 0xf000, .weak = 0x0f00, .length_ms = 65535 };
+
+    const ev_play = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const ev_stop = c.input_event{ .type = c.EV_FF, .code = 0, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev_play));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev_stop));
+
+    const first = try dev.pollFf();
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(@as(u8, 0), first.?.effect_id);
+    try std.testing.expectEqual(@as(u16, 0xf000), first.?.strong);
+    try std.testing.expectEqual(@as(u16, 0x0f00), first.?.weak);
+    try std.testing.expectEqual(@as(u16, 65535), first.?.duration_ms);
+
+    const second = try dev.pollFf();
+    try std.testing.expect(second != null);
+    try std.testing.expectEqual(@as(u8, 0), second.?.effect_id);
+    try std.testing.expectEqual(@as(u16, 0), second.?.strong);
+    try std.testing.expectEqual(@as(u16, 0), second.?.weak);
+    try std.testing.expectEqual(@as(u16, 0), second.?.duration_ms);
+
+    const third = try dev.pollFf();
+    try std.testing.expectEqual(@as(?FfEvent, null), third);
 }
 
 test "uinput: pollFfFd returns the fd" {
