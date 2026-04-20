@@ -691,8 +691,26 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             const msg = std.fmt.bufPrint(&errbuf, "{}\n", .{err}) catch "unknown error\n";
             _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
         };
+    } else if (dirExistsAbsolute(share_dir) and dirIsNonEmpty(share_dir)) {
+        // Packaging (AUR/deb/rpm) already shipped device configs into the target
+        // share dir; the "near binary / cwd" heuristic would otherwise emit a
+        // scary warning even though devices are present.
+        var infobuf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &infobuf,
+            "info: device configs already present at {s}; source copy skipped\n",
+            .{share_dir},
+        ) catch "info: device configs already present; source copy skipped\n";
+        _ = std.posix.write(std.posix.STDOUT_FILENO, msg) catch {};
     } else {
-        _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: devices directory not found near executable or current working directory\n") catch {};
+        var warnbuf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &warnbuf,
+            "warning: source `devices/` directory not found (near binary, in cwd, or at {s})\n" ++
+                "hint: run `padctl install` from the source checkout, or ensure your package ships device configs under {s}\n",
+            .{ share_dir, share_dir },
+        ) catch "warning: source `devices/` directory not found\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
     }
 
     // 4. Collect device entries once, generate both rule files
