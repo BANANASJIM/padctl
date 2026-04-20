@@ -49,6 +49,15 @@ accel_z = { offset = 27, type = "i16le" }
 
 [report.button_group]
 source = { offset = 11, size = 4 }
+# Bit layout (byte 11 bit 0 = bit 0, byte 14 bit 7 = bit 31). Less-common
+# Vader 5 buttons have known bit positions but are disabled by default
+# under [output.buttons] below — uncomment those lines to route them:
+#   C  = 16   (extra face button, right of Y)
+#   Z  = 17   (extra face button, left of A)
+#   LM = 22   (top paddle, left shoulder)
+#   RM = 23   (top paddle, right shoulder)
+# Comment syntax does not work inside TOML inline tables, so the bits
+# remain present below but the output side controls whether they fire.
 map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Select = 6, X = 7, Y = 8, Start = 9, LB = 10, RB = 11, LS = 14, RS = 15, C = 16, Z = 17, M1 = 18, M2 = 19, M3 = 20, M4 = 21, LM = 22, RM = 23, O = 24, Home = 27 }
 
 # --- Commands ---
@@ -93,11 +102,16 @@ M1     = "BTN_TRIGGER_HAPPY5"
 M2     = "BTN_TRIGGER_HAPPY7"
 M3     = "BTN_TRIGGER_HAPPY6"
 M4     = "BTN_TRIGGER_HAPPY8"
-C      = "BTN_TRIGGER_HAPPY1"
-Z      = "BTN_TRIGGER_HAPPY2"
-LM     = "BTN_TRIGGER_HAPPY3"
-RM     = "BTN_TRIGGER_HAPPY4"
 O      = "BTN_TRIGGER_HAPPY9"
+# Less-common Vader 5 buttons — uncomment to expose to userland.
+# Input-side bit positions are declared in [report.button_group].map above
+# (C=16, Z=17, LM=22, RM=23). The BTN_TRIGGER_HAPPY* targets are arbitrary
+# but distinct from the M1–M4 block above; renumber if they collide with
+# mappings you use.
+# C      = "BTN_TRIGGER_HAPPY1"
+# Z      = "BTN_TRIGGER_HAPPY2"
+# LM     = "BTN_TRIGGER_HAPPY3"
+# RM     = "BTN_TRIGGER_HAPPY4"
 
 [output.dpad]
 type = "hat"
