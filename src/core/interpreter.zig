@@ -293,7 +293,7 @@ pub const CompiledField = struct {
 
 pub const CompiledButtonEntry = struct {
     btn_id: ButtonId,
-    bit_idx: u5,
+    bit_idx: u6,
 };
 
 pub const CompiledButtonGroup = struct {
