@@ -4,13 +4,15 @@ vid = 0x28de
 pid = 0x1205
 
 [[device.interface]]
-id = 0
+id = 2
 class = "hid"
 
-# --- Input report (Report ID 0x09, 64 bytes) ---
-# Header bytes 0-3: version, report_type=0x09, size, counter
+# --- Input report (Report type 0x09, 64 bytes) ---
+# Reference: Linux kernel drivers/hid/hid-steam.c :1748-1766 (envelope),
+#            :1597 steam_do_deck_input_event (bit mapping)
+# Envelope bytes 0-3: 0x01, 0x00, report_type (0x09), payload_len (0x40)
 # frame_counter: bytes 4-7 u32le
-# buttons: bytes 8-15 bitfield
+# buttons: bytes 8-15 bitfield (see [report.button_group] below)
 # trackpad L X/Y: bytes 16-17/18-19 i16le
 # trackpad R X/Y: bytes 20-21/22-23 i16le
 # accel X/Y/Z: bytes 24-25/26-27/28-29 i16le
@@ -20,11 +22,11 @@ class = "hid"
 # trackpad force L/R: bytes 56-57/58-59 u16le
 [[report]]
 name = "main"
-interface = 0
+interface = 2
 size = 64
 
 [report.match]
-offset = 1
+offset = 2
 expect = [0x09]
 
 [report.fields]
@@ -50,14 +52,23 @@ touch1_active = { bits = [10, 4, 1] }
 # left_pad_force  = { offset = 56, type = "u16le" }
 # right_pad_force = { offset = 58, type = "u16le" }
 
-# Buttons layout (bytes 8-15, 64 bits total):
-# byte 8:  bit0=RT_dig bit1=LT_dig bit2=RS bit3=LS bit4=Y bit5=B bit6=X bit7=A
-# byte 9:  bit0=DPadUp bit1=DPadRight bit2=DPadLeft bit3=DPadDown bit4=L4 bit5=R4 bit6=L5 bit7=R5
-# byte 10: bit0=Menu bit1=Steam bit2=Select bit3=L3_touch bit4=R3_touch
-# button_group covers bytes 8-11 (4 bytes = 32 bits)
+# Buttons (bytes 8-15, canonical layout per Linux kernel hid-steam.c :1597)
+# Bit index within the 64-bit button_group source = (byte - 8) * 8 + bit_in_byte
+# byte 8:  bit0=RT_dig bit1=LT_dig bit2=RB bit3=LB bit4=Y bit5=B bit6=X bit7=A
+# byte 9:  bit0=DPadUp bit1=DPadRight bit2=DPadLeft bit3=DPadDown
+#          bit4=Select(⧉) bit5=Home(Steam) bit6=Start(☰) bit7=L5
+# byte 10: bit0=R5 bit1=LPad_click bit2=RPad_click bit3=LPad_touch bit4=RPad_touch bit6=LS_click
+# byte 11: bit2=RS_click
+# byte 13: bit1=L4 bit2=R4
+# byte 14: bit2=QuickAccess(⋯)
+# M1-M4 are padctl-convention aliases for rear-grip buttons:
+#   M1 = L5 (byte 9.7 = bit 15)
+#   M2 = R5 (byte 10.0 = bit 16)
+#   M3 = L4 (byte 13.1 = bit 41)
+#   M4 = R4 (byte 13.2 = bit 42)
 [report.button_group]
-source = { offset = 8, size = 4 }
-map = { RT = 0, LT = 1, RS = 2, LS = 3, Y = 4, B = 5, X = 6, A = 7, DPadUp = 8, DPadRight = 9, DPadLeft = 10, DPadDown = 11, M1 = 12, M2 = 13, M3 = 14, M4 = 15, Start = 16, Home = 17, Select = 18 }
+source = { offset = 8, size = 8 }
+map = { RT = 0, LT = 1, RB = 2, LB = 3, Y = 4, B = 5, X = 6, A = 7, DPadUp = 8, DPadRight = 9, DPadLeft = 10, DPadDown = 11, Select = 12, Home = 13, Start = 14, M1 = 15, M2 = 16, LS = 22, RS = 26, M3 = 41, M4 = 42 }
 
 # --- Haptic Pulse output (Report ID 0x8F, 9 bytes) ---
 # byte 0=0x8F side(u8) amplitude(u16le) period(u16le) count(u16le)
@@ -86,6 +97,8 @@ X      = "BTN_WEST"
 Y      = "BTN_NORTH"
 LT     = "BTN_TL2"
 RT     = "BTN_TR2"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
 Select = "BTN_SELECT"
 Start  = "BTN_START"
 Home   = "BTN_MODE"
