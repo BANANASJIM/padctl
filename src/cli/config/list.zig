@@ -1,13 +1,27 @@
 const std = @import("std");
 const posix = std.posix;
 const paths = @import("../../config/paths.zig");
+const socket_client = @import("../socket_client.zig");
 
+/// Probe whether the daemon is running by attempting to connect to the IPC
+/// socket. Uses the same `resolveSocketPath()` as every other client, so a
+/// user-scope daemon (XDG_RUNTIME_DIR/padctl.sock) is detected correctly.
+///
+/// Previous implementation probed `/run/padctl.pid` which (a) is only written
+/// when `--pid-file` is explicitly passed (never true in the installed user
+/// systemd unit), and (b) lives in a path that a user-scope daemon has no
+/// permission to write — so the status line always reported "Daemon: not
+/// running" even when the daemon was healthy (Sleaker 2026-04-20).
 fn daemonRunning() bool {
-    const data = std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/run/padctl.pid", 64) catch return false;
-    defer std.heap.page_allocator.free(data);
-    const trimmed = std.mem.trim(u8, data, " \n\r\t");
-    const pid = std.fmt.parseInt(std.posix.pid_t, trimmed, 10) catch return false;
-    posix.kill(pid, 0) catch return false;
+    var buf: [256]u8 = undefined;
+    const path = socket_client.resolveSocketPath(&buf);
+    // `access` check first — cheap short-circuit when no socket at all.
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    // Probe: full connect() round-trip. AF_UNIX connect fails with
+    // ECONNREFUSED when the socket file exists but nothing is listening
+    // (e.g. stale socket from a crashed previous daemon).
+    const fd = socket_client.connectToSocket(path) catch return false;
+    posix.close(fd);
     return true;
 }
 
