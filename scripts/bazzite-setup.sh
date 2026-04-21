@@ -227,12 +227,35 @@ fi
 sudo ./zig-out/bin/padctl "${install_args[@]}"
 ok "padctl installed to $PREFIX"
 
-# --- 7b. Apply mapping to the running daemon (config.toml persists for future boots,
-#         but the already-running daemon needs an explicit switch for the current session) ---
+# --- 7b. Guarantee the daemon is running as the invoking user ---
+# `padctl install` runs via sudo (writes to /usr/local, /etc), so the
+# `systemctl --user ...` trio it invokes internally executes as root and
+# does not reliably reach the invoking user's systemd instance. Redo the
+# daemon-reload/enable/restart sequence here from the user's shell so the
+# freshly-installed unit files take effect and the IPC socket is bound
+# before we apply the mapping and verify.
+info "Ensuring daemon is running as user..."
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user enable padctl.service &>/dev/null || true
+systemctl --user restart padctl.service 2>/dev/null || true
+
+# --- 7c. Apply mapping to the running daemon (config.toml persists for future boots,
+#         but the already-running daemon needs an explicit switch for the current session).
+#         Don't pin --socket to the system path — user-service installs bind
+#         their IPC socket under $XDG_RUNTIME_DIR (/run/user/<uid>/padctl.sock),
+#         and the CLI's default resolver finds it correctly from the user shell.
+#         The daemon needs a few seconds post-restart to run device init + bind
+#         its IPC socket, so retry a few times before giving up. ---
 if [[ -n "$MAPPING" ]]; then
-    info "Waiting for daemon to initialize..."
-    sleep 3
-    if "$PREFIX/bin/padctl" switch "$MAPPING" --socket /run/padctl/padctl.sock 2>/dev/null; then
+    mapping_applied=false
+    for attempt in 1 2 3 4 5 6; do
+        sleep 1
+        if "$PREFIX/bin/padctl" switch "$MAPPING" 2>/dev/null; then
+            mapping_applied=true
+            break
+        fi
+    done
+    if $mapping_applied; then
         ok "Mapping applied: $MAPPING (persisted for future boots via /etc/padctl/config.toml)"
     else
         warn "Could not apply mapping to running daemon (it will auto-apply on next boot). Run manually: padctl switch $MAPPING"
@@ -260,7 +283,10 @@ fi
 if systemctl --user is-active padctl.service &>/dev/null; then
     ok "Service: running"
 else
-    warn "Service: not running (plug in a controller)"
+    # The daemon should always be running after a successful install — it
+    # waits for hotplug internally and does NOT require a controller to be
+    # present at startup. If we reach this branch, something failed above.
+    warn "Service: not running — check 'systemctl --user status padctl' and 'journalctl --user -u padctl -n 30'"
 fi
 
 # Check resume service

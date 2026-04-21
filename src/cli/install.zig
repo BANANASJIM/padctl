@@ -85,8 +85,15 @@ const immutable_dropin_content =
     \\# Bare DeviceAllow= clears the list; with no further entries, cgroup device
     \\# controller falls back to allowing all device access.
     \\DeviceAllow=
-    \\# Allow reading user mapping configs from ~/.config/padctl/
+    \\# Allow reading user mapping configs from ~/.config/padctl/.
+    \\# ProtectHome=read-only also covers /run/user/%U per systemd.exec(5),
+    \\# so we must punch a hole for the daemon's IPC socket below.
     \\ProtectHome=read-only
+    \\# ProtectHome=read-only locks /run/user/%U, which would otherwise make
+    \\# the daemon's $XDG_RUNTIME_DIR/padctl.sock bind fail with EROFS and
+    \\# silently break `padctl status`/`switch`/`devices`. Grant write access
+    \\# back to just the runtime dir without loosening the $HOME protection.
+    \\ReadWritePaths=/run/user/%U
     \\# Short timeout for processes stuck in uninterruptible I/O
     \\TimeoutStopSec=3
     \\# SIGTERM main + SIGKILL stuck threads simultaneously
@@ -1792,6 +1799,12 @@ test "install: immutable dropin content has required directives" {
     try testing.expect(std.mem.indexOf(u8, immutable_dropin_content, "ProtectHome=read-only") != null);
     try testing.expect(std.mem.indexOf(u8, immutable_dropin_content, "TimeoutStopSec=3") != null);
     try testing.expect(std.mem.indexOf(u8, immutable_dropin_content, "KillMode=mixed") != null);
+    // ProtectHome=read-only also makes /run/user/%U read-only (per
+    // systemd.exec(5)), which silently broke the daemon's IPC socket
+    // bind(). ReadWritePaths=/run/user/%U must stay present alongside
+    // ProtectHome to keep `padctl status`/`switch`/`devices` working
+    // on immutable-OS user-service installs.
+    try testing.expect(std.mem.indexOf(u8, immutable_dropin_content, "ReadWritePaths=/run/user/%U") != null);
 }
 
 // --- Phase 3: resume service, reconnect script, hotplug rules ---
