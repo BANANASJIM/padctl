@@ -23,9 +23,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 
-const src = @import("src");
-const uhid = src.io.uhid;
-const ioctl_constants = src.io.ioctl_constants;
+// Module-relative imports — keeps the harness reachable from both the
+// `src` barrel module (via `testing_support`) and from the standalone
+// `uhid_integration_test` target without needing a dedicated `src`
+// module-import edge.
+const uhid = @import("../../io/uhid.zig");
+const ioctl_constants = @import("../../io/ioctl_constants.zig");
 
 pub const SimulatorError = error{
     SkipZigTest,

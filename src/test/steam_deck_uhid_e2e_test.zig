@@ -26,9 +26,10 @@ const posix = std.posix;
 const src = @import("src");
 const device_mod = src.config.device;
 const Interpreter = src.core.interpreter.Interpreter;
-
-const UhidSimulator = @import("harness/uhid_simulator.zig").UhidSimulator;
-const steam_deck = @import("fixtures/steam_deck_reports.zig");
+// Harness + fixtures reached through the `src` barrel so the compiler sees
+// each source file belonging to exactly one module.
+const UhidSimulator = src.testing_support.uhid_simulator.UhidSimulator;
+const steam_deck = src.testing_support.steam_deck_fixture;
 
 test "steam_deck_fixture_round_trip: fixture + interpreter agree on Steam Deck TOML" {
     const allocator = testing.allocator;
