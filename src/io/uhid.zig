@@ -440,3 +440,92 @@ test "uhid: init rejects descriptor too large" {
     };
     try testing.expectError(error.DescriptorTooLarge, UhidDevice.init(alloc, cfg));
 }
+
+test "uhid_device_vtable_match: emit + close frame UHID_INPUT2 / UHID_DESTROY" {
+    // Use a pipe as a stand-in for `/dev/uhid`. The write side receives the
+    // exact bytes a real kernel would; the read side lets the test assert on
+    // them. Keeps the test CI-safe: no `/dev/uhid` required.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+    // fds[1] is closed via UhidDevice.close() below.
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-test",
+        .uniq = "padctl/test-0",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0x09, 0x05, 0xC0 },
+    };
+
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    try dev.emit(.{ .ax = 0, .ay = 0, .rx = 0, .ry = 0 });
+
+    // Read back one event frame and validate framing.
+    var buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const n = try posix.read(fds[0], &buf);
+    try testing.expectEqual(UHID_EVENT_SIZE, n);
+
+    const event_type = std.mem.readInt(u32, buf[0..4], .little);
+    try testing.expectEqual(UHID_INPUT2, event_type);
+
+    // UhidInput2Event = { u32 type, UhidInput2Req payload }. The payload is
+    // `extern struct { u16 size; [4096]u8 data }` and inherits a 2-byte
+    // alignment, so it sits at offset 4.
+    const size = std.mem.readInt(u16, buf[4..6], .little);
+    try testing.expectEqual(@as(u16, 4), size);
+
+    // Payload bytes: centred sticks → 128,128,128,128.
+    try testing.expectEqual(@as(u8, 128), buf[6]);
+    try testing.expectEqual(@as(u8, 128), buf[7]);
+    try testing.expectEqual(@as(u8, 128), buf[8]);
+    try testing.expectEqual(@as(u8, 128), buf[9]);
+
+    // pollFf stub returns null in Wave 1.
+    try testing.expectEqual(@as(?uinput.FfEvent, null), try dev.pollFf());
+
+    // close() sends UHID_DESTROY and closes fd — validate the destroy frame
+    // before we lose the pipe.
+    dev.close();
+    const n2 = try posix.read(fds[0], &buf);
+    try testing.expectEqual(UHID_EVENT_SIZE, n2);
+    const destroy_type = std.mem.readInt(u32, buf[0..4], .little);
+    try testing.expectEqual(UHID_DESTROY, destroy_type);
+}
+
+test "uhid_device_vtable_match: outputDevice() dispatches through vtable" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0x1234,
+        .pid = 0x5678,
+        .name = "padctl-vtable-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    const out = dev.outputDevice();
+    try out.emit(.{ .ax = 0, .ay = 0, .rx = 0, .ry = 0 });
+    try testing.expectEqual(@as(?uinput.FfEvent, null), try out.pollFf());
+
+    // Drain frames so the pipe doesn't block a future test.
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &scratch);
+
+    out.close();
+    _ = try posix.read(fds[0], &scratch);
+}
