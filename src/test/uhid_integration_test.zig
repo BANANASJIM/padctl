@@ -8,96 +8,15 @@ const device_mod = src.config.device;
 const interpreter_mod = src.core.interpreter;
 const Interpreter = interpreter_mod.Interpreter;
 
-// --- UHID kernel protocol (minimal) ---
-
-const UHID_DESTROY: u32 = 1;
-const UHID_CREATE2: u32 = 11;
-const UHID_INPUT2: u32 = 12;
-
-const UHID_DATA_MAX = 4096;
-const HID_MAX_DESCRIPTOR_SIZE = 4096;
-
-const UhidCreate2Req = extern struct {
-    name: [128]u8,
-    phys: [64]u8,
-    uniq: [64]u8,
-    rd_size: u16,
-    bus: u16,
-    vendor: u32,
-    product: u32,
-    version: u32,
-    country: u32,
-    rd_data: [HID_MAX_DESCRIPTOR_SIZE]u8,
-};
-
-const UhidInput2Req = extern struct {
-    size: u16,
-    data: [UHID_DATA_MAX]u8,
-};
-
-// The kernel UHID event is a u32 type followed by a union payload.
-// We define the two variants we need as separate structs with a leading type field,
-// and write them at their full padded sizes.
-const UHID_EVENT_SIZE = 4380; // sizeof(struct uhid_event) on Linux
-
-const UhidCreate2Event = extern struct {
-    type: u32,
-    payload: UhidCreate2Req,
-};
-
-const UhidInput2Event = extern struct {
-    type: u32,
-    payload: UhidInput2Req,
-};
-
-const UhidDestroyEvent = extern struct {
-    type: u32,
-};
-
-fn openUhid() !posix.fd_t {
-    return posix.open("/dev/uhid", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-}
-
-fn uhidCreate(fd: posix.fd_t, vid: u16, pid: u16, rd_data: []const u8) !void {
-    var ev = std.mem.zeroes(UhidCreate2Event);
-    ev.type = UHID_CREATE2;
-    const name = "padctl-test";
-    @memcpy(ev.payload.name[0..name.len], name);
-    ev.payload.rd_size = @intCast(rd_data.len);
-    ev.payload.bus = 0x03; // BUS_USB
-    ev.payload.vendor = vid;
-    ev.payload.product = pid;
-    ev.payload.version = 0;
-    ev.payload.country = 0;
-    @memcpy(ev.payload.rd_data[0..rd_data.len], rd_data);
-    const bytes = std.mem.asBytes(&ev);
-    // Write full UHID_EVENT_SIZE to satisfy kernel
-    var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
-    const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
-    @memcpy(buf[0..copy_len], bytes[0..copy_len]);
-    _ = try posix.write(fd, &buf);
-}
-
-fn uhidInput(fd: posix.fd_t, data: []const u8) !void {
-    var ev = std.mem.zeroes(UhidInput2Event);
-    ev.type = UHID_INPUT2;
-    ev.payload.size = @intCast(data.len);
-    @memcpy(ev.payload.data[0..data.len], data);
-    const bytes = std.mem.asBytes(&ev);
-    var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
-    const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
-    @memcpy(buf[0..copy_len], bytes[0..copy_len]);
-    _ = try posix.write(fd, &buf);
-}
-
-fn uhidDestroy(fd: posix.fd_t) void {
-    var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
-    std.mem.writeInt(u32, buf[0..4], UHID_DESTROY, .little);
-    _ = posix.write(fd, &buf) catch {};
-}
+// UHID UAPI bindings moved to `src/io/uhid.zig` in Phase 13 Wave 1 T1. This
+// test file used to duplicate them; now it imports the shared helpers via
+// `src.io.uhid` so the test bodies below are unchanged.
+const uhid = src.io.uhid;
+const openUhid = uhid.openUhid;
+const uhidCreate = uhid.uhidCreate;
+const uhidInput = uhid.uhidInput;
+const uhidDestroy = uhid.uhidDestroy;
+const UHID_EVENT_SIZE = uhid.UHID_EVENT_SIZE;
 
 // Minimal HID report descriptor: 2 axes (X, Y), 4-byte report
 const test_rd = [_]u8{

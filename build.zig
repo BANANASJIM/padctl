@@ -213,6 +213,26 @@ pub fn build(b: *std.Build) void {
     alldev_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(alldev_tests).step);
 
+    // steam_deck_uhid_e2e: Phase 13 Wave 1 T4d — UhidSimulator → hidraw →
+    // interpreter end-to-end. Requires /dev/uhid; the harness + tests
+    // gracefully skip when it's not available.
+    const deck_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/steam_deck_uhid_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    deck_e2e_mod.addImport("toml", toml_mod);
+    deck_e2e_mod.addImport("src", src_mod);
+    const deck_e2e_tests = b.addTest(.{ .root_module = deck_e2e_mod });
+    if (use_libusb) {
+        deck_e2e_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        deck_e2e_tests.addIncludePath(b.path("compat"));
+    }
+    deck_e2e_tests.linkLibC();
+    integration_step.dependOn(&b.addRunArtifact(deck_e2e_tests).step);
+
     // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");
     const e2e_mod = b.createModule(.{

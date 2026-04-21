@@ -1,7 +1,7 @@
 .{
     .name = .padctl,
     .fingerprint = 0xef30763351dab049,
-    .version = "0.1.0",
+    .version = "0.1.2",
     .dependencies = .{
         .toml = .{
             .url = "https://github.com/sam701/zig-toml/archive/refs/heads/main.tar.gz",

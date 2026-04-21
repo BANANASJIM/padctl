@@ -271,8 +271,38 @@ pub const Supervisor = struct {
     /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
     pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         if (self.devname_map.contains(devname)) return;
+        // Dedup by phys_key. Race guard for issue #93: when a controller is
+        // unplugged and replugged within the detach-delay window (or a USB
+        // re-enumeration skips the REMOVE uevent entirely), an ADD can reach
+        // this path while a managed, not-yet-suspended instance still holds
+        // the same phys_key. Silently returning in that case leaves the
+        // entry stuck on dead hidraw fds and produces no input until
+        // `padctl reload`. Probe the backing fd liveness; if the fd is dead
+        // force-detach the stale entry and fall through to a fresh attach.
+        var stale_devname_buf: [64]u8 = undefined;
+        var stale_devname: ?[]const u8 = null;
         for (self.managed.items) |m| {
-            if (std.mem.eql(u8, m.phys_key, phys_key)) return;
+            if (!std.mem.eql(u8, m.phys_key, phys_key)) continue;
+            if (managedInstanceAlive(&m)) return;
+            // Dead fds. Capture devname for detachFull (detach frees it).
+            if (m.devname) |dn| {
+                const n = @min(dn.len, stale_devname_buf.len);
+                @memcpy(stale_devname_buf[0..n], dn[0..n]);
+                stale_devname = stale_devname_buf[0..n];
+            } else {
+                // Orphan entry (static-spawn or hotplug allocation-failure
+                // edge): phys_key matches but devname is null, so we cannot
+                // force-detach via the devname_map path. Preserve the
+                // original silent-return dedup invariant — falling through
+                // would spawn a second ManagedInstance with the same
+                // phys_key.
+                return;
+            }
+            break;
+        }
+        if (stale_devname) |dn| {
+            std.log.info("hotplug: stale entry for phys \"{s}\" has dead fds; force-detaching {s} (race-guard:#93)", .{ phys_key, dn });
+            self.detachFull(dn);
         }
         const dev_copy = try self.allocator.dupe(u8, devname);
         errdefer self.allocator.free(dev_copy);
@@ -335,6 +365,28 @@ pub const Supervisor = struct {
                 return;
             }
         }
+    }
+
+    /// Probe whether the backing device fds of `m` are still alive.
+    /// Returns false when the primary device fd has been invalidated (EBADF)
+    /// or the other end has hung up (POLLHUP / POLLERR / POLLNVAL), which
+    /// is what happens after USB removal even if `detach()` has not yet
+    /// run. Used by `attachWithInstance` to distinguish a genuine dedup
+    /// collision from a race where the ADD uevent for a replug arrives
+    /// before REMOVE drains (issue #93).
+    fn managedInstanceAlive(m: *const ManagedInstance) bool {
+        // A suspended instance is an explicit, structured state: fds are
+        // already closed and the entry is reserved for rebind via
+        // attachWithRoot(). Callers of attachWithInstance that reach a
+        // suspended match have skipped the normal rebind path — preserve
+        // the existing dedup behavior (return true = "block this attach").
+        if (m.suspended) return true;
+        if (m.instance.devices.len == 0) return false;
+        var pfd = [_]posix.pollfd{m.instance.devices[0].pollfd()};
+        pfd[0].events = posix.POLL.IN;
+        pfd[0].revents = 0;
+        _ = posix.poll(&pfd, 0) catch return false;
+        return (pfd[0].revents & (posix.POLL.NVAL | posix.POLL.HUP | posix.POLL.ERR)) == 0;
     }
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
