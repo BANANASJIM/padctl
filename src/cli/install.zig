@@ -199,12 +199,16 @@ fn updateLegacyAt(
         } else |_| {}
     } else |_| {}
 
-    // Update drop-in if the directory exists.
+    // Refresh immutable.conf only when it already exists. The earlier
+    // check guarded on padctl.service.d/ existence, which meant we'd
+    // spawn a fresh immutable.conf in directories that happened to
+    // contain unrelated user-owned drop-ins — introducing an override
+    // the user never asked for.
     const dropin_dir = std.fmt.allocPrint(allocator, "{s}/padctl.service.d", .{base_dir}) catch return;
     defer allocator.free(dropin_dir);
-    if (std.fs.accessAbsolute(dropin_dir, .{})) {
-        const dropin_path = std.fmt.allocPrint(allocator, "{s}/immutable.conf", .{dropin_dir}) catch return;
-        defer allocator.free(dropin_path);
+    const dropin_path = std.fmt.allocPrint(allocator, "{s}/immutable.conf", .{dropin_dir}) catch return;
+    defer allocator.free(dropin_path);
+    if (std.fs.accessAbsolute(dropin_path, .{})) {
         if (std.fs.createFileAbsolute(dropin_path, .{ .truncate = true })) |f| {
             defer f.close();
             f.writeAll(immutable_dropin_content) catch return;
@@ -745,29 +749,18 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
                 \\    - remove   /etc/systemd/system/padctl-resume.service (if present)
                 \\
             ) catch {};
-            const proceed = promptYesNoDefaultYes("Migrate legacy system service now?");
-            if (proceed) {
-                runSystemctlSystem(&.{ "stop", "padctl.service" });
-                runSystemctlSystem(&.{ "disable", "padctl.service" });
-                std.fs.deleteFileAbsolute(old_unit) catch {};
-                // Also drop the legacy drop-in directory so daemon-reload
-                // doesn't keep re-parsing stale overrides.
-                std.fs.deleteTreeAbsolute("/etc/systemd/system/padctl.service.d") catch {};
-                // Resume service counterpart — same story.
-                const old_resume = "/etc/systemd/system/padctl-resume.service";
-                if (std.fs.accessAbsolute(old_resume, .{})) |_| {
-                    runSystemctlSystem(&.{ "disable", "padctl-resume.service" });
-                    std.fs.deleteFileAbsolute(old_resume) catch {};
-                } else |_| {}
-                _ = std.posix.write(
-                    std.posix.STDERR_FILENO,
-                    "  legacy migration complete\n\n",
-                ) catch {};
-            } else {
+            // Auto-migration requires root: systemctl stop/disable on a
+            // system-scope unit and deletes under /etc/ both need uid 0.
+            // Non-root installs (the default path on a user-service
+            // install without sudo) would silently fail every step and
+            // then lie with "legacy migration complete", leaving the
+            // legacy unit active on the next boot where it races with
+            // the new per-user unit for hidraw. Print the manual command
+            // list instead so the user can finish the migration.
+            if (!is_root) {
                 _ = std.posix.write(std.posix.STDERR_FILENO,
-                    \\  skipped — keeping the legacy unit in place. You can
-                    \\  remove it later by rerunning `padctl install` and
-                    \\  answering yes, or manually:
+                    \\  auto-migration needs root — skipped. Re-run as
+                    \\  `sudo padctl install` or clean up manually:
                     \\    sudo systemctl stop padctl.service
                     \\    sudo systemctl disable padctl.service
                     \\    sudo rm /etc/systemd/system/padctl.service
@@ -775,6 +768,38 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
                     \\    sudo rm -f /etc/systemd/system/padctl-resume.service
                     \\
                 ) catch {};
+            } else {
+                const proceed = promptYesNoDefaultYes("Migrate legacy system service now?");
+                if (proceed) {
+                    runSystemctlSystem(&.{ "stop", "padctl.service" });
+                    runSystemctlSystem(&.{ "disable", "padctl.service" });
+                    std.fs.deleteFileAbsolute(old_unit) catch {};
+                    // Also drop the legacy drop-in directory so daemon-reload
+                    // doesn't keep re-parsing stale overrides.
+                    std.fs.deleteTreeAbsolute("/etc/systemd/system/padctl.service.d") catch {};
+                    // Resume service counterpart — same story.
+                    const old_resume = "/etc/systemd/system/padctl-resume.service";
+                    if (std.fs.accessAbsolute(old_resume, .{})) |_| {
+                        runSystemctlSystem(&.{ "disable", "padctl-resume.service" });
+                        std.fs.deleteFileAbsolute(old_resume) catch {};
+                    } else |_| {}
+                    _ = std.posix.write(
+                        std.posix.STDERR_FILENO,
+                        "  legacy migration complete\n\n",
+                    ) catch {};
+                } else {
+                    _ = std.posix.write(std.posix.STDERR_FILENO,
+                        \\  skipped — keeping the legacy unit in place. You can
+                        \\  remove it later by rerunning `padctl install` and
+                        \\  answering yes, or manually:
+                        \\    sudo systemctl stop padctl.service
+                        \\    sudo systemctl disable padctl.service
+                        \\    sudo rm /etc/systemd/system/padctl.service
+                        \\    sudo rm -rf /etc/systemd/system/padctl.service.d
+                        \\    sudo rm -f /etc/systemd/system/padctl-resume.service
+                        \\
+                    ) catch {};
+                }
             }
         } else |_| {}
     }

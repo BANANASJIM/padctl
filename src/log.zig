@@ -74,6 +74,29 @@ pub fn setMaxLogSize(mb: i64) void {
     max_log_size = clamped * 1024 * 1024;
 }
 
+/// Create `path` and any missing ancestor directories. Walks up collecting
+/// absolute path prefixes, then creates them bottom-up. Mirrors the
+/// `ensureDirAll` helper in `src/cli/install.zig`. Returns successfully
+/// when the directory exists after the call, regardless of whether it
+/// was pre-existing.
+fn ensureDirRecursive(path: []const u8) !void {
+    // Shortest path first: try the leaf directly.
+    std.fs.makeDirAbsolute(path) catch |e| switch (e) {
+        error.PathAlreadyExists => return,
+        error.FileNotFound => {
+            // Parent missing — recurse on parent, then retry self.
+            const sep = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.FileNotFound;
+            if (sep == 0) return error.FileNotFound; // reached root
+            try ensureDirRecursive(path[0..sep]);
+            std.fs.makeDirAbsolute(path) catch |e2| switch (e2) {
+                error.PathAlreadyExists => return,
+                else => return e2,
+            };
+        },
+        else => return e,
+    };
+}
+
 /// Step 1: Resolve the log directory and store the path. Call this BEFORE
 /// loading config so that early warnings (e.g. malformed config.toml) can
 /// persist to the log file via lazy open in logFn. No file is opened yet.
@@ -81,16 +104,11 @@ pub fn initPath(allocator: Allocator) void {
     const dir_path = paths.stateDir(allocator) catch return;
     defer allocator.free(dir_path);
 
-    // Ensure the directory tree exists.
-    std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => {
-            if (std.mem.lastIndexOfScalar(u8, dir_path, '/')) |sep| {
-                std.fs.makeDirAbsolute(dir_path[0..sep]) catch {};
-                std.fs.makeDirAbsolute(dir_path) catch return;
-            } else return;
-        },
-    };
+    // Recursive mkdir -p so a fresh user profile where several parent
+    // levels don't exist (e.g. ~/.local and ~/.local/state both missing)
+    // still gets a log dir. The previous single-parent fallback bailed
+    // out after one level and silently left dump logging uninitialised.
+    ensureDirRecursive(dir_path) catch return;
 
     // Store the resolved log path for lazy open and reopen-after-delete.
     const log_path = std.fmt.allocPrint(allocator, "{s}/padctl.log", .{dir_path}) catch return;
@@ -105,7 +123,17 @@ pub fn initPath(allocator: Allocator) void {
 /// Step 2: Apply diagnostics config and optionally open the log file.
 /// Call this AFTER loading config. If dump is enabled, the file opens
 /// immediately. Otherwise it stays lazy (opened on first err/warn).
+///
+/// Today this is called exactly once at startup (`main.zig`), before any
+/// device threads are spawned, so the mutex is precautionary — it
+/// future-proofs the function against a reload-path caller (SIGHUP, IPC)
+/// that would otherwise race with live log writes for `log_fd`. NOTE:
+/// `setMaxLogSize` must stay mutex-free so we don't deadlock on the
+/// non-reentrant mutex here.
 pub fn applyConfig(opts: InitOptions) void {
+    log_mutex.lock();
+    defer log_mutex.unlock();
+
     setMaxLogSize(opts.max_log_size_mb);
     dump_enabled.store(opts.dump, .release);
 
@@ -256,6 +284,20 @@ pub fn logFn(
         if (fd != -1) {
             fd = reopenIfDeleted(fd);
             _ = posix.write(fd, msg) catch {};
+            // Post-write rotation. openLogFile only rotates at fresh
+            // open (startup / lazy open), so without this check a long
+            // dump session grows past max_log_size_mb until the daemon
+            // restarts — at ~100 FF frames/s a default 100 MiB cap is
+            // blown through in under two hours. Stat the live fd; when
+            // it crosses the threshold, close + reopen, which walks
+            // through openLogFile's rotate-rename path.
+            if (posix.fstat(fd)) |st| {
+                if (st.size > max_log_size) {
+                    const old_fd = log_fd.swap(-1, .acq_rel);
+                    if (old_fd != -1) posix.close(old_fd);
+                    openLogFile();
+                }
+            } else |_| {}
         }
     }
 }

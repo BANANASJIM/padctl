@@ -137,10 +137,13 @@ else
     case "$zig_ver" in
         0.15.*) ok "zig found: $zig_ver" ;;
         *)
-            warn "zig $zig_ver detected — padctl requires 0.15.x"
-            warn "Install zig@0.15 via brew, or download from https://ziglang.org/download/"
-            read -rp "Continue anyway? [y/N] " yn
-            [[ "$yn" =~ ^[Yy] ]] || exit 1
+            # The second block below enforces a hard exit for anything
+            # outside 0.15.x, so a "Continue anyway?" prompt here would
+            # only ever delay the same exit. Keep the messaging but don't
+            # pretend the user has a choice.
+            err "zig $zig_ver detected — padctl requires 0.15.x"
+            err "Install zig@0.15 via brew, or download from https://ziglang.org/download/"
+            exit 1
             ;;
     esac
 fi

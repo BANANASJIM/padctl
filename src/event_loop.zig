@@ -2107,6 +2107,24 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
     const r_on = try runOnce(allocator, true);
     defer allocator.free(r_on.write_log);
 
+    // Both runs must have actually produced work. Without these checks the
+    // test would pass vacuously if the FF event never reached the scheduler
+    // (pipe write race, poll timeout) — both runs would have empty slots
+    // and empty write logs and `expectEqualSlices` on two empty slices
+    // would succeed.
+    try testing.expect(r_off.write_log.len > 0);
+    try testing.expect(r_on.write_log.len > 0);
+    var active_off: usize = 0;
+    var active_on: usize = 0;
+    for (r_off.scheduler_slots) |s| {
+        if (s != 0) active_off += 1;
+    }
+    for (r_on.scheduler_slots) |s| {
+        if (s != 0) active_on += 1;
+    }
+    try testing.expect(active_off >= 1);
+    try testing.expect(active_on >= 1);
+
     // Scheduler slot activity pattern must be identical (which slots are
     // active/inactive). Exact timestamps differ between runs because they
     // use the real monotonic clock, so we compare structural shape.
