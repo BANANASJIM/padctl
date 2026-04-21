@@ -708,6 +708,24 @@ pub fn main() !void {
                     std.fs.deleteTreeAbsolute(tmp_dir) catch {};
                     allocator.free(tmp_dir);
                 }
+                // Seed tmp_dir with the existing system config (if any)
+                // BEFORE writeDiagnosticsConfig runs. writeDiagnosticsConfig
+                // reads {dir}/config.toml to preserve [[device]] entries;
+                // without the seed it would write a [diagnostics]-only file
+                // to tmp_dir, and the sudo cp below would erase any bindings
+                // in /etc/padctl/config.toml. /etc/padctl/config.toml is
+                // typically world-readable (mode 0644) so no sudo is
+                // required to read it; best-effort silent-skip when the
+                // file is absent or unreadable.
+                {
+                    const sys_src = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
+                    defer if (sys_src) |p| allocator.free(p);
+                    const tmp_seed = std.fmt.allocPrint(allocator, "{s}/config.toml", .{tmp_dir}) catch null;
+                    defer if (tmp_seed) |p| allocator.free(p);
+                    if (sys_src != null and tmp_seed != null) {
+                        copyFileBestEffort(sys_src.?, tmp_seed.?) catch {};
+                    }
+                }
                 if (cli.dump.writeDiagnosticsConfig(allocator, tmp_dir, enable)) {
                     const tmp_src = std.fmt.allocPrint(allocator, "{s}/config.toml", .{tmp_dir}) catch null;
                     defer if (tmp_src) |s| allocator.free(s);
@@ -1148,6 +1166,23 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
         err_writer.writeAll("Persistence incomplete — check the errors above.\n") catch {};
     }
     return ok;
+}
+
+/// Copy `src` to `dst` without invoking sudo. Returns FileNotFound when
+/// `src` is absent; other errors propagate. Used to seed a user-owned
+/// temp dir with the current system config before calling
+/// writeDiagnosticsConfig so device bindings survive the round-trip.
+fn copyFileBestEffort(src: []const u8, dst: []const u8) !void {
+    var sf = try std.fs.openFileAbsolute(src, .{});
+    defer sf.close();
+    var df = try std.fs.createFileAbsolute(dst, .{ .truncate = true });
+    defer df.close();
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = try sf.read(&buf);
+        if (n == 0) break;
+        try df.writeAll(buf[0..n]);
+    }
 }
 
 fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {

@@ -562,6 +562,34 @@ fn runSystemctlUserWarn(verbs: []const []const u8) void {
     runCmdWarn(argv);
 }
 
+/// System-scope counterpart to runSystemctlUser. Used by the legacy-unit
+/// migration path, which operates on /etc/systemd/system/padctl.service —
+/// a system-scope unit that the user-scope helper cannot address. Builds
+/// argv dynamically so call sites don't need the forbidden
+/// `runCmd(&.{ "systemctl", ... })` literal form.
+fn runSystemctlSystem(verbs: []const []const u8) void {
+    const allocator = std.heap.page_allocator;
+    const argv = buildSystemctlSystemArgv(allocator, verbs) catch |err| {
+        var errbuf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: could not build systemctl argv: {}\n", .{err}) catch "warning: systemctl argv build failed\n";
+        writeAll(std.posix.STDERR_FILENO, msg);
+        return;
+    };
+    defer freeArgv(allocator, argv);
+    runCmd(argv);
+}
+
+fn buildSystemctlSystemArgv(allocator: std.mem.Allocator, verbs: []const []const u8) ![][]const u8 {
+    var argv = try allocator.alloc([]const u8, 1 + verbs.len);
+    errdefer allocator.free(argv);
+    argv[0] = try allocator.dupe(u8, "systemctl");
+    errdefer allocator.free(argv[0]);
+    for (verbs, 0..) |v, i| {
+        argv[1 + i] = try allocator.dupe(u8, v);
+    }
+    return argv;
+}
+
 fn findDevicesSourceDir(allocator: std.mem.Allocator, self_dir: []const u8, cwd_override: ?[]const u8) !?[]u8 {
     const sibling = try std.fmt.allocPrint(allocator, "{s}/devices", .{self_dir});
     defer allocator.free(sibling);
@@ -719,8 +747,8 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             ) catch {};
             const proceed = promptYesNoDefaultYes("Migrate legacy system service now?");
             if (proceed) {
-                runCmd(&.{ "systemctl", "stop", "padctl.service" });
-                runCmd(&.{ "systemctl", "disable", "padctl.service" });
+                runSystemctlSystem(&.{ "stop", "padctl.service" });
+                runSystemctlSystem(&.{ "disable", "padctl.service" });
                 std.fs.deleteFileAbsolute(old_unit) catch {};
                 // Also drop the legacy drop-in directory so daemon-reload
                 // doesn't keep re-parsing stale overrides.
@@ -728,7 +756,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
                 // Resume service counterpart — same story.
                 const old_resume = "/etc/systemd/system/padctl-resume.service";
                 if (std.fs.accessAbsolute(old_resume, .{})) |_| {
-                    runCmd(&.{ "systemctl", "disable", "padctl-resume.service" });
+                    runSystemctlSystem(&.{ "disable", "padctl-resume.service" });
                     std.fs.deleteFileAbsolute(old_resume) catch {};
                 } else |_| {}
                 _ = std.posix.write(
@@ -820,15 +848,17 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, dropin_path) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
-
-        // Also refresh any legacy system service drop-in if it exists. Old
-        // installs (pre-user-service) placed the drop-in under
-        // /etc/systemd/system/ which the new user-service installer does
-        // not touch. Without this, upgrades leave the old drop-in stale on
-        // disk — harmless while the system service stays disabled, but
-        // misleading if a user ever enables it manually.
-        updateLegacySystemService(allocator, destdir, prefix);
     }
+
+    // Refresh any legacy system service drop-in if it exists, regardless
+    // of effective_immutable. Pre-user-service installs on any distro
+    // (immutable or not) placed the unit under /etc/systemd/system/ or
+    // <prefix>/lib/systemd/system/ which the new user-service installer
+    // does not touch. Without this, upgrades leave stale ExecStart paths
+    // and drop-ins on disk — harmless while the legacy unit stays
+    // disabled, but misleading if a user ever enables it manually. The
+    // helper is a no-op when no legacy file is present.
+    updateLegacySystemService(allocator, destdir, prefix);
 
     // 2c. Write resume service (system installs only; user sessions handle sleep via logind)
     if (!effective_user_service) {
@@ -3252,12 +3282,14 @@ test "install: atomicInstallBinary does not double-close on rename failure" {
     try testing.expectEqual(fds_before, fds_after);
 }
 
-test "install: all systemctl calls route through runSystemctlUser helpers" {
+test "install: all systemctl calls route through helpers" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // Read our own source to verify every systemctl invocation goes through the
-    // --user-aware helper — no raw `runCmd(&.{ "systemctl", ... })` forms remain.
+    // Read our own source to verify every systemctl invocation goes through
+    // a named helper. runSystemctlUser covers user-scope (daemon-reload,
+    // enable, start for the per-user unit); runSystemctlSystem covers
+    // system-scope (legacy unit stop/disable during migration).
     const src_path = @src().file;
     var file = if (std.fs.path.isAbsolute(src_path))
         std.fs.openFileAbsolute(src_path, .{}) catch return
@@ -3272,17 +3304,23 @@ test "install: all systemctl calls route through runSystemctlUser helpers" {
     while (iter.next()) |line| {
         // Ignore the test itself (which mentions these names in strings).
         if (std.mem.indexOf(u8, line, "test \"install: all systemctl") != null) continue;
+        // Skip pure comment lines — a code comment that quotes the
+        // forbidden pattern as a documentation example shouldn't trip it.
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+
         if (std.mem.indexOf(u8, line, "runSystemctlUser") != null) helper_calls += 1;
 
-        // No raw `runCmd(&.{ "systemctl" ... })` forms allowed outside the helper itself.
+        // No raw generic-runCmd + systemctl literal on the same line outside
+        // the helpers; see runSystemctlUser / runSystemctlSystem above.
         const has_runcmd = std.mem.indexOf(u8, line, "runCmd(&.{") != null;
         const has_systemctl_literal = std.mem.indexOf(u8, line, "\"systemctl\"") != null;
         if (has_runcmd and has_systemctl_literal) {
-            try testing.expect(false); // direct systemctl call bypasses user-scope helper
+            try testing.expect(false);
         }
     }
-    // Each of the 5 call sites is one source line referencing the helper,
-    // plus the two helper fn definitions and at least one internal call.
+    // Each of the 5+ call sites is one source line referencing a helper,
+    // plus the helper fn definitions and at least one internal call.
     try testing.expect(helper_calls >= 5);
 }
 

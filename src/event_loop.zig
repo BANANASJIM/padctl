@@ -26,6 +26,7 @@ pub const WasmPlugin = wasm_runtime.WasmPlugin;
 const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
 const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
+const padctl_log = @import("log.zig");
 
 // signalfd(0) + stop_pipe(1) + macro timerfd(2) + rumble_stop_fd(3) + per-interface fds + uinput FF fd
 pub const MAX_FDS = 11;
@@ -175,16 +176,20 @@ fn emitRumbleFrame(
     defer alloc.free(bytes);
     if (cmd.checksum) |*cs| applyChecksum(bytes, cs);
 
-    // Log the full post-checksum HID frame.
-    var hex_buf: [512]u8 = undefined;
-    var hex_fbs = std.io.fixedBufferStream(&hex_buf);
-    const hw = hex_fbs.writer();
-    for (bytes) |b| {
-        hw.print("{x:0>2} ", .{b}) catch break;
+    // Log the full post-checksum HID frame — but only when dump is on;
+    // otherwise the hex-dump loop runs unconditionally on every rumble
+    // frame (100+ Hz during gameplay) even with nothing listening.
+    if (padctl_log.shouldWriteToFile(.debug)) {
+        var hex_buf: [512]u8 = undefined;
+        var hex_fbs = std.io.fixedBufferStream(&hex_buf);
+        const hw = hex_fbs.writer();
+        for (bytes) |b| {
+            hw.print("{x:0>2} ", .{b}) catch break;
+        }
+        rumble_log.debug("[{s}] HID_WRITE: cmd={s} strong={d} weak={d} iface={d} len={d} frame=[{s}]", .{
+            tag, ff_type, strong, weak, iface_idx, bytes.len, hex_fbs.getWritten(),
+        });
     }
-    rumble_log.debug("[{s}] HID_WRITE: cmd={s} strong={d} weak={d} iface={d} len={d} frame=[{s}]", .{
-        tag, ff_type, strong, weak, iface_idx, bytes.len, hex_fbs.getWritten(),
-    });
 
     devices[iface_idx].write(bytes) catch |err| {
         rumble_log.debug("[{s}] HID_WRITE: FAILED cmd={s} strong={d} weak={d} err={}", .{ tag, ff_type, strong, weak, err });
@@ -446,8 +451,10 @@ pub const EventLoop = struct {
             const heartbeat_interval: i128 = 60 * std.time.ns_per_s;
             if (now - self.last_heartbeat_ns >= heartbeat_interval) {
                 self.last_heartbeat_ns = now;
-                const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now);
-                rumble_log.debug("[{s}] HEARTBEAT: alive {s}", .{ ctx.device_tag, slotStr(&slot_buf) });
+                if (padctl_log.shouldWriteToFile(.debug)) {
+                    const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now);
+                    rumble_log.debug("[{s}] HEARTBEAT: alive {s}", .{ ctx.device_tag, slotStr(&slot_buf) });
+                }
             }
 
             // Check signalfd (slot 0)
@@ -482,10 +489,12 @@ pub const EventLoop = struct {
                 _ = posix.read(self.rumble_stop_fd, &rs_expiry) catch {};
                 const now_ns = monotonicNs();
                 const result = self.rumble_scheduler.onTimerExpired(now_ns);
-                const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
-                rumble_log.debug("[{s}] TIMERFD: expired now={d} emit_stop={} next_dl={?d} {s}", .{
-                    ctx.device_tag, now_ns, result.emit_stop_frame, result.next_deadline_ns, slotStr(&slot_buf),
-                });
+                if (padctl_log.shouldWriteToFile(.debug)) {
+                    const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
+                    rumble_log.debug("[{s}] TIMERFD: expired now={d} emit_stop={} next_dl={?d} {s}", .{
+                        ctx.device_tag, now_ns, result.emit_stop_frame, result.next_deadline_ns, slotStr(&slot_buf),
+                    });
+                }
                 if (result.emit_stop_frame) {
                     if (ctx.allocator) |alloc| {
                         if (ctx.device_config) |dcfg| {
@@ -519,11 +528,13 @@ pub const EventLoop = struct {
                         if (is_stop) {
                             if (scheduler_on) {
                                 const result = self.rumble_scheduler.onStop(ff_ev.effect_id);
-                                const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
-                                rumble_log.debug("[{s}] FF_STOP: id={d} emit_stop={} next_dl={?d} {s}", .{
-                                    ctx.device_tag,          ff_ev.effect_id,    result.emit_stop_frame,
-                                    result.next_deadline_ns, slotStr(&slot_buf),
-                                });
+                                if (padctl_log.shouldWriteToFile(.debug)) {
+                                    const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
+                                    rumble_log.debug("[{s}] FF_STOP: id={d} emit_stop={} next_dl={?d} {s}", .{
+                                        ctx.device_tag,          ff_ev.effect_id,    result.emit_stop_frame,
+                                        result.next_deadline_ns, slotStr(&slot_buf),
+                                    });
+                                }
                                 if (result.emit_stop_frame) {
                                     if (ctx.allocator) |alloc| {
                                         if (ctx.device_config) |dcfg| {
@@ -571,11 +582,13 @@ pub const EventLoop = struct {
                                     ff_ev.duration_ms,
                                     now_ns,
                                 );
-                                const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
-                                rumble_log.debug("[{s}] FF_PLAY: id={d} dur={d}ms next_dl={?d} {s}", .{
-                                    ctx.device_tag, ff_ev.effect_id,    ff_ev.duration_ms,
-                                    next_dl,        slotStr(&slot_buf),
-                                });
+                                if (padctl_log.shouldWriteToFile(.debug)) {
+                                    const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
+                                    rumble_log.debug("[{s}] FF_PLAY: id={d} dur={d}ms next_dl={?d} {s}", .{
+                                        ctx.device_tag, ff_ev.effect_id,    ff_ev.duration_ms,
+                                        next_dl,        slotStr(&slot_buf),
+                                    });
+                                }
                                 armRumbleStopFd(self.rumble_stop_fd, next_dl);
                             }
                         }
@@ -593,11 +606,13 @@ pub const EventLoop = struct {
                 const has_hup = revents & (posix.POLL.HUP | posix.POLL.ERR) != 0;
 
                 if (!has_in and has_hup) {
-                    const disc_now = monotonicNs();
-                    const disc_slots = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), disc_now);
-                    rumble_log.debug("[{s}] DISCONNECT: HUP/ERR on device slot {d} {s}", .{
-                        ctx.device_tag, slot, slotStr(&disc_slots),
-                    });
+                    if (padctl_log.shouldWriteToFile(.debug)) {
+                        const disc_now = monotonicNs();
+                        const disc_slots = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), disc_now);
+                        rumble_log.debug("[{s}] DISCONNECT: HUP/ERR on device slot {d} {s}", .{
+                            ctx.device_tag, slot, slotStr(&disc_slots),
+                        });
+                    }
                     self.disconnected = true;
                     self.running = false;
                     break;
@@ -2021,7 +2036,7 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
     // Run the same FF PLAY event through two separate event loops — one
     // with dump enabled, one disabled — and verify the scheduler state
     // and HID write output are identical.
-    const padctl_log = @import("log.zig");
+    // padctl_log is now a module-level import; no local re-binding needed.
     const allocator = testing.allocator;
 
     const RunResult = struct {

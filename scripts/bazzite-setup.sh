@@ -292,8 +292,10 @@ if [[ -n "$MAPPING" ]]; then
     no_devices=false
     for attempt in 1 2 3 4 5 6; do
         sleep 1
-        switch_output=$("$PREFIX/bin/padctl" switch "$MAPPING" 2>&1)
-        if [[ $? -eq 0 ]]; then
+        # set -euo pipefail is active; a bare `x=$(cmd)` triggers script
+        # exit on non-zero from cmd before the `$?` check can fire, so we
+        # use the if-form which `set -e` explicitly ignores.
+        if switch_output=$("$PREFIX/bin/padctl" switch "$MAPPING" 2>&1); then
             mapping_applied=true
             break
         fi

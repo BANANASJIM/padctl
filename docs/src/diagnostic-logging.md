@@ -62,6 +62,8 @@ max_log_size_mb = 100 # rotation threshold (default 100 MB)
 
 `padctl dump enable` and `padctl dump disable` are just a convenience front-end for toggling `dump` and forwarding the change to the running daemon — you can also edit this section by hand and send `SIGHUP` (`padctl reload`) instead.
 
+> ⚠️ **Rewrite behavior.** `padctl dump enable/disable` parses `config.toml`, rewrites it from the known schema, and atomically renames the result into place. Anything outside the documented schema — unknown sections, undocumented keys, hand-written comments — is **not preserved**. If you hand-edit `config.toml` with content that matters (e.g. a forward-looking `[experimental]` block, inline comments documenting a choice), keep it in a sibling file, or drive padctl via `SIGHUP` after the edit instead of using the `dump` subcommand. The current known schema is `version`, `[diagnostics]` (`dump`, `max_log_size_mb`), and `[[device]]` entries (`name`, `default_mapping`).
+
 ## Rotation
 
 On every daemon startup and on every fresh file-open, padctl stats the existing log. If it exceeds `max_log_size_mb`, the file is renamed to `padctl.log.1` (overwriting any previous backup) and a new empty `padctl.log` is created. There is only ever one rotated backup.

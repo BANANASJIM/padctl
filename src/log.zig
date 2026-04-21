@@ -34,11 +34,17 @@ pub const InitOptions = struct {
 /// When toggling on, lazily opens the log file if not already open.
 pub fn setEnabled(on: bool) void {
     dump_enabled.store(on, .release);
-    // If enabling dump and file not open yet, open it now.
-    if (on and initialized and log_fd.load(.acquire) == -1) {
+    // If enabling dump and file not open yet, open it now. Take the mutex
+    // BEFORE re-checking log_fd so two concurrent enables can't both see
+    // -1, both proceed to openLogFile, and leak the first fd. Callers
+    // today are single-threaded (CLI, IPC handler, startup), but the lock
+    // is cheap and the alternative is a subtle fd leak.
+    if (on and initialized) {
         log_mutex.lock();
         defer log_mutex.unlock();
-        openLogFile();
+        if (log_fd.load(.acquire) == -1) {
+            openLogFile();
+        }
     }
 }
 
@@ -55,8 +61,16 @@ pub fn shouldWriteToFile(comptime level: std.log.Level) bool {
 }
 
 /// Set the maximum log file size in megabytes (for rotation).
+/// Clamps to [1, 1_048_576] MiB. The lower bound falls back to the 100 MiB
+/// default when the config value is <= 0. The upper bound (1 TiB) prevents
+/// u64 overflow in the subsequent `* 1024 * 1024` multiply; a request
+/// above it is silently clamped rather than panicking in ReleaseSafe or
+/// wrapping in ReleaseFast. No realistic rotation threshold needs more.
 pub fn setMaxLogSize(mb: i64) void {
-    const clamped: u64 = if (mb > 0) @intCast(mb) else 100;
+    const DEFAULT_MB: i64 = 100;
+    const MAX_MB: i64 = 1024 * 1024; // 1 TiB
+    const pick: i64 = if (mb <= 0) DEFAULT_MB else if (mb > MAX_MB) MAX_MB else mb;
+    const clamped: u64 = @intCast(pick);
     max_log_size = clamped * 1024 * 1024;
 }
 
@@ -128,7 +142,17 @@ fn openLogFile() void {
                     @memcpy(bak_buf[0..log_path_len], log_path);
                     @memcpy(bak_buf[log_path_len .. log_path_len + 2], ".1");
                     const bak_path = bak_buf[0 .. log_path_len + 2];
-                    std.fs.renameAbsolute(log_path, bak_path) catch {};
+                    std.fs.renameAbsolute(log_path, bak_path) catch |err| {
+                        // Rename failed (EXDEV across filesystems, ENOSPC,
+                        // SELinux relabel rejection). Surface the failure
+                        // to stderr so the oversize file isn't rotated
+                        // silently; we still fall through to reopen so the
+                        // daemon keeps logging err/warn rather than going
+                        // dark. The file will retry rotation on next open.
+                        var warn_buf: [256]u8 = undefined;
+                        const warn_msg = std.fmt.bufPrint(&warn_buf, "warning: padctl log rotate failed for {s}: {} — log will grow past max_log_size_mb until next restart\n", .{ log_path, err }) catch "warning: padctl log rotate failed\n";
+                        _ = posix.write(posix.STDERR_FILENO, warn_msg) catch {};
+                    };
                 }
             }
         } else |_| {}
@@ -184,6 +208,15 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    // Early exit: .debug lines are verbose scheduler / HID traces that
+    // should be silent unless dump is enabled. Without this short-circuit
+    // every std.log.debug call would format into a 4 KiB stack buffer,
+    // hit stderr, and pollute journalctl with per-frame lines on every
+    // install — contradicting the documented "no hot-path cost when
+    // disabled" contract. .info / .warn / .err always flow as normal.
+    const is_debug = comptime (message_level == .debug);
+    if (is_debug and !dump_enabled.load(.acquire)) return;
+
     const level_txt = comptime message_level.asText();
     const scope_prefix = comptime if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
 
@@ -281,6 +314,22 @@ test "log: setEnabled toggles state" {
 test "log: setMaxLogSize updates rotation threshold" {
     setMaxLogSize(50);
     try testing.expectEqual(@as(u64, 50 * 1024 * 1024), max_log_size);
+    setMaxLogSize(100);
+}
+
+test "log: setMaxLogSize clamps non-positive values to default" {
+    setMaxLogSize(0);
+    try testing.expectEqual(@as(u64, 100 * 1024 * 1024), max_log_size);
+    setMaxLogSize(-5);
+    try testing.expectEqual(@as(u64, 100 * 1024 * 1024), max_log_size);
+    setMaxLogSize(100);
+}
+
+test "log: setMaxLogSize clamps huge values to prevent overflow" {
+    // Without the upper clamp, mb * 1024 * 1024 overflows u64 well before
+    // std.math.maxInt(i64). Must clamp instead of panic in ReleaseSafe.
+    setMaxLogSize(std.math.maxInt(i64));
+    try testing.expectEqual(@as(u64, 1024 * 1024 * 1024 * 1024), max_log_size);
     setMaxLogSize(100);
 }
 

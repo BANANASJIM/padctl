@@ -1679,6 +1679,10 @@ test "uinput: GenericUinputDevice.emitGeneric: no change produces no write" {
 
 test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
     const padctl_log = @import("../log.zig");
+    // defer the restore before toggling so an early `try` failure (pipe
+    // write, pollFf read) can't leak dump_enabled=true into subsequent
+    // tests sharing the process.
+    defer padctl_log.setEnabled(false);
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1699,7 +1703,6 @@ test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
     padctl_log.setEnabled(true);
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
     const r2 = (try dev.pollFf()).?;
-    padctl_log.setEnabled(false);
 
     // Both must be identical.
     try std.testing.expectEqual(r1.effect_type, r2.effect_type);

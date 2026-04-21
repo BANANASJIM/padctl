@@ -4,6 +4,7 @@ zig-cache/
 .zig-cache/
 .zig-local-cache/
 .zig-global-cache/
+zig-pkg/
 *.o
 *.a
 kcov-output/

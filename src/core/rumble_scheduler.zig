@@ -306,6 +306,9 @@ test "rumble_scheduler: state identical regardless of dump_enabled" {
     // Verify that the same sequence of operations produces identical
     // slot state whether dump is on or off.
     const padctl_log = @import("../log.zig");
+    // defer the restore before toggling so an early `try` failure can't
+    // leak dump_enabled=true to subsequent tests sharing the process.
+    defer padctl_log.setEnabled(false);
     const t0: i128 = 1_000_000_000;
 
     // Run with dump off.
@@ -323,7 +326,6 @@ test "rumble_scheduler: state identical regardless of dump_enabled" {
     _ = s2.onPlay(1, 0, t0);
     _ = s2.onStop(0);
     const slots2 = s2.dumpSlots();
-    padctl_log.setEnabled(false);
 
     // Slot arrays must be identical.
     for (slots1, slots2) |a, b| {

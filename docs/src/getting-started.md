@@ -169,7 +169,7 @@ padctl config edit [name]                  # open mapping in $VISUAL/$EDITOR
 padctl config test [--config] [--mapping]  # live input preview
 padctl dump enable|disable                 # toggle diagnostic logging (persists)
 padctl dump status                         # show dump state, log path, size, time span
-padctl dump export --period Nm|Nh|Nd [-o]  # export filtered log window
+padctl dump export --period Nm|Nh|Nd [-o file]  # export filtered log window
 padctl dump clear                          # delete all log files
 ```
 

@@ -31,6 +31,8 @@ pub fn writeDiagnosticsConfig(allocator: std.mem.Allocator, dir_path: []const u8
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
     defer allocator.free(config_path);
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}/config.toml.tmp", .{dir_path});
+    defer allocator.free(tmp_path);
 
     // Read existing config to preserve all fields.
     var existing_version: ?i64 = null;
@@ -54,27 +56,70 @@ pub fn writeDiagnosticsConfig(allocator: std.mem.Allocator, dir_path: []const u8
     // Update only the dump field; preserve everything else.
     existing_diag.dump = dump;
 
-    // Build the config content in memory, then write atomically.
-    var content_buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&content_buf);
-    const w = fbs.writer();
+    // Build the config content in a growable buffer — a [[device]] list
+    // with many entries can exceed any reasonable stack ceiling.
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
 
-    w.print("version = {d}\n\n", .{existing_version orelse user_config_mod.CURRENT_VERSION}) catch return error.NoSpaceLeft;
-    w.print("[diagnostics]\ndump = {}\nmax_log_size_mb = {d}\n", .{ existing_diag.dump, existing_diag.max_log_size_mb }) catch return error.NoSpaceLeft;
+    w.print("version = {d}\n\n", .{existing_version orelse user_config_mod.CURRENT_VERSION}) catch return error.OutOfMemory;
+    w.print("[diagnostics]\ndump = {}\nmax_log_size_mb = {d}\n", .{ existing_diag.dump, existing_diag.max_log_size_mb }) catch return error.OutOfMemory;
 
     if (existing_devices) |devices| {
         for (devices) |dev| {
-            w.writeAll("\n[[device]]\n") catch return error.NoSpaceLeft;
-            w.print("name = \"{s}\"\n", .{dev.name}) catch return error.NoSpaceLeft;
+            // Escape TOML strings: names or mapping paths containing `"`,
+            // `\`, or control bytes would otherwise produce malformed TOML
+            // that the next parse rejects — silently dropping all bindings.
+            w.writeAll("\n[[device]]\nname = \"") catch return error.OutOfMemory;
+            escapeTomlString(w, dev.name) catch return error.OutOfMemory;
+            w.writeAll("\"\n") catch return error.OutOfMemory;
             if (dev.default_mapping) |m| {
-                w.print("default_mapping = \"{s}\"\n", .{m}) catch return error.NoSpaceLeft;
+                w.writeAll("default_mapping = \"") catch return error.OutOfMemory;
+                escapeTomlString(w, m) catch return error.OutOfMemory;
+                w.writeAll("\"\n") catch return error.OutOfMemory;
             }
         }
     }
 
-    var f = std.fs.createFileAbsolute(config_path, .{ .truncate = true }) catch return error.AccessDenied;
-    defer f.close();
-    f.writeAll(fbs.getWritten()) catch return error.InputOutput;
+    // Atomic write: populate sibling temp file, fsync, rename(2) over the
+    // target. rename(2) is atomic on POSIX filesystems, so a mid-write
+    // failure (ENOSPC, EIO) never leaves the live config truncated.
+    {
+        var f = std.fs.createFileAbsolute(tmp_path, .{ .truncate = true }) catch return error.AccessDenied;
+        defer f.close();
+        f.writeAll(buf.items) catch {
+            std.fs.deleteFileAbsolute(tmp_path) catch {};
+            return error.InputOutput;
+        };
+        f.sync() catch {};
+    }
+    errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
+    std.posix.rename(tmp_path, config_path) catch return error.InputOutput;
+}
+
+/// Escape a TOML basic-string payload (content between the enclosing `"`).
+/// Must cover backslash, double-quote, and all control bytes per the TOML
+/// spec; otherwise a device name containing `"` or a path with `\` silently
+/// produces malformed TOML that the next load-from-dir pass rejects —
+/// which would drop every [[device]] binding.
+fn escapeTomlString(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0C => try writer.writeAll("\\f"),
+            0...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
+                var esc_buf: [6]u8 = undefined;
+                const escaped = std.fmt.bufPrint(&esc_buf, "\\u{X:0>4}", .{c}) catch unreachable;
+                try writer.writeAll(escaped);
+            },
+            else => try writer.writeByte(c),
+        }
+    }
 }
 
 /// Run `padctl dump status`: query daemon for live state, read log file stats.
@@ -162,7 +207,25 @@ pub fn deleteLogFiles(log_dir: []const u8) u32 {
     return deleted;
 }
 
+/// Defensive: verify `path` names a padctl log file under a padctl-owned
+/// state directory before invoking sudo rm. deleteLogFiles only ever
+/// constructs these paths today, but a future refactor that widened the
+/// caller could turn this helper into a supply-chain gadget; the check
+/// fails closed rather than trusting the caller.
+fn isSafePadctlLogPath(path: []const u8) bool {
+    const basename = std.fs.path.basename(path);
+    if (!std.mem.eql(u8, basename, "padctl.log") and
+        !std.mem.eql(u8, basename, "padctl.log.1")) return false;
+    const dir = std.fs.path.dirname(path) orelse return false;
+    // Accept /var/log/padctl, /var/lib/padctl, or any dir ending in /padctl
+    // (covers $XDG_STATE_HOME/padctl and ~/.local/state/padctl).
+    return std.mem.eql(u8, dir, "/var/log/padctl") or
+        std.mem.eql(u8, dir, "/var/lib/padctl") or
+        std.mem.endsWith(u8, dir, "/padctl");
+}
+
 fn sudoRm(path: []const u8) bool {
+    if (!isSafePadctlLogPath(path)) return false;
     var child = std.process.Child.init(&.{ "sudo", "rm", "-f", path }, std.heap.page_allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
@@ -359,13 +422,19 @@ pub fn runExport(
             std.process.exit(1);
         };
         defer f.close();
-        exportToFd(log_dir, cutoff, f.handle);
+        exportToFd(log_dir, cutoff, f.handle) catch |err| {
+            stderr.print("error: export to '{s}' failed: {}\n", .{ op, err }) catch {};
+            std.process.exit(1);
+        };
     } else {
-        exportToWriter(log_dir, cutoff, stdout);
+        exportToWriter(log_dir, cutoff, stdout) catch |err| {
+            stderr.print("error: export to stdout failed: {}\n", .{err}) catch {};
+            std.process.exit(1);
+        };
     }
 }
 
-fn exportToFd(log_dir: []const u8, cutoff: []const u8, fd: std.posix.fd_t) void {
+fn exportToFd(log_dir: []const u8, cutoff: []const u8, fd: std.posix.fd_t) !void {
     const FdWriter = struct {
         fd: std.posix.fd_t,
         pub fn writeAll(self: @This(), data: []const u8) !void {
@@ -376,18 +445,22 @@ fn exportToFd(log_dir: []const u8, cutoff: []const u8, fd: std.posix.fd_t) void 
         }
     };
     const w = FdWriter{ .fd = fd };
-    exportToWriter(log_dir, cutoff, w);
+    try exportToWriter(log_dir, cutoff, w);
 }
 
-fn exportToWriter(log_dir: []const u8, cutoff: []const u8, writer: anytype) void {
-    // Read rotated file first (older), then current file.
+fn exportToWriter(log_dir: []const u8, cutoff: []const u8, writer: anytype) !void {
+    // Read rotated file first (older), then current file. filterLogFile
+    // internally silent-skips a missing log (FileNotFound → no-op); writer
+    // errors (disk full, broken pipe) and other I/O faults must propagate
+    // so the caller can exit non-zero instead of silently truncating
+    // the exported window.
     var bak_buf: [280]u8 = undefined;
     const bak_path = std.fmt.bufPrint(&bak_buf, "{s}/padctl.log.1", .{log_dir}) catch return;
-    filterLogFile(bak_path, cutoff, writer) catch {};
+    try filterLogFile(bak_path, cutoff, writer);
 
     var cur_buf: [280]u8 = undefined;
     const cur_path = std.fmt.bufPrint(&cur_buf, "{s}/padctl.log", .{log_dir}) catch return;
-    filterLogFile(cur_path, cutoff, writer) catch {};
+    try filterLogFile(cur_path, cutoff, writer);
 }
 
 fn formatTimestamp(buf: *[23]u8, epoch_secs: u64) []const u8 {
@@ -1021,4 +1094,24 @@ test "dump: deleteLogFiles with no files" {
 
     const deleted = deleteLogFiles(dir_path);
     try testing.expectEqual(@as(u32, 0), deleted);
+}
+
+test "dump: isSafePadctlLogPath accepts managed locations" {
+    try testing.expect(isSafePadctlLogPath("/var/log/padctl/padctl.log"));
+    try testing.expect(isSafePadctlLogPath("/var/log/padctl/padctl.log.1"));
+    try testing.expect(isSafePadctlLogPath("/var/lib/padctl/padctl.log"));
+    try testing.expect(isSafePadctlLogPath("/home/alice/.local/state/padctl/padctl.log"));
+    try testing.expect(isSafePadctlLogPath("/home/alice/.local/state/padctl/padctl.log.1"));
+}
+
+test "dump: isSafePadctlLogPath rejects arbitrary paths" {
+    // Wrong basename.
+    try testing.expect(!isSafePadctlLogPath("/var/log/padctl/other.log"));
+    try testing.expect(!isSafePadctlLogPath("/var/log/padctl/padctl.log.2"));
+    // Wrong directory.
+    try testing.expect(!isSafePadctlLogPath("/etc/shadow"));
+    try testing.expect(!isSafePadctlLogPath("/tmp/padctl.log"));
+    try testing.expect(!isSafePadctlLogPath("padctl.log"));
+    // Parent directory traversal attempt.
+    try testing.expect(!isSafePadctlLogPath("/var/log/padctl/../etc/padctl.log"));
 }
