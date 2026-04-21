@@ -11,6 +11,7 @@ const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
 const generic = @import("core/generic.zig");
 const GenericDeviceState = generic.GenericDeviceState;
 const GenericOutputDevice = @import("io/uinput.zig").GenericOutputDevice;
+const ImuOutputDevice = @import("io/uinput.zig").ImuOutputDevice;
 const state = @import("core/state.zig");
 const GamepadStateDelta = state.GamepadStateDelta;
 const mapper_mod = @import("core/mapper.zig");
@@ -160,6 +161,7 @@ pub const EventLoopContext = struct {
     wasm_override_report: bool = false,
     generic_state: ?*GenericDeviceState = null,
     generic_output: ?GenericOutputDevice = null,
+    imu_output: ?ImuOutputDevice = null,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {
@@ -570,6 +572,7 @@ pub const EventLoop = struct {
                                     continue;
                                 };
                                 if (ctx.touchpad_output) |tp| tp.emitTouch(events.gamepad) catch {};
+                                if (ctx.imu_output) |imu| imu.emit(events.gamepad) catch {};
                                 if (ctx.aux_output) |ao| {
                                     if (events.aux.len > 0) ao.emitAux(events.aux.slice()) catch {};
                                 }
@@ -580,6 +583,7 @@ pub const EventLoop = struct {
                                     continue;
                                 };
                                 if (ctx.touchpad_output) |tp| tp.emitTouch(self.gamepad_state) catch {};
+                                if (ctx.imu_output) |imu| imu.emit(self.gamepad_state) catch {};
                             }
                         }
                     }

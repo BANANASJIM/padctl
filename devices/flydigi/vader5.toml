@@ -71,12 +71,10 @@ range = [2, 8]
 offset = 8
 
 # --- Output device ---
-# Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and
-# most games apply Xbox button mappings without additional configuration.
 [output]
-name = "Xbox Elite Series 2"
-vid = 0x045e
-pid = 0x0b00
+name = "Flydigi Vader 5 Pro"
+vid = 0x37d7
+pid = 0x2401
 
 [output.axes]
 left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
@@ -118,8 +116,11 @@ type = "hat"
 
 [output.aux]
 type = "mouse"
-name = "Vader 5 Pro Virtual Mouse"
+name = "Flydigi Vader 5 Pro Virtual Mouse"
 
 [output.force_feedback]
 type = "rumble"
 max_effects = 16
+
+[output.imu]                                                                                       
+name = "Flydigi Vader 5 Pro Motion Sensors"

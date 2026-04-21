@@ -13,6 +13,8 @@ const AuxOutputDevice = uinput.AuxOutputDevice;
 const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
 const GenericUinputDevice = uinput.GenericUinputDevice;
 const GenericOutputDevice = uinput.GenericOutputDevice;
+const ImuDevice = uinput.ImuDevice;
+const ImuOutputDevice = uinput.ImuOutputDevice;
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
@@ -83,6 +85,7 @@ pub const DeviceInstance = struct {
     touchpad_dev: ?TouchpadDevice,
     generic_state: ?generic.GenericDeviceState,
     generic_uinput: ?GenericUinputDevice,
+    imu_dev: ?ImuDevice,
     device_cfg: *const DeviceConfig,
     mapping_cfg: ?*const MappingConfig = null,
     pending_mapping: ?*MappingConfig,
@@ -133,6 +136,7 @@ pub const DeviceInstance = struct {
         var touchpad_dev: ?TouchpadDevice = null;
         var generic_state: ?generic.GenericDeviceState = null;
         var generic_uinput: ?GenericUinputDevice = null;
+        var imu_dev: ?ImuDevice = null;
 
         if (is_generic) {
             generic_state = try generic.compileGenericState(cfg);
@@ -182,6 +186,11 @@ pub const DeviceInstance = struct {
             if (out_cfg.touchpad) |*tp_cfg| {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
+            if (out_cfg.imu) |*imu_cfg| {
+                const imu_vid: u16 = @intCast(out_cfg.vid orelse 0);
+                const imu_pid: u16 = @intCast(out_cfg.pid orelse 0);
+                imu_dev = try ImuDevice.create(imu_cfg, imu_vid, imu_pid);
+            }
         }
         const mapper: ?Mapper = if (init_mapping) |mcfg|
             Mapper.init(mcfg, loop.timer_fd, allocator) catch |err| blk: {
@@ -209,6 +218,7 @@ pub const DeviceInstance = struct {
             .touchpad_dev = touchpad_dev,
             .generic_state = generic_state,
             .generic_uinput = generic_uinput,
+            .imu_dev = imu_dev,
             .device_cfg = cfg,
             .pending_mapping = null,
             .stopped = false,
@@ -221,6 +231,7 @@ pub const DeviceInstance = struct {
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
+        if (self.imu_dev) |*imu| imu.close();
         for (self.devices) |dev| dev.close();
         self.allocator.free(self.devices);
         self.loop.deinit();
@@ -249,6 +260,7 @@ pub const DeviceInstance = struct {
             const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
             const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
+            const imu_output: ?ImuOutputDevice = if (self.imu_dev) |*imu| imu.imuOutputDevice() else null;
             const generic_output: ?GenericOutputDevice = if (self.generic_uinput) |*gu| gu.genericOutputDevice() else null;
             const mapper_ptr: ?*Mapper = if (self.mapper) |*m| m else null;
 
@@ -261,6 +273,7 @@ pub const DeviceInstance = struct {
                 .mapper = mapper_ptr,
                 .aux_output = aux_output,
                 .touchpad_output = touchpad_output,
+                .imu_output = imu_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
                 .mapping_config = mcfg,
