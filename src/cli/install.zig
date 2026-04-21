@@ -271,6 +271,171 @@ fn dirExistsAbsolute(path: []const u8) bool {
     return true;
 }
 
+fn dirIsNonEmpty(path: []const u8) bool {
+    var dir = std.fs.openDirAbsolute(path, .{ .iterate = true }) catch return false;
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch return false) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".toml")) return true;
+        if (entry.kind == .directory) return true;
+    }
+    return false;
+}
+
+/// Invocation mode for `systemctl --user` commands from within `padctl install`.
+/// See buildSystemctlUserArgv for rationale.
+pub const SystemctlUserMode = enum {
+    /// Running as a normal user — call `systemctl --user` directly.
+    direct,
+    /// Running as root via sudo — hop back to the invoking user so that
+    /// `systemctl --user` talks to their session bus (XDG_RUNTIME_DIR + DBUS).
+    sudo_hop,
+    /// Running as root WITHOUT SUDO_USER/SUDO_UID — cannot locate a user bus.
+    /// Caller should print a skip note instead of attempting the command.
+    skip,
+};
+pub const SystemctlUserPlan = struct {
+    mode: SystemctlUserMode,
+    /// Only populated for sudo_hop mode. Built from SUDO_USER / SUDO_UID.
+    sudo_user: []const u8 = "",
+    sudo_uid: []const u8 = "",
+};
+
+/// Decide how to invoke `systemctl --user ...` based on current process context.
+/// Pure function for testability — all inputs come from parameters, not env.
+pub fn planSystemctlUser(uid: std.posix.uid_t, sudo_user: ?[]const u8, sudo_uid: ?[]const u8) SystemctlUserPlan {
+    if (uid != 0) return .{ .mode = .direct };
+    const su = sudo_user orelse return .{ .mode = .skip };
+    const sid = sudo_uid orelse return .{ .mode = .skip };
+    if (su.len == 0 or sid.len == 0) return .{ .mode = .skip };
+    // Reject numeric-sudo-uid that isn't actually numeric to avoid shell quoting games
+    for (sid) |c| {
+        if (c < '0' or c > '9') return .{ .mode = .skip };
+    }
+    return .{ .mode = .sudo_hop, .sudo_user = su, .sudo_uid = sid };
+}
+
+/// Build argv for invoking `systemctl --user <verbs...>` under the correct bus.
+/// Caller owns the returned slice and each nested string via the allocator.
+///
+/// sudo_hop form:
+///   sudo -u <USER> XDG_RUNTIME_DIR=/run/user/<UID> \
+///        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<UID>/bus \
+///        systemctl --user <verbs...>
+pub fn buildSystemctlUserArgv(
+    allocator: std.mem.Allocator,
+    plan: SystemctlUserPlan,
+    verbs: []const []const u8,
+) !?[][]const u8 {
+    if (plan.mode == .skip) return null;
+
+    var argv = std.ArrayList([]const u8){};
+    errdefer argv.deinit(allocator);
+
+    if (plan.mode == .sudo_hop) {
+        try argv.append(allocator, try allocator.dupe(u8, "sudo"));
+        try argv.append(allocator, try allocator.dupe(u8, "-u"));
+        try argv.append(allocator, try allocator.dupe(u8, plan.sudo_user));
+        const xrd = try std.fmt.allocPrint(allocator, "XDG_RUNTIME_DIR=/run/user/{s}", .{plan.sudo_uid});
+        try argv.append(allocator, xrd);
+        const dbus = try std.fmt.allocPrint(allocator, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{s}/bus", .{plan.sudo_uid});
+        try argv.append(allocator, dbus);
+    }
+    try argv.append(allocator, try allocator.dupe(u8, "systemctl"));
+    try argv.append(allocator, try allocator.dupe(u8, "--user"));
+    for (verbs) |v| try argv.append(allocator, try allocator.dupe(u8, v));
+
+    return try argv.toOwnedSlice(allocator);
+}
+
+fn freeArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
+    for (argv) |s| allocator.free(s);
+    allocator.free(argv);
+}
+
+fn currentPlanFromEnv() SystemctlUserPlan {
+    const uid = std.os.linux.getuid();
+    const sudo_user = std.posix.getenv("SUDO_USER");
+    const sudo_uid = std.posix.getenv("SUDO_UID");
+    return planSystemctlUser(uid, sudo_user, sudo_uid);
+}
+
+fn writeAll(fd: std.posix.fd_t, s: []const u8) void {
+    _ = std.posix.write(fd, s) catch {};
+}
+
+fn printSkipSystemctlNote() void {
+    // Default hint used by the thin helpers — the install/uninstall call sites
+    // in `run()` dedupe via `printSkipSystemctlNoteFor` so the user only sees a
+    // single 4-line note per phase. This fallback covers defensive callers.
+    const default_verbs = [_][]const []const u8{
+        &.{"daemon-reload"},
+        &.{ "enable", "--now", "padctl.service" },
+    };
+    printSkipSystemctlNoteFor(&default_verbs);
+}
+
+/// Variant that reflects the actual set of verb groups that were skipped.
+/// Use from call sites that know exactly which systemctl verbs would have run
+/// so the hint shows the correct commands (install vs uninstall differ).
+fn printSkipSystemctlNoteFor(verb_groups: []const []const []const u8) void {
+    writeAll(
+        std.posix.STDERR_FILENO,
+        "note: skipping `systemctl --user` — running as root without SUDO_USER; as your real user run:\n",
+    );
+    for (verb_groups) |verbs| {
+        writeAll(std.posix.STDERR_FILENO, "  systemctl --user");
+        for (verbs) |v| {
+            writeAll(std.posix.STDERR_FILENO, " ");
+            writeAll(std.posix.STDERR_FILENO, v);
+        }
+        writeAll(std.posix.STDERR_FILENO, "\n");
+    }
+}
+
+/// Thin wrapper over buildSystemctlUserArgv + runCmd.
+/// Mirrors runCmd semantics (silent on non-zero).
+fn runSystemctlUser(verbs: []const []const u8) void {
+    const plan = currentPlanFromEnv();
+    if (plan.mode == .skip) {
+        printSkipSystemctlNote();
+        return;
+    }
+    const allocator = std.heap.page_allocator;
+    const argv = buildSystemctlUserArgv(allocator, plan, verbs) catch |err| {
+        var errbuf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: could not build systemctl argv: {}\n", .{err}) catch "warning: systemctl argv build failed\n";
+        writeAll(std.posix.STDERR_FILENO, msg);
+        return;
+    } orelse {
+        printSkipSystemctlNote();
+        return;
+    };
+    defer freeArgv(allocator, argv);
+    runCmd(argv);
+}
+
+/// Same as runSystemctlUser but warns on non-zero exit (mirrors runCmdWarn).
+fn runSystemctlUserWarn(verbs: []const []const u8) void {
+    const plan = currentPlanFromEnv();
+    if (plan.mode == .skip) {
+        printSkipSystemctlNote();
+        return;
+    }
+    const allocator = std.heap.page_allocator;
+    const argv = buildSystemctlUserArgv(allocator, plan, verbs) catch |err| {
+        var errbuf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: could not build systemctl argv: {}\n", .{err}) catch "warning: systemctl argv build failed\n";
+        writeAll(std.posix.STDERR_FILENO, msg);
+        return;
+    } orelse {
+        printSkipSystemctlNote();
+        return;
+    };
+    defer freeArgv(allocator, argv);
+    runCmdWarn(argv);
+}
+
 fn findDevicesSourceDir(allocator: std.mem.Allocator, self_dir: []const u8, cwd_override: ?[]const u8) !?[]u8 {
     const sibling = try std.fmt.allocPrint(allocator, "{s}/devices", .{self_dir});
     defer allocator.free(sibling);
@@ -526,8 +691,26 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             const msg = std.fmt.bufPrint(&errbuf, "{}\n", .{err}) catch "unknown error\n";
             _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
         };
+    } else if (dirExistsAbsolute(share_dir) and dirIsNonEmpty(share_dir)) {
+        // Packaging (AUR/deb/rpm) already shipped device configs into the target
+        // share dir; the "near binary / cwd" heuristic would otherwise emit a
+        // scary warning even though devices are present.
+        var infobuf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &infobuf,
+            "info: device configs already present at {s}; source copy skipped\n",
+            .{share_dir},
+        ) catch "info: device configs already present; source copy skipped\n";
+        _ = std.posix.write(std.posix.STDOUT_FILENO, msg) catch {};
     } else {
-        _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: devices directory not found near executable or current working directory\n") catch {};
+        var warnbuf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &warnbuf,
+            "warning: source `devices/` directory not found (near binary, in cwd, or at {s})\n" ++
+                "hint: run `padctl install` from the source checkout, or ensure your package ships device configs under {s}\n",
+            .{ share_dir, share_dir },
+        ) catch "warning: source `devices/` directory not found\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
     }
 
     // 4. Collect device entries once, generate both rule files
@@ -646,12 +829,30 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
         runCmd(&.{ "udevadm", "trigger" });
-        runCmd(&.{ "systemctl", "--user", "daemon-reload" });
-        if (!opts.no_enable) {
-            runCmdWarn(&.{ "systemctl", "--user", "enable", "padctl.service" });
-        }
-        if (!opts.no_start) {
-            runCmdWarn(&.{ "systemctl", "--user", "start", "padctl.service" });
+        // Compute plan once so skip-mode prints the hint once instead of per-verb.
+        const install_plan = currentPlanFromEnv();
+        if (install_plan.mode == .skip) {
+            var groups: [3][]const []const u8 = undefined;
+            var n: usize = 0;
+            groups[n] = &.{"daemon-reload"};
+            n += 1;
+            if (!opts.no_enable) {
+                groups[n] = &.{ "enable", "padctl.service" };
+                n += 1;
+            }
+            if (!opts.no_start) {
+                groups[n] = &.{ "start", "padctl.service" };
+                n += 1;
+            }
+            printSkipSystemctlNoteFor(groups[0..n]);
+        } else {
+            runSystemctlUser(&.{"daemon-reload"});
+            if (!opts.no_enable) {
+                runSystemctlUserWarn(&.{ "enable", "padctl.service" });
+            }
+            if (!opts.no_start) {
+                runSystemctlUserWarn(&.{ "start", "padctl.service" });
+            }
         }
     }
 
@@ -704,8 +905,17 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 
     // Stop and disable services (ignore errors — may not be running)
     if (destdir.len == 0) {
-        runCmd(&.{ "systemctl", "--user", "stop", "padctl.service" });
-        runCmd(&.{ "systemctl", "--user", "disable", "padctl.service" });
+        const stop_plan = currentPlanFromEnv();
+        if (stop_plan.mode == .skip) {
+            const groups = [_][]const []const u8{
+                &.{ "stop", "padctl.service" },
+                &.{ "disable", "padctl.service" },
+            };
+            printSkipSystemctlNoteFor(&groups);
+        } else {
+            runSystemctlUser(&.{ "stop", "padctl.service" });
+            runSystemctlUser(&.{ "disable", "padctl.service" });
+        }
     }
 
     // Standard prefix-based files (always removed)
@@ -797,7 +1007,13 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     std.fs.deleteFileAbsolute("/run/padctl/padctl.sock") catch {};
 
     if (destdir.len == 0) {
-        runCmd(&.{ "systemctl", "--user", "daemon-reload" });
+        const reload_plan = currentPlanFromEnv();
+        if (reload_plan.mode == .skip) {
+            const groups = [_][]const []const u8{&.{"daemon-reload"}};
+            printSkipSystemctlNoteFor(&groups);
+        } else {
+            runSystemctlUser(&.{"daemon-reload"});
+        }
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
     }
 
@@ -2776,12 +2992,12 @@ test "install: atomicInstallBinary does not double-close on rename failure" {
     try testing.expectEqual(fds_before, fds_after);
 }
 
-test "install: all systemctl calls use --user scope" {
+test "install: all systemctl calls route through runSystemctlUser helpers" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // Read our own source to verify no system-scope systemctl calls remain.
-    // Zig embeds the absolute path in @src().file for addTest modules.
+    // Read our own source to verify every systemctl invocation goes through the
+    // --user-aware helper — no raw `runCmd(&.{ "systemctl", ... })` forms remain.
     const src_path = @src().file;
     var file = if (std.fs.path.isAbsolute(src_path))
         std.fs.openFileAbsolute(src_path, .{}) catch return
@@ -2792,14 +3008,105 @@ test "install: all systemctl calls use --user scope" {
     defer allocator.free(src);
 
     var iter = std.mem.splitScalar(u8, src, '\n');
-    var checked: usize = 0;
+    var helper_calls: usize = 0;
     while (iter.next()) |line| {
-        const has_runcmd = std.mem.indexOf(u8, line, "runCmd") != null;
-        const has_systemctl = std.mem.indexOf(u8, line, "systemctl") != null;
-        if (has_runcmd and has_systemctl) {
-            checked += 1;
-            try testing.expect(std.mem.indexOf(u8, line, "--user") != null);
+        // Ignore the test itself (which mentions these names in strings).
+        if (std.mem.indexOf(u8, line, "test \"install: all systemctl") != null) continue;
+        if (std.mem.indexOf(u8, line, "runSystemctlUser") != null) helper_calls += 1;
+
+        // No raw `runCmd(&.{ "systemctl" ... })` forms allowed outside the helper itself.
+        const has_runcmd = std.mem.indexOf(u8, line, "runCmd(&.{") != null;
+        const has_systemctl_literal = std.mem.indexOf(u8, line, "\"systemctl\"") != null;
+        if (has_runcmd and has_systemctl_literal) {
+            try testing.expect(false); // direct systemctl call bypasses user-scope helper
         }
     }
-    try testing.expect(checked >= 5);
+    // Each of the 5 call sites is one source line referencing the helper,
+    // plus the two helper fn definitions and at least one internal call.
+    try testing.expect(helper_calls >= 5);
+}
+
+test "install: planSystemctlUser decides direct/sudo_hop/skip" {
+    const testing = std.testing;
+
+    // Non-root → direct, regardless of SUDO_* presence
+    {
+        const p = planSystemctlUser(1000, null, null);
+        try testing.expectEqual(SystemctlUserMode.direct, p.mode);
+    }
+    {
+        const p = planSystemctlUser(1000, "jim", "1000");
+        try testing.expectEqual(SystemctlUserMode.direct, p.mode);
+    }
+    // Root + both SUDO_USER and SUDO_UID → sudo_hop
+    {
+        const p = planSystemctlUser(0, "jim", "1000");
+        try testing.expectEqual(SystemctlUserMode.sudo_hop, p.mode);
+        try testing.expectEqualStrings("jim", p.sudo_user);
+        try testing.expectEqualStrings("1000", p.sudo_uid);
+    }
+    // Root + missing SUDO_USER → skip
+    {
+        const p = planSystemctlUser(0, null, "1000");
+        try testing.expectEqual(SystemctlUserMode.skip, p.mode);
+    }
+    // Root + missing SUDO_UID → skip
+    {
+        const p = planSystemctlUser(0, "jim", null);
+        try testing.expectEqual(SystemctlUserMode.skip, p.mode);
+    }
+    // Root + empty SUDO_USER → skip
+    {
+        const p = planSystemctlUser(0, "", "1000");
+        try testing.expectEqual(SystemctlUserMode.skip, p.mode);
+    }
+    // Root + non-numeric SUDO_UID → skip (defence against shell injection)
+    {
+        const p = planSystemctlUser(0, "jim", "1000;evil");
+        try testing.expectEqual(SystemctlUserMode.skip, p.mode);
+    }
+}
+
+test "install: buildSystemctlUserArgv direct shape" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const plan = SystemctlUserPlan{ .mode = .direct };
+    const argv = (try buildSystemctlUserArgv(allocator, plan, &.{ "enable", "padctl.service" })).?;
+    defer freeArgv(allocator, argv);
+
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("systemctl", argv[0]);
+    try testing.expectEqualStrings("--user", argv[1]);
+    try testing.expectEqualStrings("enable", argv[2]);
+    try testing.expectEqualStrings("padctl.service", argv[3]);
+}
+
+test "install: buildSystemctlUserArgv sudo_hop shape carries XDG+DBUS" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const plan = SystemctlUserPlan{ .mode = .sudo_hop, .sudo_user = "jim", .sudo_uid = "1000" };
+    const argv = (try buildSystemctlUserArgv(allocator, plan, &.{"daemon-reload"})).?;
+    defer freeArgv(allocator, argv);
+
+    // sudo -u <user> XDG_RUNTIME_DIR=... DBUS_SESSION_BUS_ADDRESS=... systemctl --user daemon-reload
+    try testing.expectEqual(@as(usize, 8), argv.len);
+    try testing.expectEqualStrings("sudo", argv[0]);
+    try testing.expectEqualStrings("-u", argv[1]);
+    try testing.expectEqualStrings("jim", argv[2]);
+    try testing.expectEqualStrings("XDG_RUNTIME_DIR=/run/user/1000", argv[3]);
+    try testing.expectEqualStrings("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", argv[4]);
+    try testing.expectEqualStrings("systemctl", argv[5]);
+    try testing.expectEqualStrings("--user", argv[6]);
+    try testing.expectEqualStrings("daemon-reload", argv[7]);
+}
+
+test "install: buildSystemctlUserArgv skip returns null" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const plan = SystemctlUserPlan{ .mode = .skip };
+    const argv = try buildSystemctlUserArgv(allocator, plan, &.{"daemon-reload"});
+    try testing.expect(argv == null);
 }
