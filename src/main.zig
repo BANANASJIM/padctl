@@ -62,6 +62,7 @@ pub const io = struct {
     pub const hidraw = @import("io/hidraw.zig");
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
+    pub const uhid = @import("io/uhid.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const netlink = @import("io/netlink.zig");
 };
