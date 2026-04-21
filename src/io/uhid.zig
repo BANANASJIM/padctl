@@ -145,7 +145,16 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
     _ = posix.write(fd, &buf) catch {};
 }
 
-// --- High-level UhidDevice (T2) --------------------------------------------
+// --- High-level UhidDevice (T2 + T3) ---------------------------------------
+
+/// Precise error set for `UhidDevice.init`. Keeps the vtable callers out of
+/// `anyerror` land (see Phase 10 T9 VTable error-set convergence work).
+pub const InitError = error{
+    ConfigInvalid,
+    DescriptorTooLarge,
+    UhidCreateFailed,
+    OutOfMemory,
+} || posix.OpenError || posix.WriteError;
 
 /// Parameters for constructing a `UhidDevice`.
 ///
@@ -193,6 +202,91 @@ pub const UhidDevice = struct {
     /// stores the backing TOML allocator; CI tests use string literals.
     name: []const u8,
     uniq: []const u8,
+
+    /// Construct a `UhidDevice` against a real `/dev/uhid` fd. Opens the
+    /// kernel node, populates a `UhidCreate2Req`, and writes it.
+    ///
+    /// Ownership: caller owns the returned `*UhidDevice`. `close()` tears the
+    /// kernel device down but does not free the struct — callers hold it in
+    /// an arena or free it via `allocator.destroy(dev)` explicitly.
+    pub fn init(allocator: std.mem.Allocator, cfg: Config) InitError!*UhidDevice {
+        if (cfg.name.len == 0) return error.ConfigInvalid;
+        if (cfg.descriptor.len == 0) return error.ConfigInvalid;
+        if (cfg.descriptor.len > HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
+
+        const fd = openUhid() catch |err| switch (err) {
+            error.SkipZigTest => return error.UhidCreateFailed,
+            else => |e| return e,
+        };
+        errdefer posix.close(fd);
+
+        try sendCreate(fd, cfg);
+
+        const self = try allocator.create(UhidDevice);
+        self.* = .{
+            .fd = fd,
+            .vid = cfg.vid,
+            .pid = cfg.pid,
+            .name = cfg.name,
+            .uniq = cfg.uniq,
+        };
+        return self;
+    }
+
+    /// Test-only constructor: bind the device to a caller-supplied fd
+    /// (typically a pipe or unix socket write-end) so we can assert on the
+    /// bytes that would be sent to the kernel without touching `/dev/uhid`.
+    ///
+    /// Unlike `init`, this does NOT send a `UHID_CREATE2` event — the caller
+    /// drives that manually if desired. Use only from tests.
+    pub fn initWithFd(
+        allocator: std.mem.Allocator,
+        fd: posix.fd_t,
+        cfg: Config,
+    ) !*UhidDevice {
+        if (cfg.name.len == 0) return error.ConfigInvalid;
+        if (cfg.descriptor.len == 0) return error.ConfigInvalid;
+        if (cfg.descriptor.len > HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
+
+        const self = try allocator.create(UhidDevice);
+        self.* = .{
+            .fd = fd,
+            .vid = cfg.vid,
+            .pid = cfg.pid,
+            .name = cfg.name,
+            .uniq = cfg.uniq,
+        };
+        return self;
+    }
+
+    fn sendCreate(fd: posix.fd_t, cfg: Config) InitError!void {
+        var ev = std.mem.zeroes(UhidCreate2Event);
+        ev.type = UHID_CREATE2;
+
+        // Reserve one byte for the trailing NUL even when the caller passes
+        // a shorter string — the kernel does not require NUL termination, but
+        // the /sys/class/hid/.../name readout will include trailing junk
+        // otherwise, which confuses udev rules.
+        const name_copy = @min(cfg.name.len, ev.payload.name.len - 1);
+        @memcpy(ev.payload.name[0..name_copy], cfg.name[0..name_copy]);
+        const uniq_copy = @min(cfg.uniq.len, ev.payload.uniq.len - 1);
+        if (uniq_copy != 0) @memcpy(ev.payload.uniq[0..uniq_copy], cfg.uniq[0..uniq_copy]);
+
+        ev.payload.rd_size = std.math.cast(u16, cfg.descriptor.len) orelse
+            return error.DescriptorTooLarge;
+        ev.payload.bus = cfg.bus;
+        ev.payload.vendor = cfg.vid;
+        ev.payload.product = cfg.pid;
+        ev.payload.version = cfg.version;
+        ev.payload.country = cfg.country;
+        @memcpy(ev.payload.rd_data[0..cfg.descriptor.len], cfg.descriptor);
+
+        const bytes = std.mem.asBytes(&ev);
+        var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+        const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
+        @memcpy(buf[0..copy_len], bytes[0..copy_len]);
+        _ = posix.write(fd, &buf) catch return error.UhidCreateFailed;
+    }
 
     /// Expose this device through the shared `OutputDevice` vtable.
     pub fn outputDevice(self: *UhidDevice) uinput.OutputDevice {
@@ -309,4 +403,40 @@ test "uhid: UhidDevice vtable signature matches OutputDevice" {
     const uhid_vt = std.meta.fieldInfo(@TypeOf(UhidDevice.vtable), .emit).type;
     const uinput_vt = std.meta.fieldInfo(uinput.OutputDevice.VTable, .emit).type;
     try testing.expectEqual(uinput_vt, uhid_vt);
+}
+
+test "uhid: init rejects empty name" {
+    const alloc = testing.allocator;
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "",
+        .descriptor = &[_]u8{ 0x05, 0x01 },
+    };
+    try testing.expectError(error.ConfigInvalid, UhidDevice.init(alloc, cfg));
+}
+
+test "uhid: init rejects empty descriptor" {
+    const alloc = testing.allocator;
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-test",
+        .descriptor = &[_]u8{},
+    };
+    try testing.expectError(error.ConfigInvalid, UhidDevice.init(alloc, cfg));
+}
+
+test "uhid: init rejects descriptor too large" {
+    const alloc = testing.allocator;
+    const too_big = try alloc.alloc(u8, HID_MAX_DESCRIPTOR_SIZE + 1);
+    defer alloc.free(too_big);
+    @memset(too_big, 0);
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-test",
+        .descriptor = too_big,
+    };
+    try testing.expectError(error.DescriptorTooLarge, UhidDevice.init(alloc, cfg));
 }
