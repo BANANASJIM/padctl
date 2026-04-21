@@ -19,6 +19,8 @@
 
 const std = @import("std");
 const posix = std.posix;
+const state = @import("../core/state.zig");
+const uinput = @import("uinput.zig");
 
 // --- Kernel protocol constants ---------------------------------------------
 
@@ -143,6 +145,137 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
     _ = posix.write(fd, &buf) catch {};
 }
 
+// --- High-level UhidDevice (T2) --------------------------------------------
+
+/// Parameters for constructing a `UhidDevice`.
+///
+/// The `uniq` string feeds the `/sys/class/hid/.../uniq` attribute that
+/// padctl's routing layer reads via `EVIOCGUNIQ` to pair SDL IMU and
+/// main-pad nodes (see `decisions/015-uhid-imu-migration.md` §7 AC4). Wave 1
+/// accepts a caller-provided descriptor; Wave 2 introduces the TOML-driven
+/// descriptor builder.
+pub const Config = struct {
+    vid: u16,
+    pid: u16,
+    /// Device name. Copied into a 128-byte field; longer strings are
+    /// truncated to fit (with a NUL reserved).
+    name: []const u8,
+    /// Unique identifier string. Copied into a 64-byte field.
+    uniq: []const u8 = "",
+    /// Raw HID report descriptor bytes. Must fit in `HID_MAX_DESCRIPTOR_SIZE`.
+    descriptor: []const u8,
+    /// Bus type — defaults to USB. `hid-pidff` (Wave 6) requires `BUS_USB`.
+    bus: u16 = BUS_USB,
+    /// Device version (`bcdDevice`-like). Optional; 0 is accepted.
+    version: u32 = 0,
+    /// HID country code. 0 = "not localized" which matches most gamepads.
+    country: u32 = 0,
+};
+
+/// A UHID-backed output device implementing the shared `OutputDevice` vtable.
+///
+/// Phase 13 Wave 1 scope (T2):
+///   - Struct layout + vtable wiring matching `UinputDevice`
+///     (`src/io/uinput.zig:73-94`).
+///   - `emit(state)` ships a minimal 4-byte stick payload via `UHID_INPUT2`
+///     (Wave 2 replaces this with the descriptor-driven encoder).
+///   - `pollFf()` always returns `null` (Wave 2+ wires FF routing).
+///   - `close()` sends `UHID_DESTROY` and closes the fd.
+pub const UhidDevice = struct {
+    fd: posix.fd_t,
+    vid: u16,
+    pid: u16,
+    /// Last state passed to `emit()`. Wave 3 reads this during routing
+    /// switches to preserve pressed buttons / stick positions across backend
+    /// handoffs.
+    state_snapshot: state.GamepadState = .{},
+    /// Owned-by-caller copies: `UhidDevice` does not free these. The daemon
+    /// stores the backing TOML allocator; CI tests use string literals.
+    name: []const u8,
+    uniq: []const u8,
+
+    /// Expose this device through the shared `OutputDevice` vtable.
+    pub fn outputDevice(self: *UhidDevice) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = emitVtable,
+        .poll_ff = pollFfVtable,
+        .close = closeVtable,
+    };
+
+    fn emitVtable(ptr: *anyopaque, s: state.GamepadState) uinput.EmitError!void {
+        const self: *UhidDevice = @ptrCast(@alignCast(ptr));
+        return self.emit(s);
+    }
+
+    fn pollFfVtable(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        const self: *UhidDevice = @ptrCast(@alignCast(ptr));
+        return self.pollFf();
+    }
+
+    fn closeVtable(ptr: *anyopaque) void {
+        const self: *UhidDevice = @ptrCast(@alignCast(ptr));
+        self.close();
+    }
+
+    /// Emit a `UHID_INPUT2` event carrying a Wave-1 stub payload derived from
+    /// `s`. The payload is 4 bytes of stick axes mapped into the 0..255 HID
+    /// logical range — enough to exercise the vtable contract and the
+    /// `UhidSimulator` consumer harness. Wave 2 replaces this with the real
+    /// descriptor-driven encoder.
+    pub fn emit(self: *UhidDevice, s: state.GamepadState) uinput.EmitError!void {
+        var payload: [4]u8 = undefined;
+        payload[0] = axisToU8(s.ax);
+        payload[1] = axisToU8(s.ay);
+        payload[2] = axisToU8(s.rx);
+        payload[3] = axisToU8(s.ry);
+
+        uhidInput(self.fd, &payload) catch |err| switch (err) {
+            error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+            else => return error.WriteFailed,
+        };
+
+        self.state_snapshot = s;
+    }
+
+    /// Inject an arbitrary payload as a `UHID_INPUT2` event. Wave 2 callers
+    /// (descriptor-aware encoder) feed already-encoded bytes in directly;
+    /// Wave 1 tests use it to exercise framing without a real descriptor.
+    /// Prefer `emit()` for GamepadState-driven paths.
+    pub fn emitRaw(self: *UhidDevice, payload: []const u8) uinput.EmitError!void {
+        uhidInput(self.fd, payload) catch |err| switch (err) {
+            error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+            else => return error.WriteFailed,
+        };
+    }
+
+    /// Wave 1 stub: no FF events yet. Wave 2+ replaces this with real
+    /// `UHID_OUTPUT` handling (kernel → userspace → physical hidraw when the
+    /// PID descriptor path lands in Wave 6).
+    pub fn pollFf(self: *UhidDevice) uinput.PollFfError!?uinput.FfEvent {
+        _ = self;
+        return null;
+    }
+
+    pub fn close(self: *UhidDevice) void {
+        uhidDestroy(self.fd);
+        posix.close(self.fd);
+    }
+
+    fn axisToU8(v: i16) u8 {
+        // i16 stick axis range (-32768..32767) → u8 HID logical (0..255).
+        // Centre 0 maps to 128 (mid-range) to match the 4-byte test descriptor
+        // shipped with the unit tests. Out-of-range input is clamped.
+        const shifted: i32 = @as(i32, v) + 32768;
+        const scaled: i32 = @divTrunc(shifted, 257); // 65535 / 257 ≈ 255
+        if (scaled < 0) return 0;
+        if (scaled > 255) return 255;
+        return @intCast(scaled);
+    }
+};
+
 // --- Tests -----------------------------------------------------------------
 
 const testing = std.testing;
@@ -160,4 +293,20 @@ test "uhid: constants and struct layout" {
     try testing.expectEqual(@as(usize, 4372), @sizeOf(UhidCreate2Req));
     // UhidInput2Req: 2 + 4096 = 4098 with no compiler-inserted padding.
     try testing.expectEqual(@as(usize, 4098), @sizeOf(UhidInput2Req));
+}
+
+test "uhid: axisToU8 clamps and centres" {
+    try testing.expectEqual(@as(u8, 0), UhidDevice.axisToU8(-32768));
+    try testing.expectEqual(@as(u8, 128), UhidDevice.axisToU8(0));
+    // 32767 → (32767+32768)/257 = 65535/257 = 255 (truncation).
+    try testing.expectEqual(@as(u8, 255), UhidDevice.axisToU8(32767));
+}
+
+test "uhid: UhidDevice vtable signature matches OutputDevice" {
+    // Compile-time guardrail: if UinputDevice's vtable ever evolves (say, to
+    // add a new member), this test forces UhidDevice to be updated in
+    // lockstep before the code base can even compile its tests.
+    const uhid_vt = std.meta.fieldInfo(@TypeOf(UhidDevice.vtable), .emit).type;
+    const uinput_vt = std.meta.fieldInfo(uinput.OutputDevice.VTable, .emit).type;
+    try testing.expectEqual(uinput_vt, uhid_vt);
 }
