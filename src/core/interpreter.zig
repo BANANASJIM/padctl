@@ -293,6 +293,10 @@ pub const CompiledField = struct {
 
 pub const CompiledButtonEntry = struct {
     btn_id: ButtonId,
+    // u6 covers bit indices 0..63 — the full range addressable by a u64
+    // `button_group.source` (max 8 bytes). Previously `u5`, which silently
+    // panicked in `@intCast` when a device TOML mapped buttons to bits >= 32
+    // (e.g. Steam Deck L4/R4 at bits 41/42).
     bit_idx: u6,
 };
 
@@ -400,10 +404,15 @@ fn compileReport(report: *const ReportConfig) CompiledReport {
             if (cbg.count >= MAX_BUTTONS) break;
             const btn_name = entry.key_ptr.*;
             const bit_idx = entry.value_ptr.*;
+            // Skip out-of-range TOML values rather than panic. A u64
+            // `button_group.source` spans bits 0..63; anything outside is
+            // unmappable, so the entry is silently dropped (warn-and-skip
+            // semantics; device still starts).
+            const bit_idx_u6 = std.math.cast(u6, bit_idx) orelse continue;
             if (std.meta.stringToEnum(ButtonId, btn_name)) |btn_id| {
                 cbg.entries[cbg.count] = .{
                     .btn_id = btn_id,
-                    .bit_idx = @intCast(bit_idx),
+                    .bit_idx = bit_idx_u6,
                 };
                 cbg.count += 1;
             }
@@ -1293,6 +1302,92 @@ test "interpreter: button_group batch extraction" {
     try testing.expect(btns & (@as(u64, 1) << b_bit) == 0); // B not pressed
     try testing.expect(btns & (@as(u64, 1) << x_bit) != 0); // X pressed
     try testing.expect(btns & (@as(u64, 1) << y_bit) == 0); // Y not pressed
+}
+
+// Regression: Steam Deck's TOML maps L4/R4 at bit indices 41/42 within an
+// 8-byte button_group source. Before widening `CompiledButtonEntry.bit_idx`
+// from `u5` to `u6`, compileReport panicked with "integer does not fit in
+// destination type" the first time this device TOML was loaded, aborting
+// DeviceInstance.init before any `device ready` log emitted.
+test "interpreter: button_group accepts bit_idx >= 32 (Steam Deck L4/R4)" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 10
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.button_group]
+        \\source = { offset = 1, size = 8 }
+        \\map = { A = 0, M3 = 41, M4 = 42 }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    // Before the fix: this call panics inside compileReport at the
+    // @intCast of bit_idx=41 into u5. After the fix: init returns cleanly
+    // and we can exercise the compiled report against raw data with bit 41 set.
+    const interp = Interpreter.init(&parsed.value);
+    // raw[1..9] is the 8-byte button source. Set bit 41 (byte 5 bit 1).
+    var raw = [_]u8{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00 };
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    const btns = delta.buttons orelse return error.NoBtns;
+    const m3_bit: u6 = @intCast(@intFromEnum(ButtonId.M3));
+    try testing.expect(btns & (@as(u64, 1) << m3_bit) != 0); // M3 pressed
+}
+
+// Regression: every bit index in [32, 63] must round-trip through
+// compileReport without panic or truncation. This exercises the full
+// upper half of a u64 button_group source which was unreachable while
+// `bit_idx` was `u5`.
+test "interpreter: button_group full u6 range (bits 32..63) compiles" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 10
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.button_group]
+        \\source = { offset = 1, size = 8 }
+        \\map = { A = 32, B = 45, X = 63 }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const cr = &interp.compiled[0];
+    const cbg = cr.button_group orelse return error.NoButtonGroup;
+    try testing.expectEqual(@as(u8, 3), cbg.count);
+    // Verify all bit indices stored correctly (u5 would have silently
+    // wrapped 32→0, 45→13, 63→31; panic would have aborted earlier).
+    var saw_32 = false;
+    var saw_45 = false;
+    var saw_63 = false;
+    for (cbg.entries[0..cbg.count]) |e| {
+        if (e.bit_idx == 32) saw_32 = true;
+        if (e.bit_idx == 45) saw_45 = true;
+        if (e.bit_idx == 63) saw_63 = true;
+    }
+    try testing.expect(saw_32);
+    try testing.expect(saw_45);
+    try testing.expect(saw_63);
 }
 
 const crc32_base_toml =
