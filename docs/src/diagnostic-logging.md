@@ -31,16 +31,24 @@ Attach `bug.log` to your issue report.
 
 ## Log file location
 
-padctl picks the first writable directory from the list below:
+padctl picks the first entry whose env var is set / parent dir is
+reachable, going top-to-bottom:
 
 | Priority | Path | Source |
 |----------|------|--------|
-| 1 | `$LOGS_DIRECTORY/padctl.log` | Set by systemd when the service uses `LogsDirectory=padctl` (resolves to `/var/log/padctl/` for system units) |
-| 2 | `$XDG_STATE_HOME/padctl/padctl.log` | Standard XDG state path |
-| 3 | `~/.local/state/padctl/padctl.log` | XDG fallback when `$XDG_STATE_HOME` is unset |
-| 4 | `/var/log/padctl/padctl.log` | Final fallback when `$HOME` is also unset |
+| 1 | `$STATE_DIRECTORY/padctl.log` | Set by systemd when the unit declares `StateDirectory=padctl`. Resolves to `$XDG_STATE_HOME/padctl/` on the user service (default `~/.local/state/padctl/`) and `/var/lib/padctl/` on a system service. |
+| 2 | `$XDG_STATE_HOME/padctl/padctl.log` | Non-systemd invocations (e.g. the CLI running in the user's shell) with `$XDG_STATE_HOME` set. |
+| 3 | `~/.local/state/padctl/padctl.log` | XDG fallback when `$XDG_STATE_HOME` is unset but `$HOME` is. |
+| 4 | `/var/log/padctl/padctl.log` | Last-resort fallback when neither `$HOME` nor `$XDG_STATE_HOME` is available. |
 
-`padctl dump status` always prints the path that is currently in use.
+On a default Bazzite install (user-service + `StateDirectory=padctl` in
+the unit file) the daemon and CLI both converge on
+`~/.local/state/padctl/padctl.log`.
+
+`padctl dump status` prints the path currently in use. If both the
+current-session path and a legacy location contain `padctl.log`, the
+command picks whichever file was most recently modified (mtime-based)
+so you always see the active one.
 
 ## Config file
 
