@@ -329,8 +329,12 @@ test "regression-93: ADD before REMOVE completes must not silent-drop" {
     // managed slot's DeviceIO and is independent of the device thread's
     // lifecycle, so no sleep is needed here. stopAll()/deinit() at teardown
     // will still cleanly join the live thread.
-    posix.close(mock_a.pipe_w);
-    mock_a.pipe_w = -1;
+    //
+    // Use the atomic helper so the close can't race with the background
+    // thread's own drain-path auto-close in MockDeviceIO.read, which would
+    // otherwise produce a double-close panic under ReleaseSafe
+    // (posix.close treats EBADF as unreachable).
+    mock_a.closeWriteEnd();
 
     // Step 3 — udev ADD for the "new" hidraw node arrives BEFORE the
     // REMOVE for hidraw0 was processed. Kernel assigned a new devname
@@ -413,8 +417,9 @@ test "regression-93: orphan managed entry (devname==null) with matching phys_key
 
     // Step 2 — kill the backing fd so managedInstanceAlive() returns
     // false, forcing the race-guard path to evaluate the devname branch.
-    posix.close(mock_a.pipe_w);
-    mock_a.pipe_w = -1;
+    // Atomic helper prevents double-close with the background thread's
+    // drain-path auto-close in MockDeviceIO.read.
+    mock_a.closeWriteEnd();
 
     // Step 3 — attempt a new attach with the same phys_key. Without the
     // carve-out, this would fall through and dup-attach; with it, the

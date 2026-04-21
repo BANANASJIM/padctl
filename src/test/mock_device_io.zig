@@ -40,7 +40,19 @@ pub const MockDeviceIO = struct {
     pub fn deinit(self: *MockDeviceIO) void {
         self.write_log.deinit(self.allocator);
         posix.close(self.pipe_r);
-        if (self.pipe_w >= 0) posix.close(self.pipe_w);
+        self.closeWriteEnd();
+    }
+
+    /// Atomically swap `pipe_w` to -1 and close the old fd. Safe to call
+    /// from multiple threads and multiple times: the atomic xchg ensures
+    /// at most one caller sees the live fd and invokes posix.close, so
+    /// the internal drain-path auto-close in `read` and an external test
+    /// that also wants to simulate "write end died" cannot double-close
+    /// the same fd — posix.close on a stale fd panics under ReleaseSafe
+    /// (`BADF => unreachable` in Zig stdlib).
+    pub fn closeWriteEnd(self: *MockDeviceIO) void {
+        const fd = @atomicRmw(posix.fd_t, &self.pipe_w, .Xchg, -1, .acq_rel);
+        if (fd >= 0) posix.close(fd);
     }
 
     /// Signal the pipe_r side as readable (triggers ppoll).
@@ -70,10 +82,10 @@ pub const MockDeviceIO = struct {
         if (self.disconnected) return DeviceIO.ReadError.Disconnected;
         if (self.frame_idx >= self.frames.len) {
             // Close write end once all frames consumed — ppoll sees POLLHUP and returns.
-            if (self.pipe_w >= 0) {
-                posix.close(self.pipe_w);
-                self.pipe_w = -1;
-            }
+            // Routed through the atomic helper so a concurrent external
+            // closeWriteEnd (e.g. a test simulating a dead peer) can't
+            // collide with our close here.
+            self.closeWriteEnd();
             return DeviceIO.ReadError.Again;
         }
         const frame = self.frames[self.frame_idx];
