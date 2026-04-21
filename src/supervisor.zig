@@ -1608,10 +1608,17 @@ pub const Supervisor = struct {
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
+        std.log.info("hotplug: {s} VID={x:0>4} PID={x:0>4} phys=\"{s}\" iface={d}", .{
+            devname, vid, pid, phys, iface_id,
+        });
+
         // Check for a suspended instance with the same VID:PID to rebind
         for (self.managed.items) |*m| {
             if (!m.suspended) continue;
             const mcfg = m.instance.device_cfg;
+            std.log.debug("hotplug: suspended candidate vid={x:0>4} pid={x:0>4} phys_key=\"{s}\" new_phys=\"{s}\" phys_match={}", .{
+                @as(u16, @intCast(mcfg.device.vid)), @as(u16, @intCast(mcfg.device.pid)), m.phys_key, phys, std.mem.eql(u8, m.phys_key, phys),
+            });
             // Match by physical topology path (stable across sleep/wake)
             // rather than VID:PID (ambiguous with identical controllers)
             if (!std.mem.eql(u8, m.phys_key, phys)) continue;
@@ -1629,6 +1636,7 @@ pub const Supervisor = struct {
                     for (new_devices[0..opened]) |dev| dev.close();
                     self.allocator.free(new_devices);
                     if (isTransientOpenError(err)) return error.HotplugTransient;
+                    std.log.warn("hotplug: suspended instance found but resume aborted: open failed", .{});
                     return;
                 };
                 opened += 1;
@@ -1639,17 +1647,22 @@ pub const Supervisor = struct {
             m.instance.rerunInitSequence();
             m.suspended = false;
 
-            const dn_copy = self.allocator.dupe(u8, devname) catch return;
+            const dn_copy = self.allocator.dupe(u8, devname) catch {
+                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
+                return;
+            };
             m.devname = dn_copy;
             const dev_copy = self.allocator.dupe(u8, devname) catch {
                 self.allocator.free(dn_copy);
                 m.devname = null;
+                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
                 return;
             };
             const phys_copy = self.allocator.dupe(u8, phys) catch {
                 self.allocator.free(dn_copy);
                 self.allocator.free(dev_copy);
                 m.devname = null;
+                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
                 return;
             };
             self.devname_map.put(dev_copy, phys_copy) catch {
@@ -1657,6 +1670,7 @@ pub const Supervisor = struct {
                 self.allocator.free(dev_copy);
                 self.allocator.free(phys_copy);
                 m.devname = null;
+                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
                 return;
             };
 
@@ -1664,8 +1678,10 @@ pub const Supervisor = struct {
                 std.log.err("rebind restart failed: {}", .{err});
                 m.suspended = true;
                 m.instance.closeDeviceIO();
+                std.log.warn("hotplug: suspended instance found but resume aborted: restart failed", .{});
                 return;
             };
+            std.log.info("hotplug: resumed suspended instance (phys_key match) for {s}", .{devname});
             std.log.info("device resumed: \"{s}\" {s}/{s}", .{ mcfg.device.name, dev_root, devname });
             return;
         }
