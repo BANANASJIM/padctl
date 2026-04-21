@@ -72,8 +72,9 @@ map = { RT = 0, LT = 1, RB = 2, LB = 3, Y = 4, B = 5, X = 6, A = 7, DPadUp = 8, 
 
 # --- Haptic Pulse output (Report ID 0x8F, 9 bytes) ---
 # byte 0=0x8F side(u8) amplitude(u16le) period(u16le) count(u16le)
+# Haptics use the same proprietary HID interface (2) that carries the 0x09 input stream.
 [commands.rumble]
-interface = 0
+interface = 2
 template = "8f 00 {strong:u8} 00 00 10 00 01 00"
 
 # --- Output device ---
