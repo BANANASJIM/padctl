@@ -17,6 +17,11 @@
 //! so anyone who changes the TOML in a way that breaks Wave 3 routing (bit
 //! indices, match offset, stick offsets) discovers it here rather than on
 //! hardware.
+//!
+//! Interface id: Steam Deck declares `[[device.interface]] id = 2` and the
+//! 0x09 input report is scoped to `interface = 2` in the TOML. The
+//! interpreter matches on exact `interface_id` equality, so all
+//! `processReport` calls below pass `2` as the interface id.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -44,7 +49,7 @@ test "steam_deck_fixture_round_trip: fixture + interpreter agree on Steam Deck T
     // Button A — fixture sets bit 7 of the button_group; TOML maps bit 7 to
     // ButtonId.A, so `delta.buttons` bit 0 (ButtonId.A = 0) should be set.
     const button_bytes = gen.buttonPressReport(.A);
-    const delta_a = (try interp.processReport(0, &button_bytes)) orelse
+    const delta_a = (try interp.processReport(2, &button_bytes)) orelse
         return error.NoMatch;
     const expected_a_mask: u64 = 1 << 0; // ButtonId.A = 0
     try testing.expectEqual(expected_a_mask, delta_a.buttons.?);
@@ -52,7 +57,7 @@ test "steam_deck_fixture_round_trip: fixture + interpreter agree on Steam Deck T
     // Stick: lx=100, ly=-100 — TOML has `left_y = negate`, so delta.ay = 100
     // (double-negate: fixture writes raw, interpreter negates once).
     const stick_bytes = gen.stickReport(100, -100, 0, 0);
-    const delta_s = (try interp.processReport(0, &stick_bytes)) orelse
+    const delta_s = (try interp.processReport(2, &stick_bytes)) orelse
         return error.NoMatch;
     try testing.expectEqual(@as(?i16, 100), delta_s.ax);
     try testing.expectEqual(@as(?i16, 100), delta_s.ay); // negated by TOML transform
@@ -67,7 +72,7 @@ test "steam_deck_fixture_round_trip: lizard mode suppresses button reports" {
     var gen = steam_deck.ReportGenerator{};
     // Do NOT call acceptModeSwitch — fixture stays in lizard mode.
     const r = gen.buttonPressReport(.A);
-    const delta = (try interp.processReport(0, &r)) orelse return error.NoMatch;
+    const delta = (try interp.processReport(2, &r)) orelse return error.NoMatch;
 
     // Lizard mode → buttons field is 0 — GamepadStateDelta encodes "no change"
     // as null for buttons. Accept either a null entry or a literally-zero
@@ -131,7 +136,7 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
     const n = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
     if (n < 16) return error.SkipZigTest;
 
-    const delta_a = (try interp.processReport(0, buf[0..n])) orelse
+    const delta_a = (try interp.processReport(2, buf[0..n])) orelse
         return error.SkipZigTest;
     const expected_a_mask: u64 = 1 << 0;
     try testing.expectEqual(expected_a_mask, delta_a.buttons.?);
@@ -146,7 +151,7 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
     const n2 = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
     if (n2 < 56) return error.SkipZigTest;
 
-    const delta_s = (try interp.processReport(0, buf[0..n2])) orelse
+    const delta_s = (try interp.processReport(2, buf[0..n2])) orelse
         return error.SkipZigTest;
     try testing.expectEqual(@as(?i16, 100), delta_s.ax);
     try testing.expectEqual(@as(?i16, 100), delta_s.ay); // negated by TOML transform

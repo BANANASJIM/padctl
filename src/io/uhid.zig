@@ -147,11 +147,14 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
 
 // --- High-level UhidDevice (T2 + T3) ---------------------------------------
 
-/// Precise error set for `UhidDevice.init`. Keeps the vtable callers out of
-/// `anyerror` land (see Phase 10 T9 VTable error-set convergence work).
+/// Precise error set for `UhidDevice.init` / `UhidDevice.initWithFd`. Keeps
+/// the vtable callers out of `anyerror` land (see Phase 10 T9 VTable
+/// error-set convergence work). `InvalidFd` is only reachable from
+/// `initWithFd`; both constructors share the set for API symmetry.
 pub const InitError = error{
     ConfigInvalid,
     DescriptorTooLarge,
+    InvalidFd,
     UhidCreateFailed,
     OutOfMemory,
 } || posix.OpenError || posix.WriteError;
@@ -221,6 +224,12 @@ pub const UhidDevice = struct {
         errdefer posix.close(fd);
 
         try sendCreate(fd, cfg);
+        // After sendCreate succeeded the kernel has a live UHID device wired
+        // to `fd`; if the allocation below fails we must tear the kernel
+        // side down in addition to closing `fd` (otherwise the virtual
+        // device lingers until the process exits). `uhidDestroy` is
+        // best-effort — errors are swallowed, exactly like `close()` does.
+        errdefer uhidDestroy(fd);
 
         const self = try allocator.create(UhidDevice);
         self.* = .{
@@ -239,11 +248,17 @@ pub const UhidDevice = struct {
     ///
     /// Unlike `init`, this does NOT send a `UHID_CREATE2` event — the caller
     /// drives that manually if desired. Use only from tests.
+    ///
+    /// Shares `InitError` with `init` so callers see a uniform error set.
+    /// Negative fds are rejected (`error.InvalidFd`) — otherwise a `-1`
+    /// sentinel leaks from `close()` idempotency back into a fresh
+    /// `UhidDevice` and silently poisons every downstream write.
     pub fn initWithFd(
         allocator: std.mem.Allocator,
         fd: posix.fd_t,
         cfg: Config,
-    ) !*UhidDevice {
+    ) InitError!*UhidDevice {
+        if (fd < 0) return error.InvalidFd;
         if (cfg.name.len == 0) return error.ConfigInvalid;
         if (cfg.descriptor.len == 0) return error.ConfigInvalid;
         if (cfg.descriptor.len > HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
@@ -353,17 +368,31 @@ pub const UhidDevice = struct {
         return null;
     }
 
+    /// Tear the kernel device down and close the backing fd. Safe to call
+    /// multiple times — the second call is a no-op (we sentinel `self.fd`
+    /// to `-1` on the first call and short-circuit on entry). Matches the
+    /// idempotency pattern used by `UhidSimulator.destroy()`.
     pub fn close(self: *UhidDevice) void {
+        if (self.fd < 0) return;
         uhidDestroy(self.fd);
         posix.close(self.fd);
+        self.fd = -1;
     }
 
+    /// Map an i16 stick axis (-32768..32767) to a u8 HID logical value
+    /// (0..255) centred at 128. Fixed points:
+    ///   axisToU8(-32768) = 0      (full negative)
+    ///   axisToU8(     0) = 128    (centre / rest)
+    ///   axisToU8(+32767) = 255    (full positive, truncated)
+    ///
+    /// Divisor = 256 (not 257): we add 32768 first so the input lies in the
+    /// unsigned range 0..65535, then `>> 8` (= `/ 256`) compresses to 0..255
+    /// with 0 landing exactly on 128. A divisor of 257 would map 0 to 127
+    /// (65535 / 257 ≈ 254.9, so (0+32768)/257 = 127) which breaks the
+    /// "centred at 128" contract asserted by `uhid_device_vtable_match`.
     fn axisToU8(v: i16) u8 {
-        // i16 stick axis range (-32768..32767) → u8 HID logical (0..255).
-        // Centre 0 maps to 128 (mid-range) to match the 4-byte test descriptor
-        // shipped with the unit tests. Out-of-range input is clamped.
-        const shifted: i32 = @as(i32, v) + 32768;
-        const scaled: i32 = @divTrunc(shifted, 257); // 65535 / 257 ≈ 255
+        const shifted: i32 = @as(i32, v) + 32768; // now in 0..65535
+        const scaled: i32 = @divTrunc(shifted, 256); // 65535 / 256 = 255 (floor)
         if (scaled < 0) return 0;
         if (scaled > 255) return 255;
         return @intCast(scaled);
@@ -390,10 +419,13 @@ test "uhid: constants and struct layout" {
 }
 
 test "uhid: axisToU8 clamps and centres" {
+    // Fixed points for the i16 -> u8 remap (divisor = 256, centre at 128).
     try testing.expectEqual(@as(u8, 0), UhidDevice.axisToU8(-32768));
     try testing.expectEqual(@as(u8, 128), UhidDevice.axisToU8(0));
-    // 32767 → (32767+32768)/257 = 65535/257 = 255 (truncation).
+    // 32767 → (32767+32768)/256 = 65535/256 = 255 (floor).
     try testing.expectEqual(@as(u8, 255), UhidDevice.axisToU8(32767));
+    // Spot-check an intermediate: -1 → (32767)/256 = 127.
+    try testing.expectEqual(@as(u8, 127), UhidDevice.axisToU8(-1));
 }
 
 test "uhid: UhidDevice vtable signature matches OutputDevice" {
@@ -527,5 +559,54 @@ test "uhid_device_vtable_match: outputDevice() dispatches through vtable" {
     _ = try posix.read(fds[0], &scratch);
 
     out.close();
+    _ = try posix.read(fds[0], &scratch);
+}
+
+test "uhid: initWithFd rejects negative fd" {
+    const alloc = testing.allocator;
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    // A raw `-1` is ambiguous across platforms (some prefer wrapping via
+    // `@as(posix.fd_t, -1)`). Zig's stdlib treats the fd as `c_int`, so -1
+    // round-trips cleanly. Use a `var` so @as survives the const inference.
+    const bogus_fd: posix.fd_t = -1;
+    try testing.expectError(error.InvalidFd, UhidDevice.initWithFd(alloc, bogus_fd, cfg));
+}
+
+test "uhid: close() is idempotent (second call is a no-op)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    // First close: real teardown. Second close: must be a no-op — in
+    // particular, it MUST NOT call `posix.close(fds[1])` a second time
+    // (that would EBADF and, worse, recycle the fd into a concurrent
+    // caller's open slot).
+    dev.close();
+    try testing.expectEqual(@as(posix.fd_t, -1), dev.fd);
+    dev.close(); // no-op, must not panic
+    try testing.expectEqual(@as(posix.fd_t, -1), dev.fd);
+
+    // Drain the UHID_DESTROY frame the first close() wrote so the pipe
+    // buffer doesn't linger into a later test.
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
     _ = try posix.read(fds[0], &scratch);
 }

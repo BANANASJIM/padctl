@@ -6,9 +6,9 @@
 //! Layout (64 bytes, little-endian) — mirrors `devices/valve/steam-deck.toml`
 //! on `main`:
 //!   byte 0 : 0x01  envelope header byte 0 (version)
-//!   byte 1 : 0x09  report_type (matches `[report.match]` offset=1 expect=[0x09])
-//!   byte 2 : 0x40  payload_len (64)
-//!   byte 3 : 0x00  counter low byte
+//!   byte 1 : 0x00  reserved / envelope padding
+//!   byte 2 : 0x09  report_type (matches `[report.match]` offset=2 expect=[0x09])
+//!   byte 3 : 0x40  payload_len (64)
 //!   bytes 4-7    : frame_counter u32le
 //!   bytes 8-15   : buttons bitfield (per button_group map in steam-deck.toml)
 //!   bytes 16-23  : trackpad L/R X/Y i16le (touch0_x/y, touch1_x/y)
@@ -126,10 +126,12 @@ pub const ReportGenerator = struct {
 
     fn buildReport(self: *ReportGenerator, params: Params) [ReportSize]u8 {
         var out: [ReportSize]u8 = std.mem.zeroes([ReportSize]u8);
-        out[0] = 0x01;
-        out[1] = 0x09; // report_type — matches `[report.match]` offset=1 expect=[0x09]
-        out[2] = 0x40; // payload_len
-        out[3] = 0x00;
+        // Envelope per `devices/valve/steam-deck.toml` + kernel hid-steam.c
+        // :1748-1766. `[report.match]` requires offset=2 expect=[0x09].
+        out[0] = 0x01; // envelope header byte 0 (version)
+        out[1] = 0x00; // reserved / envelope padding
+        out[2] = 0x09; // report_type — matches `[report.match]` offset=2 expect=[0x09]
+        out[3] = 0x40; // payload_len (64)
 
         self.frame_counter +%= 1;
         std.mem.writeInt(u32, out[4..8], self.frame_counter, .little);
@@ -153,9 +155,9 @@ test "fixtures.steam_deck: idle report envelope" {
     var gen = ReportGenerator{};
     const r = gen.idleReport();
     try testing.expectEqual(@as(u8, 0x01), r[0]);
-    try testing.expectEqual(@as(u8, 0x09), r[1]); // match.offset=1 expect=[0x09]
-    try testing.expectEqual(@as(u8, 0x40), r[2]);
-    try testing.expectEqual(@as(u8, 0x00), r[3]);
+    try testing.expectEqual(@as(u8, 0x00), r[1]);
+    try testing.expectEqual(@as(u8, 0x09), r[2]); // match.offset=2 expect=[0x09]
+    try testing.expectEqual(@as(u8, 0x40), r[3]); // payload_len
     // frame_counter bumped to 1 on first call (starts at 0, +%= 1).
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, r[4..8], .little));
     // No buttons, no sticks.
