@@ -21,7 +21,12 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\NoNewPrivileges=true
         \\LockPersonality=true
         \\ProtectClock=true
-        \\LogsDirectory=padctl
+        \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,
+        \\# /var/lib/padctl on system services. systemd pre-creates it with
+        \\# the right perms, exports $STATE_DIRECTORY, and auto-whitelists
+        \\# the path through read-only home/system protections applied via
+        \\# drop-ins so the daemon can always write its dump log there.
+        \\StateDirectory=padctl
         \\
         \\[Install]
         \\WantedBy=default.target
@@ -99,8 +104,6 @@ const immutable_dropin_content =
     \\TimeoutStopSec=3
     \\# SIGTERM main + SIGKILL stuck threads simultaneously
     \\KillMode=mixed
-    \\# Create /var/log/padctl/ writable despite ProtectSystem=strict
-    \\LogsDirectory=padctl
     \\
 ;
 
@@ -149,14 +152,11 @@ fn resolveServiceDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: 
         const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
         return std.fmt.allocPrint(allocator, "{s}{s}/.config/systemd/user", .{ destdir, home });
     }
-    // On immutable OS (Bazzite/Fedora Atomic), /usr/local is a bind mount from
-    // /var/usrlocal which is unavailable during early boot. The service MUST
-    // live in /etc/systemd/system/ so systemd can find it and honour
-    // WantedBy=multi-user.target. Uses the system service template.
     if (immutable) {
-        return std.fmt.allocPrint(allocator, "{s}/etc/systemd/system", .{destdir});
+        return std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
     }
-    // Non-immutable: user service paths (same as before PR #84).
+    // systemd < 253 only scans /usr/lib/systemd/user for system-wide user units.
+    // Any other prefix falls back to /etc/systemd/user which is always scanned.
     if (std.mem.eql(u8, prefix, "/usr")) {
         return std.fmt.allocPrint(allocator, "{s}/usr/lib/systemd/user", .{destdir});
     }
@@ -164,8 +164,9 @@ fn resolveServiceDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: 
 }
 
 /// Update any legacy system service files left behind by pre-user-service
-/// installs. Without this, upgrades leave stale ExecStart (missing --config-dir)
-/// and stale drop-ins (missing LogsDirectory) on the running system service.
+/// installs. Without this, upgrades leave stale ExecStart (missing
+/// --config-dir) and stale drop-ins on disk; if a user later re-enables
+/// the legacy unit manually, they would get the old stale content.
 fn updateLegacySystemService(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8) void {
     // /etc/systemd/system — legacy installs placed the service here
     const etc_dir = std.fmt.allocPrint(allocator, "{s}/etc/systemd/system", .{destdir}) catch return;
@@ -237,7 +238,7 @@ fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []const u8
         \\ProtectHome=true
         \\PrivateTmp=true
         \\RuntimeDirectory=padctl
-        \\LogsDirectory=padctl
+        \\StateDirectory=padctl
         \\NoNewPrivileges=true
         \\SupplementaryGroups=input
         \\DeviceAllow=/dev/hidraw* rw
@@ -330,6 +331,38 @@ fn runCmd(argv: []const []const u8) void {
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
     _ = child.spawnAndWait() catch {};
+}
+
+/// Ask a y/n question on stderr and read the answer from stdin.
+/// Default-yes: empty input, any "y*", any "Y*" → true.
+/// When stdin is not a TTY (CI / scripted install), return true
+/// without prompting so non-interactive runs proceed with cleanup.
+fn promptYesNoDefaultYes(question: []const u8) bool {
+    const is_tty = std.posix.isatty(std.posix.STDIN_FILENO);
+    if (!is_tty) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "  ") catch {};
+        _ = std.posix.write(std.posix.STDERR_FILENO, question) catch {};
+        _ = std.posix.write(std.posix.STDERR_FILENO, " [Y/n] (non-interactive → Y)\n") catch {};
+        return true;
+    }
+    _ = std.posix.write(std.posix.STDERR_FILENO, "  ") catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, question) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, " [Y/n] ") catch {};
+
+    var buf: [16]u8 = undefined;
+    const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return true;
+    return parseYesNoDefaultYes(buf[0..n]);
+}
+
+/// Pure helper: decide yes/no from a raw answer string.
+/// Default-yes semantics: empty input (incl. just whitespace/newline) → yes.
+/// First non-whitespace char is y/Y → yes; anything else → no.
+/// Extracted from promptYesNoDefaultYes so tests can cover the parse
+/// rules without touching stdin/stderr.
+fn parseYesNoDefaultYes(raw: []const u8) bool {
+    const answer = std.mem.trim(u8, raw, " \t\r\n");
+    if (answer.len == 0) return true;
+    return answer[0] == 'y' or answer[0] == 'Y';
 }
 
 /// Like runCmd but warns on non-zero exit. Used for critical steps (enable/start).
@@ -659,19 +692,62 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     else
         opts.prefix;
 
-    // Migration hint: warn if old system unit exists
-    {
-        const old_unit = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/system/padctl.service", .{destdir});
-        defer allocator.free(old_unit);
+    // Legacy system-unit migration: pre-user-service installs placed the
+    // unit at /etc/systemd/system/padctl.service. That unit has been
+    // superseded by the per-user unit at /etc/systemd/user/padctl.service;
+    // leaving the old one enabled would race with the new one for the
+    // hidraw grab. We're already running as root via sudo, so offer to
+    // stop+disable+remove it ourselves — "don't break userspace, don't
+    // force users to run manual commands to finish an install." Prompt
+    // interactively for consent; default-yes on TTY, auto-proceed when
+    // stdin isn't a TTY so non-interactive installs (CI, scripts) still
+    // converge on a clean state.
+    if (destdir.len == 0) {
+        const old_unit = "/etc/systemd/system/padctl.service";
         if (std.fs.accessAbsolute(old_unit, .{})) |_| {
             _ = std.posix.write(std.posix.STDERR_FILENO,
-                \\warning: legacy system unit detected at /etc/systemd/system/padctl.service
-                \\  Stop and disable it before using the new user service:
-                \\    sudo systemctl stop padctl.service
-                \\    sudo systemctl disable padctl.service
-                \\    sudo rm /etc/systemd/system/padctl.service
+                \\warning: legacy system service detected at /etc/systemd/system/padctl.service
+                \\  padctl now runs as a user service. The legacy system unit
+                \\  would race with the new per-user unit for the hidraw grab,
+                \\  so we recommend removing it now. Proposed actions:
+                \\    - stop     padctl.service
+                \\    - disable  padctl.service
+                \\    - remove   /etc/systemd/system/padctl.service
+                \\    - remove   /etc/systemd/system/padctl.service.d/ (drop-ins)
+                \\    - remove   /etc/systemd/system/padctl-resume.service (if present)
                 \\
             ) catch {};
+            const proceed = promptYesNoDefaultYes("Migrate legacy system service now?");
+            if (proceed) {
+                runCmd(&.{ "systemctl", "stop", "padctl.service" });
+                runCmd(&.{ "systemctl", "disable", "padctl.service" });
+                std.fs.deleteFileAbsolute(old_unit) catch {};
+                // Also drop the legacy drop-in directory so daemon-reload
+                // doesn't keep re-parsing stale overrides.
+                std.fs.deleteTreeAbsolute("/etc/systemd/system/padctl.service.d") catch {};
+                // Resume service counterpart — same story.
+                const old_resume = "/etc/systemd/system/padctl-resume.service";
+                if (std.fs.accessAbsolute(old_resume, .{})) |_| {
+                    runCmd(&.{ "systemctl", "disable", "padctl-resume.service" });
+                    std.fs.deleteFileAbsolute(old_resume) catch {};
+                } else |_| {}
+                _ = std.posix.write(
+                    std.posix.STDERR_FILENO,
+                    "  legacy migration complete\n\n",
+                ) catch {};
+            } else {
+                _ = std.posix.write(std.posix.STDERR_FILENO,
+                    \\  skipped — keeping the legacy unit in place. You can
+                    \\  remove it later by rerunning `padctl install` and
+                    \\  answering yes, or manually:
+                    \\    sudo systemctl stop padctl.service
+                    \\    sudo systemctl disable padctl.service
+                    \\    sudo rm /etc/systemd/system/padctl.service
+                    \\    sudo rm -rf /etc/systemd/system/padctl.service.d
+                    \\    sudo rm -f /etc/systemd/system/padctl-resume.service
+                    \\
+                ) catch {};
+            }
         } else |_| {}
     }
 
@@ -715,12 +791,10 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 2. Write service file with correct prefix paths
     const service_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{lib_systemd_dir});
     defer allocator.free(service_path);
-    // Immutable root installs use the system service template (WantedBy=multi-user.target,
-    // ProtectSystem=strict, etc.). All others use the user service template.
-    const service_content = if (effective_immutable and !effective_user_service)
-        try generateSystemServiceContent(allocator, prefix)
-    else
-        try generateServiceContent(allocator, prefix);
+    // Always use the user-service template. Even on immutable-root installs,
+    // the service file is placed under /etc/systemd/user/ so systemd discovers
+    // it as a user unit and each user's systemd instance runs its own copy.
+    const service_content = try generateServiceContent(allocator, prefix);
     defer allocator.free(service_content);
     {
         var f = try std.fs.createFileAbsolute(service_path, .{ .truncate = true });
@@ -732,7 +806,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
     // 2b. Write immutable drop-in override (only when immutable system install)
-    if (effective_immutable and !effective_user_service) {
+    if (effective_immutable) {
         const dropin_dir = try std.fmt.allocPrint(allocator, "{s}/padctl.service.d", .{lib_systemd_dir});
         defer allocator.free(dropin_dir);
         try ensureDirAll(allocator, dropin_dir);
@@ -747,11 +821,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, dropin_path) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
-        // Also update the legacy system service drop-in if it exists. Old installs
-        // (pre-user-service) placed the drop-in under /etc/systemd/system/ which
-        // the new user-service installer does not touch. Without this, upgrades
-        // leave the old drop-in stale and any new directives (e.g. LogsDirectory)
-        // never take effect on the running system service.
+        // Also refresh any legacy system service drop-in if it exists. Old
+        // installs (pre-user-service) placed the drop-in under
+        // /etc/systemd/system/ which the new user-service installer does
+        // not touch. Without this, upgrades leave the old drop-in stale on
+        // disk — harmless while the system service stays disabled, but
+        // misleading if a user ever enables it manually.
         updateLegacySystemService(allocator, destdir, prefix);
     }
 
@@ -2090,12 +2165,17 @@ test "install: shouldAbortForImmutable logic" {
     try testing.expect(!shouldAbortForImmutable(.none, .{}));
 }
 
-test "install: resolveServiceDir immutable routes to /etc/systemd/system" {
+test "install: resolveServiceDir immutable routes to /etc/systemd/user" {
+    // Immutable installs write a USER service unit to /etc/systemd/user/ so
+    // systemd discovers it as a user unit and each user's systemd instance
+    // runs its own copy. The matching updateLegacySystemService() helper
+    // cleans up any leftover /etc/systemd/system/padctl.service from older
+    // installs.
     const testing = std.testing;
     const allocator = testing.allocator;
     const result = try resolveServiceDir(allocator, "/staging", "/usr/local", true, false);
     defer allocator.free(result);
-    try testing.expectEqualStrings("/staging/etc/systemd/system", result);
+    try testing.expectEqualStrings("/staging/etc/systemd/user", result);
 }
 
 test "install: resolveServiceDir /usr non-immutable routes to /usr/lib/systemd/user" {
@@ -2134,6 +2214,73 @@ test "install: immutable dropin content has required directives" {
     // ProtectHome to keep `padctl status`/`switch`/`devices` working
     // on immutable-OS user-service installs.
     try testing.expect(std.mem.indexOf(u8, immutable_dropin_content, "ReadWritePaths=/run/user/%U") != null);
+    // LogsDirectory= on a user service puts files under
+    // $XDG_STATE_HOME/log/padctl (extra 'log/' subdir), splitting the
+    // daemon's log path from stateDir()'s $XDG_STATE_HOME/padctl. The
+    // main service template now uses StateDirectory=padctl for the flat
+    // path; the drop-in must NOT reintroduce LogsDirectory.
+    try testing.expect(std.mem.indexOf(u8, immutable_dropin_content, "LogsDirectory") == null);
+}
+
+test "install: generateServiceContent uses StateDirectory (not LogsDirectory)" {
+    // StateDirectory=padctl maps to $XDG_STATE_HOME/padctl on user services
+    // and matches padctl's stateDir() resolver. LogsDirectory=padctl on a
+    // user service would nest under $XDG_STATE_HOME/log/padctl — splitting
+    // the path between daemon and CLI.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr/local");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "LogsDirectory") == null);
+}
+
+test "install: generateSystemServiceContent uses StateDirectory (not LogsDirectory)" {
+    // Legacy-upgrade template: the /etc/systemd/system/ unit that
+    // updateLegacySystemService refreshes if it still exists. Consistency
+    // with the user-service template — if a user manually resurrects the
+    // legacy unit, its state dir matches what stateDir() resolves to.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateSystemServiceContent(allocator, "/usr/local");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "LogsDirectory") == null);
+}
+
+test "install: parseYesNoDefaultYes empty input is yes (default-yes)" {
+    try std.testing.expect(parseYesNoDefaultYes(""));
+    try std.testing.expect(parseYesNoDefaultYes("\n"));
+    try std.testing.expect(parseYesNoDefaultYes("\r\n"));
+    try std.testing.expect(parseYesNoDefaultYes("   "));
+    try std.testing.expect(parseYesNoDefaultYes(" \t \n"));
+}
+
+test "install: parseYesNoDefaultYes 'y' variants are yes" {
+    try std.testing.expect(parseYesNoDefaultYes("y"));
+    try std.testing.expect(parseYesNoDefaultYes("Y"));
+    try std.testing.expect(parseYesNoDefaultYes("yes\n"));
+    try std.testing.expect(parseYesNoDefaultYes("YES"));
+    try std.testing.expect(parseYesNoDefaultYes("  y  \n"));
+    try std.testing.expect(parseYesNoDefaultYes("y\n"));
+}
+
+test "install: parseYesNoDefaultYes 'n' variants are no" {
+    try std.testing.expect(!parseYesNoDefaultYes("n"));
+    try std.testing.expect(!parseYesNoDefaultYes("N"));
+    try std.testing.expect(!parseYesNoDefaultYes("no\n"));
+    try std.testing.expect(!parseYesNoDefaultYes("NO"));
+    try std.testing.expect(!parseYesNoDefaultYes("  n  \n"));
+}
+
+test "install: parseYesNoDefaultYes non-y non-n input is treated as no" {
+    // Anything that isn't default-empty or y/Y should fail safe to NO,
+    // protecting destructive operations from typos like "k\n" or "maybe".
+    try std.testing.expect(!parseYesNoDefaultYes("k"));
+    try std.testing.expect(!parseYesNoDefaultYes("maybe"));
+    try std.testing.expect(!parseYesNoDefaultYes("1"));
+    try std.testing.expect(!parseYesNoDefaultYes("true"));
+    try std.testing.expect(!parseYesNoDefaultYes("asdf"));
 }
 
 // --- Phase 3: resume service, reconnect script, hotplug rules ---

@@ -283,18 +283,29 @@ systemctl --user restart padctl.service 2>/dev/null || true
 #         their IPC socket under $XDG_RUNTIME_DIR (/run/user/<uid>/padctl.sock),
 #         and the CLI's default resolver finds it correctly from the user shell.
 #         The daemon needs a few seconds post-restart to run device init + bind
-#         its IPC socket, so retry a few times before giving up. ---
+#         its IPC socket, so retry a few times before giving up. "no-devices"
+#         is a permanent error for this session (no retry will help) — the
+#         binding in /etc/padctl/config.toml still takes effect on the next
+#         hot-plug, so we short-circuit with a clearer message. ---
 if [[ -n "$MAPPING" ]]; then
     mapping_applied=false
+    no_devices=false
     for attempt in 1 2 3 4 5 6; do
         sleep 1
-        if "$PREFIX/bin/padctl" switch "$MAPPING" 2>/dev/null; then
+        switch_output=$("$PREFIX/bin/padctl" switch "$MAPPING" 2>&1)
+        if [[ $? -eq 0 ]]; then
             mapping_applied=true
+            break
+        fi
+        if [[ "$switch_output" == *"no-devices"* ]]; then
+            no_devices=true
             break
         fi
     done
     if $mapping_applied; then
         ok "Mapping applied: $MAPPING (persisted for future boots via /etc/padctl/config.toml)"
+    elif $no_devices; then
+        info "No controller currently connected — mapping will auto-apply via /etc/padctl/config.toml when you plug it in."
     else
         warn "Could not apply mapping to running daemon (it will auto-apply on next boot). Run manually: padctl switch $MAPPING"
     fi

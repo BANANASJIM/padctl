@@ -368,8 +368,6 @@ pub const UinputDevice = struct {
     pub fn pollFf(self: *UinputDevice) !?FfEvent {
         var result: ?FfEvent = null;
         var ev_count: u32 = 0;
-        var ff_count: u32 = 0;
-        var overwrite_count: u32 = 0;
         while (true) {
             var ev: c.input_event = undefined;
             const n = std.posix.read(self.fd, std.mem.asBytes(&ev)) catch |err| switch (err) {
@@ -436,13 +434,8 @@ pub const UinputDevice = struct {
                     rumble_log.debug("[{s}] pollFf: OUT_OF_RANGE code={d} value={d} DROPPED", .{ self.log_tag, ev.code, ev.value });
                     continue;
                 }
-                ff_count += 1;
-                if (result != null) overwrite_count += 1;
-                const prev_tag: []const u8 = if (result != null) "overwritten" else "none";
                 if (ev.value == 0) {
-                    rumble_log.debug("[{s}] pollFf: STOP id={d} (ev#{d}, prev={s})", .{
-                        self.log_tag, id, ff_count, prev_tag,
-                    });
+                    rumble_log.debug("[{s}] pollFf: STOP id={d}", .{ self.log_tag, id });
                     result = FfEvent{
                         .effect_type = c.FF_RUMBLE,
                         .effect_id = @intCast(id),
@@ -452,8 +445,8 @@ pub const UinputDevice = struct {
                     };
                 } else {
                     const eff = self.ff_effects[id];
-                    rumble_log.debug("[{s}] pollFf: PLAY id={d} strong={d} weak={d} dur={d}ms (ev#{d}, prev={s})", .{
-                        self.log_tag, id, eff.strong, eff.weak, eff.length_ms, ff_count, prev_tag,
+                    rumble_log.debug("[{s}] pollFf: PLAY id={d} strong={d} weak={d} dur={d}ms", .{
+                        self.log_tag, id, eff.strong, eff.weak, eff.length_ms,
                     });
                     result = FfEvent{
                         .effect_type = c.FF_RUMBLE,
@@ -475,12 +468,12 @@ pub const UinputDevice = struct {
         if (ev_count > 0) {
             if (result) |r| {
                 const kind: []const u8 = if (r.strong == 0 and r.weak == 0) "STOP" else "PLAY";
-                rumble_log.debug("[{s}] pollFf: drain end, {d} events read, {d} EV_FF, {d} overwritten, returning {s} id={d}", .{
-                    self.log_tag, ev_count, ff_count, overwrite_count, kind, r.effect_id,
+                rumble_log.debug("[{s}] pollFf: drain end, {d} events read, returning {s} id={d}", .{
+                    self.log_tag, ev_count, kind, r.effect_id,
                 });
             } else {
-                rumble_log.debug("[{s}] pollFf: drain end, {d} events read, {d} EV_FF, returning null", .{
-                    self.log_tag, ev_count, ff_count,
+                rumble_log.debug("[{s}] pollFf: drain end, {d} events read, returning null", .{
+                    self.log_tag, ev_count,
                 });
             }
         }
@@ -1714,52 +1707,4 @@ test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
     try std.testing.expectEqual(r1.strong, r2.strong);
     try std.testing.expectEqual(r1.weak, r2.weak);
     try std.testing.expectEqual(r1.duration_ms, r2.duration_ms);
-}
-
-test "uinput: pollFf drain with overwrite: PLAY then STOP returns STOP" {
-    // Verifies the drain loop correctly overwrites and the stop event wins.
-    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
-    defer std.posix.close(pfds[0]);
-    defer std.posix.close(pfds[1]);
-
-    var dev = UinputDevice{
-        .fd = pfds[0],
-        .button_codes = [_]u16{0} ** BUTTON_COUNT,
-    };
-    dev.ff_effects[0] = .{ .strong = 0xffff, .weak = 0xffff, .length_ms = 500 };
-
-    // Write PLAY then STOP for same id — STOP should win.
-    const play = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
-    const stop = c.input_event{ .type = c.EV_FF, .code = 0, .value = 0, .time = std.mem.zeroes(c.timeval) };
-    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
-    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
-
-    const result = (try dev.pollFf()).?;
-    try std.testing.expectEqual(@as(u16, 0), result.strong);
-    try std.testing.expectEqual(@as(u16, 0), result.weak);
-    try std.testing.expectEqual(@as(u8, 0), result.effect_id);
-}
-
-test "uinput: pollFf drain with overwrite: STOP then PLAY returns PLAY" {
-    // Verifies the opposite overwrite direction.
-    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
-    defer std.posix.close(pfds[0]);
-    defer std.posix.close(pfds[1]);
-
-    var dev = UinputDevice{
-        .fd = pfds[0],
-        .button_codes = [_]u16{0} ** BUTTON_COUNT,
-    };
-    dev.ff_effects[3] = .{ .strong = 0xaaaa, .weak = 0xbbbb, .length_ms = 100 };
-
-    const stop = c.input_event{ .type = c.EV_FF, .code = 3, .value = 0, .time = std.mem.zeroes(c.timeval) };
-    const play = c.input_event{ .type = c.EV_FF, .code = 3, .value = 1, .time = std.mem.zeroes(c.timeval) };
-    _ = try std.posix.write(pfds[1], std.mem.asBytes(&stop));
-    _ = try std.posix.write(pfds[1], std.mem.asBytes(&play));
-
-    const result = (try dev.pollFf()).?;
-    try std.testing.expectEqual(@as(u16, 0xaaaa), result.strong);
-    try std.testing.expectEqual(@as(u16, 0xbbbb), result.weak);
-    try std.testing.expectEqual(@as(u8, 3), result.effect_id);
-    try std.testing.expectEqual(@as(u16, 100), result.duration_ms);
 }

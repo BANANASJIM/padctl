@@ -19,19 +19,41 @@ pub fn dataDir() []const u8 {
 }
 
 /// Returns the directory for padctl log/state files.
-/// Priority: $LOGS_DIRECTORY (systemd LogsDirectory=) > $XDG_STATE_HOME/padctl
-/// > ~/.local/state/padctl > /var/log/padctl.
+///
+/// Priority (see `resolveStateDir` for the pure logic):
+/// 1. $STATE_DIRECTORY — set by systemd when the unit declares
+///    StateDirectory=padctl. Maps to $XDG_STATE_HOME/padctl on the user
+///    service and /var/lib/padctl on a system service. systemd pre-creates
+///    the dir and auto-whitelists it through any active sandbox directives.
+/// 2. $XDG_STATE_HOME/padctl — non-systemd invocations (e.g. the CLI
+///    running in the user's shell) with XDG set.
+/// 3. ~/.local/state/padctl — non-systemd invocations with HOME set.
+/// 4. /var/log/padctl — last-resort fallback when neither XDG nor HOME
+///    is available (shouldn't happen in practice).
+///
 /// Caller frees.
 pub fn stateDir(allocator: Allocator) ![]u8 {
-    // systemd sets LOGS_DIRECTORY=/var/log/padctl when LogsDirectory=padctl
-    // is in the unit file. This path is writable even under ProtectSystem=strict.
-    if (std.posix.getenv("LOGS_DIRECTORY")) |logs_dir| {
-        return allocator.dupe(u8, logs_dir);
-    }
-    if (std.posix.getenv("XDG_STATE_HOME")) |xdg| {
+    return resolveStateDir(
+        allocator,
+        std.posix.getenv("STATE_DIRECTORY"),
+        std.posix.getenv("XDG_STATE_HOME"),
+        std.posix.getenv("HOME"),
+    );
+}
+
+/// Pure helper: resolve the state directory from explicit env values.
+/// Extracted so tests don't have to manipulate process environment.
+pub fn resolveStateDir(
+    allocator: Allocator,
+    state_dir_env: ?[]const u8,
+    xdg_state_home_env: ?[]const u8,
+    home_env: ?[]const u8,
+) ![]u8 {
+    if (state_dir_env) |s| return allocator.dupe(u8, s);
+    if (xdg_state_home_env) |xdg| {
         return std.fmt.allocPrint(allocator, "{s}/padctl", .{xdg});
     }
-    const home = std.posix.getenv("HOME") orelse {
+    const home = home_env orelse {
         return allocator.dupe(u8, "/var/log/padctl");
     };
     return std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home});
@@ -177,4 +199,52 @@ test "findConfig: returns path when file exists" {
 
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings(file_path, result.?);
+}
+
+test "resolveStateDir: STATE_DIRECTORY wins over all others" {
+    const allocator = std.testing.allocator;
+    const result = try resolveStateDir(
+        allocator,
+        "/var/lib/padctl",
+        "/some/xdg",
+        "/home/user",
+    );
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/var/lib/padctl", result);
+}
+
+test "resolveStateDir: falls back to XDG_STATE_HOME/padctl when STATE_DIRECTORY unset" {
+    const allocator = std.testing.allocator;
+    const result = try resolveStateDir(
+        allocator,
+        null,
+        "/home/elly/.local/state",
+        "/home/elly",
+    );
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/home/elly/.local/state/padctl", result);
+}
+
+test "resolveStateDir: falls back to HOME/.local/state/padctl when XDG unset" {
+    const allocator = std.testing.allocator;
+    const result = try resolveStateDir(allocator, null, null, "/home/shakespear");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/home/shakespear/.local/state/padctl", result);
+}
+
+test "resolveStateDir: last-resort /var/log/padctl when nothing is set" {
+    const allocator = std.testing.allocator;
+    const result = try resolveStateDir(allocator, null, null, null);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/var/log/padctl", result);
+}
+
+test "resolveStateDir: empty STATE_DIRECTORY still wins (systemd sets it empty if no directive)" {
+    // Defensive — even if systemd somehow exports an empty STATE_DIRECTORY,
+    // we should return it as-is rather than silently treating it as unset.
+    // Caller is expected to check for empty strings before using the path.
+    const allocator = std.testing.allocator;
+    const result = try resolveStateDir(allocator, "", "/home/elly/.local/state", "/home/elly");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
 }
