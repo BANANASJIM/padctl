@@ -289,8 +289,9 @@ else
     warn "Service: not running — check 'systemctl --user status padctl' and 'journalctl --user -u padctl -n 30'"
 fi
 
-# Check resume service
-if systemctl --user is-enabled padctl-resume.service &>/dev/null; then
+# Check resume service — installed system-scope (see install.zig ~628),
+# so we check via `systemctl` (not `systemctl --user`)
+if systemctl is-enabled padctl-resume.service &>/dev/null; then
     ok "Resume service: enabled"
 fi
 
