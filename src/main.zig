@@ -62,6 +62,7 @@ pub const io = struct {
     pub const hidraw = @import("io/hidraw.zig");
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
+    pub const uhid = @import("io/uhid.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const netlink = @import("io/netlink.zig");
 };
@@ -102,6 +103,11 @@ pub const testing_support = struct {
     pub const lean_drt_props = @import("test/properties/lean_drt_props.zig");
     pub const reference_interp = @import("test/reference_interp.zig");
     pub const gen = @import("test/gen/gen.zig");
+    // Phase 13 Wave 1 T5: surface fixture + simulator harness for unit tests.
+    // Integration test with real /dev/uhid lives in its own build target
+    // (`zig build test-integration` → steam_deck_uhid_e2e_test).
+    pub const steam_deck_fixture = @import("test/fixtures/steam_deck_reports.zig");
+    pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
 };
 
 pub const config = struct {
