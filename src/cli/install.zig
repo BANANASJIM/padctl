@@ -2365,6 +2365,36 @@ test "install: parseYesNoDefaultYes non-y non-n input is treated as no" {
 // hotplug after suspend/resume. These tests lock in that the installer
 // neither writes the unit nor leaves legacy copies behind on upgrade.
 
+// Scoped fd-1 silencer for tests that drive run()/uninstall() directly.
+// Those functions emit user-facing progress on STDOUT_FILENO (fd 1).
+// Under `zig build test*`, fd 1 is the zig build-server binary protocol
+// channel (test_runner mainServer). Any bytes written by the test body
+// corrupt that stream; the build runner then parses ASCII as a message
+// header (~1.9 GB body) and blocks forever reading, while the test
+// runner sits in `anon_pipe_read` waiting for the next `run_test`
+// command — i.e., the deadlock observed as `zig build test-tsan` hang.
+// Redirecting fd 1 to /dev/null for the duration of the install/uninstall
+// call lets the test exercise real production code without touching the
+// protocol channel. Restore is mandatory so the subsequent
+// `serveTestResults` write reaches the build runner.
+const SilencedStdout = struct {
+    saved_fd: std.posix.fd_t,
+
+    fn begin() !SilencedStdout {
+        const saved = try std.posix.dup(std.posix.STDOUT_FILENO);
+        errdefer std.posix.close(saved);
+        const devnull = try std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0);
+        defer std.posix.close(devnull);
+        try std.posix.dup2(devnull, std.posix.STDOUT_FILENO);
+        return .{ .saved_fd = saved };
+    }
+
+    fn end(self: *SilencedStdout) void {
+        std.posix.dup2(self.saved_fd, std.posix.STDOUT_FILENO) catch {};
+        std.posix.close(self.saved_fd);
+    }
+};
+
 test "install: resume service is NOT installed (system immutable)" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -2382,6 +2412,8 @@ test "install: resume service is NOT installed (system immutable)" {
         .no_enable = true,
         .no_start = true,
     };
+    var silencer = try SilencedStdout.begin();
+    defer silencer.end();
     run(allocator, opts) catch |err| switch (err) {
         // Staging install legitimately fails late (e.g. devices source dir
         // not found in the test harness); we only care about the earlier
@@ -2436,7 +2468,11 @@ test "uninstall: legacy padctl-resume.service is removed (system immutable)" {
         .immutable = true,
         .user_service = false,
     };
-    try uninstall(allocator, opts);
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
 
     if (std.fs.accessAbsolute(legacy_unit, .{})) |_| {
         std.debug.print("legacy resume unit not cleaned up: {s}\n", .{legacy_unit});
@@ -2472,7 +2508,11 @@ test "uninstall: legacy padctl-resume.service is removed (non-immutable)" {
         .immutable = false,
         .user_service = false,
     };
-    try uninstall(allocator, opts);
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
 
     if (std.fs.accessAbsolute(legacy_unit, .{})) |_| {
         std.debug.print("legacy resume unit not cleaned up on non-immutable path: {s}\n", .{legacy_unit});
