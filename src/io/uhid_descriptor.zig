@@ -1205,7 +1205,9 @@ test "golden invariants: Steam Deck HID descriptor parses as balanced HID 1.11 i
     try testing.expectEqual(collection_opens, collection_closes);
     try testing.expectEqual(@as(i32, 0), collection_depth);
     try testing.expect(max_depth >= 1); // at least the application collection
-    try testing.expectEqual(@as(u32, 1), report_ids_seen);
+    // The Steam Deck descriptor declares exactly two Report IDs — one for
+    // the main input stream (ID 1) and one for the rumble output (ID 2).
+    try testing.expectEqual(@as(u32, 2), report_ids_seen);
     // Steam Deck descriptor declares >= 1 input bit (buttons + hat + axes).
     try testing.expect(total_input_bits > 0);
     // The sum of Report Size × Report Count across Input items must be a
