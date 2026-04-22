@@ -556,10 +556,13 @@ pub fn encodeReport(
 const testing = std.testing;
 const toml = @import("toml");
 
-fn makeAxesMap(allocator: std.mem.Allocator, entries: []const struct {
-    name: []const u8,
-    cfg: device.AxisConfig,
-}) !toml.HashMap(device.AxisConfig) {
+// Named helper types so multiple test sites can pass literals without
+// tripping Zig's anonymous-struct nominal typing (two anonymous structs
+// with the same shape but different declaration sites are distinct types).
+const AxisEntry = struct { name: []const u8, cfg: device.AxisConfig };
+const ButtonEntry = struct { name: []const u8, code: []const u8 };
+
+fn makeAxesMap(allocator: std.mem.Allocator, entries: []const AxisEntry) !toml.HashMap(device.AxisConfig) {
     var map = std.StringHashMap(device.AxisConfig).init(allocator);
     errdefer map.deinit();
     for (entries) |e| {
@@ -569,10 +572,7 @@ fn makeAxesMap(allocator: std.mem.Allocator, entries: []const struct {
     return .{ .map = map };
 }
 
-fn makeButtonsMap(allocator: std.mem.Allocator, entries: []const struct {
-    name: []const u8,
-    code: []const u8,
-}) !toml.HashMap([]const u8) {
+fn makeButtonsMap(allocator: std.mem.Allocator, entries: []const ButtonEntry) !toml.HashMap([]const u8) {
     var map = std.StringHashMap([]const u8).init(allocator);
     errdefer map.deinit();
     for (entries) |e| {
@@ -860,7 +860,7 @@ test "descriptor: reject > UHID_DATA_MAX via excessive button count is capped to
     const a = arena.allocator();
 
     // Create 100 button entries; builder should cap at 64.
-    var entries: [100]struct { name: []const u8, code: []const u8 } = undefined;
+    var entries: [100]ButtonEntry = undefined;
     var name_buf: [100][16]u8 = undefined;
     for (&entries, 0..) |*e, i| {
         const n = std.fmt.bufPrint(&name_buf[i], "B{d}", .{i}) catch unreachable;
