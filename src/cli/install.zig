@@ -107,20 +107,16 @@ const immutable_dropin_content =
     \\
 ;
 
-const resume_service_content =
-    \\[Unit]
-    \\Description=Restart padctl after sleep/resume
-    \\After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
-    \\
-    \\[Service]
-    \\Type=oneshot
-    \\ExecStartPre=/usr/bin/sleep 2
-    \\ExecStart=/usr/bin/systemctl restart padctl.service
-    \\
-    \\[Install]
-    \\WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
-    \\
-;
+// padctl-resume.service was removed in the fix for issue #131 Problem B.
+// The unit was broken by design — never enabled, scope-mismatched on
+// immutable installs (WantedBy=suspend.target only resolves in system
+// scope but the file was written under /etc/systemd/user/), and the
+// ExecStart called `systemctl restart padctl.service` without --user,
+// which would target a nonexistent system-scope unit (padctl has been a
+// user service since PR #77 / ADR-014 Path B). Post-suspend reconnect is
+// handled by the udev `padctl-reconnect` hook: when the controller
+// replugs after wake, udev re-fires and the reconnect script re-applies
+// the mapping. See uninstall() for legacy cleanup of v0.1.2 installs.
 
 fn generateReconnectScript(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
@@ -885,17 +881,9 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // helper is a no-op when no legacy file is present.
     updateLegacySystemService(allocator, destdir, prefix);
 
-    // 2c. Write resume service (system installs only; user sessions handle sleep via logind)
-    if (!effective_user_service) {
-        const resume_path = try std.fmt.allocPrint(allocator, "{s}/padctl-resume.service", .{lib_systemd_dir});
-        defer allocator.free(resume_path);
-        var f = try std.fs.createFileAbsolute(resume_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(resume_service_content);
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, resume_path) catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
-    }
+    // 2c. (removed) padctl-resume.service — see comment at top of file.
+    // Post-suspend reconnect is handled by the udev padctl-reconnect hook
+    // below. Legacy cleanup for upgrades from v0.1.2 lives in uninstall().
 
     // 2d. Write reconnect script (all systems)
     {
@@ -1153,7 +1141,13 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         }
     }
 
-    // Standard prefix-based files (always removed)
+    // Standard prefix-based files (always removed).
+    // Legacy note: padctl-resume.service (removed in issue #131 Problem B
+    // fix) was written by v0.1.2 installs under either /lib/systemd/system/
+    // or /lib/systemd/user/ depending on prefix+scope — the old install
+    // code had no single canonical location, so cleanup lists both to
+    // catch every upgrade path.
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "  info: removing legacy padctl-resume.service files if present\n") catch {};
     const files = [_][]const u8{
         "/bin/padctl",
         "/bin/padctl-capture",
@@ -1161,6 +1155,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/bin/padctl-reconnect",
         "/lib/systemd/system/padctl.service",
         "/lib/systemd/system/padctl-resume.service",
+        "/lib/systemd/user/padctl-resume.service",
         "/lib/udev/rules.d/60-padctl.rules",
         "/lib/udev/rules.d/61-padctl-driver-block.rules",
         "/lib/udev/rules.d/99-padctl.rules",
@@ -1178,13 +1173,21 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // Remove user unit if applicable
     if (effective_user_service) {
         if (std.posix.getenv("HOME")) |home| {
-            const user_unit = try std.fmt.allocPrint(allocator, "{s}/.config/systemd/user/padctl.service", .{home});
-            defer allocator.free(user_unit);
-            if (std.fs.deleteFileAbsolute(user_unit)) |_| {
-                _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
-                _ = std.posix.write(std.posix.STDOUT_FILENO, user_unit) catch {};
-                _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
-            } else |_| {}
+            const user_units = [_][]const u8{
+                "/.config/systemd/user/padctl.service",
+                // Legacy v0.1.2 resume unit (issue #131 Problem B cleanup);
+                // harmless if absent on fresh installs.
+                "/.config/systemd/user/padctl-resume.service",
+            };
+            for (user_units) |suffix| {
+                const user_unit = try std.fmt.allocPrint(allocator, "{s}{s}", .{ home, suffix });
+                defer allocator.free(user_unit);
+                if (std.fs.deleteFileAbsolute(user_unit)) |_| {
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, user_unit) catch {};
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+                } else |_| {}
+            }
         }
     }
 
@@ -1202,11 +1205,16 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     defer allocator.free(share_dir);
     std.fs.deleteTreeAbsolute(share_dir) catch {};
 
-    // Immutable-specific files in /etc/ (auto-detected or explicit)
+    // Immutable-specific files in /etc/ (auto-detected or explicit).
+    // /etc/systemd/user/padctl-resume.service is where v0.1.2's buggy
+    // install path actually wrote the unit on immutable systems (the
+    // scope-mismatch root cause of issue #131 Problem B); keep both
+    // /etc/systemd/system/ and /etc/systemd/user/ entries for upgrade.
     if (effective_immutable) {
         const etc_files = [_][]const u8{
             "/etc/systemd/system/padctl.service",
             "/etc/systemd/system/padctl-resume.service",
+            "/etc/systemd/user/padctl-resume.service",
             "/etc/systemd/system/padctl.service.d/immutable.conf",
             "/etc/udev/rules.d/60-padctl.rules",
             "/etc/udev/rules.d/61-padctl-driver-block.rules",
@@ -2338,14 +2346,91 @@ test "install: parseYesNoDefaultYes non-y non-n input is treated as no" {
     try std.testing.expect(!parseYesNoDefaultYes("asdf"));
 }
 
-// --- Phase 3: resume service, reconnect script, hotplug rules ---
+// --- Phase 3: resume service cleanup, reconnect script, hotplug rules ---
 
-test "install: resume service content has required fields" {
+// issue #131 Problem B: padctl-resume.service was broken by design (never
+// enabled, scope-mismatched, ExecStart targeted a nonexistent system unit)
+// and is now removed. The udev reconnect hook (padctl-reconnect) handles
+// hotplug after suspend/resume. These tests lock in that the installer
+// neither writes the unit nor leaves legacy copies behind on upgrade.
+
+test "install: resume service is NOT installed (system immutable)" {
     const testing = std.testing;
-    try testing.expect(std.mem.indexOf(u8, resume_service_content, "suspend.target") != null);
-    try testing.expect(std.mem.indexOf(u8, resume_service_content, "Type=oneshot") != null);
-    try testing.expect(std.mem.indexOf(u8, resume_service_content, "ExecStartPre=/usr/bin/sleep 2") != null);
-    try testing.expect(std.mem.indexOf(u8, resume_service_content, "systemctl restart padctl.service") != null);
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = true,
+        .user_service = false,
+        .no_enable = true,
+        .no_start = true,
+    };
+    run(allocator, opts) catch |err| switch (err) {
+        // Staging install legitimately fails late (e.g. devices source dir
+        // not found in the test harness); we only care about the earlier
+        // resume-write step, so tolerate downstream errors.
+        error.MappingInstallFailed => {},
+        else => return err,
+    };
+
+    // Every plausible legacy install location must be empty.
+    const candidates = [_][]const u8{
+        "/usr/local/lib/systemd/user/padctl-resume.service",
+        "/usr/local/lib/systemd/system/padctl-resume.service",
+        "/etc/systemd/system/padctl-resume.service",
+        "/etc/systemd/user/padctl-resume.service",
+    };
+    for (candidates) |rel| {
+        const abs = try std.fmt.allocPrint(allocator, "{s}{s}", .{ staging, rel });
+        defer allocator.free(abs);
+        if (std.fs.accessAbsolute(abs, .{})) |_| {
+            std.debug.print("found leftover resume unit at {s}\n", .{abs});
+            return error.UnexpectedResumeUnitFound;
+        } else |_| {}
+    }
+}
+
+test "uninstall: legacy padctl-resume.service is removed (system immutable)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    // Seed a fake legacy resume unit at the immutable user-scope location
+    // — this is exactly where v0.1.2 installs wrote the unit on immutable
+    // systems (issue #131 Problem B scope-mismatch).
+    const legacy_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{staging});
+    defer allocator.free(legacy_dir);
+    try ensureDirAll(allocator, legacy_dir);
+    const legacy_unit = try std.fmt.allocPrint(allocator, "{s}/padctl-resume.service", .{legacy_dir});
+    defer allocator.free(legacy_unit);
+    {
+        var f = try std.fs.createFileAbsolute(legacy_unit, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# legacy v0.1.2 resume unit — must be removed on upgrade\n");
+    }
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = true,
+        .user_service = false,
+    };
+    try uninstall(allocator, opts);
+
+    if (std.fs.accessAbsolute(legacy_unit, .{})) |_| {
+        std.debug.print("legacy resume unit not cleaned up: {s}\n", .{legacy_unit});
+        return error.LegacyResumeUnitNotRemoved;
+    } else |_| {}
 }
 
 test "install: generateReconnectScript has required commands" {

@@ -55,8 +55,7 @@ sudo ./zig-out/bin/padctl install --prefix /usr --destdir "$DESTDIR"
 
 `padctl install` also sets up the following on all systems:
 
-- **`padctl-resume.service`** — Restarts padctl after sleep/hibernate so USB devices reconnect cleanly.
-- **`padctl-reconnect`** — A hotplug script triggered by udev when a controller is plugged in. It starts the daemon if not running, restarts it if failed, and re-applies the active mapping.
+- **`padctl-reconnect`** — A hotplug script triggered by udev when a controller is plugged in. It starts the daemon if not running, restarts it if failed, and re-applies the active mapping. After suspend/resume the kernel re-emits udev events for re-enumerated devices, so the same hook handles post-wake reconnect — no separate resume unit is needed.
 - **Driver conflict rules** — Auto-generated udev rules that unbind conflicting kernel drivers (e.g., `xpad`) from devices that padctl manages. Configured per-device via `block_kernel_drivers` in device TOML configs.
 
 ### Install a Mapping

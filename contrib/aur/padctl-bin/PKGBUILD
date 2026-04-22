@@ -36,6 +36,10 @@ package() {
 
     install -Dm644 install/padctl.service \
         "${pkgdir}/usr/lib/systemd/user/padctl.service"
+    # padctl-resume.service was removed in issue #131 Problem B fix; the
+    # udev padctl-reconnect hook handles post-suspend reconnect. Kept the
+    # conditional guard so older tarballs still package cleanly, but new
+    # tarballs will not ship the file.
     [[ -f install/padctl-resume.service ]] && install -Dm644 install/padctl-resume.service \
         "${pkgdir}/usr/lib/systemd/user/padctl-resume.service"
     [[ -f install/padctl-reconnect ]] && install -Dm755 install/padctl-reconnect \
