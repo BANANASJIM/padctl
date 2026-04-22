@@ -25,7 +25,8 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Runtime mapping switch** — `padctl switch <name>` changes profiles without restart
 - **Persistent mapping** — `padctl install --mapping <name>` writes a device binding to `/etc/padctl/config.toml` that auto-applies on every boot
 - **User config** — `~/.config/padctl/config.toml` for per-device default mappings (system fallback: `/etc/padctl/config.toml`)
-- **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl config init/edit/test`
+- **Opt-in diagnostic logging** — `padctl dump enable` turns on a general-purpose, togglable file logger so users can produce a structured log for any class of bug report (force-feedback, input, mapping, hotplug, …). Today it is wired deepest into the rumble/HID path; more subsystems will be instrumented over time. Rotated, bounded on disk, and zero overhead when disabled (default)
+- **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl config init/edit/test`, `padctl dump enable/disable/status/export/clear`
 
 ## Architecture
 
@@ -144,6 +145,10 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | `padctl config edit` | Open user config in `$EDITOR` |
 | `padctl config test` | Validate config without applying |
 | `padctl scan` | Re-scan for connected devices |
+| `padctl dump enable\|disable` | Toggle opt-in diagnostic logging (persists across reboots) |
+| `padctl dump status` | Show logging state, log path, size, and time span |
+| `padctl dump export --period <N>m\|<N>h\|<N>d [-o file]` | Export recent log window for bug reports |
+| `padctl dump clear` | Delete all log files |
 
 ## Build
 

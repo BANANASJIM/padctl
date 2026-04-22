@@ -103,6 +103,8 @@ install_brew_pkg() {
     fi
 }
 
+ZIG_BREW_PKG="zig@0.15"  # padctl requires Zig 0.15.x; 0.16+ has breaking API changes
+
 if command -v brew &>/dev/null; then
     # Pin zig@0.15 — padctl does not yet support 0.16+
     # Versioned formulas are keg-only: install then prepend opt path to PATH
@@ -116,13 +118,34 @@ if command -v brew &>/dev/null; then
     export PATH="$(brew --prefix)/opt/zig@0.15/bin:$PATH"
     ok "zig on PATH: $(zig version)"
     install_brew_pkg libusb
+    # zig@0.15 is keg-only — ensure it's on PATH for this session.
+    if [[ -d "$BREW_PREFIX/opt/$ZIG_BREW_PKG/bin" ]]; then
+        export PATH="$BREW_PREFIX/opt/$ZIG_BREW_PKG/bin:$PATH"
+    fi
 else
     # Non-brew: check if zig and libusb are available
     if ! command -v zig &>/dev/null; then
         err "zig not found. Install Zig 0.15.x from https://ziglang.org/download/"
         exit 1
     fi
-    ok "zig found: $(zig version)"
+    # padctl requires Zig 0.15.x. Reject anything else upfront so users hit a
+    # clear error instead of a cryptic build failure downstream.
+    if ! zig_ver="$(zig version 2>/dev/null)"; then
+        err "failed to determine zig version"
+        exit 1
+    fi
+    case "$zig_ver" in
+        0.15.*) ok "zig found: $zig_ver" ;;
+        *)
+            # The second block below enforces a hard exit for anything
+            # outside 0.15.x, so a "Continue anyway?" prompt here would
+            # only ever delay the same exit. Keep the messaging but don't
+            # pretend the user has a choice.
+            err "zig $zig_ver detected — padctl requires 0.15.x"
+            err "Install zig@0.15 via brew, or download from https://ziglang.org/download/"
+            exit 1
+            ;;
+    esac
 fi
 
 # Verify Zig version >= 0.15.0
@@ -154,14 +177,32 @@ fi
 
 if [[ -d "$PADCTL_REPO/.git" ]]; then
     info "Updating existing repo at $PADCTL_REPO..."
+    repo_updated=false
     if [[ -n "$BRANCH" ]]; then
         git -C "$PADCTL_REPO" fetch origin 2>/dev/null || true
         git -C "$PADCTL_REPO" checkout "$BRANCH" 2>/dev/null || warn "checkout $BRANCH failed"
-        git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        if timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null; then
+            repo_updated=true
+        else
+            warn "git pull failed (might have local changes)"
+        fi
     else
-        git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null || warn "git pull failed (might have local changes)"
+        # Only pull if on a branch that tracks a remote (skip for local-only branches).
+        if git -C "$PADCTL_REPO" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+            if timeout 10 git -C "$PADCTL_REPO" pull --ff-only 2>/dev/null; then
+                repo_updated=true
+            else
+                warn "git pull failed (might have local changes)"
+            fi
+        else
+            info "Local branch with no upstream — skipping pull"
+        fi
     fi
-    ok "Repo up to date"
+    if $repo_updated; then
+        ok "Repo up to date"
+    else
+        info "Using existing repo state"
+    fi
 elif [[ -f "$PADCTL_REPO/build.zig" ]]; then
     ok "Using existing repo at $PADCTL_REPO (not a git repo)"
 else
@@ -178,7 +219,7 @@ fi
 cd "$PADCTL_REPO"
 
 # --- 5. Build ---
-info "Building padctl (ReleaseSafe)..."
+info "Building padctl (ReleaseSafe) with zig $(zig version)..."
 build_args=(-Doptimize=ReleaseSafe)
 if [[ -d "$BREW_PREFIX" ]]; then
     build_args+=(--search-prefix "$BREW_PREFIX")
@@ -245,18 +286,31 @@ systemctl --user restart padctl.service 2>/dev/null || true
 #         their IPC socket under $XDG_RUNTIME_DIR (/run/user/<uid>/padctl.sock),
 #         and the CLI's default resolver finds it correctly from the user shell.
 #         The daemon needs a few seconds post-restart to run device init + bind
-#         its IPC socket, so retry a few times before giving up. ---
+#         its IPC socket, so retry a few times before giving up. "no-devices"
+#         is a permanent error for this session (no retry will help) — the
+#         binding in /etc/padctl/config.toml still takes effect on the next
+#         hot-plug, so we short-circuit with a clearer message. ---
 if [[ -n "$MAPPING" ]]; then
     mapping_applied=false
+    no_devices=false
     for attempt in 1 2 3 4 5 6; do
         sleep 1
-        if "$PREFIX/bin/padctl" switch "$MAPPING" 2>/dev/null; then
+        # set -euo pipefail is active; a bare `x=$(cmd)` triggers script
+        # exit on non-zero from cmd before the `$?` check can fire, so we
+        # use the if-form which `set -e` explicitly ignores.
+        if switch_output=$("$PREFIX/bin/padctl" switch "$MAPPING" 2>&1); then
             mapping_applied=true
+            break
+        fi
+        if [[ "$switch_output" == *"no-devices"* ]]; then
+            no_devices=true
             break
         fi
     done
     if $mapping_applied; then
         ok "Mapping applied: $MAPPING (persisted for future boots via /etc/padctl/config.toml)"
+    elif $no_devices; then
+        info "No controller currently connected — mapping will auto-apply via /etc/padctl/config.toml when you plug it in."
     else
         warn "Could not apply mapping to running daemon (it will auto-apply on next boot). Run manually: padctl switch $MAPPING"
     fi

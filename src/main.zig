@@ -1,4 +1,10 @@
 const std = @import("std");
+const padctl_log = @import("log.zig");
+
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = padctl_log.logFn,
+};
 
 fn stdoutWrite(_: void, data: []const u8) error{}!usize {
     return std.posix.write(std.posix.STDOUT_FILENO, data) catch data.len;
@@ -24,6 +30,7 @@ pub const cli = struct {
     pub const switch_mapping = @import("cli/switch_mapping.zig");
     pub const status = @import("cli/status.zig");
     pub const devices = @import("cli/devices.zig");
+    pub const dump = @import("cli/dump.zig");
     pub const config = struct {
         pub const list = @import("cli/config/list.zig");
         pub const init = @import("cli/config/init.zig");
@@ -135,6 +142,8 @@ const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
 const VERSION = "0.1.0";
 
+pub const DumpAction = enum { enable, disable, status, @"export", clear };
+
 const Cli = struct {
     allocator: std.mem.Allocator,
     config_path: ?[]const u8 = null,
@@ -157,6 +166,9 @@ const Cli = struct {
     switch_cmd: ?struct { name: ?[]const u8 = null, device_id: ?[]const u8 = null, persist: bool = false } = null,
     status_cmd: bool = false,
     devices_cmd: bool = false,
+    dump_cmd: ?DumpAction = null,
+    dump_period: []const u8 = "1d",
+    dump_output_path: ?[]const u8 = null,
     socket_path: []const u8 = cli.socket_client.DEFAULT_SOCKET_PATH,
     socket_explicit: bool = false,
 
@@ -373,6 +385,39 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     return error.UnknownArgument;
                 }
             }
+        } else if (std.mem.eql(u8, arg, "dump")) {
+            // Collect remaining args into a small buffer for parseDumpFromSlice.
+            var dump_args: [16][]const u8 = undefined;
+            var dump_argc: usize = 0;
+            while (args.next()) |da| {
+                if (dump_argc >= dump_args.len) {
+                    std.log.err("too many dump arguments", .{});
+                    return error.UnknownArgument;
+                }
+                dump_args[dump_argc] = da;
+                dump_argc += 1;
+            }
+            const result = parseDumpFromSlice(dump_args[0..dump_argc]) catch |err| switch (err) {
+                error.MissingSubcommand => {
+                    std.log.err("dump requires a subcommand: enable, disable, status, export, clear", .{});
+                    return error.MissingArgValue;
+                },
+                error.MissingArgValue => {
+                    std.log.err("dump: missing value for option (expected an argument after --period, --socket, or -o)", .{});
+                    return error.MissingArgValue;
+                },
+                error.UnknownArgument => {
+                    std.log.err("unknown dump argument", .{});
+                    return error.UnknownArgument;
+                },
+            };
+            parsed_cli.dump_cmd = result.cmd;
+            parsed_cli.dump_period = result.period;
+            parsed_cli.dump_output_path = result.output_path;
+            if (result.socket_path) |sp| {
+                parsed_cli.socket_path = sp;
+                parsed_cli.socket_explicit = true;
+            }
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -392,6 +437,7 @@ fn printHelp() void {
         \\       padctl switch <name> [--device <id>] [--socket <path>]
         \\       padctl status [--socket <path>]
         \\       padctl devices [--socket <path>]
+        \\       padctl dump <enable|disable|status|export|clear>
         \\
         \\Subcommands:
         \\  install               Install binary, service, udev rules, and device configs
@@ -423,6 +469,13 @@ fn printHelp() void {
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  devices               List connected devices via daemon
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+        \\  dump enable           Turn on diagnostic logging (persists across reboots)
+        \\  dump disable          Turn off diagnostic logging (default)
+        \\  dump status           Show dump state, log path, size, and time span
+        \\  dump export           Export filtered logs to stdout or file
+        \\    --period <duration> Time window: Nm, Nh, or Nd (default: 1d)
+        \\    -o <path>           Write to file instead of stdout
+        \\  dump clear            Delete all log files (interactive confirmation)
         \\  config list           List XDG-layer device and mapping configs
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
         \\    --device <name>     Skip device selection prompt
@@ -589,6 +642,151 @@ pub fn main() !void {
         std.process.exit(0);
     }
 
+    // dump subcommand
+    if (parsed.dump_cmd) |dump_action| {
+        // dump status: show state + log stats, exit.
+        if (dump_action == .status) {
+            cli.dump.runStatus(allocator, parsed.socket_path, stdout_writer, stderr_writer);
+            std.process.exit(0);
+        }
+
+        // dump clear: show stats, prompt, delete.
+        if (dump_action == .clear) {
+            cli.dump.runClear(allocator, stdout_writer, stderr_writer);
+            std.process.exit(0);
+        }
+
+        // dump export: filter and output logs, exit.
+        if (dump_action == .@"export") {
+            cli.dump.runExport(allocator, parsed.dump_period, parsed.dump_output_path, stdout_writer, stderr_writer);
+            std.process.exit(0);
+        }
+
+        const enable = dump_action == .enable;
+        var config_written = false;
+        // Malformed user config blocks the persistence chain: user_config.load()
+        // refuses to fall through to the system config when the user file is
+        // broken, so writing only the system file would not actually take effect
+        // on the next daemon restart. Track this and refuse to claim persistence.
+        var user_config_blocks_fallback = false;
+
+        // Write to user config first (no sudo needed).
+        const cfgpaths = config.paths;
+        if (cfgpaths.userConfigDir(allocator)) |user_dir| {
+            defer allocator.free(user_dir);
+            if (cli.dump.writeDiagnosticsConfig(allocator, user_dir, enable)) {
+                config_written = true;
+            } else |err| {
+                if (err == error.MalformedConfig) {
+                    user_config_blocks_fallback = true;
+                    stderr_writer.writeAll("error: user config.toml is malformed — fix or remove it before enabling dump persistence\n") catch {};
+                } else {
+                    std.log.warn("could not write user config: {}", .{err});
+                }
+            }
+        } else |_| {}
+
+        // System config: write to a temp file, then sudo cp to /etc/padctl/.
+        // Direct write fails without root (AccessDenied).
+        const sys_dir = cfgpaths.systemConfigDir();
+        if (user_config_blocks_fallback) {
+            // Skip system write entirely regardless of privilege: the daemon
+            // won't read it because user_config.load() stops on MalformedConfig
+            // in the user file and refuses to fall through to the system file.
+            stderr_writer.writeAll("info: skipping system config write — broken user config would mask it\n") catch {};
+        } else if (std.os.linux.getuid() == 0) {
+            // Already root — write directly.
+            if (cli.dump.writeDiagnosticsConfig(allocator, sys_dir, enable)) {
+                config_written = true;
+            } else |err| {
+                if (err == error.MalformedConfig) {
+                    stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
+                } else {
+                    std.log.warn("could not write system config: {}", .{err});
+                }
+            }
+        } else {
+            // Non-root: write to a unique temp dir (avoids symlink/TOCTOU on
+            // a shared /tmp path), sudo cp to system path, then cleanup.
+            if (makeTempDir(allocator)) |tmp_dir| {
+                defer {
+                    // Best-effort cleanup of the temp dir tree.
+                    std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+                    allocator.free(tmp_dir);
+                }
+                // Seed tmp_dir with the existing system config (if any)
+                // BEFORE writeDiagnosticsConfig runs. writeDiagnosticsConfig
+                // reads {dir}/config.toml to preserve [[device]] entries;
+                // without the seed it would write a [diagnostics]-only file
+                // to tmp_dir, and the sudo cp below would erase any bindings
+                // in /etc/padctl/config.toml. /etc/padctl/config.toml is
+                // typically world-readable (mode 0644) so no sudo is
+                // required to read it; best-effort silent-skip when the
+                // file is absent or unreadable.
+                {
+                    const sys_src = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
+                    defer if (sys_src) |p| allocator.free(p);
+                    const tmp_seed = std.fmt.allocPrint(allocator, "{s}/config.toml", .{tmp_dir}) catch null;
+                    defer if (tmp_seed) |p| allocator.free(p);
+                    if (sys_src != null and tmp_seed != null) {
+                        copyFileBestEffort(sys_src.?, tmp_seed.?) catch {};
+                    }
+                }
+                if (cli.dump.writeDiagnosticsConfig(allocator, tmp_dir, enable)) {
+                    const tmp_src = std.fmt.allocPrint(allocator, "{s}/config.toml", .{tmp_dir}) catch null;
+                    defer if (tmp_src) |s| allocator.free(s);
+                    const sys_dst = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
+                    defer if (sys_dst) |b| allocator.free(b);
+                    if (tmp_src != null and sys_dst != null) {
+                        if (runSudoMkdir(sys_dir, stderr_writer)) {
+                            if (runSudoCopy(tmp_src.?, sys_dst.?, stderr_writer)) {
+                                config_written = true;
+                            }
+                        }
+                    }
+                } else |err| {
+                    if (err == error.MalformedConfig) {
+                        stderr_writer.writeAll("error: system config.toml is malformed — fix or remove it\n") catch {};
+                    } else {
+                        std.log.warn("could not write system config: {}", .{err});
+                    }
+                }
+            } else |err| {
+                std.log.warn("could not create temp dir for config write: {}", .{err});
+            }
+        }
+
+        // Send IPC to running daemon (best-effort).
+        var ipc_ok = false;
+        const ipc_cmd: []const u8 = if (enable) "DUMP ON\n" else "DUMP OFF\n";
+        if (cli.socket_client.connectToSocket(parsed.socket_path)) |sock_fd| {
+            defer std.posix.close(sock_fd);
+            var resp_buf: [64]u8 = undefined;
+            if (cli.socket_client.sendCommand(sock_fd, ipc_cmd, &resp_buf)) |resp| {
+                _ = stdout_writer.write(resp) catch {};
+                ipc_ok = true;
+            } else |_| {
+                stderr_writer.writeAll("warning: daemon did not respond\n") catch {};
+            }
+        } else |_| {
+            if (config_written) {
+                stderr_writer.writeAll("info: daemon not running; config written, will apply on next start\n") catch {};
+            }
+        }
+
+        if (!config_written and !ipc_ok) {
+            stderr_writer.writeAll("error: could not persist or apply dump setting\n") catch {};
+            std.process.exit(1);
+        }
+        if (!config_written and user_config_blocks_fallback) {
+            // IPC may have succeeded (live-only apply), but the setting will
+            // be lost on next daemon restart. Surface this loudly so users
+            // don't assume the toggle is durable.
+            stderr_writer.writeAll("warning: dump setting was NOT persisted across restarts — fix the malformed user config.toml first\n") catch {};
+        }
+        std.process.exit(0);
+    }
+
     // switch subcommand
     if (parsed.switch_cmd) |sw| {
         // Resolve the mapping name: either explicit or from user config.
@@ -718,6 +916,31 @@ pub fn main() !void {
         };
         std.process.exit(0);
     }
+
+    // Daemon mode logging: two-step init.
+    // Step 1: resolve the log path so that early warnings (e.g. malformed
+    // config.toml) can persist to the log file via lazy open in logFn.
+    padctl_log.initPath(allocator);
+    defer padctl_log.deinit();
+
+    // Step 2: load diagnostics config. Warnings during load now persist.
+    const log_opts: padctl_log.InitOptions = blk: {
+        const user_cfg_mod = @import("config/user_config.zig");
+        if (user_cfg_mod.load(allocator)) |pr| {
+            var ucpr = pr;
+            defer ucpr.deinit();
+            break :blk .{
+                .dump = ucpr.value.diagnostics.dump,
+                .max_log_size_mb = ucpr.value.diagnostics.max_log_size_mb,
+            };
+        }
+        break :blk .{};
+    };
+
+    // Step 3: apply config — sets rotation size, dump toggle, opens file if dump on.
+    padctl_log.applyConfig(log_opts);
+
+    std.log.info("padctl started, PID={d}, dump={}", .{ std.os.linux.getpid(), padctl_log.isEnabled() });
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
     if (parsed.config_dir) |dir_path| {
@@ -951,6 +1174,23 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
     return ok;
 }
 
+/// Copy `src` to `dst` without invoking sudo. Returns FileNotFound when
+/// `src` is absent; other errors propagate. Used to seed a user-owned
+/// temp dir with the current system config before calling
+/// writeDiagnosticsConfig so device bindings survive the round-trip.
+fn copyFileBestEffort(src: []const u8, dst: []const u8) !void {
+    var sf = try std.fs.openFileAbsolute(src, .{});
+    defer sf.close();
+    var df = try std.fs.createFileAbsolute(dst, .{ .truncate = true });
+    defer df.close();
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = try sf.read(&buf);
+        if (n == 0) break;
+        try df.writeAll(buf[0..n]);
+    }
+}
+
 fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {
     const argv = [_][]const u8{ "sudo", "cp", src, dst };
     var child = std.process.Child.init(&argv, std.heap.page_allocator);
@@ -993,6 +1233,29 @@ fn runSudoMkdir(dir: []const u8, err_writer: anytype) bool {
         .Exited => |code| code == 0,
         else => false,
     };
+}
+
+/// Create a unique, exclusive temp directory owned by the current user.
+/// Using `mkdir` (exclusive) + random suffix avoids symlink/TOCTOU races on a
+/// shared predictable path like `/tmp/padctl-dump-config`. Mode 0o700 keeps
+/// the tree private even though the config.toml contents are non-sensitive.
+/// Caller owns and must free the returned path.
+fn makeTempDir(allocator: std.mem.Allocator) ![]u8 {
+    const tmp = std.posix.getenv("TMPDIR") orelse "/tmp";
+    var rand_bytes: [8]u8 = undefined;
+    var attempts: u32 = 0;
+    while (attempts < 16) : (attempts += 1) {
+        std.crypto.random.bytes(&rand_bytes);
+        const suffix = std.mem.readInt(u64, &rand_bytes, .little);
+        const path = try std.fmt.allocPrint(allocator, "{s}/padctl-dump-{x}", .{ tmp, suffix });
+        std.posix.mkdir(path, 0o700) catch |err| {
+            allocator.free(path);
+            if (err == error.PathAlreadyExists) continue;
+            return err;
+        };
+        return path;
+    }
+    return error.TempDirCreationFailed;
 }
 
 fn escapeTomlString(writer: anytype, s: []const u8) !void {
@@ -1093,9 +1356,111 @@ fn parseDeviceFromStatus(resp: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Parse dump subcommand and options from an argument slice. Testable
+/// variant of the inline dump-parsing block in parseArgs.
+pub fn parseDumpFromSlice(args: []const []const u8) !struct {
+    cmd: ?DumpAction = null,
+    period: []const u8 = "1d",
+    output_path: ?[]const u8 = null,
+    socket_path: ?[]const u8 = null,
+} {
+    var result: @TypeOf(parseDumpFromSlice(args) catch unreachable) = .{};
+    // Distinct errors so the caller can produce accurate messages: missing
+    // the `dump <sub>` token is not the same as a trailing flag with no value.
+    if (args.len == 0) return error.MissingSubcommand;
+    const sub = args[0];
+    if (std.mem.eql(u8, sub, "enable")) {
+        result.cmd = .enable;
+    } else if (std.mem.eql(u8, sub, "disable")) {
+        result.cmd = .disable;
+    } else if (std.mem.eql(u8, sub, "status")) {
+        result.cmd = .status;
+    } else if (std.mem.eql(u8, sub, "export")) {
+        result.cmd = .@"export";
+    } else if (std.mem.eql(u8, sub, "clear")) {
+        result.cmd = .clear;
+    } else {
+        return error.UnknownArgument;
+    }
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--period")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            result.period = args[i];
+        } else if (std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            result.output_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--socket")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgValue;
+            result.socket_path = args[i];
+        } else {
+            return error.UnknownArgument;
+        }
+    }
+    return result;
+}
+
 // --- CLI tests ---
 
 const testing = std.testing;
+
+test "main: parseDumpFromSlice: enable" {
+    const r = try parseDumpFromSlice(&.{"enable"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .enable), r.cmd);
+    try testing.expectEqualStrings("1d", r.period);
+    try testing.expectEqual(@as(?[]const u8, null), r.output_path);
+}
+
+test "main: parseDumpFromSlice: disable" {
+    const r = try parseDumpFromSlice(&.{"disable"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .disable), r.cmd);
+}
+
+test "main: parseDumpFromSlice: status" {
+    const r = try parseDumpFromSlice(&.{"status"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .status), r.cmd);
+}
+
+test "main: parseDumpFromSlice: export with period and output" {
+    const r = try parseDumpFromSlice(&.{ "export", "--period", "2h", "-o", "/tmp/out.log" });
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .@"export"), r.cmd);
+    try testing.expectEqualStrings("2h", r.period);
+    try testing.expectEqualStrings("/tmp/out.log", r.output_path.?);
+}
+
+test "main: parseDumpFromSlice: export default period" {
+    const r = try parseDumpFromSlice(&.{"export"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .@"export"), r.cmd);
+    try testing.expectEqualStrings("1d", r.period);
+}
+
+test "main: parseDumpFromSlice: clear" {
+    const r = try parseDumpFromSlice(&.{"clear"});
+    try testing.expectEqual(@as(@TypeOf(r.cmd), .clear), r.cmd);
+}
+
+test "main: parseDumpFromSlice: missing subcommand" {
+    try testing.expectError(error.MissingSubcommand, parseDumpFromSlice(&.{}));
+}
+
+test "main: parseDumpFromSlice: missing value for --period" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{ "export", "--period" }));
+}
+
+test "main: parseDumpFromSlice: missing value for -o" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{ "export", "-o" }));
+}
+
+test "main: parseDumpFromSlice: missing value for --socket" {
+    try testing.expectError(error.MissingArgValue, parseDumpFromSlice(&.{ "status", "--socket" }));
+}
+
+test "main: parseDumpFromSlice: unknown subcommand" {
+    try testing.expectError(error.UnknownArgument, parseDumpFromSlice(&.{"foobar"}));
+}
 
 test "main: parseDeviceFromStatus extracts device name" {
     const resp = "STATUS device=Flydigi Vader 5 Pro active=true\n";
