@@ -35,6 +35,10 @@ pub const ManagedInstance = struct {
     switch_mapping: ?*mapping_cfg.ParseResult = null,
     default_mapping_pr: ?*mapping_cfg.ParseResult = null,
     suspended: bool = false,
+    /// CLOCK_MONOTONIC deadline (ns). When non-null and `now >= deadline`,
+    /// `gcExpiredGrace()` tears the entry down. Set by `detach()` when
+    /// `suspend_grace_sec > 0`; cleared on successful rebind. Issue #131-A.
+    grace_deadline_ns: ?u64 = null,
 };
 
 /// Config snapshot used for hot-reload diffing.
@@ -158,6 +162,21 @@ pub const Supervisor = struct {
     user_cfg: ?user_config_mod.ParseResult = null,
     test_switch_mapping_override: ?[]const u8 = null,
     test_switch_fail_commit_index: ?usize = null,
+    /// Issue #131-A: `detach()` preserves the virtual uinput for this many
+    /// seconds to survive wireless sleep/wake. Once the deadline passes
+    /// without a matching ADD, `gcExpiredGrace()` fully tears the entry
+    /// down so the uinput fd is not leaked indefinitely (zombie device).
+    /// Set to 0 to disable the grace window and tear down immediately
+    /// (pre-PR-#114 behavior).
+    suspend_grace_sec: u32 = 15,
+    /// Timerfd that fires when a grace deadline comes due. Armed by
+    /// `detach()`; drained by `drainGraceTimer()`. -1 = unavailable
+    /// (e.g. `initForTest`); callers must call `gcExpiredGrace()` directly.
+    grace_timer_fd: posix.fd_t = -1,
+    /// Test-only clock override (ns). When non-null, `nowNs()` returns
+    /// this value instead of reading CLOCK_MONOTONIC. Production paths
+    /// leave this null.
+    test_now_override_ns: ?u64 = null,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -184,6 +203,14 @@ pub const Supervisor = struct {
             break :blk -1;
         };
         errdefer if (retry_fd >= 0) posix.close(retry_fd);
+
+        // Issue #131-A: timerfd that fires when a suspended instance's grace
+        // window expires so the main loop can tear the uinput down.
+        const grace_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch blk: {
+            std.log.warn("suspend grace timer unavailable", .{});
+            break :blk -1;
+        };
+        errdefer if (grace_fd >= 0) posix.close(grace_fd);
 
         const inotify_result = initInotify(allocator);
 
@@ -212,6 +239,7 @@ pub const Supervisor = struct {
             .user_cfg = user_config_mod.load(allocator),
             .test_switch_mapping_override = null,
             .test_switch_fail_commit_index = null,
+            .grace_timer_fd = grace_fd,
         };
     }
 
@@ -249,6 +277,7 @@ pub const Supervisor = struct {
         if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
         if (self.hotplug_retry_fd >= 0) posix.close(self.hotplug_retry_fd);
+        if (self.grace_timer_fd >= 0) posix.close(self.grace_timer_fd);
         self.hotplug_pending.deinit(self.allocator);
         if (self.config_dir) |dir| self.allocator.free(dir);
         if (self.managed.items.len > 0) self.stopAll();
@@ -320,7 +349,21 @@ pub const Supervisor = struct {
     /// stay open so consumers (e.g. Steam) keep their cached eventN
     /// references. On reconnect, attachWithRoot() rebinds the new hidraw fds
     /// to the existing instance.
+    ///
+    /// Issue #131-A: When `suspend_grace_sec > 0` the entry keeps its uinput
+    /// but is marked with a `grace_deadline_ns`; if no matching ADD arrives
+    /// before the deadline, `gcExpiredGrace()` tears it down so the virtual
+    /// gamepad does not linger forever after a permanent disconnect.
+    /// When `suspend_grace_sec == 0` the entry is torn down immediately
+    /// (pre-PR-#114 semantics).
     pub fn detach(self: *Supervisor, devname: []const u8) void {
+        if (self.suspend_grace_sec == 0) {
+            // Grace window disabled: fall through to full teardown so the
+            // uinput fd is released alongside the hidraw handle.
+            self.detachFull(devname);
+            return;
+        }
+
         const entry = self.devname_map.fetchRemove(devname) orelse {
             std.log.debug("detach: {s} not in devname_map", .{devname});
             return;
@@ -331,11 +374,17 @@ pub const Supervisor = struct {
 
         for (self.managed.items) |*m| {
             if (!std.mem.eql(u8, m.phys_key, phys_key)) continue;
-            std.log.info("device suspended: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
+            std.log.info("device suspended: \"{s}\" {s} (grace {d}s)", .{ m.instance.device_cfg.device.name, devname, self.suspend_grace_sec });
             m.instance.stop();
             m.thread.join();
             m.instance.closeDeviceIO();
             m.suspended = true;
+            // Schedule grace deadline. Saturating add keeps us safe against
+            // pathological `suspend_grace_sec` values.
+            const now = self.nowNs();
+            const grace_ns: u64 = @as(u64, self.suspend_grace_sec) *| std.time.ns_per_s;
+            m.grace_deadline_ns = now +| grace_ns;
+            self.armGraceTimer();
             if (m.devname) |dn| {
                 self.allocator.free(dn);
                 m.devname = null;
@@ -343,6 +392,95 @@ pub const Supervisor = struct {
             return;
         }
         std.log.debug("detach: no managed instance for phys {s}", .{phys_key});
+    }
+
+    /// Current CLOCK_MONOTONIC in nanoseconds, honouring `test_now_override_ns`
+    /// when set. All issue-#131-A grace deadline arithmetic goes through
+    /// this helper so tests can drive the clock deterministically.
+    pub fn nowNs(self: *const Supervisor) u64 {
+        if (self.test_now_override_ns) |t| return t;
+        // std.time.nanoTimestamp is wall-clock; we want a monotonic source.
+        // clock_gettime(CLOCK_MONOTONIC) never goes backwards and is the
+        // right clock for deadline computation.
+        var ts: linux.timespec = undefined;
+        const rc = linux.clock_gettime(.MONOTONIC, &ts);
+        if (rc != 0) {
+            // Extremely unlikely on Linux; fall back to nanoTimestamp so
+            // we still return a plausibly-increasing value.
+            const ns = std.time.nanoTimestamp();
+            return @intCast(if (ns < 0) 0 else ns);
+        }
+        const sec: u64 = @intCast(ts.sec);
+        const nsec: u64 = @intCast(ts.nsec);
+        return sec *| std.time.ns_per_s +| nsec;
+    }
+
+    /// Clear the grace deadline on a managed entry — called by the rebind
+    /// path in `attachWithRoot()` when a matching ADD arrives before the
+    /// deadline. Public for tests. Issue #131-A.
+    pub fn clearGraceDeadline(_: *Supervisor, m: *ManagedInstance) void {
+        m.grace_deadline_ns = null;
+    }
+
+    /// Iterate the managed list and tear down any suspended entry whose
+    /// grace deadline has passed. Called by the serve loop on
+    /// `grace_timer_fd` fire and exposed to tests for deterministic
+    /// exercise. Issue #131-A.
+    pub fn gcExpiredGrace(self: *Supervisor, now_ns: u64) void {
+        var i: usize = self.managed.items.len;
+        while (i > 0) {
+            i -= 1;
+            const m = &self.managed.items[i];
+            const deadline = m.grace_deadline_ns orelse continue;
+            if (now_ns < deadline) continue;
+            std.log.info("grace window expired for phys \"{s}\"; tearing down uinput (issue #131-A)", .{m.phys_key});
+            // `detach()` has already joined the worker thread and closed
+            // the hidraw fds, so `teardownManaged` just frees the uinput
+            // + bookkeeping.
+            self.teardownManaged(m);
+            _ = self.managed.swapRemove(i);
+        }
+        self.armGraceTimer();
+    }
+
+    /// Arm the grace timerfd to fire at the soonest pending deadline. If
+    /// no entries are pending, the timer is disarmed. A no-op when
+    /// `grace_timer_fd < 0` (e.g. `initForTest`).
+    fn armGraceTimer(self: *Supervisor) void {
+        if (self.grace_timer_fd < 0) return;
+        var soonest: ?u64 = null;
+        for (self.managed.items) |*m| {
+            const d = m.grace_deadline_ns orelse continue;
+            if (soonest == null or d < soonest.?) soonest = d;
+        }
+        const disarm = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = 0 },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+        if (soonest == null) {
+            _ = linux.timerfd_settime(self.grace_timer_fd, .{}, &disarm, null);
+            return;
+        }
+        const now = self.nowNs();
+        const target = soonest.?;
+        // Minimum 1 ms so a deadline that is already in the past still
+        // triggers a timer fire (itimerspec with zero values disarms).
+        const delay_ns: u64 = if (target > now) target - now else 1_000_000;
+        const sec: i64 = @intCast(delay_ns / std.time.ns_per_s);
+        const nsec: i64 = @intCast(delay_ns % std.time.ns_per_s);
+        const spec = linux.itimerspec{
+            .it_value = .{ .sec = sec, .nsec = nsec },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+        _ = linux.timerfd_settime(self.grace_timer_fd, .{}, &spec, null);
+    }
+
+    /// Drain `grace_timer_fd` and run expiry GC. Called by the serve loop.
+    fn drainGraceTimer(self: *Supervisor) void {
+        if (self.grace_timer_fd < 0) return;
+        var tbuf: [8]u8 = undefined;
+        _ = posix.read(self.grace_timer_fd, &tbuf) catch {};
+        self.gcExpiredGrace(self.nowNs());
     }
 
     /// Unconditionally tear down and remove a managed instance (used by
@@ -803,8 +941,8 @@ pub const Supervisor = struct {
         }
         defer self.stopAll();
 
-        // 6 base fds + 1 listen + 4 clients = 11
-        var pollfds: [11]posix.pollfd = undefined;
+        // 7 base fds + 1 listen + 4 clients = 12
+        var pollfds: [12]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -828,6 +966,12 @@ pub const Supervisor = struct {
         } else null;
         const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -890,6 +1034,13 @@ pub const Supervisor = struct {
             if (hotplug_retry_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (grace_timer_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainGraceTimer();
                     pollfds[slot].revents = 0;
                 }
             }
@@ -1402,7 +1553,7 @@ pub const Supervisor = struct {
     pub fn serveMulti(self: *Supervisor, dirs: []const []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [11]posix.pollfd = undefined;
+        var pollfds: [12]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1426,6 +1577,12 @@ pub const Supervisor = struct {
         } else null;
         const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -1491,6 +1648,13 @@ pub const Supervisor = struct {
                 }
             }
 
+            if (grace_timer_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainGraceTimer();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
             if (listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
@@ -1516,7 +1680,7 @@ pub const Supervisor = struct {
     pub fn serve(self: *Supervisor, dir_path: []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [11]posix.pollfd = undefined;
+        var pollfds: [12]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1540,6 +1704,12 @@ pub const Supervisor = struct {
         } else null;
         const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -1601,6 +1771,13 @@ pub const Supervisor = struct {
             if (hotplug_retry_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (grace_timer_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainGraceTimer();
                     pollfds[slot].revents = 0;
                 }
             }
@@ -1723,6 +1900,11 @@ pub const Supervisor = struct {
             self.allocator.free(new_devices);
             m.instance.rerunInitSequence();
             m.suspended = false;
+            // Issue #131-A: rebind succeeded within the grace window;
+            // clear the deadline and re-arm the timer so the remaining
+            // suspended entries (if any) still get GC'd on time.
+            m.grace_deadline_ns = null;
+            self.armGraceTimer();
 
             const dn_copy = self.allocator.dupe(u8, devname) catch {
                 std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
