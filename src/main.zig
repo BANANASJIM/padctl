@@ -70,6 +70,7 @@ pub const io = struct {
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
     pub const uhid = @import("io/uhid.zig");
+    pub const uhid_descriptor = @import("io/uhid_descriptor.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const netlink = @import("io/netlink.zig");
 };
