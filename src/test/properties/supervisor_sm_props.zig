@@ -447,3 +447,110 @@ test "regression-93: orphan managed entry (devname==null) with matching phys_key
 
     sup.stopAll();
 }
+
+// --- regression: issue #131-A — zombie uinput after permanent disconnect ---
+
+test "issue-131-A: suspend grace window expires → managed instance torn down if no ADD within grace_sec" {
+    // Scenario: PR #114 introduced `detach()` → `suspended = true` to survive
+    // wireless sleep/wake without losing the virtual gamepad. But if the
+    // physical device is gone permanently (battery dead, cable unplugged)
+    // the managed entry lingers forever → zombie uinput node.
+    //
+    // Fix: `suspend_grace_sec` schedules a deadline at detach time; when
+    // `gcExpiredGrace(now_ns)` runs past the deadline the managed entry is
+    // fully torn down (equivalent to pre-#114 `detachFull`).
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    // Configure a 5-second grace window.
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+
+    // Still suspended + tracked before deadline.
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns != null);
+
+    // GC at t0+3s (before deadline) → still present.
+    sup.gcExpiredGrace(t0 + 3 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // GC at t0+6s (past deadline) → torn down.
+    sup.gcExpiredGrace(t0 + 6 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "issue-131-A: suspend grace window → ADD within grace_sec re-attaches cleanly" {
+    // If a matching ADD arrives within the grace window the suspended
+    // instance is reused — its uinput stays alive, grace_deadline_ns is
+    // cleared, and `suspended = false` is restored by the rebind path.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns != null);
+
+    // Simulate rebind: in production the netlink ADD path walks
+    // `attachWithRoot` which clears grace_deadline_ns and restores
+    // `suspended = false`. The test exercises only the grace-window
+    // bookkeeping: call `clearGraceDeadline(&m)` to mirror what the
+    // rebind path does, then verify gcExpiredGrace leaves the entry
+    // intact even past the original deadline.
+    sup.clearGraceDeadline(&sup.managed.items[0]);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns == null);
+
+    sup.gcExpiredGrace(t0 + 60 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    sup.stopAll();
+}
+
+test "issue-131-A: suspend_grace_sec=0 disables grace window (legacy pre-#114 behavior)" {
+    // When `suspend_grace_sec == 0`, detach() tears down immediately —
+    // equivalent to `detachFull` — restoring the pre-#114 semantics for
+    // users who prefer strict removal over sleep/wake preservation.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 0;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    sup.detach("hidraw0");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
