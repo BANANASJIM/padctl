@@ -1205,16 +1205,27 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     defer allocator.free(share_dir);
     std.fs.deleteTreeAbsolute(share_dir) catch {};
 
+    // Unconditional: v0.1.2 resolveServiceDir fallback could write
+    // padctl-resume.service here on non-immutable, non-/usr prefixes too.
+    {
+        const legacy_resume = [_][]const u8{
+            "/etc/systemd/user/padctl-resume.service",
+            "/etc/systemd/system/padctl-resume.service",
+        };
+        for (legacy_resume) |suffix| {
+            const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ destdir, suffix });
+            defer allocator.free(path);
+            std.fs.deleteFileAbsolute(path) catch continue;
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+        }
+    }
+
     // Immutable-specific files in /etc/ (auto-detected or explicit).
-    // /etc/systemd/user/padctl-resume.service is where v0.1.2's buggy
-    // install path actually wrote the unit on immutable systems (the
-    // scope-mismatch root cause of issue #131 Problem B); keep both
-    // /etc/systemd/system/ and /etc/systemd/user/ entries for upgrade.
     if (effective_immutable) {
         const etc_files = [_][]const u8{
             "/etc/systemd/system/padctl.service",
-            "/etc/systemd/system/padctl-resume.service",
-            "/etc/systemd/user/padctl-resume.service",
             "/etc/systemd/system/padctl.service.d/immutable.conf",
             "/etc/udev/rules.d/60-padctl.rules",
             "/etc/udev/rules.d/61-padctl-driver-block.rules",
@@ -2429,6 +2440,42 @@ test "uninstall: legacy padctl-resume.service is removed (system immutable)" {
 
     if (std.fs.accessAbsolute(legacy_unit, .{})) |_| {
         std.debug.print("legacy resume unit not cleaned up: {s}\n", .{legacy_unit});
+        return error.LegacyResumeUnitNotRemoved;
+    } else |_| {}
+}
+
+// T-H1: non-immutable + non-/usr prefix must also clean /etc/systemd/user/
+// padctl-resume.service (issue #131-B uninstall gap — H1 fix).
+test "uninstall: legacy padctl-resume.service is removed (non-immutable)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const legacy_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{staging});
+    defer allocator.free(legacy_dir);
+    try ensureDirAll(allocator, legacy_dir);
+    const legacy_unit = try std.fmt.allocPrint(allocator, "{s}/padctl-resume.service", .{legacy_dir});
+    defer allocator.free(legacy_unit);
+    {
+        var f = try std.fs.createFileAbsolute(legacy_unit, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# legacy v0.1.2 resume unit\n");
+    }
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    try uninstall(allocator, opts);
+
+    if (std.fs.accessAbsolute(legacy_unit, .{})) |_| {
+        std.debug.print("legacy resume unit not cleaned up on non-immutable path: {s}\n", .{legacy_unit});
         return error.LegacyResumeUnitNotRemoved;
     } else |_| {}
 }
