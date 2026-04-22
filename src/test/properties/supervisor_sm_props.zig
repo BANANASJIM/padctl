@@ -532,6 +532,76 @@ test "issue-131-A: suspend grace window → ADD within grace_sec re-attaches cle
     sup.stopAll();
 }
 
+test "issue-131-A: gcExpiredGrace triggers at exact deadline (inclusive boundary)" {
+    // At `now_ns == deadline_ns` the grace window is exhausted; the entry
+    // must be torn down (gcExpiredGrace uses `now < deadline` to "keep",
+    // so equality triggers teardown).
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+    const deadline = sup.managed.items[0].grace_deadline_ns.?;
+    try testing.expectEqual(t0 + 5 * std.time.ns_per_s, deadline);
+
+    // Exactly one tick before the deadline → keep.
+    sup.gcExpiredGrace(deadline - 1);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // Exactly at the deadline → torn down.
+    sup.gcExpiredGrace(deadline);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "issue-131-A: multiple suspensions with different deadlines expire independently" {
+    // Two devices detached at different times → each torn down on its own
+    // deadline without affecting the other.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock_a, &parsed.value, "hidraw0", "keyA");
+    try attach(&sup, allocator, &mock_b, &parsed.value, "hidraw1", "keyB");
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0"); // deadline_A = t0 + 5s
+
+    sup.test_now_override_ns = t0 + 2 * std.time.ns_per_s;
+    sup.detach("hidraw1"); // deadline_B = t0 + 7s
+
+    // Skip to t0 + 6s: only A expired.
+    sup.gcExpiredGrace(t0 + 6 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns != null);
+
+    // Skip to t0 + 8s: B also expired.
+    sup.gcExpiredGrace(t0 + 8 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
 test "issue-131-A: suspend_grace_sec=0 disables grace window (legacy pre-#114 behavior)" {
     // When `suspend_grace_sec == 0`, detach() tears down immediately —
     // equivalent to `detachFull` — restoring the pre-#114 semantics for
