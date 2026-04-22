@@ -707,3 +707,105 @@ test "descriptor: isSignedStickAxis heuristic" {
     // DualSense preset: 0..255 treated as trigger-style unsigned.
     try testing.expect(!isSignedStickAxis(0, 255));
 }
+
+// --- Regression tests for CodeRabbit PR #132 findings ------------------------
+// Red tests (T1): added BEFORE the axis-routing/@intCast fix. Each test
+// exercises a previously-silent failure mode (axis drop, unchecked @intCast,
+// FFB-only rejection) and must FAIL against the pre-fix builder.
+
+test "descriptor: DualSense-shape X/Y/RX/RY with min=0 max=255 emits all four usages" {
+    // Regression for silent axis drop: the pre-fix builder routes axes by
+    // `isSignedStickAxis` heuristic (min<0 or max>255) AND by Pass-2's
+    // trigger_order {ABS_Z, ABS_RZ}. A DualSense-shape config where X/Y/RX/RY
+    // use unsigned 0..255 ranges hits neither pass and the axes vanish.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = 0, .max = 255 } },
+        .{ .name = "left_y", .cfg = .{ .code = "ABS_Y", .min = 0, .max = 255 } },
+        .{ .name = "right_x", .cfg = .{ .code = "ABS_RX", .min = 0, .max = 255 } },
+        .{ .name = "right_y", .cfg = .{ .code = "ABS_RY", .min = 0, .max = 255 } },
+    });
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "A", .code = "BTN_SOUTH" },
+    });
+    const out = device.OutputConfig{
+        .name = "dualsense-shape",
+        .axes = axes,
+        .buttons = buttons,
+    };
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    // For each of the four Generic Desktop Usages (X=0x30, Y=0x31, Rx=0x33,
+    // Ry=0x34) we expect a `0x09 <usage>` Usage item to appear somewhere in
+    // the descriptor. (0x09 is the 1-byte Usage prefix on the current Usage
+    // Page; the builder switches back to Generic Desktop before each axis.)
+    const wanted_usages = [_]u8{ 0x30, 0x31, 0x33, 0x34 };
+    for (wanted_usages) |u| {
+        var found = false;
+        var i: usize = 0;
+        while (i + 1 < desc.len) : (i += 1) {
+            if (desc[i] == 0x09 and desc[i + 1] == u) {
+                found = true;
+                break;
+            }
+        }
+        try testing.expect(found);
+    }
+}
+
+test "descriptor: out-of-range i64 axis min returns InvalidOutputConfig instead of panicking" {
+    // Regression for unchecked @intCast(i64→i32): malformed TOML with an
+    // axis min/max outside i32 range must be rejected cleanly rather than
+    // panicking in safe builds.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = std.math.maxInt(i64), .max = std.math.maxInt(i64) } },
+    });
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "A", .code = "BTN_SOUTH" },
+    });
+    const out = device.OutputConfig{
+        .name = "bad-axis",
+        .axes = axes,
+        .buttons = buttons,
+    };
+
+    try testing.expectError(
+        error.InvalidOutputConfig,
+        UhidDescriptorBuilder.buildFromOutput(testing.allocator, out),
+    );
+}
+
+test "descriptor: FFB-only output (no input buttons/axes) produces a valid descriptor" {
+    // The module docstring states an OutputConfig with force_feedback but no
+    // inputs must still yield a descriptor. The pre-fix code bookkept only
+    // input-side emission, so FFB-only outputs were wrongly rejected.
+    const out = device.OutputConfig{
+        .name = "ffb-only",
+        .force_feedback = .{ .type = "rumble" },
+    };
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    try testing.expect(desc.len > 0);
+    try testing.expectEqual(@as(u8, 0xC0), desc[desc.len - 1]);
+    // The FFB branch must have emitted the Vendor-Defined Usage Page.
+    var i: usize = 0;
+    var found = false;
+    while (i + 2 < desc.len) : (i += 1) {
+        if (desc[i] == 0x06 and desc[i + 1] == 0x00 and desc[i + 2] == 0xFF) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
