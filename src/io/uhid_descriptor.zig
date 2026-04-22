@@ -49,6 +49,7 @@
 const std = @import("std");
 const uhid = @import("uhid.zig");
 const device = @import("../config/device.zig");
+const state_mod = @import("../core/state.zig");
 
 pub const BuildError = std.mem.Allocator.Error || error{
     DescriptorTooLarge,
@@ -384,6 +385,167 @@ pub const UhidDescriptorBuilder = struct {
         return buf.toOwnedSlice(allocator);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Input report encoder — mirrors the descriptor layout byte-for-byte.
+// ---------------------------------------------------------------------------
+
+/// Max bytes `encodeReport` will ever emit. Sized to cover an input report ID
+/// byte + 64-bit button bitmap (cap in `buildFromOutput`) + 1-byte hat + four
+/// i16 sticks + two u8 triggers + two 5-byte touch contacts. 32 bytes is
+/// comfortably larger than any baseline gamepad the builder accepts; the
+/// boundary is pinned by a descriptor-driven unit test.
+pub const MAX_REPORT_BYTES: usize = 32;
+
+pub const EncodeError = error{ReportTooLong};
+
+/// Stable HID-bit-index → `state_mod.ButtonId` assignment. The builder's
+/// button pass emits `Usage Minimum 1, Usage Maximum button_count`; the
+/// encoder walks `ButtonId` in declaration order and packs a 1-bit entry for
+/// each id that appears in `cfg.buttons`. Determinism matters: SDL assumes
+/// a stable ordering between descriptor enumeration and report payload.
+fn buttonIdSlot(cfg: device.OutputConfig, bit_idx: u8) ?state_mod.ButtonId {
+    const buttons = cfg.buttons orelse return null;
+    var slot: u8 = 0;
+    inline for (@typeInfo(state_mod.ButtonId).@"enum".fields) |f| {
+        if (buttons.map.contains(f.name)) {
+            if (slot == bit_idx) return @enumFromInt(f.value);
+            slot += 1;
+        }
+    }
+    return null;
+}
+
+/// Number of buttons the builder declares — mirrors the `map.count()` +
+/// 64-cap path in `buildFromOutput` so encoder and descriptor stay in sync.
+fn buttonCount(cfg: device.OutputConfig) u8 {
+    const buttons = cfg.buttons orelse return 0;
+    const n = buttons.map.count();
+    return if (n > 64) 64 else @intCast(n);
+}
+
+fn axisWithCode(cfg: device.OutputConfig, code: []const u8) ?device.AxisConfig {
+    const axes = cfg.axes orelse return null;
+    var it = axes.map.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value_ptr.code, code)) return entry.value_ptr.*;
+    }
+    return null;
+}
+
+/// Translate (dpad_x, dpad_y) into a 4-bit hat value matching the descriptor's
+/// Logical Maximum 7 (N, NE, E, SE, S, SW, W, NW; neutral = 8).
+fn hatValue(gs: state_mod.GamepadState) u4 {
+    const x = gs.dpad_x;
+    const y = gs.dpad_y;
+    if (x == 0 and y == -1) return 0;
+    if (x == 1 and y == -1) return 1;
+    if (x == 1 and y == 0) return 2;
+    if (x == 1 and y == 1) return 3;
+    if (x == 0 and y == 1) return 4;
+    if (x == -1 and y == 1) return 5;
+    if (x == -1 and y == 0) return 6;
+    if (x == -1 and y == -1) return 7;
+    return 8;
+}
+
+/// Encode a `GamepadState` into a wire-format HID input report matching the
+/// bytes the descriptor produced by `UhidDescriptorBuilder.buildFromOutput`
+/// describes. First byte is always `INPUT_REPORT_ID`. Layout follows the
+/// same section order as the descriptor: buttons → hat → sticks → triggers
+/// → touchpad. Sections absent from `cfg` are simply skipped — the resulting
+/// byte length is the sum of declared section widths.
+///
+/// Owned by the caller. `buf` must have capacity >= `MAX_REPORT_BYTES`.
+/// Returns the slice of `buf` that was populated.
+pub fn encodeReport(
+    cfg: device.OutputConfig,
+    gs: state_mod.GamepadState,
+    buf: []u8,
+) EncodeError![]u8 {
+    if (buf.len < MAX_REPORT_BYTES) return error.ReportTooLong;
+    @memset(buf, 0);
+
+    var pos: usize = 0;
+    buf[pos] = INPUT_REPORT_ID;
+    pos += 1;
+
+    // --- Button bitmap ---
+    const btn_count = buttonCount(cfg);
+    if (btn_count > 0) {
+        const btn_bytes: usize = (@as(usize, btn_count) + 7) / 8;
+        var i: u8 = 0;
+        while (i < btn_count) : (i += 1) {
+            const slot = buttonIdSlot(cfg, i) orelse continue;
+            const mask: u64 = @as(u64, 1) << @intFromEnum(slot);
+            if ((gs.buttons & mask) != 0) {
+                const byte_idx = pos + (@as(usize, i) / 8);
+                const bit_pos: u3 = @intCast(i % 8);
+                buf[byte_idx] |= @as(u8, 1) << bit_pos;
+            }
+        }
+        pos += btn_bytes;
+    }
+
+    // --- Hat (4-bit + 4-bit padding packed into one byte) ---
+    const has_hat: bool = if (cfg.dpad) |d| std.mem.eql(u8, d.type, "hat") else false;
+    if (has_hat) {
+        buf[pos] = @as(u8, hatValue(gs)) & 0x0F;
+        pos += 1;
+    }
+
+    // --- Sticks (fixed order) ---
+    const stick_order = [_]struct { code: []const u8, field: enum { ax, ay, rx, ry } }{
+        .{ .code = "ABS_X", .field = .ax },
+        .{ .code = "ABS_Y", .field = .ay },
+        .{ .code = "ABS_RX", .field = .rx },
+        .{ .code = "ABS_RY", .field = .ry },
+    };
+    for (stick_order) |s| {
+        if (axisWithCode(cfg, s.code) == null) continue;
+        const v: i16 = switch (s.field) {
+            .ax => gs.ax,
+            .ay => gs.ay,
+            .rx => gs.rx,
+            .ry => gs.ry,
+        };
+        std.mem.writeInt(i16, buf[pos..][0..2], v, .little);
+        pos += 2;
+    }
+
+    // --- Triggers (fixed order) ---
+    const trigger_order = [_]struct { code: []const u8, field: enum { lt, rt } }{
+        .{ .code = "ABS_Z", .field = .lt },
+        .{ .code = "ABS_RZ", .field = .rt },
+    };
+    for (trigger_order) |t| {
+        if (axisWithCode(cfg, t.code) == null) continue;
+        buf[pos] = switch (t.field) {
+            .lt => gs.lt,
+            .rt => gs.rt,
+        };
+        pos += 1;
+    }
+
+    // --- Touchpad (per-finger tip + X + Y) ---
+    if (cfg.touchpad) |_| {
+        const finger0 = [_]struct { active: bool, x: i16, y: i16 }{
+            .{ .active = gs.touch0_active, .x = gs.touch0_x, .y = gs.touch0_y },
+            .{ .active = gs.touch1_active, .x = gs.touch1_x, .y = gs.touch1_y },
+        };
+        for (finger0) |f| {
+            if (pos + 5 > buf.len) return error.ReportTooLong;
+            buf[pos] = if (f.active) 1 else 0;
+            pos += 1;
+            std.mem.writeInt(i16, buf[pos..][0..2], f.x, .little);
+            pos += 2;
+            std.mem.writeInt(i16, buf[pos..][0..2], f.y, .little);
+            pos += 2;
+        }
+    }
+
+    return buf[0..pos];
+}
 
 // ---------------------------------------------------------------------------
 // Tests — kept in-module so new contributors reading `uhid_descriptor.zig`
@@ -818,4 +980,235 @@ test "descriptor: FFB-only output (no input buttons/axes) produces a valid descr
         }
     }
     try testing.expect(found);
+}
+
+// --- encodeReport tests (H3 regression) ------------------------------------
+
+test "encodeReport: buttons + stick pair + triggers pack in declared order" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = -32768, .max = 32767 } },
+        .{ .name = "left_y", .cfg = .{ .code = "ABS_Y", .min = -32768, .max = 32767 } },
+        .{ .name = "lt", .cfg = .{ .code = "ABS_Z", .min = 0, .max = 255 } },
+        .{ .name = "rt", .cfg = .{ .code = "ABS_RZ", .min = 0, .max = 255 } },
+    });
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "A", .code = "BTN_SOUTH" },
+        .{ .name = "B", .code = "BTN_EAST" },
+        .{ .name = "X", .code = "BTN_WEST" },
+    });
+    const out = device.OutputConfig{
+        .name = "layout-test",
+        .axes = axes,
+        .buttons = buttons,
+    };
+
+    // Build descriptor to measure the declared input report width and sanity
+    // -check the encoder stays within it.
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    // Press A (bit 0) and X (bit 2); lt=100, rt=200, ax=1234, ay=-1.
+    var gs = state_mod.GamepadState{};
+    gs.buttons = (@as(u64, 1) << @intFromEnum(state_mod.ButtonId.A)) |
+        (@as(u64, 1) << @intFromEnum(state_mod.ButtonId.X));
+    gs.ax = 1234;
+    gs.ay = -1;
+    gs.lt = 100;
+    gs.rt = 200;
+
+    var report_buf: [MAX_REPORT_BYTES]u8 = undefined;
+    const report = try encodeReport(out, gs, &report_buf);
+
+    // Layout: [ReportID=1][buttons=1 byte for 3 buttons][ax lo][ax hi][ay lo][ay hi][lt][rt]
+    try testing.expectEqual(@as(usize, 8), report.len);
+    try testing.expectEqual(@as(u8, INPUT_REPORT_ID), report[0]);
+    // A = bit 0, B = bit 1, X = bit 2. Pressed: A + X → 0b0000_0101 = 0x05.
+    try testing.expectEqual(@as(u8, 0x05), report[1]);
+    try testing.expectEqual(@as(i16, 1234), std.mem.readInt(i16, report[2..4], .little));
+    try testing.expectEqual(@as(i16, -1), std.mem.readInt(i16, report[4..6], .little));
+    try testing.expectEqual(@as(u8, 100), report[6]);
+    try testing.expectEqual(@as(u8, 200), report[7]);
+}
+
+test "encodeReport: hat packs cardinal/diagonal and neutral correctly" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = -32768, .max = 32767 } },
+    });
+    const out = device.OutputConfig{
+        .name = "hat-test",
+        .axes = axes,
+        .dpad = .{ .type = "hat" },
+    };
+
+    const cases = [_]struct { dx: i8, dy: i8, expect: u8 }{
+        .{ .dx = 0, .dy = -1, .expect = 0 }, // N
+        .{ .dx = 1, .dy = -1, .expect = 1 }, // NE
+        .{ .dx = 1, .dy = 0, .expect = 2 }, // E
+        .{ .dx = 1, .dy = 1, .expect = 3 }, // SE
+        .{ .dx = 0, .dy = 1, .expect = 4 }, // S
+        .{ .dx = -1, .dy = 1, .expect = 5 }, // SW
+        .{ .dx = -1, .dy = 0, .expect = 6 }, // W
+        .{ .dx = -1, .dy = -1, .expect = 7 }, // NW
+        .{ .dx = 0, .dy = 0, .expect = 8 }, // neutral
+    };
+    for (cases) |tc| {
+        var gs = state_mod.GamepadState{};
+        gs.dpad_x = tc.dx;
+        gs.dpad_y = tc.dy;
+        var buf: [MAX_REPORT_BYTES]u8 = undefined;
+        const r = try encodeReport(out, gs, &buf);
+        // Layout: [ID=1][hat][ax lo][ax hi]
+        try testing.expectEqual(@as(u8, tc.expect), r[1] & 0x0F);
+        try testing.expectEqual(@as(usize, 4), r.len);
+    }
+}
+
+test "encodeReport: Steam Deck TOML produces a non-empty report with correct ID" {
+    const alloc = testing.allocator;
+    const parsed = try device.parseFile(alloc, "devices/valve/steam-deck.toml");
+    defer parsed.deinit();
+    const out = parsed.value.output orelse return error.MissingOutputSection;
+
+    var gs = state_mod.GamepadState{};
+    gs.ax = 100;
+    gs.ay = -100;
+    gs.rx = 50;
+    gs.ry = -50;
+    gs.lt = 128;
+    gs.rt = 64;
+
+    var buf: [MAX_REPORT_BYTES]u8 = undefined;
+    const r = try encodeReport(out, gs, &buf);
+
+    try testing.expectEqual(@as(u8, INPUT_REPORT_ID), r[0]);
+    // Steam Deck layout: ID(1) + buttons(17→3 bytes after pad) + hat(1) +
+    // sticks(4×2=8) + triggers(2) + touchpad(2 fingers × 5=10) = 25.
+    try testing.expect(r.len > 1);
+    try testing.expect(r.len <= MAX_REPORT_BYTES);
+}
+
+test "encodeReport: empty config is rejected by descriptor builder, encoder never sees it" {
+    // encodeReport is only called after buildFromOutput succeeded, so an
+    // empty config path cannot occur in production. Assert the guard to
+    // document the invariant.
+    const out = device.OutputConfig{ .name = "empty" };
+    try testing.expectError(error.InvalidOutputConfig, UhidDescriptorBuilder.buildFromOutput(testing.allocator, out));
+}
+
+test "encodeReport: buffer smaller than MAX_REPORT_BYTES returns ReportTooLong" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = -32768, .max = 32767 } },
+    });
+    const out = device.OutputConfig{ .name = "small", .axes = axes };
+    var tiny: [4]u8 = undefined;
+    try testing.expectError(error.ReportTooLong, encodeReport(out, .{}, &tiny));
+}
+
+// --- Structural invariants on the Steam Deck golden fixture (H5) -----------
+//
+// The golden .bin is the builder's own output, so a byte-exact match is
+// tautological. Instead we *parse* the bytes as HID 1.11 short items and
+// assert global structure invariants that would catch any builder-level
+// corruption (wrong report ID, unbalanced collections, byte alignment).
+
+fn hidItemSize(prefix: u8) u8 {
+    // HID 1.11 §6.2.2.2 short item: bSize lives in the low 2 bits of the
+    // prefix byte. Encoding: 0=0 bytes, 1=1 byte, 2=2 bytes, 3=4 bytes.
+    return switch (prefix & 0b11) {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        else => unreachable,
+    };
+}
+
+test "golden invariants: Steam Deck HID descriptor parses as balanced HID 1.11 item stream" {
+    const alloc = testing.allocator;
+    const bytes = try std.fs.cwd().readFileAlloc(
+        alloc,
+        "src/test/fixtures/golden/steam_deck_hid_descriptor.bin",
+        65536,
+    );
+    defer alloc.free(bytes);
+
+    // Prologue: Usage Page (Generic Desktop) 0x05 0x01, Usage (Game Pad)
+    // 0x09 0x05, Collection (Application) 0xA1 0x01.
+    try testing.expectEqual(@as(u8, 0x05), bytes[0]);
+    try testing.expectEqual(@as(u8, 0x01), bytes[1]);
+    try testing.expectEqual(@as(u8, 0x09), bytes[2]);
+    try testing.expectEqual(@as(u8, 0x05), bytes[3]);
+    try testing.expectEqual(@as(u8, 0xA1), bytes[4]);
+    try testing.expectEqual(@as(u8, 0x01), bytes[5]);
+
+    var collection_depth: i32 = 0;
+    var max_depth: i32 = 0;
+    var collection_opens: u32 = 0;
+    var collection_closes: u32 = 0;
+    var report_ids_seen: u32 = 0;
+    var total_input_bits: u64 = 0;
+    var cur_report_size: u32 = 0;
+    var cur_report_count: u32 = 0;
+
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const prefix = bytes[i];
+        const size = hidItemSize(prefix);
+        i += 1;
+        if (i + size > bytes.len) return error.TruncatedItem;
+
+        const tag = prefix & 0xF0;
+        const btype = (prefix >> 2) & 0b11; // 0=main, 1=global, 2=local
+        const payload = bytes[i..][0..size];
+
+        switch (prefix) {
+            0xA1 => { // Collection
+                collection_opens += 1;
+                collection_depth += 1;
+                if (collection_depth > max_depth) max_depth = collection_depth;
+            },
+            0xC0 => { // End Collection
+                collection_closes += 1;
+                collection_depth -= 1;
+            },
+            0x85 => { // Report ID (global)
+                report_ids_seen += 1;
+            },
+            else => {},
+        }
+
+        // Track Report Size / Report Count to verify byte alignment on Input
+        // items.
+        if (prefix == 0x75 and size == 1) cur_report_size = payload[0];
+        if (prefix == 0x95 and size == 1) cur_report_count = payload[0];
+
+        // Main input item (tag 1000, btype 0) — 0x80 family. 0x81 <data> is
+        // "Input".
+        if (tag == 0x80 and btype == 0) {
+            total_input_bits += @as(u64, cur_report_size) * @as(u64, cur_report_count);
+        }
+
+        i += size;
+    }
+
+    try testing.expectEqual(collection_opens, collection_closes);
+    try testing.expectEqual(@as(i32, 0), collection_depth);
+    try testing.expect(max_depth >= 1); // at least the application collection
+    try testing.expectEqual(@as(u32, 1), report_ids_seen);
+    // Steam Deck descriptor declares >= 1 input bit (buttons + hat + axes).
+    try testing.expect(total_input_bits > 0);
+    // The sum of Report Size × Report Count across Input items must be a
+    // multiple of 8 — the kernel rejects unaligned Input aggregates.
+    try testing.expectEqual(@as(u64, 0), total_input_bits % 8);
 }

@@ -21,6 +21,8 @@ const std = @import("std");
 const posix = std.posix;
 const state = @import("../core/state.zig");
 const uinput = @import("uinput.zig");
+const device_cfg = @import("../config/device.zig");
+const descriptor = @import("uhid_descriptor.zig");
 
 // --- Kernel protocol constants ---------------------------------------------
 
@@ -188,6 +190,12 @@ pub const Config = struct {
     version: u32 = 0,
     /// HID country code. 0 = "not localized" which matches most gamepads.
     country: u32 = 0,
+    /// Optional `[output]` section the descriptor was built from. When set,
+    /// `emit()` packs HID reports via `uhid_descriptor.encodeReport` so the
+    /// bytes on the wire match the declared layout. When null, `emit()`
+    /// falls back to a raw 4-byte stick stub (legacy tests that pass a hand
+    /// -written descriptor without a matching `OutputConfig` still work).
+    output: ?device_cfg.OutputConfig = null,
 };
 
 /// A UHID-backed output device implementing the shared `OutputDevice` vtable.
@@ -211,6 +219,9 @@ pub const UhidDevice = struct {
     /// stores the backing TOML allocator; CI tests use string literals.
     name: []const u8,
     uniq: []const u8,
+    /// Optional `OutputConfig` — when set, `emit()` dispatches to the
+    /// descriptor-driven encoder. See `Config.output`.
+    output: ?device_cfg.OutputConfig,
 
     /// Construct a `UhidDevice` against a real `/dev/uhid` fd. Opens the
     /// kernel node, populates a `UhidCreate2Req`, and writes it.
@@ -244,6 +255,7 @@ pub const UhidDevice = struct {
             .pid = cfg.pid,
             .name = cfg.name,
             .uniq = cfg.uniq,
+            .output = cfg.output,
         };
         return self;
     }
@@ -276,6 +288,7 @@ pub const UhidDevice = struct {
             .pid = cfg.pid,
             .name = cfg.name,
             .uniq = cfg.uniq,
+            .output = cfg.output,
         };
         return self;
     }
@@ -335,22 +348,33 @@ pub const UhidDevice = struct {
         self.close();
     }
 
-    /// Emit a `UHID_INPUT2` event carrying a Wave-1 stub payload derived from
-    /// `s`. The payload is 4 bytes of stick axes mapped into the 0..255 HID
-    /// logical range — enough to exercise the vtable contract and the
-    /// `UhidSimulator` consumer harness. Wave 2 replaces this with the real
-    /// descriptor-driven encoder.
+    /// Emit a `UHID_INPUT2` event carrying an input report derived from `s`.
+    /// When `Config.output` was supplied, bytes are packed by
+    /// `uhid_descriptor.encodeReport` against the exact layout declared by
+    /// the descriptor (Report ID + buttons + hat + sticks + triggers +
+    /// touchpad). When `output` is null, a 4-byte stick-only stub is sent —
+    /// retained for tests that bring a hand-written descriptor without a
+    /// matching `OutputConfig`.
     pub fn emit(self: *UhidDevice, s: state.GamepadState) uinput.EmitError!void {
-        var payload: [4]u8 = undefined;
-        payload[0] = axisToU8(s.ax);
-        payload[1] = axisToU8(s.ay);
-        payload[2] = axisToU8(s.rx);
-        payload[3] = axisToU8(s.ry);
-
-        uhidInput(self.fd, &payload) catch |err| switch (err) {
-            error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
-            else => return error.WriteFailed,
-        };
+        if (self.output) |out| {
+            var report_buf: [descriptor.MAX_REPORT_BYTES]u8 = undefined;
+            const bytes = descriptor.encodeReport(out, s, &report_buf) catch
+                return error.WriteFailed;
+            uhidInput(self.fd, bytes) catch |err| switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+                else => return error.WriteFailed,
+            };
+        } else {
+            var payload: [4]u8 = undefined;
+            payload[0] = axisToU8(s.ax);
+            payload[1] = axisToU8(s.ay);
+            payload[2] = axisToU8(s.rx);
+            payload[3] = axisToU8(s.ry);
+            uhidInput(self.fd, &payload) catch |err| switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+                else => return error.WriteFailed,
+            };
+        }
 
         self.state_snapshot = s;
     }
