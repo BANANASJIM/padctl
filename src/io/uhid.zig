@@ -123,8 +123,14 @@ pub fn uhidCreate(
     _ = try posix.write(fd, &buf);
 }
 
-/// Send a `UHID_INPUT2` event carrying an input report payload.
+/// Send a `UHID_INPUT2` event carrying an input report payload. Rejects
+/// payloads larger than `UHID_DATA_MAX` — the kernel's `uhid_input2_req.data`
+/// is a fixed `[4096]u8` and `uhid_input2_req.size` is a `u16`, so anything
+/// beyond 4096 bytes would both overrun the payload array (panic in safe
+/// builds, silent corruption in release) and truncate in the `size` field.
 pub fn uhidInput(fd: posix.fd_t, data: []const u8) !void {
+    if (data.len > UHID_DATA_MAX) return error.PayloadTooLong;
+
     var ev = std.mem.zeroes(UhidInput2Event);
     ev.type = UHID_INPUT2;
     ev.payload.size = @intCast(data.len);
@@ -614,6 +620,67 @@ test "uhid: initWithFd rejects negative fd" {
     // round-trips cleanly. Use a `var` so @as survives the const inference.
     const bogus_fd: posix.fd_t = -1;
     try testing.expectError(error.InvalidFd, UhidDevice.initWithFd(alloc, bogus_fd, cfg));
+}
+
+test "uhid: uhidInput rejects oversized payload (regression H4)" {
+    // Pre-fix: uhidInput blindly `@memcpy`'d `data` into the fixed 4096-byte
+    // payload array, which panics in safe builds and corrupts adjacent
+    // memory in release. Assert a slice larger than UHID_DATA_MAX now
+    // returns error.PayloadTooLong before touching the buffer.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const oversized = try testing.allocator.alloc(u8, UHID_DATA_MAX + 1);
+    defer testing.allocator.free(oversized);
+    @memset(oversized, 0xAA);
+
+    try testing.expectError(error.PayloadTooLong, uhidInput(fds[1], oversized));
+
+    // A boundary-case payload of exactly UHID_DATA_MAX must pass.
+    const ok_size = try testing.allocator.alloc(u8, UHID_DATA_MAX);
+    defer testing.allocator.free(ok_size);
+    @memset(ok_size, 0x55);
+    try uhidInput(fds[1], ok_size);
+
+    // Drain to keep the pipe clean for later tests.
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &scratch);
+}
+
+test "uhid: emitRaw maps PayloadTooLong to WriteFailed (vtable error stability)" {
+    // `emitRaw` returns `uinput.EmitError` which is `{ WriteFailed, DeviceGone }`
+    // — adding a new variant would ripple across every vtable call site. Map
+    // oversized payloads to `WriteFailed` so the new guard stays inside the
+    // existing error set.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-payload-guard",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    const oversized = try alloc.alloc(u8, UHID_DATA_MAX + 512);
+    defer alloc.free(oversized);
+    @memset(oversized, 0x42);
+
+    try testing.expectError(error.WriteFailed, dev.emitRaw(oversized));
+
+    dev.close();
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = posix.read(fds[0], &scratch) catch {};
 }
 
 test "uhid: close() is idempotent (second call is a no-op)" {
