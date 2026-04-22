@@ -2,7 +2,9 @@
 set -e
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     if [ -d /run/systemd/system ]; then
-        systemctl stop padctl.service padctl-resume.service || true
-        systemctl disable padctl.service padctl-resume.service || true
+        # padctl-resume.service was removed in issue #131 Problem B fix;
+        # still attempt stop/disable to clean up upgrades from v0.1.2.
+        systemctl stop padctl.service padctl-resume.service 2>/dev/null || true
+        systemctl disable padctl.service padctl-resume.service 2>/dev/null || true
     fi
 fi

@@ -343,10 +343,9 @@ else
     warn "Service: not running — check 'systemctl --user status padctl' and 'journalctl --user -u padctl -n 30'"
 fi
 
-# Check resume service
-if systemctl --user is-enabled padctl-resume.service &>/dev/null; then
-    ok "Resume service: enabled"
-fi
+# padctl-resume.service was removed in issue #131 Problem B fix —
+# the udev padctl-reconnect hook handles post-suspend reconnects.
+# Nothing to verify here.
 
 # Check udev rules
 for rules_file in 60-padctl.rules 61-padctl-driver-block.rules; do

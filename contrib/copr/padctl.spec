@@ -44,25 +44,25 @@ systemd socket activation and udev integration.
 %{_bindir}/padctl-debug
 %{_bindir}/padctl-reconnect
 %{_unitdir}/padctl.service
-%{_unitdir}/padctl-resume.service
 %{_udevrulesdir}/60-padctl.rules
 %{_udevrulesdir}/61-padctl-driver-block.rules
 %{_datadir}/padctl/
 
 %post
-%systemd_post padctl.service padctl-resume.service
+%systemd_post padctl.service
 
 %preun
-%systemd_preun padctl.service padctl-resume.service
+%systemd_preun padctl.service
 
 %postun
-%systemd_postun_with_restart padctl.service padctl-resume.service
+%systemd_postun_with_restart padctl.service
 
 %changelog
 * Fri Apr 04 2026 padctl maintainers <maintainers@padctl.dev> - 0.1.0-1
 - Fix ExclusiveArch (was incorrectly BuildArch)
 - Update udev rules: 99-padctl.rules -> 60-padctl.rules + 61-padctl-driver-block.rules
-- Add padctl-debug, padctl-capture, padctl-reconnect, padctl-resume.service to %files
+- Add padctl-debug, padctl-capture, padctl-reconnect to %files
+- Drop padctl-resume.service (removed in issue #131 Problem B fix)
 - Use padctl install to generate all files instead of manual installs
 - Add Requires: systemd
 
