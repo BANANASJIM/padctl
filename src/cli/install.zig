@@ -286,6 +286,47 @@ fn ensureDirAll(allocator: std.mem.Allocator, path: []const u8) !void {
     }
 }
 
+/// Create the XDG parent dirs that systemd's StateDirectory= requires to exist.
+/// systemd only creates the final component ($XDG_STATE_HOME/padctl), not its
+/// parents.  When a user has wiped ~/.local/state the service fails at startup.
+/// Chowns newly created dirs to SUDO_UID:SUDO_GID when running as root.
+fn ensureUserXdgDirs(allocator: std.mem.Allocator, home: []const u8) !void {
+    const dirs = [_][]const u8{
+        ".config",
+        ".config/systemd",
+        ".config/systemd/user",
+        ".local",
+        ".local/state",
+        ".local/share",
+    };
+
+    const sudo_uid_str = std.posix.getenv("SUDO_UID");
+    const sudo_gid_str = std.posix.getenv("SUDO_GID");
+    const do_chown = std.os.linux.getuid() == 0 and sudo_uid_str != null and sudo_gid_str != null;
+    const chown_uid: std.posix.uid_t = if (do_chown)
+        @intCast(std.fmt.parseInt(u32, sudo_uid_str.?, 10) catch 0)
+    else
+        0;
+    const chown_gid: std.posix.gid_t = if (do_chown)
+        @intCast(std.fmt.parseInt(u32, sudo_gid_str.?, 10) catch 0)
+    else
+        0;
+
+    for (dirs) |rel| {
+        const abs = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, rel });
+        defer allocator.free(abs);
+        std.fs.makeDirAbsolute(abs) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        if (do_chown) {
+            var d = std.fs.openDirAbsolute(abs, .{}) catch continue;
+            defer d.close();
+            std.posix.fchown(d.fd, chown_uid, chown_gid) catch {};
+        }
+    }
+}
+
 fn copyFile(src: []const u8, dst: []const u8) !void {
     var src_file = try std.fs.openFileAbsolute(src, .{});
     defer src_file.close();
@@ -813,6 +854,11 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     try ensureDirAll(allocator, lib_systemd_dir);
     try ensureDirAll(allocator, share_dir);
     try ensureDirAll(allocator, udev_dir);
+
+    if (effective_user_service and destdir.len == 0) {
+        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        try ensureUserXdgDirs(allocator, home);
+    }
 
     const self_path = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(self_path);
@@ -3604,4 +3650,42 @@ test "install: buildSystemctlUserArgv skip returns null" {
     const plan = SystemctlUserPlan{ .mode = .skip };
     const argv = try buildSystemctlUserArgv(allocator, plan, &.{"daemon-reload"});
     try testing.expect(argv == null);
+}
+
+test "install: ensureUserXdgDirs creates parent chain for StateDirectory" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+
+    try ensureUserXdgDirs(allocator, home);
+
+    for ([_][]const u8{
+        ".config/systemd/user",
+        ".local/state",
+        ".local/share",
+    }) |rel| {
+        const abs = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, rel });
+        defer allocator.free(abs);
+        var d = try std.fs.openDirAbsolute(abs, .{});
+        d.close();
+    }
+}
+
+test "install: ensureUserXdgDirs idempotent (second call no error)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+
+    try ensureUserXdgDirs(allocator, home);
+    try ensureUserXdgDirs(allocator, home);
 }
