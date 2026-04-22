@@ -33,9 +33,15 @@ const std = @import("std");
 
 pub const ReportSize: usize = 64;
 
-/// Canonical Valve Steam Deck vendor / product IDs.
-pub const DECK_VID: u16 = 0x28de;
-pub const DECK_PID: u16 = 0x1205;
+/// Synthetic VID/PID used by the test harness — **not** Valve's real IDs.
+/// A developer running these tests on a machine with a real Steam Deck
+/// attached would otherwise see `UhidSimulator.findHidrawPath` alias to the
+/// real hardware node (same 0x28de:0x1205 match), corrupting both the test
+/// harness and potentially the real device's input stream. Picking a value
+/// outside any known vendor range (0xFADE is not assigned by USB-IF) ensures
+/// the virtual device we create is the only match.
+pub const DECK_VID: u16 = 0xFADE;
+pub const DECK_PID: u16 = 0xD00D;
 
 /// Subset of `ButtonId` relevant to Deck digital buttons. Enum values are the
 /// bit indices inside the 64-bit `button_group` field that starts at byte 8.

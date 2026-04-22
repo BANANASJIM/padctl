@@ -96,11 +96,13 @@ pub const UhidSimulator = struct {
 
         // Bounded poll for the hidraw node. Real kernels take ~20-100ms to
         // wire the hidraw class device up. We deliberately exceed the test
-        // timeout by a small factor so slow CI doesn't flap.
+        // timeout by a small factor so slow CI doesn't flap. The optional
+        // uniq filter excludes real hardware sharing our synthetic VID/PID
+        // — belt-and-braces defence against vendor-ID collisions.
         const start = std.time.milliTimestamp();
         const deadline = start + @as(i64, @intCast(opts.hidraw_timeout_ms));
         while (std.time.milliTimestamp() < deadline) {
-            if (try findHidrawPath(opts.vid, opts.pid)) |entry| {
+            if (try findHidrawPath(opts.vid, opts.pid, opts.uniq)) |entry| {
                 @memcpy(self.hidraw_path_buf[0..entry.len], entry.slice());
                 self.hidraw_path_buf[entry.len] = 0;
                 self.hidraw_path_len = entry.len;
@@ -183,7 +185,12 @@ const HidrawEntry = struct {
     }
 };
 
-fn findHidrawPath(vid: u16, pid: u16) !?HidrawEntry {
+/// Find a /dev/hidrawN whose VID/PID match and — when `expect_uniq` is
+/// non-empty — whose `HIDIOCGRAWUNIQ` attribute matches exactly. The uniq
+/// filter prevents aliasing a real device that happens to share the
+/// synthetic test VID/PID; when `expect_uniq` is empty the legacy
+/// VID/PID-only match applies.
+fn findHidrawPath(vid: u16, pid: u16, expect_uniq: []const u8) !?HidrawEntry {
     const linux = std.os.linux;
     var i: u8 = 0;
     while (i < 64) : (i += 1) {
@@ -196,11 +203,19 @@ fn findHidrawPath(vid: u16, pid: u16) !?HidrawEntry {
         if (rc != 0) continue;
         const dev_vid: u16 = @bitCast(info.vendor);
         const dev_pid: u16 = @bitCast(info.product);
-        if (dev_vid == vid and dev_pid == pid) {
-            var out = HidrawEntry{ .storage = undefined, .len = path.len };
-            @memcpy(out.storage[0..path.len], path);
-            return out;
+        if (dev_vid != vid or dev_pid != pid) continue;
+
+        if (expect_uniq.len != 0) {
+            var uniq_buf: [64]u8 = std.mem.zeroes([64]u8);
+            const uniq_rc = linux.ioctl(fd, ioctl_constants.HIDIOCGRAWUNIQ(uniq_buf.len), @intFromPtr(&uniq_buf));
+            if (uniq_rc < 0) continue;
+            const nul = std.mem.indexOfScalar(u8, &uniq_buf, 0) orelse uniq_buf.len;
+            if (!std.mem.eql(u8, uniq_buf[0..nul], expect_uniq)) continue;
         }
+
+        var out = HidrawEntry{ .storage = undefined, .len = path.len };
+        @memcpy(out.storage[0..path.len], path);
+        return out;
     }
     return null;
 }
