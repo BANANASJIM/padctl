@@ -243,6 +243,7 @@ fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []const u8
         \\SupplementaryGroups=input
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
+        \\DeviceAllow=/dev/uhid rw
         \\DeviceAllow=char-input rw
         \\
         \\[Install]
@@ -1561,6 +1562,11 @@ fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []const U
 
     try buf.appendSlice(allocator, "\n# uinput access for logged-in users\n");
     try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\"\n");
+    // ADR-015 §Dependencies: UHID virtual-device creation mirrors uinput's
+    // permission model. padctl running as a user service needs write access
+    // to /dev/uhid to expose SDL-visible gamepads; uaccess grants this to
+    // the active login session without requiring CAP_SYS_ADMIN.
+    try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uhid\", TAG+=\"uaccess\"\n");
 
     var f = try std.fs.createFileAbsolute(rules_path, .{ .truncate = true });
     defer f.close();
@@ -2205,6 +2211,9 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null); // hidraw rule
     try testing.expect(std.mem.indexOf(u8, content, "GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
+    // ADR-015: /dev/uhid must get uaccess so the user service can create
+    // virtual SDL-visible gamepads without CAP_SYS_ADMIN.
+    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\"") != null);
 }
 
 test "install: findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
@@ -2450,6 +2459,19 @@ test "install: generateSystemServiceContent uses StateDirectory (not LogsDirecto
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
     try testing.expect(std.mem.indexOf(u8, content, "LogsDirectory") == null);
+}
+
+test "install: generateSystemServiceContent grants /dev/uhid DeviceAllow (ADR-015)" {
+    // ADR-015 §Dependencies: the UHID migration needs /dev/uhid access
+    // parallel to /dev/uinput. Pre-fix the template listed only hidraw,
+    // uinput, and char-input — UhidDevice.init would have failed with
+    // EACCES on a default install.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateSystemServiceContent(allocator, "/usr/local");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "DeviceAllow=/dev/uhid rw") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "DeviceAllow=/dev/uinput rw") != null);
 }
 
 test "install: parseYesNoDefaultYes empty input is yes (default-yes)" {
