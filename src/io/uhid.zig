@@ -428,13 +428,52 @@ test "uhid: axisToU8 clamps and centres" {
     try testing.expectEqual(@as(u8, 127), UhidDevice.axisToU8(-1));
 }
 
-test "uhid: UhidDevice vtable signature matches OutputDevice" {
-    // Compile-time guardrail: if UinputDevice's vtable ever evolves (say, to
-    // add a new member), this test forces UhidDevice to be updated in
-    // lockstep before the code base can even compile its tests.
-    const uhid_vt = std.meta.fieldInfo(@TypeOf(UhidDevice.vtable), .emit).type;
-    const uinput_vt = std.meta.fieldInfo(uinput.OutputDevice.VTable, .emit).type;
-    try testing.expectEqual(uinput_vt, uhid_vt);
+test "uhid: outputDevice().emit routes through UhidDevice.emit (not a stub)" {
+    // The prior revision compared UhidDevice.vtable.emit's type to
+    // OutputDevice.VTable.emit's type — a tautology since vtable is declared
+    // as `uinput.OutputDevice.VTable{ ... }`. This replacement asserts that a
+    // vtable-routed emit call reaches the real implementation by observing
+    // the bytes written to the backing fd change with the input state.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-vtable-dispatch",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    const out = dev.outputDevice();
+    // Emit a non-zero state — axisToU8 shifts away from the 128 centre.
+    try out.emit(.{ .ax = 32767, .ay = -32768, .rx = 0, .ry = 0 });
+
+    var buf: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &buf);
+    try testing.expectEqual(UHID_INPUT2, std.mem.readInt(u32, buf[0..4], .little));
+    // Bytes 6..10 are the stick payload after the u16 size field at offset 4.
+    try testing.expectEqual(@as(u8, 255), buf[6]); // ax full positive
+    try testing.expectEqual(@as(u8, 0), buf[7]); // ay full negative
+    try testing.expectEqual(@as(u8, 128), buf[8]); // rx centre
+    try testing.expectEqual(@as(u8, 128), buf[9]); // ry centre
+
+    // A second emit with the opposite state must produce different bytes —
+    // proves the call routed into the live UhidDevice.emit each time rather
+    // than capturing the first invocation's state.
+    try out.emit(.{ .ax = -32768, .ay = 32767, .rx = 0, .ry = 0 });
+    _ = try posix.read(fds[0], &buf);
+    try testing.expectEqual(@as(u8, 0), buf[6]);
+    try testing.expectEqual(@as(u8, 255), buf[7]);
+
+    out.close();
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &scratch);
 }
 
 test "uhid: init rejects empty name" {
