@@ -233,6 +233,26 @@ pub fn build(b: *std.Build) void {
     deck_e2e_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(deck_e2e_tests).step);
 
+    // supervisor_uhid_grace_integration: issue-131-A real-kernel validation.
+    // Creates a UHID virtual device, attaches via Supervisor, simulates
+    // disconnect, and asserts grace-window teardown with deterministic clock.
+    const grace_int_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/supervisor_uhid_grace_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    grace_int_mod.addImport("toml", toml_mod);
+    grace_int_mod.addImport("src", src_mod);
+    const grace_int_tests = b.addTest(.{ .root_module = grace_int_mod });
+    if (use_libusb) {
+        grace_int_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        grace_int_tests.addIncludePath(b.path("compat"));
+    }
+    grace_int_tests.linkLibC();
+    integration_step.dependOn(&b.addRunArtifact(grace_int_tests).step);
+
     // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");
     const e2e_mod = b.createModule(.{
