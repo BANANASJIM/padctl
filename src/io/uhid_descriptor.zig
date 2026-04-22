@@ -24,7 +24,7 @@
 //!    /`Logical Maximum` taken from the `AxisConfig`.
 //! 4. Triggers — `ABS_Z`/`ABS_RZ` → Usage `Z`/`Rz`, 8-bit unsigned 0..255.
 //! 5. Touchpad — if `[output.touchpad]` present, emitted as a separate
-//!    Physical Collection with `MT` (multi-touch) contact slots.
+//!    Logical Collection with `MT` (multi-touch) contact slots.
 //!
 //! Output report (if `[output.force_feedback]` is `rumble`):
 //!
@@ -42,6 +42,9 @@
 //!     `uhid.HID_MAX_DESCRIPTOR_SIZE` (4096 bytes). The builder refuses to
 //!     hand back an oversized descriptor because `UHID_CREATE2` will reject
 //!     it downstream.
+//!   - `error.InvalidOutputConfig` — the `OutputConfig` is semantically
+//!     unusable (e.g. no inputs and no FFB output, or axis/touchpad bounds
+//!     outside the 32-bit signed range HID item encoding supports).
 
 const std = @import("std");
 const uhid = @import("uhid.zig");
@@ -143,16 +146,11 @@ fn axisUsage(code: []const u8) ?u8 {
     return null;
 }
 
-/// Returns true if the axis is a "stick" (signed 16-bit range) rather than a
-/// "trigger" (unsigned 8-bit 0..255). Decision is taken from the
-/// `AxisConfig.min` value — matches the preset layout in
-/// `src/config/presets.zig`:
-///   - `ABS_X/Y/RX/RY` → min -32768 → sticks
-///   - `ABS_Z/RZ` → min 0, max 255 → triggers (some presets use 0..255)
-///   - DualSense preset uses min=0 max=255 even for sticks. We honour that.
-fn isSignedStickAxis(min: i64, max: i64) bool {
-    return min < 0 or max > 255;
-}
+// Axis routing is driven by HID Usage (see `buildFromOutput` axis pass).
+// The previous `isSignedStickAxis(min, max)` heuristic is gone: it silently
+// dropped DualSense-shape sticks (min=0 max=255 on X/Y/Rx/Ry) because those
+// ranges fall into the trigger predicate, and trigger emission only iterated
+// over ABS_Z/ABS_RZ.
 
 // --- Builder ----------------------------------------------------------------
 
@@ -161,9 +159,11 @@ pub const UhidDescriptorBuilder = struct {
     /// bytes that the caller must free.
     ///
     /// The builder refuses to emit a completely empty descriptor: an
-    /// `OutputConfig` with no buttons, no axes, and no force_feedback is
-    /// rejected with `error.InvalidOutputConfig` — a zero-input HID device
-    /// cannot be sanely created.
+    /// `OutputConfig` with no buttons, no axes, no touchpad, and no
+    /// force_feedback is rejected with `error.InvalidOutputConfig` — a
+    /// zero-capability HID device cannot be sanely created. FFB-only
+    /// configurations (force_feedback but no input collections) ARE
+    /// permitted and will produce a valid descriptor.
     pub fn buildFromOutput(allocator: std.mem.Allocator, out: device.OutputConfig) BuildError![]u8 {
         var buf = std.ArrayList(u8){};
         errdefer buf.deinit(allocator);
@@ -231,15 +231,18 @@ pub const UhidDescriptorBuilder = struct {
         }
 
         // --- 3 + 4. Axes: sticks (16-bit signed) then triggers (8-bit unsigned) ---
+        //
+        // Routing is driven by the HID Usage (X/Y/Rx/Ry → stick; Z/Rz →
+        // trigger), NOT by `min`/`max`. Presets such as DualSense declare
+        // sticks as 0..255, and the pre-fix `isSignedStickAxis` heuristic
+        // silently dropped those axes. Axis ranges that do not fit into
+        // `i32` are rejected with `error.InvalidOutputConfig` rather than
+        // panicking at `@intCast`.
+        //
+        // Emission order is fixed (stick_order first, then trigger_order)
+        // to keep the golden-file byte stream deterministic regardless of
+        // TOML insertion order.
         if (out.axes) |axes| {
-            // Two-pass emission: first all stick-like axes, then triggers.
-            // Iteration order within a StringHashMap is not stable, so we
-            // gather by pass (pass 0 = sticks, pass 1 = triggers) keyed on
-            // usage code. This keeps the descriptor deterministic for
-            // golden-file testing as long as the TOML field order is stable
-            // (which it is: iteration order matches insertion order here).
-            // Within each pass we visit in a fixed usage order.
-
             const stick_order = [_][]const u8{ "ABS_X", "ABS_Y", "ABS_RX", "ABS_RY" };
             var sticks_emitted: u32 = 0;
             for (stick_order) |want| {
@@ -247,13 +250,14 @@ pub const UhidDescriptorBuilder = struct {
                 while (it.next()) |entry| {
                     const cfg = entry.value_ptr.*;
                     if (!std.mem.eql(u8, cfg.code, want)) continue;
-                    if (!isSignedStickAxis(cfg.min, cfg.max)) continue;
-                    const usage = axisUsage(cfg.code) orelse continue;
+                    const usage = axisUsage(cfg.code) orelse unreachable; // stick_order codes always map
+                    const min_i32 = std.math.cast(i32, cfg.min) orelse return error.InvalidOutputConfig;
+                    const max_i32 = std.math.cast(i32, cfg.max) orelse return error.InvalidOutputConfig;
 
                     try writeItem1(&buf, allocator, 0x05, 0x01); // Usage Page (Generic Desktop)
                     try writeItem1(&buf, allocator, 0x09, usage); // Usage
-                    try writeLogicalMin(&buf, allocator, @intCast(cfg.min));
-                    try writeLogicalMax(&buf, allocator, @intCast(cfg.max));
+                    try writeLogicalMin(&buf, allocator, min_i32);
+                    try writeLogicalMax(&buf, allocator, max_i32);
                     try writeItem1(&buf, allocator, 0x75, 0x10); // Report Size (16)
                     try writeItem1(&buf, allocator, 0x95, 0x01); // Report Count (1)
                     try writeItem1(&buf, allocator, 0x81, 0x02); // Input (Data, Var, Abs)
@@ -269,8 +273,14 @@ pub const UhidDescriptorBuilder = struct {
                 while (it.next()) |entry| {
                     const cfg = entry.value_ptr.*;
                     if (!std.mem.eql(u8, cfg.code, want)) continue;
-                    if (isSignedStickAxis(cfg.min, cfg.max)) continue;
-                    const usage = axisUsage(cfg.code) orelse continue;
+                    const usage = axisUsage(cfg.code) orelse unreachable; // trigger_order codes always map
+                    // Trigger Logical Min/Max are fixed 0..255 on the wire
+                    // regardless of the TOML `min`/`max` — those are only
+                    // used by the supervisor to scale input events. Still
+                    // guard the i64→i32 cast so malformed configs surface as
+                    // InvalidOutputConfig rather than panicking.
+                    _ = std.math.cast(i32, cfg.min) orelse return error.InvalidOutputConfig;
+                    _ = std.math.cast(i32, cfg.max) orelse return error.InvalidOutputConfig;
 
                     try writeItem1(&buf, allocator, 0x05, 0x01); // Usage Page (Generic Desktop)
                     try writeItem1(&buf, allocator, 0x09, usage); // Usage
@@ -286,12 +296,12 @@ pub const UhidDescriptorBuilder = struct {
             if (sticks_emitted != 0 or triggers_emitted != 0) emitted_any_input = true;
         }
 
-        // --- 5. Touchpad (separate Physical Collection, multi-touch digitizer) ---
+        // --- 5. Touchpad (separate Logical Collection, multi-touch digitizer) ---
         if (out.touchpad) |tp| {
-            const x_min: i32 = @intCast(tp.x_min);
-            const x_max: i32 = @intCast(tp.x_max);
-            const y_min: i32 = @intCast(tp.y_min);
-            const y_max: i32 = @intCast(tp.y_max);
+            const x_min = std.math.cast(i32, tp.x_min) orelse return error.InvalidOutputConfig;
+            const x_max = std.math.cast(i32, tp.x_max) orelse return error.InvalidOutputConfig;
+            const y_min = std.math.cast(i32, tp.y_min) orelse return error.InvalidOutputConfig;
+            const y_max = std.math.cast(i32, tp.y_max) orelse return error.InvalidOutputConfig;
             const slots_raw: u8 = if (tp.max_slots) |s| @intCast(@min(@max(s, 1), MAX_TOUCH_CONTACTS)) else MAX_TOUCH_CONTACTS;
 
             try writeItem1(&buf, allocator, 0x05, 0x0D); // Usage Page (Digitizer)
@@ -339,6 +349,13 @@ pub const UhidDescriptorBuilder = struct {
         }
 
         // --- 6. Force feedback output report (rumble minimal) ---
+        //
+        // A well-formed FFB-only `OutputConfig` (no buttons/axes/touchpad,
+        // only `[output.force_feedback]`) is legal per the module docstring
+        // — the builder must still produce a descriptor the kernel accepts.
+        // We therefore track "something was emitted" rather than
+        // "something on the input side was emitted".
+        var emitted_any: bool = emitted_any_input;
         if (out.force_feedback) |ff| {
             if (std.mem.eql(u8, ff.type, "rumble")) {
                 // A placeholder vendor-defined 2-byte output report that the
@@ -354,13 +371,14 @@ pub const UhidDescriptorBuilder = struct {
                 try writeItem1(&buf, allocator, 0x75, 0x08); // Report Size (8)
                 try writeItem1(&buf, allocator, 0x95, 0x02); // Report Count (2) — strong + weak
                 try writeItem1(&buf, allocator, 0x91, 0x02); // Output (Data, Var, Abs)
+                emitted_any = true;
             }
         }
 
         // --- End Application Collection ---
         try writeByte(&buf, allocator, 0xC0);
 
-        if (!emitted_any_input) return error.InvalidOutputConfig;
+        if (!emitted_any) return error.InvalidOutputConfig;
         if (buf.items.len > uhid.HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
 
         return buf.toOwnedSlice(allocator);
@@ -701,9 +719,103 @@ test "descriptor: reject > UHID_DATA_MAX via excessive button count is capped to
     try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
 }
 
-test "descriptor: isSignedStickAxis heuristic" {
-    try testing.expect(isSignedStickAxis(-32768, 32767));
-    try testing.expect(!isSignedStickAxis(0, 255));
-    // DualSense preset: 0..255 treated as trigger-style unsigned.
-    try testing.expect(!isSignedStickAxis(0, 255));
+// --- Regression tests for CodeRabbit PR #132 findings ------------------------
+// Each test exercises a failure mode that was silent (axis drop, unchecked
+// @intCast) or contradicted the docstring (FFB-only rejection) in the
+// pre-fix builder.
+
+test "descriptor: DualSense-shape X/Y/RX/RY with min=0 max=255 emits all four usages" {
+    // Regression for silent axis drop: a DualSense-shape config where
+    // X/Y/RX/RY use unsigned 0..255 must still emit four stick axes, routed
+    // by HID Usage rather than min/max heuristic.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = 0, .max = 255 } },
+        .{ .name = "left_y", .cfg = .{ .code = "ABS_Y", .min = 0, .max = 255 } },
+        .{ .name = "right_x", .cfg = .{ .code = "ABS_RX", .min = 0, .max = 255 } },
+        .{ .name = "right_y", .cfg = .{ .code = "ABS_RY", .min = 0, .max = 255 } },
+    });
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "A", .code = "BTN_SOUTH" },
+    });
+    const out = device.OutputConfig{
+        .name = "dualsense-shape",
+        .axes = axes,
+        .buttons = buttons,
+    };
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    // For each of the four Generic Desktop Usages (X=0x30, Y=0x31, Rx=0x33,
+    // Ry=0x34) we expect a `0x09 <usage>` Usage item to appear somewhere in
+    // the descriptor. (0x09 is the 1-byte Usage prefix on the current Usage
+    // Page; the builder switches back to Generic Desktop before each axis.)
+    const wanted_usages = [_]u8{ 0x30, 0x31, 0x33, 0x34 };
+    for (wanted_usages) |u| {
+        var found = false;
+        var i: usize = 0;
+        while (i + 1 < desc.len) : (i += 1) {
+            if (desc[i] == 0x09 and desc[i + 1] == u) {
+                found = true;
+                break;
+            }
+        }
+        try testing.expect(found);
+    }
+}
+
+test "descriptor: out-of-range i64 axis min returns InvalidOutputConfig instead of panicking" {
+    // Regression for unchecked @intCast(i64→i32): malformed TOML with an
+    // axis min/max outside i32 range must be rejected cleanly rather than
+    // panicking in safe builds.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = std.math.maxInt(i64), .max = std.math.maxInt(i64) } },
+    });
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "A", .code = "BTN_SOUTH" },
+    });
+    const out = device.OutputConfig{
+        .name = "bad-axis",
+        .axes = axes,
+        .buttons = buttons,
+    };
+
+    try testing.expectError(
+        error.InvalidOutputConfig,
+        UhidDescriptorBuilder.buildFromOutput(testing.allocator, out),
+    );
+}
+
+test "descriptor: FFB-only output (no input buttons/axes) produces a valid descriptor" {
+    // The module docstring states an OutputConfig with force_feedback but no
+    // inputs must still yield a descriptor. The pre-fix code bookkept only
+    // input-side emission, so FFB-only outputs were wrongly rejected.
+    const out = device.OutputConfig{
+        .name = "ffb-only",
+        .force_feedback = .{ .type = "rumble" },
+    };
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    try testing.expect(desc.len > 0);
+    try testing.expectEqual(@as(u8, 0xC0), desc[desc.len - 1]);
+    // The FFB branch must have emitted the Vendor-Defined Usage Page.
+    var i: usize = 0;
+    var found = false;
+    while (i + 2 < desc.len) : (i += 1) {
+        if (desc[i] == 0x06 and desc[i + 1] == 0x00 and desc[i + 2] == 0xFF) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
 }
