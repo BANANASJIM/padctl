@@ -624,3 +624,99 @@ test "issue-131-A: suspend_grace_sec=0 disables grace window (legacy pre-#114 be
     sup.detach("hidraw0");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
+
+// --- regression: PR #134 B1 — rebind failure paths must not corrupt state ---
+
+test "T-B1a: rebind dupe OOM preserves suspended + grace_deadline (no zombie join)" {
+    // PR #134 review BLOCKING B1: the original rebind block flipped
+    // `m.suspended = false` + cleared `grace_deadline_ns` before the
+    // three `dupe` calls. An OOM mid-sequence left `suspended=false`
+    // with a detached (already-joined) thread handle, so any later
+    // `stopAll` / `reload` would double-join → pthread_join UB.
+    //
+    // Fix: `finalizeRebind` only commits state after every fallible op
+    // succeeds. This test injects a FailingAllocator so the first dupe
+    // OOMs and asserts the invariants: suspended still true,
+    // grace_deadline_ns still set, and GC still reclaims the entry.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+    try testing.expect(sup.managed.items[0].suspended);
+
+    // Swap to a failing allocator for the duration of finalizeRebind.
+    const real_alloc = sup.allocator;
+    var fa = testing.FailingAllocator.init(real_alloc, .{ .fail_index = 0 });
+    sup.allocator = fa.allocator();
+    const err = sup.finalizeRebind(&sup.managed.items[0], "hidraw0", "key0");
+    sup.allocator = real_alloc;
+    try testing.expectError(error.OutOfMemory, err);
+
+    // Contract: state unchanged on failure.
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expect(sup.managed.items[0].devname == null);
+    try testing.expect(!sup.devname_map.contains("hidraw0"));
+
+    // GC past deadline still reclaims — no double-join panic.
+    sup.gcExpiredGrace(original_deadline + std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "T-B1b: rebind restart failure preserves suspended + grace_deadline" {
+    // Second half of B1: the original restart-failure branch flipped
+    // `m.suspended` back to true but left `grace_deadline_ns = null`,
+    // so `gcExpiredGrace` (`deadline orelse continue`) skipped the
+    // entry forever — a permanent zombie, which is the exact bug
+    // PR #134 claims to fix.
+    //
+    // Fix: `finalizeRebind` errors out before touching any commit
+    // field. This test forces the restart failure via
+    // `test_fail_rebind_restart` and asserts both `suspended` and
+    // `grace_deadline_ns` survive, so the grace GC still fires.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    sup.test_fail_rebind_restart = true;
+    const err = sup.finalizeRebind(&sup.managed.items[0], "hidraw0", "key0");
+    sup.test_fail_rebind_restart = false;
+    try testing.expectError(error.TestInjectedRestartFailure, err);
+
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expect(sup.managed.items[0].devname == null);
+    try testing.expect(!sup.devname_map.contains("hidraw0"));
+
+    sup.gcExpiredGrace(original_deadline + std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}

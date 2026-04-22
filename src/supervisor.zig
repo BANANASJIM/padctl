@@ -177,6 +177,12 @@ pub const Supervisor = struct {
     /// this value instead of reading CLOCK_MONOTONIC. Production paths
     /// leave this null.
     test_now_override_ns: ?u64 = null,
+    /// Test-only switch: when true, `finalizeRebind()` short-circuits
+    /// with `error.TestInjectedRestartFailure` just before calling
+    /// `restartManagedThread`. Used by regression tests to exercise the
+    /// "restart failed after bookkeeping" branch without racing real
+    /// thread creation.
+    test_fail_rebind_restart: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -222,7 +228,7 @@ pub const Supervisor = struct {
             break :blk null;
         };
 
-        return .{
+        var sup: Supervisor = .{
             .allocator = allocator,
             .managed = .{},
             .stop_fd = stop_fd,
@@ -241,6 +247,22 @@ pub const Supervisor = struct {
             .test_switch_fail_commit_index = null,
             .grace_timer_fd = grace_fd,
         };
+        sup.applyUserConfigRuntime();
+        return sup;
+    }
+
+    /// Apply runtime tunables from `user_cfg` onto `self`. Called after
+    /// `init()` loads the config and again from `doReload()` so live
+    /// `padctl reload` picks up edits. No-op when `user_cfg` is null.
+    fn applyUserConfigRuntime(self: *Supervisor) void {
+        const uc = (self.user_cfg orelse return).value;
+        const raw = uc.supervisor.suspend_grace_sec;
+        self.suspend_grace_sec = if (raw <= 0)
+            0
+        else if (raw > @as(i64, std.math.maxInt(u32)))
+            std.math.maxInt(u32)
+        else
+            @intCast(raw);
     }
 
     pub fn initForTest(allocator: std.mem.Allocator) !Supervisor {
@@ -575,6 +597,46 @@ pub const Supervisor = struct {
         m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
     }
 
+    /// Commit bookkeeping for a suspended instance whose device fds have
+    /// just been rebound by `attachWithRoot()`. Allocates the devname /
+    /// phys slices, updates `devname_map`, restarts the worker thread,
+    /// and only then flips `m.suspended`/`m.grace_deadline_ns`.
+    ///
+    /// Contract: any failure leaves `m.suspended`, `m.grace_deadline_ns`,
+    /// `m.devname`, `m.thread`, and `devname_map` exactly as they were
+    /// on entry. The caller's grace-window GC is preserved so the entry
+    /// is still cleaned up on deadline (issue #131-A). On error the
+    /// caller is responsible for `m.instance.closeDeviceIO()`.
+    pub fn finalizeRebind(self: *Supervisor, m: *ManagedInstance, devname: []const u8, phys: []const u8) !void {
+        const dn_copy = try self.allocator.dupe(u8, devname);
+        errdefer self.allocator.free(dn_copy);
+
+        const dev_copy = try self.allocator.dupe(u8, devname);
+        const phys_copy = self.allocator.dupe(u8, phys) catch |err| {
+            self.allocator.free(dev_copy);
+            return err;
+        };
+
+        // devname_map takes ownership of dev_copy/phys_copy on success.
+        self.devname_map.put(dev_copy, phys_copy) catch |err| {
+            self.allocator.free(dev_copy);
+            self.allocator.free(phys_copy);
+            return err;
+        };
+        errdefer if (self.devname_map.fetchRemove(dev_copy)) |e| {
+            self.allocator.free(e.key);
+            self.allocator.free(e.value);
+        };
+
+        if (builtin.is_test and self.test_fail_rebind_restart) return error.TestInjectedRestartFailure;
+        try restartManagedThread(m);
+
+        m.devname = dn_copy;
+        m.suspended = false;
+        m.grace_deadline_ns = null;
+        self.armGraceTimer();
+    }
+
     fn clearSwitchMapping(self: *Supervisor, m: *ManagedInstance) void {
         if (m.switch_mapping) |pm| {
             pm.deinit();
@@ -728,6 +790,7 @@ pub const Supervisor = struct {
     ) void {
         if (self.user_cfg) |*uc| uc.deinit();
         self.user_cfg = user_config_mod.load(self.allocator);
+        self.applyUserConfigRuntime();
 
         const new_configs = reloadFn(reload_allocator) catch |err| {
             std.log.err("reload failed: {}", .{err});
@@ -1512,6 +1575,7 @@ pub const Supervisor = struct {
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
         if (self.user_cfg) |*uc| uc.deinit();
         self.user_cfg = user_config_mod.load(self.allocator);
+        self.applyUserConfigRuntime();
         self.stopAll();
         for (self.configs.items) |c| {
             c.deinit();
@@ -1532,6 +1596,7 @@ pub const Supervisor = struct {
     fn doReloadFromDirs(self: *Supervisor, dirs: []const []const u8) void {
         if (self.user_cfg) |*uc| uc.deinit();
         self.user_cfg = user_config_mod.load(self.allocator);
+        self.applyUserConfigRuntime();
         self.stopAll();
         for (self.configs.items) |c| {
             c.deinit();
@@ -1899,45 +1964,13 @@ pub const Supervisor = struct {
             m.instance.rebindDeviceIO(new_devices);
             self.allocator.free(new_devices);
             m.instance.rerunInitSequence();
-            m.suspended = false;
-            // Issue #131-A: rebind succeeded within the grace window;
-            // clear the deadline and re-arm the timer so the remaining
-            // suspended entries (if any) still get GC'd on time.
-            m.grace_deadline_ns = null;
-            self.armGraceTimer();
 
-            const dn_copy = self.allocator.dupe(u8, devname) catch {
-                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
-                return;
-            };
-            m.devname = dn_copy;
-            const dev_copy = self.allocator.dupe(u8, devname) catch {
-                self.allocator.free(dn_copy);
-                m.devname = null;
-                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
-                return;
-            };
-            const phys_copy = self.allocator.dupe(u8, phys) catch {
-                self.allocator.free(dn_copy);
-                self.allocator.free(dev_copy);
-                m.devname = null;
-                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
-                return;
-            };
-            self.devname_map.put(dev_copy, phys_copy) catch {
-                self.allocator.free(dn_copy);
-                self.allocator.free(dev_copy);
-                self.allocator.free(phys_copy);
-                m.devname = null;
-                std.log.warn("hotplug: suspended instance found but resume aborted: rebind failed", .{});
-                return;
-            };
-
-            restartManagedThread(m) catch |err| {
-                std.log.err("rebind restart failed: {}", .{err});
-                m.suspended = true;
+            // Issue #131-A: commit bookkeeping only after every fallible
+            // step succeeds. On failure `m.suspended`/`m.grace_deadline_ns`
+            // stay as-is so the grace-window GC still reclaims the entry.
+            self.finalizeRebind(m, devname, phys) catch |err| {
                 m.instance.closeDeviceIO();
-                std.log.warn("hotplug: suspended instance found but resume aborted: restart failed", .{});
+                std.log.warn("hotplug: suspended instance resume aborted: {}", .{err});
                 return;
             };
             std.log.info("hotplug: resumed suspended instance (phys_key match) for {s}", .{devname});
