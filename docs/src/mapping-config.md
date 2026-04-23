@@ -6,11 +6,53 @@ An optional `--mapping` TOML file overrides the default button/axis pass-through
 
 ```toml
 name = "fps"
+trigger_threshold = 100
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | — | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
+| `trigger_threshold` | integer (0–255) | null | 模拟 trigger 数字化阈值。见下方说明。 |
+
+### `trigger_threshold` — 把模拟 trigger 当按钮用
+
+padctl 默认把 LT / RT 建模为模拟轴（ABS_Z / ABS_RZ）。若要在 `[remap]` 里把它们绑到键位，或在 `[[macro]]` 步骤里把 `LT` / `RT` 当 target，需要先声明一个阈值：
+
+```toml
+trigger_threshold = 100   # 0–255，LT 和 RT 共用同一值
+```
+
+超过阈值 → 合成为 `LT` / `RT` 按钮 press；低于或等于阈值 → release。声明后 `LT` / `RT` 与普通面按钮语义一致，可直接用在 `[remap]` 和 `[[macro]]` 里：
+
+```toml
+trigger_threshold = 100
+
+[remap]
+LT = "KEY_LEFTSHIFT"
+RT = "mouse_right"
+
+[[macro]]
+name  = "scope_shot"
+steps = [
+    { down = "RT" },
+    { delay = 80 },
+    { up   = "RT" },
+]
+```
+
+**选值指南：**
+
+| 值 | 使用场景 |
+|----|---------|
+| 50–80 | 轻按即触发 |
+| 100–120 | 常见"点击感"，推荐起点 |
+| 160+ | 深按才触发 |
+
+用 `padctl dump enable` 观察 LT / RT 的实际轴读数，可以精确确定合适的阈值。见 [Diagnostic Logging](diagnostic-logging.md)。
+
+**抖动问题：** 若边界处出现 press / release 抖动，把阈值调高 10–20 即可消除。
+
+未声明 `trigger_threshold` 时，`LT` / `RT` 只作为模拟轴输出，不参与 `[remap]` 和 `[[macro]]` 的按钮匹配。
 
 ## `[remap]`
 

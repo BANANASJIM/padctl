@@ -278,9 +278,51 @@ steps = [
 
 Bind in remap: `M1 = "macro:dodge_roll"`
 
+### Trigger Threshold — 把模拟 LT / RT 当按钮用 {#trigger-threshold}
+
+LT / RT 默认是模拟轴，不能直接作为 `[remap]` 的源键或 `[[macro]]` 的步骤 target。声明 `trigger_threshold` 后，padctl 会在每帧实时把轴值合成为数字按钮：
+
+```toml
+trigger_threshold = 100   # 0–255，LT 和 RT 共用
+
+[remap]
+LT = "KEY_LEFTSHIFT"      # 超过 100 → 合成 LT 按下 → 发 Shift
+RT = "mouse_right"        # 超过 100 → 合成 RT 按下 → 发右键
+```
+
+完整字段说明见 [Mapping Config Reference — trigger_threshold](mapping-config.md#trigger_threshold)。
+
 ### Adaptive Trigger (`[adaptive_trigger]`) — DualSense only
 
 Configures the resistance profile of the DualSense L2/R2 triggers. See [Mapping Config Reference](mapping-config.md#adaptive_trigger) for full field tables.
+
+## Recipe：在 macro 里用 LT / RT
+
+模拟 trigger（LT / RT）默认只输出轴，不能直接用作 macro 步骤 target。先声明 `trigger_threshold`，然后就能像普通面按钮一样写：
+
+```toml
+trigger_threshold = 100
+
+[[macro]]
+name  = "scope_shot"
+steps = [
+    { down = "RT" },   # RT 轴超过 100 → 合成按下
+    { delay = 80 },
+    { up   = "RT" },
+]
+
+[[macro]]
+name  = "aim_walk"
+steps = [
+    { down = "LT" },
+    "pause_for_release",
+    { up = "LT" },
+]
+```
+
+用 `padctl dump enable` 观察 LT / RT 的实际轴读数以调参，参见 [Diagnostic Logging](diagnostic-logging.md)。
+
+> **注意：** macro 引擎把 `LT` / `RT` 当数字按钮处理，不支持模拟 ramp（渐进按压）。
 
 ## Full Example
 
