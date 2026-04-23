@@ -1390,12 +1390,21 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             \\
         ) catch {};
     } else if (will_start_user_service) {
+        const action = if (opts.no_start and opts.no_enable)
+            "installed (neither enabled nor started — --no-enable --no-start given)"
+        else if (opts.no_start)
+            "enabled (not started — --no-start given); run `systemctl --user start padctl.service` when ready"
+        else if (opts.no_enable)
+            "started (not enabled — --no-enable given); run `systemctl --user enable padctl.service` to auto-start on login"
+        else
+            "enabled and started";
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete. User service ") catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, action) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO,
+            \\.
             \\
-            \\Install complete.
-            \\
-            \\To start the service:
-            \\  systemctl --user enable --now padctl.service
+            \\Verify:
+            \\  systemctl --user status padctl.service
             \\
             \\To auto-start at boot without a login session (headless/server):
             \\  sudo loginctl enable-linger $USER
