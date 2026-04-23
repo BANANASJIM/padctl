@@ -56,7 +56,7 @@ jobs:
               # that is expected; file installation and ensureUserXdgDirs still execute.
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
-                /usr/local/bin/padctl install --prefix /usr/local 2>&1" || true
+                /usr/local/bin/padctl install --prefix /usr/local 2>&1"
 
               # ---- invariant checks ----
               FAIL=0
@@ -106,7 +106,7 @@ jobs:
               # ---- uninstall ----
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
-                /usr/local/bin/padctl uninstall --prefix /usr/local 2>&1" || true
+                /usr/local/bin/padctl uninstall --prefix /usr/local 2>&1"
 
               echo "=== uninstall invariants ==="
               FAIL=0
