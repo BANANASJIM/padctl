@@ -14,6 +14,7 @@ const AuxOutputDevice = uinput.AuxOutputDevice;
 const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
 const GenericUinputDevice = uinput.GenericUinputDevice;
 const GenericOutputDevice = uinput.GenericOutputDevice;
+const uhid_mod = @import("io/uhid.zig");
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
@@ -73,13 +74,23 @@ pub fn openDeviceWithRetry(
     }
 }
 
+/// Primary output ownership. T3 introduces the union so T4 can route the
+/// primary card to either uinput or UHID without widening call sites.
+pub const Owner = union(enum) {
+    none,
+    uinput: *UinputDevice,
+    uhid: *uhid_mod.UhidDevice,
+};
+
 pub const DeviceInstance = struct {
     allocator: std.mem.Allocator,
     devices: []DeviceIO,
     loop: EventLoop,
     interp: Interpreter,
     mapper: ?Mapper,
-    uinput_dev: ?UinputDevice,
+    owner: Owner = .none,
+    primary_output: ?OutputDevice = null,
+    imu_output: ?OutputDevice = null,
     aux_dev: ?AuxDevice,
     touchpad_dev: ?TouchpadDevice,
     generic_state: ?generic.GenericDeviceState,
@@ -133,7 +144,8 @@ pub const DeviceInstance = struct {
 
         const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
 
-        var uinput_dev: ?UinputDevice = null;
+        var owner: Owner = .none;
+        var primary_output: ?OutputDevice = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
         var generic_state: ?generic.GenericDeviceState = null;
@@ -145,11 +157,16 @@ pub const DeviceInstance = struct {
                 generic_uinput = try GenericUinputDevice.create(out_cfg, &generic_state.?);
             }
         } else if (cfg.output) |*out_cfg| {
-            uinput_dev = try UinputDevice.create(out_cfg);
-            uinput_dev.?.log_tag = cfg.device.name;
+            const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
+            errdefer {
+                uinput_ptr.close();
+                allocator.destroy(uinput_ptr);
+            }
+            uinput_ptr.log_tag = cfg.device.name;
+            owner = .{ .uinput = uinput_ptr };
+            primary_output = uinput_ptr.outputDevice();
             if (out_cfg.force_feedback != null) {
-                errdefer uinput_dev.?.close();
-                try loop.addUinputFf(uinput_dev.?.pollFfFd());
+                try loop.addUinputFf(uinput_ptr.pollFfFd());
             }
             if (out_cfg.aux != null or init_mapping != null) {
                 const mcfg_opt = init_mapping;
@@ -210,7 +227,9 @@ pub const DeviceInstance = struct {
             .loop = loop,
             .interp = interp,
             .mapper = mapper,
-            .uinput_dev = uinput_dev,
+            .owner = owner,
+            .primary_output = primary_output,
+            .imu_output = null,
             .aux_dev = aux_dev,
             .touchpad_dev = touchpad_dev,
             .generic_state = generic_state,
@@ -223,7 +242,17 @@ pub const DeviceInstance = struct {
 
     pub fn deinit(self: *DeviceInstance) void {
         if (self.mapper) |*m| m.deinit();
-        if (self.uinput_dev) |*u| u.close();
+        switch (self.owner) {
+            .none => {},
+            .uinput => |p| {
+                p.close();
+                self.allocator.destroy(p);
+            },
+            .uhid => |p| {
+                p.close();
+                self.allocator.destroy(p);
+            },
+        }
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
@@ -252,7 +281,7 @@ pub const DeviceInstance = struct {
                 @atomicStore(?*MappingConfig, &self.pending_mapping, null, .release);
             }
 
-            const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
+            const output = self.primary_output orelse nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
             const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
             const generic_output: ?GenericOutputDevice = if (self.generic_uinput) |*gu| gu.genericOutputDevice() else null;
@@ -419,7 +448,9 @@ fn testInstance(
         .loop = loop,
         .interp = Interpreter.init(cfg),
         .mapper = null,
-        .uinput_dev = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
         .aux_dev = null,
         .touchpad_dev = null,
         .generic_state = null,
@@ -503,7 +534,9 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
         .loop = loop,
         .interp = Interpreter.init(&parsed.value),
         .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
-        .uinput_dev = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
         .aux_dev = null,
         .touchpad_dev = null,
         .generic_state = null,
@@ -570,7 +603,9 @@ test "DeviceInstance: updateMapping updates mapping_cfg after swap" {
         .loop = loop,
         .interp = Interpreter.init(&parsed.value),
         .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
-        .uinput_dev = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
         .aux_dev = null,
         .touchpad_dev = null,
         .generic_state = null,
@@ -648,9 +683,9 @@ test "DeviceInstance: closeDeviceIO closes device fds without touching uinput" {
         allocator.free(inst.devices);
     }
 
-    // closeDeviceIO must not crash; uinput_dev stays null (not touched)
+    // closeDeviceIO must not crash; owner stays .none (not touched)
     inst.closeDeviceIO();
-    try testing.expectEqual(@as(?@import("io/uinput.zig").UinputDevice, null), inst.uinput_dev);
+    try testing.expect(inst.owner == .none);
 }
 
 test "DeviceInstance: rebindDeviceIO replaces device fds" {

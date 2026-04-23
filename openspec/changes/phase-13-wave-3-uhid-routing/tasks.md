@@ -128,7 +128,7 @@ Files: `src/device_instance.zig`, `src/supervisor.zig`
 
 ### T3a: Define `Owner` union inside `DeviceInstance`
 
-- [ ] In `src/device_instance.zig` near line 76 (before `pub const DeviceInstance`),
+- [x] In `src/device_instance.zig` near line 76 (before `pub const DeviceInstance`),
   add:
   ```zig
   const Owner = union(enum) {
@@ -141,29 +141,29 @@ Files: `src/device_instance.zig`, `src/supervisor.zig`
 
 ### T3b: Replace `uinput_dev` field with `owner` + two outputs
 
-- [ ] In `src/device_instance.zig:82`, delete `uinput_dev: ?UinputDevice,`.
-- [ ] Add `owner: Owner = .none,`
-- [ ] Add `primary_output: ?uinput.OutputDevice = null,`
-- [ ] Add `imu_output: ?uinput.OutputDevice = null,` (populated in T4; T3 leaves null)
-- [ ] `zig build` will fail until T3c-T3g are done; that is expected.
+- [x] In `src/device_instance.zig:82`, delete `uinput_dev: ?UinputDevice,`.
+- [x] Add `owner: Owner = .none,`
+- [x] Add `primary_output: ?uinput.OutputDevice = null,`
+- [x] Add `imu_output: ?uinput.OutputDevice = null,` (populated in T4; T3 leaves null)
+- [x] `zig build` will fail until T3c-T3g are done; that is expected.
 
 ### T3c: Update constructor path (~line 136-148)
 
-- [ ] Replace `var uinput_dev: ?UinputDevice = null; ... uinput_dev = try UinputDevice.create(out_cfg);`
+- [x] Replace `var uinput_dev: ?UinputDevice = null; ... uinput_dev = try UinputDevice.create(out_cfg);`
   with:
   ```zig
   const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
   errdefer { uinput_ptr.close(); allocator.destroy(uinput_ptr); }
   uinput_ptr.log_tag = cfg.device.name;
   ```
-- [ ] Replace line 151-152 `loop.addUinputFf(uinput_dev.?.pollFfFd())` with
+- [x] Replace line 151-152 `loop.addUinputFf(uinput_dev.?.pollFfFd())` with
   `loop.addUinputFf(uinput_ptr.pollFfFd())`.
-- [ ] T3 does NOT yet branch on `[output.imu].backend` — that is T4.
+- [x] T3 does NOT yet branch on `[output.imu].backend` — that is T4.
   Default unconditionally to the uinput pointer path so behaviour is unchanged.
 
 ### T3d: Update `DeviceInstance` struct literal at line 213
 
-- [ ] Replace `.uinput_dev = uinput_dev,` with:
+- [x] Replace `.uinput_dev = uinput_dev,` with:
   ```zig
   .owner = .{ .uinput = uinput_ptr },
   .primary_output = uinput_ptr.outputDevice(),
@@ -172,7 +172,7 @@ Files: `src/device_instance.zig`, `src/supervisor.zig`
 
 ### T3e: Update destructor at line 226
 
-- [ ] Replace `if (self.uinput_dev) |*u| u.close();` with:
+- [x] Replace `if (self.uinput_dev) |*u| u.close();` with:
   ```zig
   switch (self.owner) {
       .none => {},
@@ -183,28 +183,28 @@ Files: `src/device_instance.zig`, `src/supervisor.zig`
 
 ### T3f: Update emit call at line 255
 
-- [ ] Replace `const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();`
+- [x] Replace `const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();`
   with `const output = self.primary_output orelse nullOutput();`.
 
 ### T3g: Update test fixtures and second supervisor construction
 
-- [ ] `src/device_instance.zig:422,506,573` — replace `.uinput_dev = null,`
+- [x] `src/device_instance.zig:422,506,573` — replace `.uinput_dev = null,`
   with `.owner = .none, .primary_output = null, .imu_output = null,`
   (T4d adds `.imu_dev = null, .imu_name_owned = null,` to the same literals
   once those fields exist — this can be done in T3g preemptively with
   `// T4d: add .imu_dev/.imu_name_owned once fields land` comments, or in T4d
   proper; either ordering compiles cleanly as long as all three checkbox
   steps land before `zig build test` runs).
-- [ ] `src/device_instance.zig:651-653` — update the test that asserts
+- [x] `src/device_instance.zig:651-653` — update the test that asserts
   `inst.uinput_dev == null` to assert `inst.owner == .none`.
-- [ ] `src/supervisor.zig:2079` — same replacement.
+- [x] `src/supervisor.zig:2079` — same replacement.
 
 ### T3h: CI green — regression gate
 
-- [ ] `zig build test` passes with zero new failures.
-- [ ] Run `supervisor_uhid_grace_integration_test.zig` — must stay green
+- [x] `zig build test` passes with zero new failures.
+- [x] Run `supervisor_uhid_grace_integration_test.zig` — must stay green
   (sentinel for rebind/grace lifetime).
-- [ ] Run `full_pipeline_e2e_test.zig` — must stay green (sentinel for
+- [x] Run `full_pipeline_e2e_test.zig` — must stay green (sentinel for
   end-to-end uinput path).
 
 ---
