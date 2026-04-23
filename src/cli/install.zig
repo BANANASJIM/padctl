@@ -682,13 +682,14 @@ pub fn installWillStartUserService(
     sudo_user_env: ?[]const u8,
 ) bool {
     if (destdir.len != 0) return false; // staged package build — no live user service
-    const effective = user_service_opt orelse !is_root;
-    if (effective) return true;
-    // Root + SUDO_USER set → sudo_hop path starts the invoking user's service.
-    if (is_root) {
-        if (sudo_user_env) |su| {
-            if (su.len != 0) return true;
-        }
+    // Explicit flag wins: --no-user-service means "don't start", including the
+    // sudo_hop path. --user-service means "start" regardless of is_root.
+    if (user_service_opt) |explicit| return explicit;
+    // Implicit: non-root default starts the user service.
+    if (!is_root) return true;
+    // Implicit + root: sudo_hop starts the invoking user's service when SUDO_USER is set.
+    if (sudo_user_env) |su| {
+        if (su.len != 0) return true;
     }
     return false;
 }
@@ -1315,33 +1316,38 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     }
 
     // 5. Reload system daemons and enable/start services (only when not staging)
+    const will_start_user_service = installWillStartUserService(is_root, opts.user_service, destdir, std.posix.getenv("SUDO_USER"));
     if (destdir.len == 0) {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
         runCmd(&.{ "udevadm", "trigger" });
-        // Compute plan once so skip-mode prints the hint once instead of per-verb.
-        const install_plan = currentPlanFromEnv();
-        if (install_plan.mode == .skip) {
-            var groups: [3][]const []const u8 = undefined;
-            var n: usize = 0;
-            groups[n] = &.{"daemon-reload"};
-            n += 1;
-            if (!opts.no_enable) {
-                groups[n] = &.{ "enable", "padctl.service" };
+        // Honour --no-user-service even when sudo_hop would otherwise fire:
+        // an explicit opt-out must not enable/start the user unit.
+        if (will_start_user_service) {
+            // Compute plan once so skip-mode prints the hint once instead of per-verb.
+            const install_plan = currentPlanFromEnv();
+            if (install_plan.mode == .skip) {
+                var groups: [3][]const []const u8 = undefined;
+                var n: usize = 0;
+                groups[n] = &.{"daemon-reload"};
                 n += 1;
-            }
-            if (!opts.no_start) {
-                groups[n] = &.{ "start", "padctl.service" };
-                n += 1;
-            }
-            printSkipSystemctlNoteFor(groups[0..n]);
-        } else {
-            runSystemctlUser(&.{"daemon-reload"});
-            if (!opts.no_enable) {
-                runSystemctlUserWarn(&.{ "enable", "padctl.service" });
-            }
-            if (!opts.no_start) {
-                runSystemctlUserWarn(&.{ "start", "padctl.service" });
+                if (!opts.no_enable) {
+                    groups[n] = &.{ "enable", "padctl.service" };
+                    n += 1;
+                }
+                if (!opts.no_start) {
+                    groups[n] = &.{ "start", "padctl.service" };
+                    n += 1;
+                }
+                printSkipSystemctlNoteFor(groups[0..n]);
+            } else {
+                runSystemctlUser(&.{"daemon-reload"});
+                if (!opts.no_enable) {
+                    runSystemctlUserWarn(&.{ "enable", "padctl.service" });
+                }
+                if (!opts.no_start) {
+                    runSystemctlUserWarn(&.{ "start", "padctl.service" });
+                }
             }
         }
     }
@@ -1351,7 +1357,39 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         return error.MappingInstallFailed;
     }
 
-    if (effective_user_service and destdir.len == 0) {
+    // Completion hint — mirror actual runtime state so the user does not have
+    // to guess whether the service was started. Branches:
+    //   - Staged install (destdir set): no live service, just acknowledge.
+    //   - Explicit --no-user-service: service file installed but NOT started.
+    //   - sudo install (root + SUDO_USER, no opt-out): sudo_hop already started it.
+    //   - Non-root user install: service not yet started, show manual command.
+    //   - Root without SUDO_USER: nothing to start.
+    if (destdir.len != 0) {
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete (staged).\n") catch {};
+    } else if (opts.user_service != null and opts.user_service.? == false) {
+        _ = std.posix.write(std.posix.STDOUT_FILENO,
+            \\
+            \\Install complete. User service NOT started (--no-user-service given).
+            \\
+            \\To start manually later:
+            \\  systemctl --user enable --now padctl.service
+            \\
+        ) catch {};
+    } else if (will_start_user_service and is_root and
+        (std.posix.getenv("SUDO_USER") orelse "").len != 0)
+    {
+        _ = std.posix.write(std.posix.STDOUT_FILENO,
+            \\
+            \\Install complete. User service started via sudo -u $SUDO_USER.
+            \\
+            \\Verify:
+            \\  systemctl --user status padctl.service
+            \\
+            \\To auto-start at boot without a login session (headless/server):
+            \\  sudo loginctl enable-linger $USER
+            \\
+        ) catch {};
+    } else if (will_start_user_service) {
         _ = std.posix.write(std.posix.STDOUT_FILENO,
             \\
             \\Install complete.
@@ -3910,6 +3948,18 @@ test "install: ensureUserXdgDirs NOT called when root without SUDO_USER" {
     // would be .skip, no user service starts, so no XDG dirs to seed.
     try testing.expect(!installWillStartUserService(true, null, "", null));
     try testing.expect(!installWillStartUserService(true, null, "", ""));
+}
+
+test "install: explicit --no-user-service returns false regardless of sudo_hop" {
+    const testing = std.testing;
+    // Non-root + explicit false → don't start (obvious case).
+    try testing.expect(!installWillStartUserService(false, false, "", null));
+    // sudo + explicit false → must override the sudo_hop default. Previously
+    // the systemctl block still fired enable/start via sudo_hop, ignoring the
+    // user's opt-out; this regression guards the new gate.
+    try testing.expect(!installWillStartUserService(true, false, "", "jim"));
+    // Explicit false under staging is still false (destdir short-circuit wins).
+    try testing.expect(!installWillStartUserService(true, false, "/tmp/staging", "jim"));
 }
 
 test "install: ensureUserXdgDirs chown path opens dir with iterate flag (no BADF)" {
