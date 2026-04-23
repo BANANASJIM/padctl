@@ -5,8 +5,11 @@ and the engineering plan's test matrix
 (`engineering/phase-13-wave-plan.md@35c9c36` §Wave 3 test-layer matrix):
 
 - **Layer 0** — pure functions, zero fd, zero privilege (`zig build test`).
-- **Layer 1** — in-process `UhidSimulator` intercepts `/dev/uhid` writes;
-  still zero-privilege, runs on CI main line.
+- **Layer 1** — in-process fixture using `UhidDevice.initWithFd` +
+  `posix.pipe2` pairs to capture the raw `UHID_CREATE2` / `UHID_DESTROY`
+  event bytes written by the routing switch; still zero-privilege, runs on
+  CI main line. `UhidSimulator` is NOT used here — it is an input-side
+  harness that produces a virtual HID node, not a write-capture interceptor.
 - **Layer 2** — real `/dev/uhid` open + `EVIOCGUNIQ` ioctls; soft gate via
   `PADCTL_TEST_REQUIRE_UHID=1` env var (local + CI host with UHID available).
 
@@ -87,21 +90,31 @@ is soft-gated per the Wave 1 / Wave 4 pattern (PR #127, PR #140, PR #154 B2).
 
 ### T5 — `src/test/supervisor_uhid_routing_test.zig` (new)
 
+Fixture: two `posix.pipe2(.{ .NONBLOCK = true })` pairs; the write-ends are
+injected as `test_primary_uhid_fd` / `test_imu_uhid_fd` into
+`DeviceInstance.init` (see T5f seam). After construction, the read-ends
+carry one `UhidCreate2Event` each (and one `UHID_DESTROY` each after
+`deinit`). Decoding is byte-structured `UhidCreate2Event` memcpy, matching
+the pattern in the existing `src/io/uhid.zig` inline tests.
+
 - [ ] **TP24**: `DeviceInstance.init` with `[output.imu].backend = "uhid"` +
-  fixture `phys_key = "sim-phys-0001"`: `UhidSimulator` observes exactly 2
-  `UHID_CREATE2` events.
-- [ ] **TP25**: Both captured `UHID_CREATE2` events carry byte-identical
-  `uniq` (`std.mem.eql`).
-- [ ] **TP26**: Captured uniq begins with `"padctl/"` followed by the
+  fixture `phys_key = "sim-phys-0001"`: exactly one `UHID_CREATE2` event is
+  readable from each pipe read-end (total 2).
+- [ ] **TP25**: Both decoded `UHID_CREATE2` payloads carry byte-identical
+  `payload.uniq` (`std.mem.eql`).
+- [ ] **TP26**: Decoded uniq begins with `"padctl/"` followed by the
   normalized device name.
-- [ ] **TP27**: `DeviceInstance.init` with `backend = "uinput"` (default): zero
-  `UHID_CREATE2` events observed.
+- [ ] **TP27**: `DeviceInstance.init` with `backend = "uinput"` (default): no
+  bytes readable from either pipe (neither write-end was injected; routing
+  goes through `UinputDevice.initBoxed` only).
 - [ ] **TP28**: `DeviceInstance.init` with `backend = "uinput"` + `[output.imu]`
   present: returns `error.InvalidConfig` (cross-check of T1's validate).
-- [ ] **TP29**: Primary descriptor bytes contain `EV_KEY` usage; IMU
-  descriptor bytes do not (scan both captures).
-- [ ] **TP30**: `DeviceInstance.deinit` tears down both UHID cards — simulator
-  observes 2 `UHID_DESTROY` events.
+- [ ] **TP29**: Primary `payload.rd_data[0..rd_size]` contains Usage Page
+  Button bytes (`0x05 0x09`); IMU `rd_data` does not (scan both decoded
+  events).
+- [ ] **TP30**: `DeviceInstance.deinit` tears down both UHID cards — one
+  `UHID_DESTROY` event readable from each pipe read-end (total 2) after
+  `deinit` returns.
 
 ## Layer 2: Real `/dev/uhid` (soft gate)
 
@@ -141,9 +154,10 @@ One row per ADR-015 Stage 1 exit condition
 | AC | Criterion | Covered by | Status after Wave 3 |
 |----|-----------|------------|---------------------|
 | AC1 | SDL `testcontroller` / Steam sensor panel identifies IMU (**local-only, requires X11/Wayland**) | Manual validation in Wave 5 canary; Wave 3 PR description logs local run | Pending Wave 5 — Wave 3 produces the code capability |
-| AC2 | `zig build test` contains a `EVIOCGUNIQ` + `std.mem.eql` CI-equivalent signal | TP31 (Layer 2, real `DeviceInstance`) + TP25 (Layer 1, simulator) | Satisfied — Wave 4 base extended to real routing path |
-| AC3 | Every existing `devices/*.toml` `buildFromOutput` descriptor has no regression | TP36 (`uhid_all_devices_test.zig`) + TP33 (zero-diff regression sentinel) | Satisfied — Wave 3 does not change Wave 2's descriptor output |
+| AC2 | `zig build test` contains a `EVIOCGUNIQ` + `std.mem.eql` CI-equivalent signal | TP31 (Layer 2, real `DeviceInstance`) + TP25 (Layer 1, pipe-captured payload) | Satisfied — Wave 4 base extended to real routing path |
+| AC3 | **Rumble paths on real hardware do not regress** (ADR-015 Stage 1 exit condition 3 — manual, per-device real-hardware matrix, local-only) | N/A at Layer 0/1/2 in Wave 3; closed by Wave 5 canary testing against the real-device matrix | **Wave 5 prerequisite — Wave 3 passes through**. Wave 3 does not touch rumble paths (ffb poll, `UinputDevice.pollFf`), so no regression is introduced, but the ADR's "real hardware verified" bar is only met by Wave 5's manual runs. Do not mark Satisfied. |
 | AC4 | `zig build test` contains new `UhidDevice` unit tests + descriptor golden-file tests | TP16-TP20 (`buildForImu` golden); TP9-TP15 (`buildUniq` unit) | Satisfied |
+| — | Descriptor-builder regression (Wave 2 `buildFromOutput` golden-file CI coverage remains green for every existing `devices/*.toml`) | TP36 (`uhid_all_devices_test.zig`) + TP33 (zero-diff regression sentinel) | Satisfied — Wave 3 does not change Wave 2's descriptor output. **Not a remap of AC3**; this is a separate descriptor-only guardrail for T5a's new `buildForImu` not to disturb `buildFromOutput`. |
 
 Additional Wave 3-specific acceptance:
 

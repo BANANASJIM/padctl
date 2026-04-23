@@ -11,7 +11,7 @@
 | `src/io/uniq.zig` (new) | T4: `buildUniq` pure function + Layer 0 unit test block |
 | `src/io/uhid_descriptor.zig` | T5: `UhidDescriptorBuilder.buildForImu` + IMU golden-file test |
 | `src/event_loop.zig` | T5: IMU emit dispatch (call `imu_output.emit` from the gamepad-state update path) |
-| `src/test/supervisor_uhid_routing_test.zig` (new) | T5: Layer 1 `UhidSimulator` routing assertion |
+| `src/test/supervisor_uhid_routing_test.zig` (new) | T5: Layer 1 routing assertion via `UhidDevice.initWithFd` + `posix.pipe2` |
 | `src/test/uhid_uniq_pairing_test.zig` | T5: extend to exercise real `DeviceInstance`, not hand-built `UHID_CREATE2` |
 | `build.zig` | Register new `uniq.zig` and `supervisor_uhid_routing_test.zig` in the test step |
 
@@ -256,9 +256,14 @@ pub const MAX_UNIQ_LEN = 64;  // matches ADR-015 AC4 expected maxima
 /// - `device_name`: `cfg.device.name`. Normalized: lowercase, spaces + non-alphanum
 ///   → `-`, collapse consecutive `-`, trim `-`, truncate to 32 bytes.
 /// - `phys_key`: `readPhysFromSysfs` output for the physical device; when non-null,
-///   instance = FNV-16 hash as 4-digit lowercase hex.
+///   instance = `hash16(phys_key)` as 4-digit lowercase hex (FNV-1a-32 then
+///   low-16-bit truncation; see §"Cross-cutting: uniq format" for the exact
+///   algorithm).
 /// - `counter`: used only when `phys_key` is null (virtual devices, bluetooth
 ///   without sysfs path). Monotonic within daemon lifetime, starts at 1.
+///   Caller owns the counter storage; `buildUniq` reads it but does not
+///   mutate — mutation (increment on fallback use) is the caller's
+///   responsibility, per T4f.
 ///
 /// Returns a NUL-terminated slice owned by the caller; pass to
 /// `std.mem.sliceTo(ptr, 0)` before use as a Zig slice.
@@ -269,12 +274,14 @@ pub fn buildUniq(
     counter: u16,
 ) std.mem.Allocator.Error![:0]u8 {
     // 1. normalize device_name → device_id (lowercase, non-alphanum→'-', collapse, trim, clip 32)
-    // 2. instance = if (phys_key) |p| fnv16hex(p) else fmt("ctr{:04x}", counter)
+    // 2. instance = if (phys_key) |p| hash16hex(p) else fmt("ctr{x:0>4}", counter)
     // 3. render "padctl/{device_id}-{instance}" into allocator-owned buffer with NUL terminator
     // 4. assert buf.len < MAX_UNIQ_LEN
 }
 
-fn fnv16(bytes: []const u8) u16 { /* FNV-1a 16-bit */ }
+// FNV-1a 32-bit folded to 16 bits. Identical algorithm to the §"Cross-cutting"
+// spec. Wrapping multiply via `*%=`; truncation via `@truncate`.
+fn hash16(bytes: []const u8) u16 { /* FNV-1a-32 then @truncate; see spec */ }
 ```
 
 Layer 0 tests in the same file:
@@ -303,10 +310,17 @@ const use_uhid = blk: {
 var owner: Owner = .none;
 var primary_out: ?uinput.OutputDevice = null;
 var imu_out: ?uinput.OutputDevice = null;
+var imu_dev_ptr: ?*uhid.UhidDevice = null;       // assigned inside the IMU block below
+var imu_name_ptr: ?[]const u8 = null;            // ditto; stored on DeviceInstance for lifetime management
 
 if (use_uhid) {
-    const uniq = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key_opt, daemon_counter);
+    // `uniq_counter` is a parameter on DeviceInstance.init — see §4d for its
+    // sourcing (Supervisor.daemon_uniq_counter via `*u16`). We snapshot once,
+    // build the shared string, then increment ONLY if phys_key was null.
+    const counter_snapshot: u16 = uniq_counter.*;
+    const uniq = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
     defer allocator.free(uniq);
+    if (phys_key == null) uniq_counter.* += 1;
 
     // Primary pad UHID card
     const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg);
@@ -327,9 +341,25 @@ if (use_uhid) {
     if (imu_cfg_opt) |imu_cfg| {
         const imu_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(allocator, imu_cfg);
         defer allocator.free(imu_descriptor);
-        const imu_name = imu_cfg.name orelse try std.fmt.allocPrint(allocator, "{s} IMU", .{cfg.device.name});
+
+        // IMU name lifetime: `UhidDevice.name` is documented (`src/io/uhid.zig:218`)
+        // as "owned-by-caller" — the struct stores the slice reference and never
+        // frees it. `sendCreate` (called inside `UhidDevice.init`) copies the
+        // bytes into the `UHID_CREATE2` payload at line 304-305, but `self.name`
+        // retains the caller pointer for any future diagnostics. Therefore the
+        // allocation below MUST outlive `imu_uhid`. We store the allocated
+        // string as a DeviceInstance field (`imu_name_owned: ?[]const u8`) and
+        // free it in `deinit` strictly AFTER the matching `imu_dev.close()`.
+        // A `defer allocator.free(...)` here would dangling-pointer the stored
+        // reference immediately on block exit and is therefore forbidden.
+        const imu_name_alloc: []const u8 = if (imu_cfg.name) |n|
+            try allocator.dupe(u8, n)
+        else
+            try std.fmt.allocPrint(allocator, "{s} IMU", .{cfg.device.name});
+        errdefer allocator.free(imu_name_alloc);
+
         const imu_uhid = try uhid.UhidDevice.init(allocator, .{
-            .name = imu_name,
+            .name = imu_name_alloc,
             .uniq = uniq,                  // SAME string — ADR-015 hard constraint
             .vid = @intCast(imu_cfg.vid orelse cfg.device.vid),
             .pid = @intCast(imu_cfg.pid orelse cfg.device.pid),
@@ -337,7 +367,10 @@ if (use_uhid) {
             .output = null,                // IMU descriptor is built separately, not from OutputConfig
         });
         // NOTE: T3 owner union holds ONE primary; IMU's *UhidDevice lifetime is
-        // managed by a second field `imu_dev: ?*UhidDevice` added here.
+        // managed by a second field `imu_dev: ?*UhidDevice` added here. The
+        // backing `imu_name_alloc` lives on DeviceInstance as `imu_name_owned`.
+        imu_dev_ptr = imu_uhid;
+        imu_name_ptr = imu_name_alloc;
         imu_out = imu_uhid.outputDevice();
     }
 } else {
@@ -349,16 +382,37 @@ if (use_uhid) {
 }
 ```
 
-#### 4c. `DeviceInstance` gains `imu_dev: ?*UhidDevice`
+#### 4c. `DeviceInstance` gains `imu_dev: ?*UhidDevice` + `imu_name_owned`
 
-T4 adds a second pointer field (the owner union covers only the primary).
-Rationale: the owner union models "one primary output per instance" and should
-not grow to accommodate the companion IMU card. Teardown:
+T4 adds two new fields on `DeviceInstance`:
+
+```zig
+imu_dev:        ?*uhid_mod.UhidDevice = null,
+imu_name_owned: ?[]const u8           = null,   // allocator-owned; lifetime ≥ imu_dev
+```
+
+Rationale for two fields instead of widening `Owner`: the owner union models
+"one primary output per instance" and should not grow to 4+ cases for the
+companion IMU card. A plain optional pair is clearer and keeps the primary
+switch code unchanged.
+
+Teardown order (IMU strictly before primary, name strictly after its device):
 
 ```zig
 pub fn deinit(self: *DeviceInstance) void {
     // ... existing aux/touchpad teardown ...
-    if (self.imu_dev) |p| { p.close(); self.allocator.destroy(p); }
+
+    // IMU teardown: close the kernel device FIRST, then free the name backing
+    // string. Reversing this order would free the memory that UhidDevice.name
+    // points to while UHID_DESTROY is in flight.
+    if (self.imu_dev) |p| {
+        p.close();
+        self.allocator.destroy(p);
+    }
+    if (self.imu_name_owned) |n| {
+        self.allocator.free(n);
+    }
+
     switch (self.owner) {
         .none => {},
         .uinput => |p| { p.close(); self.allocator.destroy(p); },
@@ -367,15 +421,52 @@ pub fn deinit(self: *DeviceInstance) void {
 }
 ```
 
-#### 4d. `phys_key` wiring
+#### 4d. `phys_key` + counter wiring
 
 `phys_key` is already owned by `Supervisor.ManagedInstance` at
 `src/supervisor.zig:30,46` and passed to `spawnInstance`. T4 extends
-`DeviceInstance.init` to accept an optional `phys_key: ?[]const u8` parameter
-(callers in `supervisor.zig` have it; `main.zig` / test callers may pass null).
+`DeviceInstance.init` to accept both the optional `phys_key` and an explicit
+pointer to the daemon-wide fallback counter:
 
-Fallback counter: new `Supervisor` field `daemon_uniq_counter: u16 = 1`,
-incremented each time `DeviceInstance.init` consumes a null `phys_key`.
+```zig
+pub fn init(
+    allocator: std.mem.Allocator,
+    cfg: *const device.DeviceConfig,
+    init_mapping: ...,
+    phys_key: ?[]const u8,               // null → fall back to counter
+    uniq_counter: *u16,                  // pointer to Supervisor.daemon_uniq_counter;
+                                         // `buildUniq` reads it; the caller below
+                                         // increments ONLY when phys_key is null
+) !DeviceInstance
+```
+
+Inside the `if (use_uhid)` block, the uniq-building call and counter bump are:
+
+```zig
+const counter_snapshot: u16 = uniq_counter.*;
+const uniq = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
+defer allocator.free(uniq);
+if (phys_key == null) uniq_counter.* += 1;   // only mutate on fallback use
+```
+
+A pointer (not a `u16` by value and not a global atomic) is deliberate: the
+Supervisor owns the counter's storage (`daemon_uniq_counter: u16 = 1`), the
+daemon is single-threaded in this call path so plain `*u16` suffices, and the
+explicit parameter documents the dependency — no hidden global, no per-call
+snapshot that gets stale. Callers:
+
+- `src/supervisor.zig` (both `DeviceInstance.init` call sites — grep for
+  `DeviceInstance.init(` inside `supervisor.zig`, 2 production sites): pass
+  `m.phys_key` and `&self.daemon_uniq_counter`.
+- `src/main.zig` (the one production site that constructs `DeviceInstance`
+  without a `Supervisor`, roughly line 1021): pass `null` for `phys_key` and
+  a pointer to a `u16 = 1` owned by `main`'s frame (one-shot daemon path —
+  the counter never matters because there is only one device).
+- `src/test/supervisor_uhid_grace_integration_test.zig` (2 sites, ~lines 80
+  and 138): pass `null` for `phys_key` and `&local_counter` for a stack-local
+  `var local_counter: u16 = 1`.
+
+The spec pins 5 total caller sites that must be updated in T4e.
 
 ### Uniq format — honest footnote
 
@@ -388,8 +479,8 @@ Wave 3 therefore defines the convention fresh from the engineering plan:
 
 - `device-id` = normalized `cfg.device.name` (lowercase, non-alphanum → `-`,
   collapsed, trimmed, truncated to 32 bytes)
-- `instance` = FNV-16(phys_key) rendered as 4-digit hex, or `ctr{:04x}`
-  fallback
+- `instance` = `hash16(phys_key)` (FNV-1a-32 then low-16-bit truncation)
+  rendered as 4-digit lowercase hex, or `ctr{x:0>4}` fallback
 
 This is internally consistent with the plan and with ADR-015 §20 (uniq must be
 byte-identical between the two cards), but is NOT cross-validated against any
@@ -402,12 +493,12 @@ daemon restarts, a future ADR may pin `instance` to a sysfs-stable value
 
 | File | Before | After |
 |------|--------|-------|
-| `src/io/uniq.zig` (new) | — | `buildUniq` + `fnv16` + 5 Layer 0 tests |
+| `src/io/uniq.zig` (new) | — | `buildUniq` + `hash16` + 5 Layer 0 tests |
 | `src/device_instance.zig:136-148` | unconditional `UinputDevice.create` | backend switch (above) |
-| `src/device_instance.zig` (fields) | no `imu_dev` | adds `imu_dev: ?*UhidDevice = null` |
-| `src/device_instance.zig` (deinit) | — | teardown imu_dev before primary owner |
-| `src/device_instance.zig` (init signature) | `init(alloc, cfg, init_mapping)` | `init(alloc, cfg, init_mapping, phys_key: ?[]const u8)` (callers updated) |
-| `src/supervisor.zig` | — | adds `daemon_uniq_counter: u16 = 1`; threads through `spawnInstance`/`attachWithInstance` |
+| `src/device_instance.zig` (fields) | no `imu_dev`, no `imu_name_owned` | adds `imu_dev: ?*UhidDevice = null` and `imu_name_owned: ?[]const u8 = null` |
+| `src/device_instance.zig` (deinit) | — | teardown `imu_dev` (close + destroy), then free `imu_name_owned`, then primary owner |
+| `src/device_instance.zig` (init signature) | `init(alloc, cfg, init_mapping)` | `init(alloc, cfg, init_mapping, phys_key: ?[]const u8, uniq_counter: *u16)` (5 caller sites updated: supervisor×2, main×1, grace-integration-test×2) |
+| `src/supervisor.zig` | — | adds `daemon_uniq_counter: u16 = 1`; passes `&self.daemon_uniq_counter` to both `DeviceInstance.init` call sites |
 | `build.zig` | — | register `src/io/uniq.zig` in test step |
 
 ### Error surface
@@ -485,21 +576,64 @@ the IMU descriptor references only the 6 IMU axes, so passing the full
 
 #### 5c. Layer 1 `src/test/supervisor_uhid_routing_test.zig` (new)
 
-Fixture: in-process `UhidSimulator` (already exists per Wave 1) intercepts
-`/dev/uhid` writes. Test flow:
+Fixture: `UhidDevice.initWithFd` + `posix.pipe2` to capture the raw
+`UHID_CREATE2` event bytes emitted on the write-end. `UhidSimulator` is an
+input-side harness (it opens `/dev/uhid` to produce a virtual HID node for
+padctl to consume) and cannot intercept write-side `UHID_CREATE2` events
+emitted by `DeviceInstance.init → UhidDevice.init`; it is not used here.
+
+Pattern (matches existing `src/io/uhid.zig` inline tests):
+
+```zig
+var primary_fds: [2]posix.fd_t = undefined;
+var imu_fds: [2]posix.fd_t = undefined;
+try posix.pipe2(&primary_fds, .{ .NONBLOCK = true });
+try posix.pipe2(&imu_fds, .{ .NONBLOCK = true });
+defer for ([_]posix.fd_t{
+    primary_fds[0], primary_fds[1], imu_fds[0], imu_fds[1],
+}) |fd| posix.close(fd) catch {};
+
+// Test hook: DeviceInstance.init must accept pre-opened pipe write-ends in
+// place of openUhid(). Implementer adds a narrow test-only seam — either a
+// `test_fd_override` arg or a compile-time injected `uhidOpenFn` — so the
+// routing block's two UhidDevice.init calls bind to primary_fds[1] / imu_fds[1]
+// via initWithFd instead of opening /dev/uhid. See T5f subtask for the
+// precise seam chosen.
+
+// ... DeviceInstance constructs, each UhidDevice.initWithFd writes the
+//     UHID_CREATE2 event to its pipe write-end via a test-driven sendCreate
+//     call (or, if initWithFd is extended to optionally emit CREATE2, in
+//     the constructor path) ...
+
+var buf: [UHID_EVENT_SIZE]u8 = undefined;
+const n_primary = try posix.read(primary_fds[0], &buf);
+const primary_uniq = extractUniq(buf[0..n_primary]);   // helper: reads payload.uniq
+const n_imu = try posix.read(imu_fds[0], &buf);
+const imu_uniq = extractUniq(buf[0..n_imu]);
+try std.testing.expect(std.mem.eql(u8, primary_uniq, imu_uniq));
+```
+
+Test flow:
 
 1. Build a minimal `DeviceConfig` with `[output.imu].backend = "uhid"`.
-2. Call `DeviceInstance.init(allocator, &cfg, null, phys_key_fixture)`.
-3. Assert simulator observed exactly 2 `UHID_CREATE2` events.
-4. Assert both events carry byte-identical `uniq` (`std.mem.eql`).
-5. Assert uniq starts with `"padctl/"` + normalized device name.
-6. Assert primary descriptor contains `EV_KEY` bits; IMU descriptor does not.
+2. Open two `posix.pipe2` pairs and inject their write-ends as the UHID fds
+   for the primary and IMU cards (see seam note above).
+3. Call `DeviceInstance.init(allocator, &cfg, null, phys_key_fixture,
+   &counter)`.
+4. Read one `UHID_CREATE2` event from each pipe read-end.
+5. Decode payload and assert both carry byte-identical `uniq` (`std.mem.eql`).
+6. Assert uniq starts with `"padctl/"` + normalized device name.
+7. Assert primary descriptor bytes contain `EV_KEY` (Usage Page Button 0x09);
+   IMU descriptor bytes do not.
 
-Second test in same file: `backend = "uinput"` → zero `UHID_CREATE2` events
-(regression guard).
+Second test in same file: `backend = "uinput"` → the pipe fds are never
+written (regression guard — no `UHID_CREATE2` emitted).
 
 Third test: `backend = "uinput"` + `[output.imu]` present → `DeviceInstance.init`
 returns `error.InvalidConfig` (T1 validate path sanity check).
+
+Fourth test: `DeviceInstance.deinit` after `backend="uhid"` — read-end of each
+pipe receives a `UHID_DESTROY` event (one per card).
 
 #### 5d. Extend Layer 2 `src/test/uhid_uniq_pairing_test.zig`
 
@@ -554,17 +688,42 @@ where:
               collapse consecutive '-',
               trim leading/trailing '-',
               truncate to 32 bytes.
-  instance  = if phys_key:  lowercase-hex FNV-16(phys_key), 4 digits
+  instance  = if phys_key:  lowercase-hex hash16(phys_key), 4 digits
               else:         "ctr" + lowercase-hex(daemon_counter, 4 digits)
   total     ≤ 63 bytes + NUL terminator (fits UHID_CREATE2_UNIQ 64-byte field)
 ```
 
-Examples:
+`hash16` algorithm (fully specified, reproducible, Zig-idiomatic):
+
+```zig
+// FNV-1a 32-bit over the phys_key bytes, then fold to 16 bits by masking.
+// Standard FNV-1a parameters — identical to the C reference and to
+// `std.hash.Fnv1a_32` if the stdlib offers it; otherwise the 6-line
+// implementation below is the canonical one.
+fn hash16(bytes: []const u8) u16 {
+    var h: u32 = 0x811c9dc5;              // FNV offset basis, 32-bit
+    for (bytes) |b| {
+        h ^= @as(u32, b);
+        h *%= 0x01000193;                 // FNV prime, 32-bit wrapping
+    }
+    return @truncate(h);                  // lower 16 bits
+}
+```
+
+`*%=` is Zig's wrapping multiply — no overflow concern regardless of input
+length. `@truncate(h)` takes the lower 16 bits, producing a value in
+`[0, 0xFFFF]`. Rendered as `"{x:0>4}"` this is exactly 4 lowercase hex digits.
+
+Examples (illustrative; **implementer pins the real hash output on first
+run as the golden known-answer value** — the hash below is a placeholder and
+must not be copied into the test verbatim):
 
 - `cfg.device.name = "Flydigi Vader 3 Pro"`, `phys_key = "usb-0000:00:14.0-3/input0"` →
-  FNV-16 = `0xA7C2` → uniq = `"padctl/flydigi-vader-3-pro-a7c2"`
+  uniq = `"padctl/flydigi-vader-3-pro-<hhhh>"` where `<hhhh>` is the
+  4-hex-digit `hash16` output the implementer computes and pins.
 - `cfg.device.name = "DualSense"`, `phys_key = null`, `counter = 1` →
-  uniq = `"padctl/dualsense-ctr0001"`
+  uniq = `"padctl/dualsense-ctr0001"` (no hash involved — the counter branch
+  is deterministic without a hash function).
 
 Both primary and IMU cards receive the **same string literal** — built once,
 passed to both `UhidDevice.init` calls. See T4 section 4b above.
@@ -579,7 +738,7 @@ passed to both `UhidDevice.init` calls. See T4 section 4b above.
 | D2 | `UinputDevice.initBoxed` wraps `create`, does not replace it | Keeps `create` as the single construction path; `initBoxed` is purely a lifetime adapter. Less diff, easier review, zero behaviour change to existing callers of `create`. |
 | D3 | `imu_dev: ?*UhidDevice` as a second field, NOT a variant in `Owner` union | `Owner` models "one primary output per instance". Stretching it to 4 cases (none/uinput/uhid/uhid+imu) muddies the invariant. A plain optional is clearer for a paired companion device. |
 | D4 | `buildUniq` in a new `src/io/uniq.zig`, not inline in `uhid.zig` | P9 (All Modules Independently Testable). Pure function, zero dependency on `std.posix`, runs Layer 0 with zero privileges. Matches the file-per-pure-concern pattern already seen in `src/io/uhid_descriptor.zig`. |
-| D5 | FNV-16 hash over `phys_key`, not full sysfs path | `phys_key` already captures device identity via `readPhysFromSysfs`. FNV-16 fits the 64-byte uniq budget with room to spare. 16-bit collision probability within a single daemon instance is negligible (< 2^-16 per boot). |
+| D5 | `hash16` (FNV-1a-32 truncated to low 16 bits) over `phys_key`, not full sysfs path | `phys_key` already captures device identity via `readPhysFromSysfs`. 4 hex digits fits the 64-byte uniq budget with room to spare. FNV-1a-32 has a single canonical spec (offset 0x811c9dc5, prime 0x01000193) — Zig `*%=` plus `@truncate` gives a 6-line reproducible implementation. 16-bit collision probability within a single daemon instance is negligible (< 2^-16 per boot). |
 | D6 | Counter fallback when `phys_key` is null | Virtual / Bluetooth devices may return null phys. A monotonic counter preserves within-boot uniqueness. Counter is not stable across daemon restarts, but Wave 3 only requires intra-boot pairing (ADR-015 AC4). |
 | D7 | IMU descriptor carries only sensor axes, no `EV_KEY`, no sticks | ADR-015 §Alternatives hard constraint — SDL `GuessDeviceClass` checks `EV_KEY` bit to disambiguate gamepad vs sensor. |
 | D8 | Reuse `GamepadState` for IMU emit, no separate `ImuState` | `GamepadState` already holds accel/gyro fields. `UhidDevice.encodeReport` is descriptor-driven (PR #140) and ignores fields not referenced by its bound descriptor. Adding a parallel state type would duplicate dirty-axis tracking. |
