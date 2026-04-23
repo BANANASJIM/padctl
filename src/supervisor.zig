@@ -760,6 +760,15 @@ pub const Supervisor = struct {
         m.instance.mapper = tx.new_mapper.?;
         tx.new_mapper = null;
         m.instance.mapping_cfg = &tx.parsed_ptr.?.value;
+        // issue #142: rebuild AuxDevice when switching mappings so newly
+        // required KEY_* or REL_* capabilities become available. Warn rather
+        // than propagate on failure, matching the reload path (~line 676).
+        m.instance.rebuildAuxIfChanged(
+            &tx.parsed_ptr.?.value,
+            tx.old_mapping_cfg,
+        ) catch |err| {
+            std.log.warn("rebuildAuxIfChanged during switch: {}", .{err});
+        };
         restartManagedThread(m) catch |err| {
             if (m.instance.mapper) |*cur| {
                 cur.deinit();
@@ -2174,6 +2183,92 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     try testing.expect(sup.managed.items[1].switch_mapping == null);
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[0].instance.stopped, .acquire));
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[1].instance.stopped, .acquire));
+}
+
+test "supervisor: switch to mapping with new aux KEY_* rebuilds aux caps (issue #142)" {
+    // Regression for issue #142: before the fix, commitSwitchTarget swapped
+    // mapper and mapping_cfg but never called rebuildAuxIfChanged. If the
+    // default_mapping loaded at daemon start did not need aux (needs_keyboard
+    // false, no mouse/rel), AuxDevice was created with zero KEY_* caps; then
+    // `padctl switch` to a mapping containing KEY_* remaps left the aux_dev
+    // caps stale and the kernel silently rejected KEY_G emissions.
+    //
+    // This test uses a device config with no [output] section so
+    // rebuildAuxIfChanged short-circuits without touching /dev/uinput, and
+    // observes the call via the test-only rebuild_aux_calls counter on
+    // DeviceInstance. If the rebuildAuxIfChanged line in commitSwitchTarget
+    // is removed, the counter stays 0 and this test fails.
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    const base_dir = "/tmp/padctl_supervisor_test_switch_issue142";
+    std.fs.deleteTreeAbsolute(base_dir) catch {};
+    try std.fs.makeDirAbsolute(base_dir);
+    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+
+    const mappings_dir = try std.fmt.allocPrint(allocator, "{s}/mappings", .{base_dir});
+    defer allocator.free(mappings_dir);
+    try std.fs.makeDirAbsolute(mappings_dir);
+    const mapping_path = try std.fmt.allocPrint(allocator, "{s}/keys.toml", .{mappings_dir});
+    defer allocator.free(mapping_path);
+    {
+        const f = try std.fs.createFileAbsolute(mapping_path, .{});
+        defer f.close();
+        // Mapping that triggers needs_keyboard=true (C -> KEY_G). The bug
+        // manifested precisely when switching INTO such a mapping.
+        try f.writeAll("[remap]\nC = \"KEY_G\"\n");
+    }
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst, null);
+
+    // Baseline: the spawn path does not call rebuildAuxIfChanged; pre-switch
+    // counter must be 0 so any post-switch observation is attributable to
+    // commitSwitchTarget.
+    try testing.expectEqual(@as(usize, 0), sup.managed.items[0].instance.rebuild_aux_calls);
+
+    sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+
+    sup.handleSwitch(resp_fds[0], "keys", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("OK keys\n", resp_buf[0..n]);
+
+    // Primary assertion: commitSwitchTarget must invoke rebuildAuxIfChanged
+    // exactly once for this device. Removing the fix drops this to 0.
+    try testing.expectEqual(@as(usize, 1), sup.managed.items[0].instance.rebuild_aux_calls);
+
+    // Secondary sanity checks: the swap itself still happened.
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
+    try testing.expect(sup.managed.items[0].instance.mapping_cfg != null);
+    const new_mcfg = sup.managed.items[0].instance.mapping_cfg.?;
+    const caps = mapping_mod.deriveAuxFromMapping(new_mcfg);
+    try testing.expect(caps.needs_keyboard);
 }
 
 test "supervisor: Supervisor: SWITCH with no devices returns no-devices" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
@@ -88,6 +89,10 @@ pub const DeviceInstance = struct {
     pending_mapping: ?*MappingConfig,
     stopped: bool,
     poll_timeout_ms: ?u32 = null,
+    // Test-only observability hook for issue #142 regression: counts
+    // rebuildAuxIfChanged invocations so tests can verify the switch path
+    // actually rebuilds aux caps without relying on /dev/uinput.
+    rebuild_aux_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
     /// init_mapping: optional MappingConfig used to auto-derive aux capabilities when
@@ -280,6 +285,7 @@ pub const DeviceInstance = struct {
     /// Rebuild AuxDevice if caps changed after a mapping swap. old_mcfg may be null
     /// if there was no prior mapping. Called from run() after pending_mapping swap.
     pub fn rebuildAuxIfChanged(self: *DeviceInstance, new_mcfg: *const MappingConfig, old_mcfg: ?*const MappingConfig) !void {
+        if (builtin.is_test) self.rebuild_aux_calls += 1;
         if (self.device_cfg.output == null) return;
         const new_caps = mapping_mod.deriveAuxFromMapping(new_mcfg);
         const old_caps: mapping_mod.DerivedAuxCaps = if (old_mcfg) |m|
