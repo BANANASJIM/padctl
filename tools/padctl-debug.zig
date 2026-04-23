@@ -447,7 +447,11 @@ pub fn main() !void {
                                 prev_buttons = new_btns;
                             }
                             if (mapper) |*m| {
-                                if (m.apply(delta, 16)) |out| {
+                                const now_ns: i128 = blk: {
+                                    const ts = std.posix.clock_gettime(.MONOTONIC) catch break :blk 0;
+                                    break :blk @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+                                };
+                                if (m.apply(delta, 16, now_ns)) |out| {
                                     mapped_gs = out.gamepad;
                                     mapped_gs.synthesizeDpadAxes();
                                     // Process aux events

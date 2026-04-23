@@ -40,7 +40,7 @@ test "property: random input deltas never crash mapper" {
 
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
-        const ev = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16, 0);
         // Invariant: aux key/mouse codes must be non-zero (no code 0 in Linux input).
         for (ev.aux.slice()) |aux| {
             switch (aux) {
@@ -65,12 +65,12 @@ test "property: all 64 button bits set — no panic or overflow" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .buttons = 0xFFFFFFFFFFFFFFFF }, 16);
+    const ev = try m.apply(.{ .buttons = 0xFFFFFFFFFFFFFFFF }, 16, 0);
     // mapper must return without panic; buttons field is valid
     _ = ev.gamepad.buttons;
 
     // release all
-    _ = try m.apply(.{ .buttons = 0 }, 16);
+    _ = try m.apply(.{ .buttons = 0 }, 16, 0);
 }
 
 // P3: rapid layer toggle — 1000 cycles
@@ -158,7 +158,7 @@ test "property: random button remap pairs — no crash" {
         var m = &ctx.mapper;
 
         const delta = state_mod.generateRandomDelta(rng);
-        const ev = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16, 0);
         for (ev.aux.slice()) |aux| {
             switch (aux) {
                 .key => |k| try testing.expect(k.code > 0),
@@ -193,7 +193,7 @@ test "property: extreme axis values — no overflow after processing" {
     };
 
     for (extreme_deltas) |delta| {
-        _ = try m.apply(delta, 16);
+        _ = try m.apply(delta, 16, 0);
     }
 
     // also fuzz with random extreme-biased values
@@ -220,7 +220,7 @@ test "property: extreme axis values — no overflow after processing" {
         if (rng.boolean()) {
             delta.buttons = rng.int(u64);
         }
-        _ = try m.apply(delta, 16);
+        _ = try m.apply(delta, 16, 0);
     }
 }
 
@@ -236,7 +236,7 @@ test "property: empty config — passthrough no crash" {
 
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
-        const ev = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16, 0);
         // No remaps → gamepad output equals input (passthrough).
         if (delta.buttons) |b| try testing.expectEqual(b, ev.gamepad.buttons);
         if (delta.ax) |v| try testing.expectEqual(v, ev.gamepad.ax);
@@ -262,7 +262,7 @@ test "property: empty layer array — no crash" {
 
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
-        const ev = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16, 0);
         for (ev.aux.slice()) |aux| {
             switch (aux) {
                 .key => |k| try testing.expect(k.code > 0),
@@ -288,7 +288,7 @@ test "property: duplicate remap targets — last write wins, no crash" {
     var m = &ctx.mapper;
 
     // press both A and B → both map to Y
-    const ev1 = try m.apply(.{ .buttons = btnMask(.A) | btnMask(.B) }, 16);
+    const ev1 = try m.apply(.{ .buttons = btnMask(.A) | btnMask(.B) }, 16, 0);
     // Y should be injected (at least one source is pressed)
     try testing.expect((ev1.gamepad.buttons & btnMask(.Y)) != 0);
     // A and B should be suppressed
@@ -299,7 +299,7 @@ test "property: duplicate remap targets — last write wins, no crash" {
     var prng = std.Random.DefaultPrng.init(0xAAAA);
     const rng = prng.random();
     for (0..1000) |_| {
-        _ = try m.apply(.{ .buttons = rng.int(u64) }, 16);
+        _ = try m.apply(.{ .buttons = rng.int(u64) }, 16, 0);
     }
 }
 
@@ -319,8 +319,8 @@ test "property: apply same delta twice — no duplicate button press events" {
 
     for (0..1000) |_| {
         const delta = GamepadStateDelta{ .buttons = rng.int(u64) };
-        const ev1 = try m.apply(delta, 16);
-        const ev2 = try m.apply(delta, 16);
+        const ev1 = try m.apply(delta, 16, 0);
+        const ev2 = try m.apply(delta, 16, 0);
 
         // second apply with identical state should produce no key/mouse press events
         for (ev2.aux.slice()) |aux| {
@@ -358,13 +358,13 @@ test "property: layer and base remap to same target — no crash" {
     _ = m.layer.onTimerExpired();
 
     // both A and B pressed — both map to KEY_F1
-    _ = try m.apply(.{ .buttons = btnMask(.A) | btnMask(.B) }, 16);
+    _ = try m.apply(.{ .buttons = btnMask(.A) | btnMask(.B) }, 16, 0);
 
     // fuzz
     var prng = std.Random.DefaultPrng.init(0xBBBB);
     const rng = prng.random();
     for (0..1000) |_| {
         const delta = state_mod.generateRandomDelta(rng);
-        _ = try m.apply(delta, 16);
+        _ = try m.apply(delta, 16, 0);
     }
 }

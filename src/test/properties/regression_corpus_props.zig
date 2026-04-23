@@ -41,7 +41,7 @@ test "regression: all corpus cases pass" {
         std.debug.assert(case.frames.len == case.expected_buttons.len);
 
         for (case.frames, case.expected_buttons, 0..) |frame, expected, idx| {
-            const prod = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
+            const prod = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms), 0);
             const oout = mapper_oracle.apply(&oracle, frame.delta, &ctx.parsed.value, @as(u64, frame.dt_ms));
 
             testing.expectEqual(expected, prod.gamepad.buttons) catch |err| {

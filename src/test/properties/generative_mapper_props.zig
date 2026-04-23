@@ -41,7 +41,7 @@ fn runHarness(
         sequence_gen.randomSequence(rng, frames, ctx.parsed.value);
 
         for (frames) |frame| {
-            _ = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
+            _ = try ctx.mapper.apply(frame.delta, @as(u32, frame.dt_ms), 0);
         }
         pass += 1;
     }
@@ -163,7 +163,7 @@ test "generative: layer hold -> pending -> active -> deactivate" {
 
     // idle -> pending
     var prev = oracle;
-    _ = ctx.mapper.apply(.{ .buttons = lt }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = lt }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 0);
     transition_id.classify(&tracker, &prev, &oracle, .{ .buttons = lt }, &parsed.value);
     try testing.expect(tracker.seen[@intFromEnum(transition_id.TransitionId.layer_idle_to_pending)]);
@@ -172,20 +172,20 @@ test "generative: layer hold -> pending -> active -> deactivate" {
     prev = oracle;
     // Fire production timer BEFORE apply so layer is active for remap processing
     _ = ctx.mapper.layer.onTimerExpired();
-    _ = ctx.mapper.apply(.{ .buttons = lt }, 101) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = lt }, 101, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 101);
     transition_id.classify(&tracker, &prev, &oracle, .{ .buttons = lt }, &parsed.value);
     try testing.expect(tracker.seen[@intFromEnum(transition_id.TransitionId.layer_pending_to_active)]);
 
     // verify layer remap active: A -> X
     // Production suppresses layer trigger buttons; oracle doesn't — mask out LT for comparison
-    const prod = ctx.mapper.apply(.{ .buttons = lt | a }, 0) catch unreachable;
+    const prod = ctx.mapper.apply(.{ .buttons = lt | a }, 0, 0) catch unreachable;
     const oout = mapper_oracle.apply(&oracle, .{ .buttons = lt | a }, &parsed.value, 0);
     try testing.expectEqual(oout.gamepad.buttons & ~lt, prod.gamepad.buttons);
 
     // active -> idle (release LT)
     prev = oracle;
-    _ = ctx.mapper.apply(.{ .buttons = 0 }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = 0 }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = 0 }, &parsed.value, 0);
     transition_id.classify(&tracker, &prev, &oracle, .{ .buttons = 0 }, &parsed.value);
     try testing.expect(tracker.seen[@intFromEnum(transition_id.TransitionId.layer_active_to_idle)]);
@@ -214,24 +214,24 @@ test "generative: layer toggle on/off" {
     const a = helpers.btnMask(.A);
 
     // press + release Select -> toggle on
-    _ = ctx.mapper.apply(.{ .buttons = sel }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = sel }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = sel }, &parsed.value, 0);
     var prev = oracle;
-    _ = ctx.mapper.apply(.{ .buttons = 0 }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = 0 }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = 0 }, &parsed.value, 0);
     transition_id.classify(&tracker, &prev, &oracle, .{ .buttons = 0 }, &parsed.value);
     try testing.expect(tracker.seen[@intFromEnum(transition_id.TransitionId.layer_toggle_on)]);
 
     // A should be remapped to KEY_F1
-    const prod = ctx.mapper.apply(.{ .buttons = a }, 0) catch unreachable;
+    const prod = ctx.mapper.apply(.{ .buttons = a }, 0, 0) catch unreachable;
     const oout = mapper_oracle.apply(&oracle, .{ .buttons = a }, &parsed.value, 0);
     try testing.expectEqual(oout.gamepad.buttons, prod.gamepad.buttons);
 
     // press + release Select -> toggle off
-    _ = ctx.mapper.apply(.{ .buttons = sel }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = sel }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = sel }, &parsed.value, 0);
     prev = oracle;
-    _ = ctx.mapper.apply(.{ .buttons = 0 }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = 0 }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = 0 }, &parsed.value, 0);
     transition_id.classify(&tracker, &prev, &oracle, .{ .buttons = 0 }, &parsed.value);
     try testing.expect(tracker.seen[@intFromEnum(transition_id.TransitionId.layer_toggle_off)]);
@@ -251,7 +251,7 @@ test "generative: dpad arrows mode emits KEY events" {
     const parsed = try mapping.parseString(allocator, toml_str);
     defer parsed.deinit();
 
-    const prod = ctx.mapper.apply(.{ .dpad_x = -1 }, 0) catch unreachable;
+    const prod = ctx.mapper.apply(.{ .dpad_x = -1 }, 0, 0) catch unreachable;
     const oout = mapper_oracle.apply(&oracle, .{ .dpad_x = -1 }, &parsed.value, 0);
 
     try testing.expectEqual(oout.gamepad.dpad_x, prod.gamepad.dpad_x);
@@ -287,15 +287,15 @@ test "generative: simultaneous buttons + layer remap" {
     const b = helpers.btnMask(.B);
 
     // Activate layer
-    _ = ctx.mapper.apply(.{ .buttons = lt }, 0) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = lt }, 0, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 0);
     _ = ctx.mapper.layer.onTimerExpired();
-    _ = ctx.mapper.apply(.{ .buttons = lt }, 51) catch unreachable;
+    _ = ctx.mapper.apply(.{ .buttons = lt }, 51, 0) catch unreachable;
     _ = mapper_oracle.apply(&oracle, .{ .buttons = lt }, &parsed.value, 51);
 
     // Press A + B simultaneously while layer active
     // Production suppresses layer trigger buttons; oracle doesn't — mask out LT for comparison
-    const prod = ctx.mapper.apply(.{ .buttons = lt | a | b }, 0) catch unreachable;
+    const prod = ctx.mapper.apply(.{ .buttons = lt | a | b }, 0, 0) catch unreachable;
     const oout = mapper_oracle.apply(&oracle, .{ .buttons = lt | a | b }, &parsed.value, 0);
     try testing.expectEqual(oout.gamepad.buttons & ~lt, prod.gamepad.buttons);
     try compareAux(&oout.aux, &prod.aux);
@@ -335,7 +335,7 @@ test "generative: real device configs x compatible mapping x random sequences" {
         sequence_gen.randomSequence(rng, &frames_buf, map_parsed.value);
 
         for (frames_buf) |frame| {
-            _ = try mc.mapper.apply(frame.delta, @as(u32, frame.dt_ms));
+            _ = try mc.mapper.apply(frame.delta, @as(u32, frame.dt_ms), 0);
         }
         tested += 1;
     }

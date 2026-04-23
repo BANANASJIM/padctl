@@ -279,7 +279,7 @@ test "macro: layer switch while macro active — held keys released, macros clea
 
     // Press M1 to start macro — down LSHIFT emitted, delay armed.
     const m1_mask = btnMask(.M1);
-    _ = try m.apply(.{ .buttons = m1_mask }, 16);
+    _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
     // Now activate layer (LT hold) — active_changed fires → macros cleared, releases emitted.
@@ -287,7 +287,7 @@ test "macro: layer switch while macro active — held keys released, macros clea
     _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
-    const ev = try m.apply(.{ .buttons = m1_mask }, 16);
+    const ev = try m.apply(.{ .buttons = m1_mask }, 16, 0);
 
     // active_macros must be empty after layer switch.
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
@@ -391,7 +391,7 @@ test "macro: hot-reload — updateMapping swaps config; next apply uses new mapp
     // Verify new mapping: M1 press produces KEY_A, not macro.
     var m = &inst.mapper.?;
     const m1_mask = btnMask(.M1);
-    const ev = try m.apply(.{ .buttons = m1_mask }, 16);
+    const ev = try m.apply(.{ .buttons = m1_mask }, 16, 0);
 
     // With new mapping M1 = "KEY_A", active_macros must be empty.
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
@@ -429,7 +429,7 @@ test "macro: mapper macro trigger — M1=macro:dodge_roll press starts player" {
 
     // Rising edge: M1 press → macro player added.
     const m1_mask = btnMask(.M1);
-    const ev = try m.apply(.{ .buttons = m1_mask }, 16);
+    const ev = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     _ = ev;
 
     // Macro player started and immediately ran synchronous steps (tap B + tap LEFT = 4 events).
@@ -453,10 +453,10 @@ test "macro: mapper macro trigger — no second player on held button (no re-tri
 
     const m1_mask = btnMask(.M1);
     // Frame 1: rising edge → macro starts and finishes.
-    _ = try m.apply(.{ .buttons = m1_mask }, 16);
+    _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 
     // Frame 2: still held → no new player (no rising edge).
-    _ = try m.apply(.{ .buttons = m1_mask }, 16);
+    _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
