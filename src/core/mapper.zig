@@ -17,8 +17,9 @@ const REL_Y: u16 = c.REL_Y;
 const REL_WHEEL: u16 = c.REL_WHEEL;
 const REL_HWHEEL: u16 = c.REL_HWHEEL;
 
-pub const RemapTargetResolved = @import("remap.zig").RemapTargetResolved;
-pub const resolveTarget = @import("remap.zig").resolveTarget;
+const remap_mod = @import("remap.zig");
+pub const RemapTargetResolved = remap_mod.RemapTargetResolved;
+pub const resolveTarget = remap_mod.resolveTarget;
 pub const AuxEvent = aux_event_mod.AuxEvent;
 pub const AuxEventList = aux_event_mod.AuxEventList;
 pub const TimerRequest = @import("timer_request.zig").TimerRequest;
@@ -244,21 +245,6 @@ pub const Mapper = struct {
             const pressed = (self.state.buttons & src_mask) != 0;
             const prev_pressed = (self.prev.buttons & src_mask) != 0;
             switch (target) {
-                .key => |code| {
-                    if (pressed != prev_pressed)
-                        aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {};
-                },
-                .mouse_button => |code| {
-                    if (pressed != prev_pressed)
-                        aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {};
-                },
-                .gamepad_button => |dst| {
-                    if (pressed) {
-                        const dst_idx: u6 = @intCast(@intFromEnum(dst));
-                        self.injected_buttons |= @as(u64, 1) << dst_idx;
-                    }
-                },
-                .disabled => {},
                 .macro => |name| {
                     if (pressed and !prev_pressed) {
                         if (self.findMacro(name)) |m| {
@@ -276,6 +262,18 @@ pub const Mapper = struct {
                         }
                     }
                 },
+                .gamepad_button => {
+                    // Level-triggered: OR bit each frame while held;
+                    // `injected_buttons` is reset at frame start so release is implicit.
+                    if (pressed) remap_mod.applyTarget(target, .press, &aux, &self.injected_buttons, null, null);
+                },
+                .key, .mouse_button => {
+                    if (pressed and !prev_pressed)
+                        remap_mod.applyTarget(target, .press, &aux, &self.injected_buttons, null, null);
+                    if (!pressed and prev_pressed)
+                        remap_mod.applyTarget(target, .release, &aux, &self.injected_buttons, null, null);
+                },
+                .disabled => {},
             }
         }
 
@@ -504,23 +502,9 @@ fn emitTapEvent(
     injected_buttons: *u64,
     pending_tap_release: *?u64,
 ) void {
-    switch (target) {
-        .key => |code| {
-            aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
-            aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
-        },
-        .mouse_button => |code| {
-            aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {};
-            aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {};
-        },
-        .gamepad_button => |dst| {
-            const dst_idx: u6 = @intCast(@intFromEnum(dst));
-            const mask: u64 = @as(u64, 1) << dst_idx;
-            injected_buttons.* |= mask;
-            pending_tap_release.* = mask;
-        },
-        .disabled, .macro => {},
-    }
+    var local_pending: u64 = pending_tap_release.* orelse 0;
+    remap_mod.applyTarget(target, .tap, aux, injected_buttons, &local_pending, null);
+    if (local_pending != 0) pending_tap_release.* = local_pending;
 }
 
 fn buttonBit(name: []const u8) u64 {

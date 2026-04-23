@@ -1,8 +1,10 @@
 const std = @import("std");
 const state = @import("state.zig");
 const input_codes = @import("../config/input_codes.zig");
+const aux_event_mod = @import("aux_event.zig");
 
 const ButtonId = state.ButtonId;
+const AuxEventList = aux_event_mod.AuxEventList;
 
 pub const RemapTargetResolved = union(enum) {
     key: u16,
@@ -11,6 +13,59 @@ pub const RemapTargetResolved = union(enum) {
     disabled: void,
     macro: []const u8,
 };
+
+pub const TargetAction = enum { press, release, tap };
+
+/// Dispatch a resolved remap target into aux events and injected-button state.
+/// `.disabled` and `.macro` are no-ops — callers that need macro-queue side
+/// effects must handle them before calling this.
+/// `pending_tap_release` is required when action == .tap and target is .gamepad_button.
+/// `held_gamepad` is optional; MacroPlayer uses it to track bits for emitPendingReleases.
+pub fn applyTarget(
+    target: RemapTargetResolved,
+    action: TargetAction,
+    aux: *AuxEventList,
+    injected_buttons: *u64,
+    pending_tap_release: ?*u64,
+    held_gamepad: ?*u64,
+) void {
+    switch (target) {
+        .key => |code| switch (action) {
+            .press => aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {},
+            .release => aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
+            .tap => {
+                aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
+                aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
+            },
+        },
+        .mouse_button => |code| switch (action) {
+            .press => aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {},
+            .release => aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
+            .tap => {
+                aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {};
+                aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {};
+            },
+        },
+        .gamepad_button => |dst| {
+            const mask = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst)));
+            switch (action) {
+                .press => {
+                    injected_buttons.* |= mask;
+                    if (held_gamepad) |h| h.* |= mask;
+                },
+                .release => {
+                    injected_buttons.* &= ~mask;
+                    if (held_gamepad) |h| h.* &= ~mask;
+                },
+                .tap => {
+                    injected_buttons.* |= mask;
+                    if (pending_tap_release) |ptr| ptr.* |= mask;
+                },
+            }
+        },
+        .disabled, .macro => {},
+    }
+}
 
 pub fn resolveTarget(raw: []const u8) !RemapTargetResolved {
     if (std.mem.eql(u8, raw, "disabled")) return .disabled;
