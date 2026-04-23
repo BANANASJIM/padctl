@@ -1378,9 +1378,18 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     } else if (will_start_user_service and is_root and
         (std.posix.getenv("SUDO_USER") orelse "").len != 0)
     {
+        const action_sudo = if (opts.no_start and opts.no_enable)
+            "installed via sudo -u $SUDO_USER (neither enabled nor started — --no-enable --no-start given)"
+        else if (opts.no_start)
+            "enabled via sudo -u $SUDO_USER (not started — --no-start given); run `systemctl --user start padctl.service` as that user when ready"
+        else if (opts.no_enable)
+            "started via sudo -u $SUDO_USER (not enabled — --no-enable given); run `systemctl --user enable padctl.service` as that user to auto-start on login"
+        else
+            "enabled and started via sudo -u $SUDO_USER";
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete. User service ") catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, action_sudo) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO,
-            \\
-            \\Install complete. User service started via sudo -u $SUDO_USER.
+            \\.
             \\
             \\Verify:
             \\  systemctl --user status padctl.service
