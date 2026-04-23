@@ -694,6 +694,134 @@ pub fn installWillStartUserService(
     return false;
 }
 
+/// Snapshot of the process environment that feeds `InstallPlan.compute`.
+/// Kept as a plain struct so tests can construct synthetic environments without
+/// mutating getenv state.
+pub const EnvSnapshot = struct {
+    uid: std.posix.uid_t,
+    home: ?[]const u8,
+    sudo_user: ?[]const u8,
+    sudo_uid: ?[]const u8,
+
+    pub fn fromProcess() EnvSnapshot {
+        return .{
+            .uid = std.os.linux.getuid(),
+            .home = std.posix.getenv("HOME"),
+            .sudo_user = std.posix.getenv("SUDO_USER"),
+            .sudo_uid = std.posix.getenv("SUDO_UID"),
+        };
+    }
+};
+
+/// Single source of truth for every decision `install.run()` makes before it
+/// starts touching the filesystem. All derived axes are computed exactly once
+/// in `compute()` so later phases read a plain struct instead of re-deriving
+/// (and drifting from) the originals. This directly addresses the PR #148 gate
+/// bug where `effective_user_service` was re-tested at the wrong call site.
+pub const InstallPlan = struct {
+    // --- inputs (captured, not re-derived) ---
+    opts: InstallOptions,
+    is_root: bool,
+    sudo_user: ?[]const u8,
+    sudo_uid: ?[]const u8,
+    home: ?[]const u8,
+
+    // --- derived axes ---
+    staging_mode: bool,
+    effective_user_service: bool,
+    immutable_kind: ImmutableKind,
+    effective_immutable: bool,
+    prefix: []const u8,
+    systemctl_plan: SystemctlUserPlan,
+    will_start_user_service: bool,
+    do_xdg_dirs: bool,
+    do_enable_systemctl: bool,
+
+    // --- owned path strings (freed by deinit) ---
+    bin_dir: []const u8,
+    service_dir: []const u8,
+    share_dir: []const u8,
+    udev_dir: []const u8,
+
+    pub fn compute(allocator: std.mem.Allocator, opts: InstallOptions, env: EnvSnapshot) !InstallPlan {
+        const is_root = env.uid == 0;
+        const destdir = opts.destdir;
+        const staging_mode = destdir.len != 0;
+
+        const effective_user_service = opts.user_service orelse !is_root;
+
+        const immutable_kind = detectImmutableOs(allocator, if (staging_mode) destdir else "");
+        const effective_immutable = opts.immutable or (immutable_kind != .none and !opts.no_immutable);
+
+        const prefix = if (effective_immutable and std.mem.eql(u8, opts.prefix, "/usr"))
+            "/usr/local"
+        else
+            opts.prefix;
+
+        const systemctl_plan = planSystemctlUser(env.uid, env.sudo_user, env.sudo_uid);
+
+        const will_start_user_service = installWillStartUserService(
+            is_root,
+            opts.user_service,
+            destdir,
+            env.sudo_user,
+        );
+
+        // Pre-seeding XDG parents is required on exactly the install paths that
+        // end up starting a user-scope padctl.service — identical to
+        // `will_start_user_service`. Kept as a separate field to keep call
+        // sites self-documenting.
+        const do_xdg_dirs = will_start_user_service;
+
+        // systemctl enable/start only runs on live installs (non-staging).
+        const do_enable_systemctl = !staging_mode and will_start_user_service;
+
+        var bin_dir: []const u8 = &.{};
+        var service_dir: []const u8 = &.{};
+        var share_dir: []const u8 = &.{};
+        var udev_dir: []const u8 = &.{};
+        errdefer {
+            if (bin_dir.len != 0) allocator.free(bin_dir);
+            if (service_dir.len != 0) allocator.free(service_dir);
+            if (share_dir.len != 0) allocator.free(share_dir);
+            if (udev_dir.len != 0) allocator.free(udev_dir);
+        }
+
+        bin_dir = try std.fmt.allocPrint(allocator, "{s}{s}/bin", .{ destdir, prefix });
+        service_dir = try resolveServiceDir(allocator, destdir, prefix, effective_immutable, effective_user_service);
+        share_dir = try std.fmt.allocPrint(allocator, "{s}{s}/share/padctl/devices", .{ destdir, prefix });
+        udev_dir = try resolveUdevDir(allocator, destdir, prefix, effective_immutable);
+
+        return .{
+            .opts = opts,
+            .is_root = is_root,
+            .sudo_user = env.sudo_user,
+            .sudo_uid = env.sudo_uid,
+            .home = env.home,
+            .staging_mode = staging_mode,
+            .effective_user_service = effective_user_service,
+            .immutable_kind = immutable_kind,
+            .effective_immutable = effective_immutable,
+            .prefix = prefix,
+            .systemctl_plan = systemctl_plan,
+            .will_start_user_service = will_start_user_service,
+            .do_xdg_dirs = do_xdg_dirs,
+            .do_enable_systemctl = do_enable_systemctl,
+            .bin_dir = bin_dir,
+            .service_dir = service_dir,
+            .share_dir = share_dir,
+            .udev_dir = udev_dir,
+        };
+    }
+
+    pub fn deinit(self: *const InstallPlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.bin_dir);
+        allocator.free(self.service_dir);
+        allocator.free(self.share_dir);
+        allocator.free(self.udev_dir);
+    }
+};
+
 /// Build argv for invoking `systemctl --user <verbs...>` under the correct bus.
 /// Caller owns the returned slice and each nested string via the allocator.
 ///
@@ -936,9 +1064,10 @@ fn installMapping(allocator: std.mem.Allocator, name: []const u8, destdir: []con
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
-    const is_root = std.os.linux.getuid() == 0;
-    const effective_user_service = opts.user_service orelse !is_root;
-    if (opts.destdir.len == 0 and !is_root and !effective_user_service) {
+    // Input validation — reject impossible option combinations before touching disk.
+    if (opts.destdir.len == 0 and std.os.linux.getuid() != 0 and
+        (opts.user_service orelse true) == false)
+    {
         _ = std.posix.write(std.posix.STDERR_FILENO, "error: system-wide install requires root — use: sudo padctl install\n") catch {};
         std.process.exit(1);
     }
@@ -948,11 +1077,10 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         std.process.exit(1);
     }
 
-    const destdir = opts.destdir;
-
-    // Detect immutable OS — only check real root when not staging
-    const immutable_kind = detectImmutableOs(allocator, if (destdir.len > 0) destdir else "");
-    if (shouldAbortForImmutable(immutable_kind, opts)) {
+    // Detect immutable OS first so we can abort before building the plan
+    // (compute() would otherwise allocate paths we'd just throw away).
+    const immutable_probe = detectImmutableOs(allocator, if (opts.destdir.len > 0) opts.destdir else "");
+    if (shouldAbortForImmutable(immutable_probe, opts)) {
         _ = std.posix.write(std.posix.STDERR_FILENO,
             \\error: immutable OS detected (files under /usr are read-only).
             \\Standard install will not work correctly on this system.
@@ -965,107 +1093,16 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         ) catch {};
         std.process.exit(1);
     }
-    const effective_immutable = opts.immutable or (immutable_kind != .none and !opts.no_immutable);
 
-    // On immutable systems, /usr is read-only — auto-switch default prefix to /usr/local
-    const prefix = if (effective_immutable and std.mem.eql(u8, opts.prefix, "/usr"))
-        "/usr/local"
-    else
-        opts.prefix;
+    const plan = try InstallPlan.compute(allocator, opts, EnvSnapshot.fromProcess());
+    defer plan.deinit(allocator);
 
-    // Legacy system-unit migration: pre-user-service installs placed the
-    // unit at /etc/systemd/system/padctl.service. That unit has been
-    // superseded by the per-user unit at /etc/systemd/user/padctl.service;
-    // leaving the old one enabled would race with the new one for the
-    // hidraw grab. We're already running as root via sudo, so offer to
-    // stop+disable+remove it ourselves — "don't break userspace, don't
-    // force users to run manual commands to finish an install." Prompt
-    // interactively for consent; default-yes on TTY, auto-proceed when
-    // stdin isn't a TTY so non-interactive installs (CI, scripts) still
-    // converge on a clean state.
-    if (destdir.len == 0) {
-        const old_unit = "/etc/systemd/system/padctl.service";
-        if (std.fs.accessAbsolute(old_unit, .{})) |_| {
-            _ = std.posix.write(std.posix.STDERR_FILENO,
-                \\warning: legacy system service detected at /etc/systemd/system/padctl.service
-                \\  padctl now runs as a user service. The legacy system unit
-                \\  would race with the new per-user unit for the hidraw grab,
-                \\  so we recommend removing it now. Proposed actions:
-                \\    - stop     padctl.service
-                \\    - disable  padctl.service
-                \\    - remove   /etc/systemd/system/padctl.service
-                \\    - remove   /etc/systemd/system/padctl.service.d/ (drop-ins)
-                \\    - remove   /etc/systemd/system/padctl-resume.service (if present)
-                \\
-            ) catch {};
-            // Auto-migration requires root: systemctl stop/disable on a
-            // system-scope unit and deletes under /etc/ both need uid 0.
-            // Non-root installs (the default path on a user-service
-            // install without sudo) would silently fail every step and
-            // then lie with "legacy migration complete", leaving the
-            // legacy unit active on the next boot where it races with
-            // the new per-user unit for hidraw. Print the manual command
-            // list instead so the user can finish the migration.
-            if (!is_root) {
-                _ = std.posix.write(std.posix.STDERR_FILENO,
-                    \\  auto-migration needs root — skipped. Re-run as
-                    \\  `sudo padctl install` or clean up manually:
-                    \\    sudo systemctl stop padctl.service
-                    \\    sudo systemctl disable padctl.service
-                    \\    sudo rm /etc/systemd/system/padctl.service
-                    \\    sudo rm -rf /etc/systemd/system/padctl.service.d
-                    \\    sudo rm -f /etc/systemd/system/padctl-resume.service
-                    \\
-                ) catch {};
-            } else {
-                const proceed = promptYesNoDefaultYes("Migrate legacy system service now?");
-                if (proceed) {
-                    runSystemctlSystem(&.{ "stop", "padctl.service" });
-                    runSystemctlSystem(&.{ "disable", "padctl.service" });
-                    std.fs.deleteFileAbsolute(old_unit) catch {};
-                    // Also drop the legacy drop-in directory so daemon-reload
-                    // doesn't keep re-parsing stale overrides.
-                    std.fs.deleteTreeAbsolute("/etc/systemd/system/padctl.service.d") catch {};
-                    // Resume service counterpart — same story.
-                    const old_resume = "/etc/systemd/system/padctl-resume.service";
-                    if (std.fs.accessAbsolute(old_resume, .{})) |_| {
-                        runSystemctlSystem(&.{ "disable", "padctl-resume.service" });
-                        std.fs.deleteFileAbsolute(old_resume) catch {};
-                    } else |_| {}
-                    _ = std.posix.write(
-                        std.posix.STDERR_FILENO,
-                        "  legacy migration complete\n\n",
-                    ) catch {};
-                } else {
-                    _ = std.posix.write(std.posix.STDERR_FILENO,
-                        \\  skipped — keeping the legacy unit in place. You can
-                        \\  remove it later by rerunning `padctl install` and
-                        \\  answering yes, or manually:
-                        \\    sudo systemctl stop padctl.service
-                        \\    sudo systemctl disable padctl.service
-                        \\    sudo rm /etc/systemd/system/padctl.service
-                        \\    sudo rm -rf /etc/systemd/system/padctl.service.d
-                        \\    sudo rm -f /etc/systemd/system/padctl-resume.service
-                        \\
-                    ) catch {};
-                }
-            }
-        } else |_| {}
-    }
+    try runLegacySystemUnitMigration(&plan);
 
-    const bin_dir = try std.fmt.allocPrint(allocator, "{s}{s}/bin", .{ destdir, prefix });
-    defer allocator.free(bin_dir);
-    const lib_systemd_dir = try resolveServiceDir(allocator, destdir, prefix, effective_immutable, effective_user_service);
-    defer allocator.free(lib_systemd_dir);
-    const share_dir = try std.fmt.allocPrint(allocator, "{s}{s}/share/padctl/devices", .{ destdir, prefix });
-    defer allocator.free(share_dir);
-    const udev_dir = try resolveUdevDir(allocator, destdir, prefix, effective_immutable);
-    defer allocator.free(udev_dir);
-
-    try ensureDirAll(allocator, bin_dir);
-    try ensureDirAll(allocator, lib_systemd_dir);
-    try ensureDirAll(allocator, share_dir);
-    try ensureDirAll(allocator, udev_dir);
+    try ensureDirAll(allocator, plan.bin_dir);
+    try ensureDirAll(allocator, plan.service_dir);
+    try ensureDirAll(allocator, plan.share_dir);
+    try ensureDirAll(allocator, plan.udev_dir);
 
     // Gate covers every path that ends up starting a user-scope padctl.service:
     // explicit --user-service, non-root default, and sudo install routed via
@@ -1073,7 +1110,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // gate (`effective_user_service and destdir.len == 0`) short-circuited on
     // the sudo_hop path, leaving the XDG parents absent and letting systemd
     // v254+ recreate the legacy migration symlink after every install.
-    if (installWillStartUserService(is_root, opts.user_service, destdir, std.posix.getenv("SUDO_USER"))) {
+    if (plan.do_xdg_dirs) {
         const home = try resolveTargetHome(allocator);
         defer allocator.free(home);
         try ensureUserXdgDirs(allocator, home);
@@ -1083,8 +1120,117 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     defer allocator.free(self_path);
     const self_dir = std.fs.path.dirname(self_path) orelse ".";
 
-    // 1. Copy binaries
-    const bin_padctl = try std.fmt.allocPrint(allocator, "{s}/padctl", .{bin_dir});
+    try installBinaries(allocator, &plan, self_path, self_dir);
+    try installServiceFiles(allocator, &plan);
+    try installReconnectScript(allocator, &plan);
+    try installDeviceConfigs(allocator, &plan, self_dir);
+
+    var device_entries = try collectAllDeviceEntries(allocator, &plan);
+    defer freeDeviceEntries(allocator, &device_entries);
+
+    try installUdevRules(allocator, &plan, device_entries.items);
+    try cleanupLegacyUdevFiles(allocator, &plan);
+    writeModulesLoad(allocator, plan.opts.destdir, plan.prefix, plan.effective_immutable);
+
+    var installed_mappings = std.ArrayList([]const u8){};
+    defer installed_mappings.deinit(allocator);
+    var mapping_failed = try installMappings(allocator, &plan, self_dir, &installed_mappings);
+    if (installed_mappings.items.len > 0) {
+        const binding_failed = try installBindings(allocator, &plan, self_dir, installed_mappings.items);
+        mapping_failed = mapping_failed or binding_failed;
+    }
+
+    if (plan.do_enable_systemctl) {
+        runSystemctlPhase(&plan);
+    } else if (!plan.staging_mode) {
+        // Reload udev rules even when the user-service is disabled — the
+        // device rules were still written and systemd-udevd needs them.
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
+        runCmd(&.{ "udevadm", "control", "--reload-rules" });
+        runCmd(&.{ "udevadm", "trigger" });
+    }
+
+    if (mapping_failed) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "\nInstall completed with mapping errors.\n") catch {};
+        return error.MappingInstallFailed;
+    }
+
+    printCompletionHint(&plan);
+    printInputGroupHint();
+}
+
+/// Detect + optionally auto-migrate a legacy /etc/systemd/system/padctl.service
+/// unit. Pre-user-service installs placed the unit here; leaving it enabled
+/// would race with the new per-user unit for the hidraw grab. Prompt-driven
+/// on TTY, safe no-op when the legacy file is absent or the install is staged.
+fn runLegacySystemUnitMigration(plan: *const InstallPlan) !void {
+    if (plan.staging_mode) return;
+    const old_unit = "/etc/systemd/system/padctl.service";
+    std.fs.accessAbsolute(old_unit, .{}) catch return;
+
+    _ = std.posix.write(std.posix.STDERR_FILENO,
+        \\warning: legacy system service detected at /etc/systemd/system/padctl.service
+        \\  padctl now runs as a user service. The legacy system unit
+        \\  would race with the new per-user unit for the hidraw grab,
+        \\  so we recommend removing it now. Proposed actions:
+        \\    - stop     padctl.service
+        \\    - disable  padctl.service
+        \\    - remove   /etc/systemd/system/padctl.service
+        \\    - remove   /etc/systemd/system/padctl.service.d/ (drop-ins)
+        \\    - remove   /etc/systemd/system/padctl-resume.service (if present)
+        \\
+    ) catch {};
+
+    // Auto-migration requires root: systemctl stop/disable on a system-scope
+    // unit and deletes under /etc/ both need uid 0. Non-root callers get the
+    // manual command list so they can finish the migration themselves.
+    if (!plan.is_root) {
+        _ = std.posix.write(std.posix.STDERR_FILENO,
+            \\  auto-migration needs root — skipped. Re-run as
+            \\  `sudo padctl install` or clean up manually:
+            \\    sudo systemctl stop padctl.service
+            \\    sudo systemctl disable padctl.service
+            \\    sudo rm /etc/systemd/system/padctl.service
+            \\    sudo rm -rf /etc/systemd/system/padctl.service.d
+            \\    sudo rm -f /etc/systemd/system/padctl-resume.service
+            \\
+        ) catch {};
+        return;
+    }
+
+    if (promptYesNoDefaultYes("Migrate legacy system service now?")) {
+        runSystemctlSystem(&.{ "stop", "padctl.service" });
+        runSystemctlSystem(&.{ "disable", "padctl.service" });
+        std.fs.deleteFileAbsolute(old_unit) catch {};
+        std.fs.deleteTreeAbsolute("/etc/systemd/system/padctl.service.d") catch {};
+        const old_resume = "/etc/systemd/system/padctl-resume.service";
+        if (std.fs.accessAbsolute(old_resume, .{})) |_| {
+            runSystemctlSystem(&.{ "disable", "padctl-resume.service" });
+            std.fs.deleteFileAbsolute(old_resume) catch {};
+        } else |_| {}
+        _ = std.posix.write(std.posix.STDERR_FILENO, "  legacy migration complete\n\n") catch {};
+    } else {
+        _ = std.posix.write(std.posix.STDERR_FILENO,
+            \\  skipped — keeping the legacy unit in place. You can
+            \\  remove it later by rerunning `padctl install` and
+            \\  answering yes, or manually:
+            \\    sudo systemctl stop padctl.service
+            \\    sudo systemctl disable padctl.service
+            \\    sudo rm /etc/systemd/system/padctl.service
+            \\    sudo rm -rf /etc/systemd/system/padctl.service.d
+            \\    sudo rm -f /etc/systemd/system/padctl-resume.service
+            \\
+        ) catch {};
+    }
+}
+
+fn installBinaries(
+    allocator: std.mem.Allocator,
+    plan: *const InstallPlan,
+    self_path: []const u8,
+    self_dir: []const u8,
+) !void {
+    const bin_padctl = try std.fmt.allocPrint(allocator, "{s}/padctl", .{plan.bin_dir});
     defer allocator.free(bin_padctl);
     try atomicInstallBinary(allocator, self_path, bin_padctl);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
@@ -1094,21 +1240,22 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     for ([_][]const u8{ "padctl-capture", "padctl-debug" }) |name| {
         const src = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self_dir, name });
         defer allocator.free(src);
-        const dst = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin_dir, name });
+        const dst = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ plan.bin_dir, name });
         defer allocator.free(dst);
         atomicInstallBinary(allocator, src, dst) catch continue;
         _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, dst) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
+}
 
-    // 2. Write service file with correct prefix paths
-    const service_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{lib_systemd_dir});
+fn installServiceFiles(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
+    const service_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{plan.service_dir});
     defer allocator.free(service_path);
     // Always use the user-service template. Even on immutable-root installs,
     // the service file is placed under /etc/systemd/user/ so systemd discovers
     // it as a user unit and each user's systemd instance runs its own copy.
-    const service_content = try generateServiceContent(allocator, prefix);
+    const service_content = try generateServiceContent(allocator, plan.prefix);
     defer allocator.free(service_content);
     {
         var f = try std.fs.createFileAbsolute(service_path, .{ .truncate = true });
@@ -1119,9 +1266,8 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, service_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
-    // 2b. Write immutable drop-in override (only when immutable system install)
-    if (effective_immutable) {
-        const dropin_dir = try std.fmt.allocPrint(allocator, "{s}/padctl.service.d", .{lib_systemd_dir});
+    if (plan.effective_immutable) {
+        const dropin_dir = try std.fmt.allocPrint(allocator, "{s}/padctl.service.d", .{plan.service_dir});
         defer allocator.free(dropin_dir);
         try ensureDirAll(allocator, dropin_dir);
         const dropin_path = try std.fmt.allocPrint(allocator, "{s}/immutable.conf", .{dropin_dir});
@@ -1144,42 +1290,38 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // and drop-ins on disk — harmless while the legacy unit stays
     // disabled, but misleading if a user ever enables it manually. The
     // helper is a no-op when no legacy file is present.
-    updateLegacySystemService(allocator, destdir, prefix);
+    updateLegacySystemService(allocator, plan.opts.destdir, plan.prefix);
+}
 
-    // 2c. (removed) padctl-resume.service — see comment at top of file.
-    // Post-suspend reconnect is handled by the udev padctl-reconnect hook
-    // below. Legacy cleanup for upgrades from v0.1.2 lives in uninstall().
-
-    // 2d. Write reconnect script (all systems)
+fn installReconnectScript(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
+    const reconnect_script = try generateReconnectScript(allocator, plan.prefix);
+    defer allocator.free(reconnect_script);
+    const reconnect_path = try std.fmt.allocPrint(allocator, "{s}/padctl-reconnect", .{plan.bin_dir});
+    defer allocator.free(reconnect_path);
     {
-        const reconnect_script = try generateReconnectScript(allocator, prefix);
-        defer allocator.free(reconnect_script);
-        const reconnect_path = try std.fmt.allocPrint(allocator, "{s}/padctl-reconnect", .{bin_dir});
-        defer allocator.free(reconnect_path);
-        {
-            var f = try std.fs.createFileAbsolute(reconnect_path, .{ .truncate = true });
-            defer f.close();
-            try f.writeAll(reconnect_script);
-        }
-        std.posix.fchmodat(std.fs.cwd().fd, reconnect_path, 0o755, 0) catch {
-            _ = std.posix.write(std.posix.STDERR_FILENO, "warning: could not chmod padctl-reconnect\n") catch {};
-        };
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, reconnect_path) catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+        var f = try std.fs.createFileAbsolute(reconnect_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll(reconnect_script);
     }
+    std.posix.fchmodat(std.fs.cwd().fd, reconnect_path, 0o755, 0) catch {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "warning: could not chmod padctl-reconnect\n") catch {};
+    };
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, reconnect_path) catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+}
 
-    // 3. Copy devices/*.toml
+fn installDeviceConfigs(allocator: std.mem.Allocator, plan: *const InstallPlan, self_dir: []const u8) !void {
     const src_devices = try findDevicesSourceDir(allocator, self_dir, null);
     defer if (src_devices) |path| allocator.free(path);
     if (src_devices) |path| {
-        copyDevicesTomls(allocator, path, share_dir) catch |err| {
+        copyDevicesTomls(allocator, path, plan.share_dir) catch |err| {
             _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: ") catch {};
             var errbuf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&errbuf, "{}\n", .{err}) catch "unknown error\n";
             _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
         };
-    } else if (dirExistsAbsolute(share_dir) and dirIsNonEmpty(share_dir)) {
+    } else if (dirExistsAbsolute(plan.share_dir) and dirIsNonEmpty(plan.share_dir)) {
         // Packaging (AUR/deb/rpm) already shipped device configs into the target
         // share dir; the "near binary / cwd" heuristic would otherwise emit a
         // scary warning even though devices are present.
@@ -1187,7 +1329,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         const msg = std.fmt.bufPrint(
             &infobuf,
             "info: device configs already present at {s}; source copy skipped\n",
-            .{share_dir},
+            .{plan.share_dir},
         ) catch "info: device configs already present; source copy skipped\n";
         _ = std.posix.write(std.posix.STDOUT_FILENO, msg) catch {};
     } else {
@@ -1196,177 +1338,168 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             &warnbuf,
             "warning: source `devices/` directory not found (near binary, in cwd, or at {s})\n" ++
                 "hint: run `padctl install` from the source checkout, or ensure your package ships device configs under {s}\n",
-            .{ share_dir, share_dir },
+            .{ plan.share_dir, plan.share_dir },
         ) catch "warning: source `devices/` directory not found\n";
         _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
     }
+}
 
-    // 4. Collect device entries once, generate both rule files
+fn collectAllDeviceEntries(allocator: std.mem.Allocator, plan: *const InstallPlan) !std.ArrayList(UdevEntry) {
     const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
     defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
     var all_dirs: std.ArrayList([]const u8) = .{};
     defer all_dirs.deinit(allocator);
-    try all_dirs.append(allocator, share_dir);
+    try all_dirs.append(allocator, plan.share_dir);
     if (config_dirs) |dirs| {
         for (dirs) |d| try all_dirs.append(allocator, d);
     }
-    var device_entries = try collectDeviceEntries(allocator, all_dirs.items);
-    defer freeDeviceEntries(allocator, &device_entries);
+    return try collectDeviceEntries(allocator, all_dirs.items);
+}
 
-    // 4a. Generate 60-padctl.rules (systemd trigger + input perms + hotplug reconnect)
-    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{udev_dir});
+fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, entries: []const UdevEntry) !void {
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{plan.udev_dir});
     defer allocator.free(rules_path);
-    try generateUdevRulesFromEntries(allocator, device_entries.items, rules_path, prefix);
+    try generateUdevRulesFromEntries(allocator, entries, rules_path, plan.prefix);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 
-    // 4b. Generate driver block rules (61-padctl-driver-block.rules)
-    {
-        const driver_rules_path = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{udev_dir});
-        defer allocator.free(driver_rules_path);
-        generateDriverBlockRulesFromEntries(allocator, device_entries.items, driver_rules_path) catch |err| {
+    const driver_rules_path = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{plan.udev_dir});
+    defer allocator.free(driver_rules_path);
+    generateDriverBlockRulesFromEntries(allocator, entries, driver_rules_path) catch |err| {
+        var errbuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: driver block rules not generated: {}\n", .{err}) catch "warning: driver block rules error\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+    };
+}
+
+fn cleanupLegacyUdevFiles(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
+    // Legacy 99-padctl.rules was renamed to 60- for correct priority.
+    const legacy = try std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d/99-padctl.rules", .{ plan.opts.destdir, plan.prefix });
+    defer allocator.free(legacy);
+    std.fs.deleteFileAbsolute(legacy) catch {};
+
+    // /etc/ path for immutable systems that had the old naming.
+    const legacy_etc = try std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d/99-padctl.rules", .{plan.opts.destdir});
+    defer allocator.free(legacy_etc);
+    std.fs.deleteFileAbsolute(legacy_etc) catch {};
+}
+
+/// Returns true if any mapping failed (reported via stderr). Populates
+/// `installed_mappings` with names that were successfully installed so the
+/// binding phase only writes config entries for files that actually exist on
+/// disk.
+fn installMappings(
+    allocator: std.mem.Allocator,
+    plan: *const InstallPlan,
+    self_dir: []const u8,
+    installed_mappings: *std.ArrayList([]const u8),
+) !bool {
+    if (plan.opts.mappings.len == 0) return false;
+    const mappings_src = findMappingsSourceDir(allocator, self_dir, null) catch null;
+    defer if (mappings_src) |path| allocator.free(path);
+    if (mappings_src == null) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "error: mappings directory not found near executable or current working directory\n") catch {};
+        return true;
+    }
+    var failed = false;
+    for (plan.opts.mappings) |mapping_name| {
+        installMapping(allocator, mapping_name, plan.opts.destdir, mappings_src.?, plan.opts.force_mapping) catch |err| {
+            _ = std.posix.write(std.posix.STDERR_FILENO, "error: mapping '") catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
             var errbuf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&errbuf, "warning: driver block rules not generated: {}\n", .{err}) catch "warning: driver block rules error\n";
+            const msg = std.fmt.bufPrint(&errbuf, "' not installed: {}\n", .{err}) catch "' not installed\n";
             _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+            failed = true;
+            continue;
         };
+        installed_mappings.append(allocator, mapping_name) catch {};
     }
+    return failed;
+}
 
-    // 4c. Remove legacy 99-padctl.rules if present (renamed to 60- for correct priority)
-    {
-        const legacy = try std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d/99-padctl.rules", .{ destdir, prefix });
-        defer allocator.free(legacy);
-        std.fs.deleteFileAbsolute(legacy) catch {};
+fn installBindings(
+    allocator: std.mem.Allocator,
+    plan: *const InstallPlan,
+    self_dir: []const u8,
+    installed_mappings: []const []const u8,
+) !bool {
+    const devices_src = findDevicesSourceDir(allocator, self_dir, null) catch null;
+    defer if (devices_src) |path| allocator.free(path);
+    if (devices_src == null) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "error: devices directory not found, cannot resolve device bindings\n") catch {};
+        return true;
     }
-    // Also clean /etc/ path for immutable systems that had the old naming
-    {
-        const legacy_etc = try std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d/99-padctl.rules", .{destdir});
-        defer allocator.free(legacy_etc);
-        std.fs.deleteFileAbsolute(legacy_etc) catch {};
-    }
-
-    // 4d. Write modules-load.d so uhid and uinput are available at boot
-    writeModulesLoad(allocator, destdir, prefix, effective_immutable);
-
-    // 4e. Install mapping configs (if --mapping specified, repeatable)
-    // Track per-mapping success so 4f only writes bindings for mappings
-    // that were actually installed (avoids a config.toml entry pointing
-    // at a missing mapping file).
-    var mapping_failed = false;
-    var installed_mappings = std.ArrayList([]const u8){};
-    defer installed_mappings.deinit(allocator);
-    if (opts.mappings.len > 0) {
-        const mappings_src = findMappingsSourceDir(allocator, self_dir, null) catch null;
-        defer if (mappings_src) |path| allocator.free(path);
-        if (mappings_src) |src| {
-            for (opts.mappings) |mapping_name| {
-                installMapping(allocator, mapping_name, destdir, src, opts.force_mapping) catch |err| {
-                    _ = std.posix.write(std.posix.STDERR_FILENO, "error: mapping '") catch {};
-                    _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
-                    var errbuf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&errbuf, "' not installed: {}\n", .{err}) catch "' not installed\n";
-                    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-                    mapping_failed = true;
-                    continue;
-                };
-                installed_mappings.append(allocator, mapping_name) catch {};
-            }
+    var failed = false;
+    for (installed_mappings) |mapping_name| {
+        const device_name = findDeviceNameForMapping(allocator, mapping_name, devices_src.?) catch null;
+        defer if (device_name) |n| allocator.free(n);
+        if (device_name) |name| {
+            const mode: ConflictMode = if (plan.opts.force_binding)
+                .force
+            else if (std.posix.isatty(std.posix.STDIN_FILENO))
+                .interactive
+            else
+                .skip;
+            writeBinding(allocator, plan.opts.destdir, name, mapping_name, mode, stdinPrompt) catch |err| {
+                var errbuf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&errbuf, "error: could not write binding for \"{s}\": {}\n", .{ mapping_name, err }) catch "error: binding write failed\n";
+                _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+                failed = true;
+            };
         } else {
-            _ = std.posix.write(std.posix.STDERR_FILENO, "error: mappings directory not found near executable or current working directory\n") catch {};
-            mapping_failed = true;
+            _ = std.posix.write(std.posix.STDERR_FILENO, "error: no device config found for mapping '") catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, "', binding not written\n") catch {};
+            failed = true;
         }
     }
+    return failed;
+}
 
-    // 4f. Write device→mapping bindings to /etc/padctl/config.toml so the
-    //      daemon auto-applies the mapping at boot without a manual
-    //      `padctl switch`. Only process mappings that were successfully
-    //      installed in 4e — writing a binding for a missing mapping file
-    //      would make reboot auto-apply point at nothing.
-    if (installed_mappings.items.len > 0) {
-        const devices_src = findDevicesSourceDir(allocator, self_dir, null) catch null;
-        defer if (devices_src) |path| allocator.free(path);
-        if (devices_src) |dev_dir| {
-            for (installed_mappings.items) |mapping_name| {
-                const device_name = findDeviceNameForMapping(allocator, mapping_name, dev_dir) catch null;
-                defer if (device_name) |n| allocator.free(n);
-                if (device_name) |name| {
-                    const mode: ConflictMode = if (opts.force_binding)
-                        .force
-                    else if (std.posix.isatty(std.posix.STDIN_FILENO))
-                        .interactive
-                    else
-                        .skip;
-                    writeBinding(allocator, destdir, name, mapping_name, mode, stdinPrompt) catch |err| {
-                        var errbuf: [256]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&errbuf, "error: could not write binding for \"{s}\": {}\n", .{ mapping_name, err }) catch "error: binding write failed\n";
-                        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-                        mapping_failed = true;
-                    };
-                } else {
-                    _ = std.posix.write(std.posix.STDERR_FILENO, "error: no device config found for mapping '") catch {};
-                    _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
-                    _ = std.posix.write(std.posix.STDERR_FILENO, "', binding not written\n") catch {};
-                    mapping_failed = true;
-                }
-            }
-        } else {
-            _ = std.posix.write(std.posix.STDERR_FILENO, "error: devices directory not found, cannot resolve device bindings\n") catch {};
-            mapping_failed = true;
+fn runSystemctlPhase(plan: *const InstallPlan) void {
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
+    runCmd(&.{ "udevadm", "control", "--reload-rules" });
+    runCmd(&.{ "udevadm", "trigger" });
+
+    if (plan.systemctl_plan.mode == .skip) {
+        var groups: [3][]const []const u8 = undefined;
+        var n: usize = 0;
+        groups[n] = &.{"daemon-reload"};
+        n += 1;
+        if (!plan.opts.no_enable) {
+            groups[n] = &.{ "enable", "padctl.service" };
+            n += 1;
         }
-    }
-
-    // 5. Reload system daemons and enable/start services (only when not staging)
-    const will_start_user_service = installWillStartUserService(is_root, opts.user_service, destdir, std.posix.getenv("SUDO_USER"));
-    if (destdir.len == 0) {
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
-        runCmd(&.{ "udevadm", "control", "--reload-rules" });
-        runCmd(&.{ "udevadm", "trigger" });
-        // Honour --no-user-service even when sudo_hop would otherwise fire:
-        // an explicit opt-out must not enable/start the user unit.
-        if (will_start_user_service) {
-            // Compute plan once so skip-mode prints the hint once instead of per-verb.
-            const install_plan = currentPlanFromEnv();
-            if (install_plan.mode == .skip) {
-                var groups: [3][]const []const u8 = undefined;
-                var n: usize = 0;
-                groups[n] = &.{"daemon-reload"};
-                n += 1;
-                if (!opts.no_enable) {
-                    groups[n] = &.{ "enable", "padctl.service" };
-                    n += 1;
-                }
-                if (!opts.no_start) {
-                    groups[n] = &.{ "start", "padctl.service" };
-                    n += 1;
-                }
-                printSkipSystemctlNoteFor(groups[0..n]);
-            } else {
-                runSystemctlUser(&.{"daemon-reload"});
-                if (!opts.no_enable) {
-                    runSystemctlUserWarn(&.{ "enable", "padctl.service" });
-                }
-                if (!opts.no_start) {
-                    runSystemctlUserWarn(&.{ "start", "padctl.service" });
-                }
-            }
+        if (!plan.opts.no_start) {
+            groups[n] = &.{ "start", "padctl.service" };
+            n += 1;
         }
+        printSkipSystemctlNoteFor(groups[0..n]);
+        return;
     }
-
-    if (mapping_failed) {
-        _ = std.posix.write(std.posix.STDERR_FILENO, "\nInstall completed with mapping errors.\n") catch {};
-        return error.MappingInstallFailed;
+    runSystemctlUser(&.{"daemon-reload"});
+    if (!plan.opts.no_enable) {
+        runSystemctlUserWarn(&.{ "enable", "padctl.service" });
     }
+    if (!plan.opts.no_start) {
+        runSystemctlUserWarn(&.{ "start", "padctl.service" });
+    }
+}
 
-    // Completion hint — mirror actual runtime state so the user does not have
-    // to guess whether the service was started. Branches:
+fn printCompletionHint(plan: *const InstallPlan) void {
+    // Mirror actual runtime state so the user does not have to guess whether
+    // the service was started. Branches:
     //   - Staged install (destdir set): no live service, just acknowledge.
     //   - Explicit --no-user-service: service file installed but NOT started.
     //   - sudo install (root + SUDO_USER, no opt-out): sudo_hop already started it.
     //   - Non-root user install: service not yet started, show manual command.
     //   - Root without SUDO_USER: nothing to start.
-    if (destdir.len != 0) {
+    if (plan.staging_mode) {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete (staged).\n") catch {};
-    } else if (opts.user_service != null and opts.user_service.? == false) {
+        return;
+    }
+    if (plan.opts.user_service != null and plan.opts.user_service.? == false) {
         _ = std.posix.write(std.posix.STDOUT_FILENO,
             \\
             \\Install complete. User service NOT started (--no-user-service given).
@@ -1375,14 +1508,16 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             \\  systemctl --user enable --now padctl.service
             \\
         ) catch {};
-    } else if (will_start_user_service and is_root and
-        (std.posix.getenv("SUDO_USER") orelse "").len != 0)
+        return;
+    }
+    if (plan.will_start_user_service and plan.is_root and
+        (plan.sudo_user orelse "").len != 0)
     {
-        const action_sudo = if (opts.no_start and opts.no_enable)
+        const action_sudo = if (plan.opts.no_start and plan.opts.no_enable)
             "installed via sudo -u $SUDO_USER (neither enabled nor started — --no-enable --no-start given)"
-        else if (opts.no_start)
+        else if (plan.opts.no_start)
             "enabled via sudo -u $SUDO_USER (not started — --no-start given); run `systemctl --user start padctl.service` as that user when ready"
-        else if (opts.no_enable)
+        else if (plan.opts.no_enable)
             "started via sudo -u $SUDO_USER (not enabled — --no-enable given); run `systemctl --user enable padctl.service` as that user to auto-start on login"
         else
             "enabled and started via sudo -u $SUDO_USER";
@@ -1398,12 +1533,14 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             \\  sudo loginctl enable-linger $USER
             \\
         ) catch {};
-    } else if (will_start_user_service) {
-        const action = if (opts.no_start and opts.no_enable)
+        return;
+    }
+    if (plan.will_start_user_service) {
+        const action = if (plan.opts.no_start and plan.opts.no_enable)
             "installed (neither enabled nor started — --no-enable --no-start given)"
-        else if (opts.no_start)
+        else if (plan.opts.no_start)
             "enabled (not started — --no-start given); run `systemctl --user start padctl.service` when ready"
-        else if (opts.no_enable)
+        else if (plan.opts.no_enable)
             "started (not enabled — --no-enable given); run `systemctl --user enable padctl.service` to auto-start on login"
         else
             "enabled and started";
@@ -1419,21 +1556,22 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             \\  sudo loginctl enable-linger $USER
             \\
         ) catch {};
-    } else {
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
+        return;
     }
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
+}
 
-    if (!userInGroup("input")) {
-        _ = std.posix.write(std.posix.STDOUT_FILENO,
-            \\
-            \\[padctl] Note: /dev/uhid and /dev/uinput now grant rw to 'input' group members.
-            \\[padctl] For 0-sudo UHID access from SSH/headless/test sessions, add yourself:
-            \\[padctl]   sudo usermod -aG input $USER
-            \\[padctl]   (then re-login for group membership to take effect)
-            \\[padctl] Graphical desktop users do not need this — uaccess ACL handles it automatically.
-            \\
-        ) catch {};
-    }
+fn printInputGroupHint() void {
+    if (userInGroup("input")) return;
+    _ = std.posix.write(std.posix.STDOUT_FILENO,
+        \\
+        \\[padctl] Note: /dev/uhid and /dev/uinput now grant rw to 'input' group members.
+        \\[padctl] For 0-sudo UHID access from SSH/headless/test sessions, add yourself:
+        \\[padctl]   sudo usermod -aG input $USER
+        \\[padctl]   (then re-login for group membership to take effect)
+        \\[padctl] Graphical desktop users do not need this — uaccess ACL handles it automatically.
+        \\
+    ) catch {};
 }
 
 pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
@@ -3978,6 +4116,106 @@ test "install: explicit --no-user-service returns false regardless of sudo_hop" 
     try testing.expect(!installWillStartUserService(true, false, "", "jim"));
     // Explicit false under staging is still false (destdir short-circuit wins).
     try testing.expect(!installWillStartUserService(true, false, "/tmp/staging", "jim"));
+}
+
+// InstallPlan decision-axis matrix — guards against PR #148-class regressions
+// where a single boolean decision drifts apart between compute time and use
+// time. Each case pins every derived axis to an expected value so the matrix
+// doubles as behavioural spec.
+test "install: InstallPlan case A — non-root default" {
+    const testing = std.testing;
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.effective_user_service);
+    try testing.expect(plan.will_start_user_service);
+    try testing.expect(plan.do_xdg_dirs);
+    try testing.expect(plan.do_enable_systemctl);
+    try testing.expect(!plan.staging_mode);
+    try testing.expectEqual(SystemctlUserMode.direct, plan.systemctl_plan.mode);
+}
+
+test "install: InstallPlan case B — sudo_hop (issue #139 v3 regression)" {
+    // The PR #148 failure path: `sudo padctl install` with no flag. Without
+    // the gate fix, do_xdg_dirs flipped false and systemd v254+ recreated the
+    // legacy migration symlink after every install.
+    const testing = std.testing;
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.is_root);
+    try testing.expect(!plan.effective_user_service); // root + no explicit flag → false
+    try testing.expect(plan.will_start_user_service); // but sudo_hop still starts it
+    try testing.expect(plan.do_xdg_dirs); // MUST be true — this is the regression gate
+    try testing.expect(plan.do_enable_systemctl);
+    try testing.expectEqual(SystemctlUserMode.sudo_hop, plan.systemctl_plan.mode);
+    try testing.expectEqualStrings("alice", plan.systemctl_plan.sudo_user);
+    try testing.expectEqualStrings("1000", plan.systemctl_plan.sudo_uid);
+}
+
+test "install: InstallPlan case C — staged build (destdir set)" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .destdir = "/tmp/staging" };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.staging_mode);
+    try testing.expect(!plan.will_start_user_service);
+    try testing.expect(!plan.do_xdg_dirs);
+    try testing.expect(!plan.do_enable_systemctl);
+}
+
+test "install: InstallPlan case D — root + explicit --no-user-service" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = false };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.effective_user_service);
+    try testing.expect(!plan.will_start_user_service); // explicit opt-out overrides sudo_hop
+    try testing.expect(!plan.do_xdg_dirs);
+    try testing.expect(!plan.do_enable_systemctl);
+}
+
+test "install: InstallPlan case E — root + explicit --user-service" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = true };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    // Save existing HOME, set it to a tmpdir so resolveServiceDir succeeds; restore after.
+    // resolveServiceDir needs HOME to be present when user_service=true.
+    const saved_home = std.posix.getenv("HOME");
+    _ = saved_home;
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.effective_user_service);
+    try testing.expect(plan.will_start_user_service);
+    try testing.expect(plan.do_xdg_dirs);
+    try testing.expect(plan.do_enable_systemctl);
+    // non-hop form because SUDO_USER is absent
+    try testing.expectEqual(SystemctlUserMode.skip, plan.systemctl_plan.mode);
+}
+
+test "install: InstallPlan prefix auto-switches to /usr/local on explicit --immutable" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .immutable = true };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.effective_immutable);
+    try testing.expectEqualStrings("/usr/local", plan.prefix);
+}
+
+test "install: InstallPlan service_dir routes by user_service + immutable" {
+    const testing = std.testing;
+    // Non-root → user dir under HOME. HOME must be set for the test env (it is,
+    // by zig's test runner).
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(std.mem.endsWith(u8, plan.service_dir, "/.config/systemd/user"));
 }
 
 test "install: ensureUserXdgDirs chown path opens dir with iterate flag (no BADF)" {
