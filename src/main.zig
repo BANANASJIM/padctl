@@ -227,6 +227,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     opts.no_enable = true;
                 } else if (std.mem.eql(u8, iarg, "--no-start")) {
                     opts.no_start = true;
+                } else if (std.mem.eql(u8, iarg, "--user-service")) {
+                    opts.user_service = true;
+                } else if (std.mem.eql(u8, iarg, "--no-user-service")) {
+                    opts.user_service = false;
                 } else {
                     std.log.err("unknown install argument: {s}", .{iarg});
                     return error.UnknownArgument;
@@ -449,6 +453,8 @@ fn printHelp() void {
         \\    --mapping <name>    Install a mapping config to /etc/padctl/mappings/ (repeatable)
         \\    --force-mapping     Overwrite existing mapping files
         \\    --force-binding     Overwrite device bindings in /etc/padctl/config.toml
+        \\    --user-service      Force user-scope install (~/.config/systemd/user/)
+        \\    --no-user-service   Skip user-service enable/start (even under sudo)
         \\    --no-enable         Skip systemctl enable
         \\    --no-start          Skip systemctl start
         \\  uninstall             Remove installed files, stop and disable service
