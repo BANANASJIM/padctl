@@ -328,6 +328,31 @@ fn resolveTargetHome(allocator: std.mem.Allocator) ![]const u8 {
 /// systemd only creates the final component ($XDG_STATE_HOME/padctl), not its
 /// parents.  When a user has wiped ~/.local/state the service fails at startup.
 /// Chowns newly created dirs to SUDO_UID:SUDO_GID when running as root.
+// Removes `path` if it is a dangling symlink (target missing). No-op if path
+// is not a symlink or if the target is reachable. Best-effort: errors are
+// printed to stderr and swallowed — callers must not depend on this succeeding.
+fn removeBrokenSymlink(path: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // readLinkAbsolute returns error.NotLink for real files/dirs, error.FileNotFound
+    // for missing paths — both mean nothing to clean up.
+    _ = std.fs.readLinkAbsolute(path, &buf) catch return;
+    // Symlink exists. accessAbsolute follows the link; FileNotFound means dangling.
+    std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.fs.deleteFileAbsolute(path) catch |del_err| {
+                var errbuf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(
+                    &errbuf,
+                    "warning: could not remove broken symlink {s}: {}\n",
+                    .{ path, del_err },
+                ) catch "warning: broken symlink cleanup failed\n";
+                writeAll(std.posix.STDERR_FILENO, msg);
+            };
+        },
+        else => {}, // target reachable (or permission denied) — leave it alone
+    };
+}
+
 fn ensureUserXdgDirs(allocator: std.mem.Allocator, home: []const u8) !void {
     const dirs = [_][]const u8{
         ".config",
@@ -337,6 +362,17 @@ fn ensureUserXdgDirs(allocator: std.mem.Allocator, home: []const u8) !void {
         ".local/state",
         ".local/share",
     };
+
+    // Defensive cleanup: broken symlinks in StateDirectory/WorkingDirectory paths
+    // prevent systemd from creating the directory. User environments (XDG_STATE_HOME
+    // overrides, manual setup) occasionally leave these behind — padctl never creates them.
+    const state_padctl = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home});
+    defer allocator.free(state_padctl);
+    removeBrokenSymlink(state_padctl);
+
+    const config_padctl = try std.fmt.allocPrint(allocator, "{s}/.config/padctl", .{home});
+    defer allocator.free(config_padctl);
+    removeBrokenSymlink(config_padctl);
 
     const sudo_uid_str = std.posix.getenv("SUDO_UID");
     const sudo_gid_str = std.posix.getenv("SUDO_GID");
@@ -3736,6 +3772,55 @@ test "install: ensureUserXdgDirs idempotent (second call no error)" {
 
     try ensureUserXdgDirs(allocator, home);
     try ensureUserXdgDirs(allocator, home);
+}
+
+test "install: ensureUserXdgDirs removes broken .local/state/padctl symlink" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home_path);
+
+    try tmp.dir.makePath(".local/state");
+    try tmp.dir.symLink("/nonexistent-target-for-test", ".local/state/padctl", .{});
+
+    const state_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home_path});
+    defer allocator.free(state_path);
+
+    // Pre-condition: symlink exists but target is missing.
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(state_path, .{}));
+
+    try ensureUserXdgDirs(allocator, home_path);
+
+    // Post-condition: broken symlink is gone.
+    try testing.expectError(error.FileNotFound, std.fs.cwd().statFile(state_path));
+}
+
+test "install: ensureUserXdgDirs preserves valid .local/state/padctl symlink" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home_path);
+
+    try tmp.dir.makePath(".config/padctl-real");
+    try tmp.dir.makePath(".local/state");
+    const real_target = try std.fmt.allocPrint(allocator, "{s}/.config/padctl-real", .{home_path});
+    defer allocator.free(real_target);
+    try tmp.dir.symLink(real_target, ".local/state/padctl", .{});
+
+    try ensureUserXdgDirs(allocator, home_path);
+
+    // Valid symlink must not be removed.
+    const state_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home_path});
+    defer allocator.free(state_path);
+    try std.fs.accessAbsolute(state_path, .{});
 }
 
 test "install: resolveTargetHomeFromFile reads home from passwd" {
