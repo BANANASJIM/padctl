@@ -12,47 +12,38 @@ trigger_threshold = 100
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | — | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
-| `trigger_threshold` | integer (0–255) | null | 模拟 trigger 数字化阈值。见下方说明。 |
+| `trigger_threshold` | integer (0–255) | null | Threshold for synthesizing digital `LT` / `RT` button events from the analog trigger axes. See below. |
 
-### `trigger_threshold` — 把模拟 trigger 当按钮用
+<a id="trigger_threshold"></a>
+### trigger_threshold — analog triggers as digital buttons
 
-padctl 默认把 LT / RT 建模为模拟轴（ABS_Z / ABS_RZ）。若要在 `[remap]` 里把它们绑到键位，或在 `[[macro]]` 步骤里把 `LT` / `RT` 当 target，需要先声明一个阈值：
-
-```toml
-trigger_threshold = 100   # 0–255，LT 和 RT 共用同一值
-```
-
-超过阈值 → 合成为 `LT` / `RT` 按钮 press；低于或等于阈值 → release。声明后 `LT` / `RT` 与普通面按钮语义一致，可直接用在 `[remap]` 和 `[[macro]]` 里：
+padctl models `LT` and `RT` as analog axes (ABS_Z / ABS_RZ) by default. To bind them to keys or mouse buttons in `[remap]`, declare a threshold:
 
 ```toml
-trigger_threshold = 100
+trigger_threshold = 100   # 0–255, shared by both LT and RT
 
 [remap]
 LT = "KEY_LEFTSHIFT"
 RT = "mouse_right"
-
-[[macro]]
-name  = "scope_shot"
-steps = [
-    { down = "RT" },
-    { delay = 80 },
-    { up   = "RT" },
-]
 ```
 
-**选值指南：**
+Axis value above threshold → synthesizes `LT` / `RT` button press. Value at or below threshold → release. Once declared, `LT` and `RT` behave like any other face button for `[remap]` sources and `[[layer]]` `trigger` fields.
 
-| 值 | 使用场景 |
-|----|---------|
-| 50–80 | 轻按即触发 |
-| 100–120 | 常见"点击感"，推荐起点 |
-| 160+ | 深按才触发 |
+**Threshold tuning:**
 
-用 `padctl dump enable` 观察 LT / RT 的实际轴读数，可以精确确定合适的阈值。见 [Diagnostic Logging](diagnostic-logging.md)。
+| Value | Feel |
+|-------|------|
+| 50–80 | Light touch triggers |
+| 100–120 | Click-like feel (recommended starting point) |
+| 160+ | Deliberate press only |
 
-**抖动问题：** 若边界处出现 press / release 抖动，把阈值调高 10–20 即可消除。
+Use `padctl dump enable` to observe raw LT / RT axis readings and dial in the threshold. See [Diagnostic Logging](diagnostic-logging.md).
 
-未声明 `trigger_threshold` 时，`LT` / `RT` 只作为模拟轴输出，不参与 `[remap]` 和 `[[macro]]` 的按钮匹配。
+**Jitter:** If the axis hovers around the threshold and produces rapid press/release bursts, raise the threshold by 10–20.
+
+Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not participate in `[remap]` or layer trigger matching.
+
+> **Known limitation:** `[[macro]]` steps do **not** currently support `LT` / `RT` as `down` / `up` targets. The macro player's `.gamepad_button` dispatch arm is not yet implemented (see ADR-016 §3 Path A and issue #99). A macro step such as `{ down = "LT" }` is silently skipped. The supported paths are `[remap]` and the `[[layer]] trigger` field.
 
 ## `[remap]`
 
