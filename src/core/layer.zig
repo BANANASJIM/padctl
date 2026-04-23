@@ -344,7 +344,7 @@ test "layer: tap-hold: ACTIVE + release within timeout (race) → tap emitted (#
     const release_time: i128 = press_time + 150_000_000;
     const res2 = ls.onTriggerRelease(RemapTarget{ .key = 183 }, release_time);
     try testing.expect(res2.layer_deactivated);
-    try testing.expect(res2.tap_event != null);
+    try testing.expectEqual(@as(?RemapTarget, RemapTarget{ .key = 183 }), res2.tap_event);
     try testing.expect(ls.tap_hold == null);
 }
 
@@ -361,7 +361,7 @@ test "layer: tap-hold: ACTIVE + release at hold_timeout - 5ms → tap emitted (#
     const release_time: i128 = press_time + 195_000_000;
     const res = ls.onTriggerRelease(RemapTarget{ .key = 183 }, release_time);
     try testing.expect(res.layer_deactivated);
-    try testing.expect(res.tap_event != null);
+    try testing.expectEqual(@as(?RemapTarget, RemapTarget{ .key = 183 }), res.tap_event);
     try testing.expect(ls.tap_hold == null);
 }
 
