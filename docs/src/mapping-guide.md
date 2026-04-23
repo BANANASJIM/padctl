@@ -278,6 +278,22 @@ steps = [
 
 Bind in remap: `M1 = "macro:dodge_roll"`
 
+### Trigger Threshold — analog LT / RT as digital buttons {#trigger-threshold}
+
+LT / RT are analog axes by default and cannot be used directly as `[remap]` source keys. Once `trigger_threshold` is declared, padctl synthesizes digital button events from the axis values each frame, making them available for `[remap]` and layer triggers:
+
+```toml
+trigger_threshold = 100   # 0–255, shared by LT and RT
+
+[remap]
+LT = "KEY_LEFTSHIFT"      # axis > 100 → synthesize LT press → emit Shift
+RT = "mouse_right"        # axis > 100 → synthesize RT press → emit right click
+```
+
+See [Mapping Config Reference — trigger_threshold](mapping-config.md#trigger_threshold) for the full field description.
+
+> **Known limitation:** `[[macro]]` steps do **not** currently support `LT` / `RT` as `down` / `up` targets. The `.gamepad_button` dispatch arm is not yet wired in the macro engine (issue #99 + ADR-016 §3 Path A). A macro step such as `{ down = "LT" }` is silently skipped. The supported paths today are `[remap]` and the `[[layer]] trigger` field.
+
 ### Adaptive Trigger (`[adaptive_trigger]`) — DualSense only
 
 Configures the resistance profile of the DualSense L2/R2 triggers. See [Mapping Config Reference](mapping-config.md#adaptive_trigger) for full field tables.

@@ -6,11 +6,44 @@ An optional `--mapping` TOML file overrides the default button/axis pass-through
 
 ```toml
 name = "fps"
+trigger_threshold = 100
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | — | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
+| `trigger_threshold` | integer (0–255) | null | Threshold for synthesizing digital `LT` / `RT` button events from the analog trigger axes. See below. |
+
+<a id="trigger_threshold"></a>
+### trigger_threshold — analog triggers as digital buttons
+
+padctl models `LT` and `RT` as analog axes (ABS_Z / ABS_RZ) by default. To bind them to keys or mouse buttons in `[remap]`, declare a threshold:
+
+```toml
+trigger_threshold = 100   # 0–255, shared by both LT and RT
+
+[remap]
+LT = "KEY_LEFTSHIFT"
+RT = "mouse_right"
+```
+
+Axis value above threshold → synthesizes `LT` / `RT` button press. Value at or below threshold → release. Once declared, `LT` and `RT` behave like any other face button for `[remap]` sources and `[[layer]]` `trigger` fields.
+
+**Threshold tuning:**
+
+| Value | Feel |
+|-------|------|
+| 50–80 | Light touch triggers |
+| 100–120 | Click-like feel (recommended starting point) |
+| 160+ | Deliberate press only |
+
+Use `padctl dump enable` to observe raw LT / RT axis readings and dial in the threshold. See [Diagnostic Logging](diagnostic-logging.md).
+
+**Jitter:** If the axis hovers around the threshold and produces rapid press/release bursts, raise the threshold by 10–20.
+
+Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not participate in `[remap]` or layer trigger matching.
+
+> **Known limitation:** `[[macro]]` steps do **not** currently support `LT` / `RT` as `down` / `up` targets. The macro player's `.gamepad_button` dispatch arm is not yet implemented (see ADR-016 §3 Path A and issue #99). A macro step such as `{ down = "LT" }` is silently skipped. The supported paths are `[remap]` and the `[[layer]] trigger` field.
 
 ## `[remap]`
 
