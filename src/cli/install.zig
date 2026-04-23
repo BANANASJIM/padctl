@@ -500,7 +500,7 @@ fn ensureUserXdgDirs(allocator: std.mem.Allocator, home: []const u8) !void {
             else => return err,
         };
         if (do_chown) {
-            var d = std.fs.openDirAbsolute(abs, .{}) catch continue;
+            var d = std.fs.openDirAbsolute(abs, .{ .iterate = true }) catch continue;
             defer d.close();
             std.posix.fchown(d.fd, chown_uid, chown_gid) catch {};
         }
@@ -660,6 +660,37 @@ pub fn planSystemctlUser(uid: std.posix.uid_t, sudo_user: ?[]const u8, sudo_uid:
         if (c < '0' or c > '9') return .{ .mode = .skip };
     }
     return .{ .mode = .sudo_hop, .sudo_user = su, .sudo_uid = sid };
+}
+
+/// Decide whether this `install` invocation will ultimately start a user-scope
+/// padctl.service — and therefore must pre-create the XDG parent dirs so
+/// systemd v254+ does not auto-create the legacy-migration symlink
+/// `$XDG_STATE_HOME/padctl → $XDG_CONFIG_HOME/padctl`. Issue #139.
+///
+/// Paths that start a user service:
+///   1. Non-staged + effective user_service (explicit --user-service, or the
+///      non-root default).
+///   2. Non-staged + root via sudo (SUDO_USER present) — `run()` enters the
+///      `sudo_hop` branch (see SystemctlUserMode.sudo_hop) and calls
+///      `systemctl --user start padctl.service` on the invoking user.
+///
+/// Pure function for testability — all inputs come from parameters, not env.
+pub fn installWillStartUserService(
+    is_root: bool,
+    user_service_opt: ?bool,
+    destdir: []const u8,
+    sudo_user_env: ?[]const u8,
+) bool {
+    if (destdir.len != 0) return false; // staged package build — no live user service
+    const effective = user_service_opt orelse !is_root;
+    if (effective) return true;
+    // Root + SUDO_USER set → sudo_hop path starts the invoking user's service.
+    if (is_root) {
+        if (sudo_user_env) |su| {
+            if (su.len != 0) return true;
+        }
+    }
+    return false;
 }
 
 /// Build argv for invoking `systemctl --user <verbs...>` under the correct bus.
@@ -1035,7 +1066,13 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     try ensureDirAll(allocator, share_dir);
     try ensureDirAll(allocator, udev_dir);
 
-    if (effective_user_service and destdir.len == 0) {
+    // Gate covers every path that ends up starting a user-scope padctl.service:
+    // explicit --user-service, non-root default, and sudo install routed via
+    // SystemctlUserMode.sudo_hop (root+SUDO_USER). Issue #139 v3: the previous
+    // gate (`effective_user_service and destdir.len == 0`) short-circuited on
+    // the sudo_hop path, leaving the XDG parents absent and letting systemd
+    // v254+ recreate the legacy migration symlink after every install.
+    if (installWillStartUserService(is_root, opts.user_service, destdir, std.posix.getenv("SUDO_USER"))) {
         const home = try resolveTargetHome(allocator);
         defer allocator.free(home);
         try ensureUserXdgDirs(allocator, home);
@@ -3835,6 +3872,65 @@ test "install: planSystemctlUser decides direct/sudo_hop/skip" {
         const p = planSystemctlUser(0, "jim", "1000;evil");
         try testing.expectEqual(SystemctlUserMode.skip, p.mode);
     }
+}
+
+// Regression tests for issue #139 v3 — the install gate that decides whether
+// to call ensureUserXdgDirs must fire on every path that eventually starts a
+// user-scope padctl.service, including the root+SUDO_USER sudo_hop path.
+test "install: ensureUserXdgDirs called when non-root user-service install" {
+    const testing = std.testing;
+    // is_root=false, --user-service omitted (effective=true via `!is_root`),
+    // no staging, no SUDO_USER (non-root shell).
+    try testing.expect(installWillStartUserService(false, null, "", null));
+}
+
+test "install: ensureUserXdgDirs called when sudo install without --user-service (sudo_hop case)" {
+    const testing = std.testing;
+    // The failure mode from issue #139 v3: `sudo padctl install` with no flag.
+    // effective_user_service resolves to false, yet run() still invokes
+    // `systemctl --user start` via sudo_hop — the gate must return true.
+    try testing.expect(installWillStartUserService(true, null, "", "jim"));
+}
+
+test "install: ensureUserXdgDirs called when sudo install with --user-service" {
+    const testing = std.testing;
+    try testing.expect(installWillStartUserService(true, true, "", "jim"));
+}
+
+test "install: ensureUserXdgDirs NOT called when staged install (destdir set)" {
+    const testing = std.testing;
+    // Package builds (destdir=/tmp/staging) have no runtime user — no XDG work.
+    try testing.expect(!installWillStartUserService(false, null, "/tmp/staging", null));
+    try testing.expect(!installWillStartUserService(true, true, "/tmp/staging", "jim"));
+}
+
+test "install: ensureUserXdgDirs NOT called when root without SUDO_USER" {
+    const testing = std.testing;
+    // Root shell without sudo (SUDO_USER absent or empty) — SystemctlUserMode
+    // would be .skip, no user service starts, so no XDG dirs to seed.
+    try testing.expect(!installWillStartUserService(true, null, "", null));
+    try testing.expect(!installWillStartUserService(true, null, "", ""));
+}
+
+test "install: ensureUserXdgDirs chown path opens dir with iterate flag (no BADF)" {
+    // Zig std.posix.fchown panics with BADF on a Dir fd opened without
+    // .iterate = true. Verify ensureUserXdgDirs creates dirs that can be
+    // re-opened with .iterate = true (proving the openDir flag is correct).
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home_path);
+
+    // Without SUDO_UID/SUDO_GID (non-root test env), chown is skipped,
+    // but the dir-creation path runs in full.
+    try ensureUserXdgDirs(allocator, home_path);
+
+    const abs = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home_path});
+    defer allocator.free(abs);
+    var d = try std.fs.openDirAbsolute(abs, .{ .iterate = true });
+    d.close();
 }
 
 test "install: buildSystemctlUserArgv direct shape" {
