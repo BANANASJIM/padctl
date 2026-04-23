@@ -2,7 +2,7 @@
 
 Three test layers per ADR-015 (`decisions/015-uhid-imu-migration.md@92caade`)
 and the engineering plan's test matrix
-(`engineering/phase-13-wave-plan.md@35c9c36` §Wave 3 测试层矩阵):
+(`engineering/phase-13-wave-plan.md@35c9c36` §Wave 3 test-layer matrix):
 
 - **Layer 0** — pure functions, zero fd, zero privilege (`zig build test`).
 - **Layer 1** — in-process `UhidSimulator` intercepts `/dev/uhid` writes;
@@ -53,8 +53,9 @@ is soft-gated per the Wave 1 / Wave 4 pattern (PR #127, PR #140, PR #154 B2).
   byte-identical output (`std.mem.eql`).
 - [ ] **TP12**: Output length (incl NUL) is ≤ `MAX_UNIQ_LEN` (64) for every
   test input; stress with a 60-byte device name.
-- [ ] **TP13**: Non-ASCII normalization — `"Pad 中文"` produces device-id
-  containing only ASCII alphanum and `-`.
+- [ ] **TP13**: Non-ASCII normalization — a device name containing non-ASCII
+  bytes (e.g. `"Pad \xe4\xb8\xad"`) produces a device-id containing only ASCII
+  alphanum and `-`.
 - [ ] **TP14**: FNV-16 known-answer vector — `fnv16("abc")` returns the pinned
   reference value (protects against silent hash changes).
 - [ ] **TP15**: Counter fallback advances — `buildUniq(alloc, n, null, 1)` and

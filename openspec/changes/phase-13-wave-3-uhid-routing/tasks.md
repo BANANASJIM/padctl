@@ -234,8 +234,8 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
   byte-identical `[:0]u8`.
 - [ ] `test "buildUniq: output ≤ 64 bytes including NUL"` — stress with a
   60-byte device name to confirm truncation.
-- [ ] `test "buildUniq: non-ASCII → '-'"` — input `"Pad 中文"` → normalized
-  id contains only ASCII alphanum + `-`.
+- [ ] `test "buildUniq: non-ASCII → '-'"` — input with non-ASCII bytes (e.g.
+  `"Pad \xe4\xb8\xad"`) → normalized id contains only ASCII alphanum + `-`.
 - [ ] `test "fnv16: known-answer vector"` — pin at least one known FNV-1a
   16-bit output (e.g. `"abc"` → known value) to prevent silent hash changes.
 

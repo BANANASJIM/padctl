@@ -285,7 +285,7 @@ Layer 0 tests in the same file:
 | `buildUniq: phys_key null, counter=1` | `"DualSense"`, `null`, `1` | `"padctl/dualsense-ctr0001"` |
 | `buildUniq: idempotent for same phys_key` | two calls same inputs | byte-identical output |
 | `buildUniq: length bound` | any inputs | result (incl NUL) ≤ 64 bytes |
-| `buildUniq: ASCII clamp` | `"Pad with 中文"` | `"padctl/pad-with-..."` (non-ASCII → `-`) |
+| `buildUniq: ASCII clamp` | device name with non-ASCII bytes | normalized id contains only `[a-z0-9-]` (non-ASCII → `-`) |
 
 #### 4b. Supervisor/DeviceInstance routing switch
 
