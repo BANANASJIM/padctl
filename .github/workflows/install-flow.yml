@@ -1,0 +1,126 @@
+name: install-flow
+
+on: [push, pull_request]
+
+concurrency:
+  group: install-flow-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-sandbox:
+    name: install / rootless-docker sandbox
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build padctl (no libusb — install flow only needs the static binary)
+        run: zig build -Dlibusb=false
+
+      - name: Run install-flow sandbox
+        run: |
+          set -euo pipefail
+
+          # Stage assets into a directory the container can read
+          STAGE="$PWD/_ci_stage"
+          mkdir -p "$STAGE/bin"
+          cp zig-out/bin/padctl "$STAGE/bin/padctl"
+          cp -r devices "$STAGE/devices"
+          cp -r mappings "$STAGE/mappings" 2>/dev/null || true
+
+          docker run --rm \
+            --privileged \
+            -v "$STAGE:/opt/padctl:ro" \
+            -v "$PWD:/src:ro" \
+            debian:12 \
+            /bin/bash -euo pipefail -c '
+              # ---- bootstrap ----
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                sudo adduser coreutils procps 2>/dev/null
+
+              # Create test user with passwordless sudo
+              useradd -m -s /bin/bash testuser
+              echo "testuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/testuser
+
+              cp /opt/padctl/bin/padctl /usr/local/bin/padctl
+              chmod +x /usr/local/bin/padctl
+
+              # ---- install ----
+              # Run as testuser so SUDO_USER is set when they call sudo padctl install.
+              # udevadm/systemctl calls inside padctl will fail silently (no daemon) —
+              # that is expected; file installation and ensureUserXdgDirs still execute.
+              su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
+                HOME=/home/testuser \
+                /usr/local/bin/padctl install --prefix /usr/local 2>&1"
+
+              # ---- invariant checks ----
+              FAIL=0
+
+              check() {
+                local desc="$1"; shift
+                if eval "$@"; then
+                  echo "  PASS: $desc"
+                else
+                  echo "  FAIL: $desc"
+                  FAIL=1
+                fi
+              }
+
+              echo "=== install invariants ==="
+
+              check "/etc/systemd/user/padctl.service exists" \
+                "[ -f /etc/systemd/user/padctl.service ]"
+
+              check "/etc/systemd/user/padctl.service is a regular file (not symlink)" \
+                "[ ! -L /etc/systemd/user/padctl.service ]"
+
+              check "/home/testuser/.local/state/padctl exists" \
+                "[ -e /home/testuser/.local/state/padctl ]"
+
+              check "/home/testuser/.local/state/padctl is NOT a symlink (issue #139)" \
+                "[ ! -L /home/testuser/.local/state/padctl ]"
+
+              check "/home/testuser/.local/state/padctl is a directory (issue #139 v2)" \
+                "[ -d /home/testuser/.local/state/padctl ]"
+
+              check "/home/testuser/.local/state/padctl owned by testuser" \
+                "[ \"\$(stat -c %U /home/testuser/.local/state/padctl)\" = testuser ]"
+
+              check "/usr/local/bin/padctl installed" \
+                "[ -f /usr/local/bin/padctl ]"
+
+              if [ $FAIL -ne 0 ]; then
+                echo "=== INSTALL INVARIANTS FAILED ==="
+                echo "--- /home/testuser tree ---"
+                find /home/testuser -maxdepth 4 2>/dev/null || true
+                echo "--- /etc/systemd/user ---"
+                ls -la /etc/systemd/user/ 2>/dev/null || true
+                exit 1
+              fi
+
+              # ---- uninstall ----
+              su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
+                HOME=/home/testuser \
+                /usr/local/bin/padctl uninstall --prefix /usr/local 2>&1"
+
+              echo "=== uninstall invariants ==="
+              FAIL=0
+
+              check "/usr/local/bin/padctl removed after uninstall" \
+                "[ ! -f /usr/local/bin/padctl ]"
+
+              check "/etc/systemd/user/padctl.service removed after uninstall" \
+                "[ ! -f /etc/systemd/user/padctl.service ]"
+
+              if [ $FAIL -ne 0 ]; then
+                echo "=== UNINSTALL INVARIANTS FAILED ==="
+                exit 1
+              fi
+
+              echo "=== all invariants passed ==="
+            '

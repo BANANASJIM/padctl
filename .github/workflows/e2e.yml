@@ -20,5 +20,22 @@ jobs:
         run: |
           sudo modprobe uhid uinput 2>/dev/null || true
           sudo chmod 666 /dev/uhid /dev/uinput 2>/dev/null || true
+      - name: Probe /dev/uhid accessibility
+        id: uhid_probe
+        run: |
+          if [ -r /dev/uhid ] && [ -w /dev/uhid ]; then
+            echo "uhid_ok=true" >> "$GITHUB_OUTPUT"
+            echo "UHID gate ENABLED — /dev/uhid is accessible, enforcing PADCTL_TEST_REQUIRE_UHID=1"
+          else
+            echo "uhid_ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::UHID gate DISABLED — /dev/uhid not accessible on this runner. Layer 2/3 tests will skip."
+          fi
       - name: Run e2e tests
+        env:
+          PADCTL_TEST_REQUIRE_UHID: ${{ steps.uhid_probe.outputs.uhid_ok == 'true' && '1' || '0' }}
         run: zig build test-e2e
+      - name: Run integration tests (UHID)
+        if: steps.uhid_probe.outputs.uhid_ok == 'true'
+        env:
+          PADCTL_TEST_REQUIRE_UHID: "1"
+        run: zig build test-integration
