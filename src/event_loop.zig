@@ -471,17 +471,8 @@ pub const EventLoop = struct {
                 break;
             }
 
-            // Check timerfd (slot 2)
-            if (self.pollfds[2].revents & posix.POLL.IN != 0) {
-                var expiry: [8]u8 = undefined;
-                _ = posix.read(self.timer_fd, &expiry) catch {};
-                if (ctx.mapper) |m| {
-                    const macro_aux = m.onTimerExpired();
-                    if (macro_aux.len > 0) {
-                        if (ctx.aux_output) |ao| ao.emitAux(macro_aux.slice()) catch {};
-                    }
-                }
-            }
+            // Mapper timerfd (slot 2) is drained after the device fd loop
+            // below — see issue #79.
 
             // Check rumble auto-stop timerfd (slot 3).
             if (self.pollfds[3].revents & posix.POLL.IN != 0) {
@@ -666,7 +657,7 @@ pub const EventLoop = struct {
                             self.gamepad_state.applyDelta(delta);
 
                             if (ctx.mapper) |m| {
-                                const events = m.apply(delta, dt_ms) catch |err| {
+                                const events = m.apply(delta, dt_ms, now) catch |err| {
                                     std.log.err("mapper.apply failed: {}", .{err});
                                     continue;
                                 };
@@ -691,6 +682,21 @@ pub const EventLoop = struct {
                                 if (ctx.touchpad_output) |tp| tp.emitTouch(self.gamepad_state) catch {};
                             }
                         }
+                    }
+                }
+            }
+
+            // Mapper timerfd (slot 2): drained after device fds so an
+            // on-wakeup tap release reaches apply() before PENDING is
+            // promoted to ACTIVE (issue #79). Both handlers share the
+            // `now` snapshot taken right after ppoll.
+            if (self.pollfds[2].revents & posix.POLL.IN != 0) {
+                var expiry: [8]u8 = undefined;
+                _ = posix.read(self.timer_fd, &expiry) catch {};
+                if (ctx.mapper) |m| {
+                    const macro_aux = m.onTimerExpired(now);
+                    if (macro_aux.len > 0) {
+                        if (ctx.aux_output) |ao| ao.emitAux(macro_aux.slice()) catch {};
                     }
                 }
             }

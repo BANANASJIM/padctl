@@ -348,6 +348,36 @@ test "layer: tap-hold: ACTIVE + release within timeout (race) → tap emitted (#
     try testing.expect(ls.tap_hold == null);
 }
 
+test "layer: tap-hold: ACTIVE + release at hold_timeout - 5ms → tap emitted (#79 boundary)" {
+    // Release physically happens at press+195ms (just below 200ms
+    // hold_timeout). The fix ensures the caller's ppoll-wakeup snapshot
+    // reaches onTriggerRelease unmodified — see issue #79.
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const press_time: i128 = 1_000_000_000;
+    _ = ls.onTriggerPress("aim", 200, press_time);
+    _ = ls.onTimerExpired();
+
+    const release_time: i128 = press_time + 195_000_000;
+    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 }, release_time);
+    try testing.expect(res.layer_deactivated);
+    try testing.expect(res.tap_event != null);
+    try testing.expect(ls.tap_hold == null);
+}
+
+test "layer: tap-hold: ACTIVE + release at hold_timeout → no tap (upper boundary)" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const press_time: i128 = 1_000_000_000;
+    _ = ls.onTriggerPress("aim", 200, press_time);
+    _ = ls.onTimerExpired();
+
+    const release_time: i128 = press_time + 200_000_000;
+    const res = ls.onTriggerRelease(RemapTarget{ .key = 183 }, release_time);
+    try testing.expect(res.layer_deactivated);
+    try testing.expect(res.tap_event == null);
+}
+
 test "layer: tap-hold: IDLE + release → no-op" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();

@@ -349,7 +349,7 @@ test "e2e pipeline: vader5 — axes + button A → remap A→KEY_F13" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(delta, 16);
+    const ev = try m.apply(delta, 16, 0);
     // A suppressed in gamepad output
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     // KEY_F13 emitted as aux
@@ -389,7 +389,7 @@ test "e2e pipeline: dualsense USB — scaled axes + buttons → remap B→mouse_
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(delta, 16);
+    const ev = try m.apply(delta, 16, 0);
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.B));
     var found_mouse_left = false;
     for (ev.aux.slice()) |e| {
@@ -428,7 +428,7 @@ test "e2e pipeline: switch-pro — button press → remap A→B, Y→KEY_F1" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(delta, 16);
+    const ev = try m.apply(delta, 16, 0);
     // A suppressed, B injected
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expect((ev.gamepad.buttons & btnMask(.B)) != 0);
@@ -475,7 +475,7 @@ test "e2e pipeline: random packets through full pipeline — no crash" {
         raw[2] = 0xef;
 
         const delta = (interp.processReport(1, &raw) catch continue) orelse continue;
-        const ev = try m.apply(delta, 16);
+        const ev = try m.apply(delta, 16, 0);
         // Invariant: aux key/mouse codes must be non-zero.
         for (ev.aux.slice()) |aux| {
             switch (aux) {

@@ -12,11 +12,6 @@ const c = @cImport(@cInclude("linux/input-event-codes.h"));
 
 const posix = std.posix;
 
-fn monotonicNs() i128 {
-    const ts = posix.clock_gettime(.MONOTONIC) catch return 0;
-    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
-}
-
 const REL_X: u16 = c.REL_X;
 const REL_Y: u16 = c.REL_Y;
 const REL_WHEEL: u16 = c.REL_WHEEL;
@@ -90,7 +85,10 @@ pub const Mapper = struct {
         self.timer_queue.deinit();
     }
 
-    pub fn apply(self: *Mapper, delta: GamepadStateDelta, dt_ms: u32) !OutputEvents {
+    // `now_ns` is the ppoll-wakeup CLOCK_MONOTONIC snapshot from the caller;
+    // must match the value passed to onTimerExpired() in the same wakeup so
+    // tap/hold boundary decisions see a single timeline (issue #79).
+    pub fn apply(self: *Mapper, delta: GamepadStateDelta, dt_ms: u32, now_ns: i128) !OutputEvents {
         // flush pending tap release from previous frame
         var aux = AuxEventList{};
         if (self.pending_tap_release) |mask| {
@@ -120,7 +118,6 @@ pub const Mapper = struct {
 
         // [2] layer trigger processing
         const configs = self.config.layer orelse &.{};
-        const now_ns = monotonicNs();
         const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons, now_ns);
         var timer_request: ?TimerRequest = null;
         if (action.arm_timer_ms) |ms| {
@@ -346,7 +343,8 @@ pub const Mapper = struct {
         return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux, .timer_request = timer_request };
     }
 
-    pub fn onTimerExpired(self: *Mapper) AuxEventList {
+    // `now_ns` is the same ppoll-wakeup snapshot passed to apply().
+    pub fn onTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
         const th_res = self.layer.onTimerExpired();
         if (th_res.layer_activated) {
             self.prev.dpad_x = 0;
@@ -355,7 +353,7 @@ pub const Mapper = struct {
 
         var aux = AuxEventList{};
         var buf: [16]timer_queue_mod.Deadline = undefined;
-        const expired = self.timer_queue.drainExpired(std.time.nanoTimestamp(), &buf);
+        const expired = self.timer_queue.drainExpired(now_ns, &buf);
         for (expired) |d| {
             var idx: usize = 0;
             while (idx < self.active_macros.items.len) {
@@ -539,7 +537,7 @@ test "mapper: no layer no remap: apply passes through unchanged" {
     defer m.deinit();
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << a_idx)) != 0);
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
@@ -556,7 +554,7 @@ test "mapper: base remap disabled: source button suppressed" {
     defer m.deinit();
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
@@ -573,7 +571,7 @@ test "mapper: base remap key: source -> KEY_F13 aux event" {
     defer m.deinit();
 
     const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << m1_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << m1_idx }, 16, 0);
 
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << m1_idx));
     try testing.expectEqual(@as(usize, 1), events.aux.len);
@@ -599,7 +597,7 @@ test "mapper: base remap gamepad_button: A -> B" {
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
 
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << b_idx)) != 0);
@@ -634,7 +632,7 @@ test "mapper: layer remap overrides base: base A->B, layer A->C" {
     const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
     const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
 
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
 
     // A suppressed
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
@@ -670,7 +668,7 @@ test "mapper: suppress accumulates: base suppress A + layer suppress B" {
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
     const both = (@as(u64, 1) << a_idx) | (@as(u64, 1) << b_idx);
-    const events = try m.apply(.{ .buttons = both }, 16);
+    const events = try m.apply(.{ .buttons = both }, 16, 0);
 
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << b_idx));
@@ -704,7 +702,7 @@ test "mapper: inject last-write wins: layer inject overrides base inject for sam
     const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
     const y_idx: u6 = @intCast(@intFromEnum(ButtonId.Y));
 
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
 
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << x_idx));
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << y_idx)) != 0);
@@ -725,12 +723,12 @@ test "mapper: prev frame masking: suppress produces correct diff" {
     const a_mask: u64 = @as(u64, 1) << a_idx;
 
     // Frame N-1: A pressed, remap disabled
-    const ev1 = try m.apply(.{ .buttons = a_mask }, 16);
+    const ev1 = try m.apply(.{ .buttons = a_mask }, 16, 0);
     // A is suppressed in output, prev is now raw a_mask
     try testing.expectEqual(@as(u64, 0), ev1.gamepad.buttons & a_mask);
 
     // Frame N: A still pressed — should produce no change (both masked_prev and gamepad have A=0)
-    const ev2 = try m.apply(.{ .buttons = a_mask }, 16);
+    const ev2 = try m.apply(.{ .buttons = a_mask }, 16, 0);
     try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & a_mask);
     // masked_prev should also have A=0 (same suppress applied)
     try testing.expectEqual(@as(u64, 0), ev2.prev.buttons & a_mask);
@@ -759,13 +757,13 @@ test "mapper: onTimerExpired: PENDING -> ACTIVE activates layer" {
     try testing.expect(!m.layer.tap_hold.?.layer_activated);
 
     // Timer fires — goes ACTIVE
-    _ = m.onTimerExpired();
+    _ = m.onTimerExpired(0);
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 
     // Now layer remap should be active
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << b_idx)) != 0);
 }
 
@@ -853,16 +851,16 @@ test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
 
     // Frame 1: LT + dpad-up pressed simultaneously → layer PENDING, dpad recorded in prev
-    _ = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16);
+    _ = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16, 0);
 
     // Timer fires: PENDING → ACTIVE
-    _ = m.onTimerExpired();
+    _ = m.onTimerExpired(0);
 
     // Frame 2: still holding LT + dpad-up, but now layer is ACTIVE (active_changed=true)
     // prev.dpad_y should be reset to 0 so edge triggers KEY_UP press
     const configs = parsed.value.layer.?;
     _ = configs; // suppress unused warning
-    const ev = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16);
+    const ev = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16, 0);
 
     var got_key_up = false;
     for (ev.aux.slice()) |e| switch (e) {
@@ -894,15 +892,15 @@ test "mapper: gamepad_button tap: injected this frame, released next frame" {
     const a_mask: u64 = @as(u64, 1) << a_idx;
 
     // Press LT -> PENDING
-    _ = try m.apply(.{ .buttons = lt_mask }, 16);
+    _ = try m.apply(.{ .buttons = lt_mask }, 16, 0);
     // Release LT -> tap fires (PENDING->IDLE with tap)
-    const ev_tap = try m.apply(.{ .buttons = 0 }, 16);
+    const ev_tap = try m.apply(.{ .buttons = 0 }, 16, 0);
     // A should be injected this frame
     try testing.expect((ev_tap.gamepad.buttons & a_mask) != 0);
     try testing.expect(m.pending_tap_release != null);
 
     // Next frame: pending_tap_release should clear A
-    const ev_release = try m.apply(.{}, 16);
+    const ev_release = try m.apply(.{}, 16, 0);
     try testing.expectEqual(@as(u64, 0), ev_release.gamepad.buttons & a_mask);
     try testing.expect(m.pending_tap_release == null);
 }
@@ -927,7 +925,7 @@ test "mapper: dt_ms propagation: stick mouse output scales with dt" {
 
     var total4: i32 = 0;
     for (0..4) |_| {
-        const ev = try m4.apply(.{ .rx = 10000 }, 4);
+        const ev = try m4.apply(.{ .rx = 10000 }, 4, 0);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| if (r.code == 0) {
                 total4 += r.value;
@@ -937,7 +935,7 @@ test "mapper: dt_ms propagation: stick mouse output scales with dt" {
     }
 
     var total16: i32 = 0;
-    const ev16 = try m16.apply(.{ .rx = 10000 }, 16);
+    const ev16 = try m16.apply(.{ .rx = 10000 }, 16, 0);
     for (ev16.aux.slice()) |e| switch (e) {
         .rel => |r| if (r.code == 0) {
             total16 += r.value;
@@ -963,11 +961,11 @@ test "mapper: dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     defer m.deinit();
 
     // Frame 1: dpad up
-    const ev1 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16);
+    const ev1 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16, 0);
     try testing.expectEqual(@as(i8, 0), ev1.gamepad.dpad_y);
 
     // Frame 2: same dpad — masked_prev should also have dpad_y = 0
-    const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16);
+    const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16, 0);
     try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
 }
 
@@ -1012,10 +1010,10 @@ test "mapper: Mapper.apply toggle OOM is silently swallowed" {
     const sel_idx: u6 = @intCast(@intFromEnum(ButtonId.Select));
     const sel_mask: u64 = @as(u64, 1) << sel_idx;
     // Rising edge then release — toggle fires, toggled.put OOMs silently.
-    _ = try m.apply(.{ .buttons = sel_mask }, 16);
-    _ = try m.apply(.{}, 16);
+    _ = try m.apply(.{ .buttons = sel_mask }, 16, 0);
+    _ = try m.apply(.{}, 16, 0);
     // Mapper must stay usable: third frame must produce no-crash and empty aux events.
-    const ev = try m.apply(.{}, 16);
+    const ev = try m.apply(.{}, 16, 0);
     try testing.expectEqual(@as(usize, 0), ev.aux.len);
 }
 
@@ -1043,7 +1041,7 @@ test "mapper: active_macros append OOM is silently ignored" {
     defer m.deinit();
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     // Rising edge triggers macro dispatch; append failure must not crash.
-    const ev = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const ev = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
     // OOM swallowed: no aux events emitted (macro not started), A suppressed by remap.
     const a_mask: u64 = @as(u64, 1) << a_idx;
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & a_mask);
@@ -1082,10 +1080,10 @@ test "mapper: gyro activate: inactive frame no REL events and processor reset" {
     // Seed EMA with large gyro input while RB is held
     const rb_idx: u6 = @intCast(@intFromEnum(ButtonId.RB));
     const rb_mask: u64 = @as(u64, 1) << rb_idx;
-    _ = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
+    _ = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
 
     // Release RB — gyro should be deactivated, processor reset, no REL events
-    const ev = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16);
+    const ev = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
     try testing.expectEqual(@as(usize, 0), ev.aux.len);
     // After reset, EMA should be zero
     try testing.expectApproxEqAbs(@as(f32, 0.0), m.gyro_proc.ema_x, 1e-5);
@@ -1110,7 +1108,7 @@ test "mapper: gyro activate: active when RB held, inactive when released" {
     const rb_mask: u64 = @as(u64, 1) << rb_idx;
 
     // RB held, large gyro — should produce REL events
-    const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
+    const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
     try testing.expect(ev_active.aux.len > 0);
     // At least one REL event must be present (not just any aux event)
     var found_rel = false;
@@ -1120,7 +1118,7 @@ test "mapper: gyro activate: active when RB held, inactive when released" {
     try testing.expect(found_rel);
 
     // RB released — no REL events
-    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16);
+    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
     try testing.expectEqual(@as(usize, 0), ev_inactive.aux.len);
 }
 
@@ -1139,7 +1137,7 @@ test "mapper: gyro joystick mode: overrides emit_state.rx/ry, suppresses origina
     defer m.deinit();
 
     // Feed large gyro input so joy_x/joy_y are non-zero
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 }, 16, 0);
 
     // rx/ry must be gyro-derived (not the raw 5000)
     try testing.expect(ev.gamepad.rx != 5000);
@@ -1167,7 +1165,7 @@ test "mapper: gyro joystick mode: null joy_x does not touch rx" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const ev = try m.apply(.{ .rx = 1234, .ry = -1234 }, 16);
+    const ev = try m.apply(.{ .rx = 1234, .ry = -1234 }, 16, 0);
     // mode=off: no override, axes pass through unchanged
     try testing.expectEqual(@as(i16, 1234), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, -1234), ev.gamepad.ry);
@@ -1187,7 +1185,7 @@ test "mapper: gyro mouse mode: joy_x/y do not affect emit_state axes" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 999, .ry = 888 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 999, .ry = 888 }, 16, 0);
     // mouse mode: rx/ry must be untouched (suppress_right_stick_gyro stays false)
     try testing.expectEqual(@as(i16, 999), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, 888), ev.gamepad.ry);
@@ -1221,11 +1219,11 @@ test "mapper: layer switch resets gyro EMA and accumulators" {
     // Trigger layer activation: LT press → PENDING
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
-    _ = try m.apply(.{ .buttons = lt_mask }, 16);
+    _ = try m.apply(.{ .buttons = lt_mask }, 16, 0);
 
     // Timer fires → ACTIVE (active_changed = true inside onTimerExpired, but processLayerTriggers
     // sets active_changed on press too — here we drive it through the full path)
-    _ = m.onTimerExpired();
+    _ = m.onTimerExpired(0);
     // Manually trigger a frame that will see active_changed via release
     // Instead: drive through processLayerTriggers which sets active_changed on ACTIVE→IDLE release
     // For simplicity: re-dirty the processor and then release LT to deactivate
@@ -1235,7 +1233,7 @@ test "mapper: layer switch resets gyro EMA and accumulators" {
     m.stick_right.scroll_accum = 0.9;
 
     // LT release → layer deactivates → active_changed = true → reset fires
-    _ = try m.apply(.{ .buttons = 0 }, 16);
+    _ = try m.apply(.{ .buttons = 0 }, 16, 0);
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_x);
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.accum_x);
@@ -1254,7 +1252,7 @@ test "mapper: no layer switch — processor state preserved" {
     m.gyro_proc.ema_x = 42.0;
     m.stick_left.mouse_accum_x = 0.6;
 
-    _ = try m.apply(.{}, 16);
+    _ = try m.apply(.{}, 16, 0);
 
     // No layer change: state must not be reset
     try testing.expectEqual(@as(f32, 42.0), m.gyro_proc.ema_x);
@@ -1278,14 +1276,14 @@ test "mapper: toggle layer switch resets processors" {
     const sel_mask: u64 = @as(u64, 1) << sel_idx;
 
     // Frame 1: Select pressed (rising edge only, toggle fires on release)
-    _ = try m.apply(.{ .buttons = sel_mask }, 16);
+    _ = try m.apply(.{ .buttons = sel_mask }, 16, 0);
 
     // Dirty processor state to simulate residual accumulation
     m.gyro_proc.ema_y = -200.0;
     m.stick_right.mouse_accum_y = 0.8;
 
     // Frame 2: Select released → toggle fires → active_changed = true → reset
-    _ = try m.apply(.{ .buttons = 0 }, 16);
+    _ = try m.apply(.{ .buttons = 0 }, 16, 0);
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_y);
     try testing.expectEqual(@as(f32, 0), m.stick_right.mouse_accum_y);
@@ -1307,7 +1305,7 @@ test "mapper: gyro mouse REL events carry REL_X/REL_Y codes" {
     defer m.deinit();
 
     // Positive gyro input → REL_X and REL_Y events with matching codes and positive values.
-    const ev = try m.apply(.{ .gyro_x = 20000, .gyro_y = 20000 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 20000, .gyro_y = 20000 }, 16, 0);
 
     var rel_x_value: ?i32 = null;
     var rel_y_value: ?i32 = null;
@@ -1338,7 +1336,7 @@ test "mapper: gyro mouse REL sign follows gyro input sign" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const ev = try m.apply(.{ .gyro_x = -20000, .gyro_y = -20000 }, 16);
+    const ev = try m.apply(.{ .gyro_x = -20000, .gyro_y = -20000 }, 16, 0);
 
     var rel_x_value: ?i32 = null;
     var rel_y_value: ?i32 = null;
@@ -1372,7 +1370,7 @@ test "mapper: stick scroll REL_WHEEL and REL_HWHEEL codes verified" {
     var wheel_value: i32 = 0;
     var hwheel_value: i32 = 0;
     for (0..30) |_| {
-        const ev = try m.apply(.{ .rx = 32000, .ry = -32000 }, 16);
+        const ev = try m.apply(.{ .rx = 32000, .ry = -32000 }, 16, 0);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| {
                 if (r.code == REL_WHEEL) wheel_value += r.value;
@@ -1401,7 +1399,7 @@ test "mapper: stick scroll positive ry gives negative REL_WHEEL values" {
     // ry > 0 = stick down → REL_WHEEL < 0 (scroll down)
     var wheel_value: i32 = 0;
     for (0..30) |_| {
-        const ev = try m.apply(.{ .rx = 0, .ry = 32000 }, 16);
+        const ev = try m.apply(.{ .rx = 0, .ry = 32000 }, 16, 0);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| if (r.code == REL_WHEEL) {
                 wheel_value += r.value;
@@ -1425,7 +1423,7 @@ test "mapper: invalid remap target does not suppress source button" {
     defer m.deinit();
 
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
     // A must still pass through — bad target must not suppress the source
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << a_idx)) != 0);
 }
@@ -1443,7 +1441,7 @@ test "mapper: trigger_threshold: lt above threshold sets LT button" {
     const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
     const rt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.RT));
 
-    const events = try m.apply(.{ .lt = 200, .rt = 50 }, 16);
+    const events = try m.apply(.{ .lt = 200, .rt = 50 }, 16, 0);
     try testing.expect((events.gamepad.buttons & lt_bit) != 0);
     try testing.expect((events.gamepad.buttons & rt_bit) == 0);
 }
@@ -1458,7 +1456,7 @@ test "mapper: trigger_threshold: null threshold does not synthesize buttons" {
 
     const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
 
-    const events = try m.apply(.{ .lt = 200 }, 16);
+    const events = try m.apply(.{ .lt = 200 }, 16, 0);
     try testing.expect((events.gamepad.buttons & lt_bit) == 0);
 }
 
@@ -1475,11 +1473,11 @@ test "mapper: trigger_threshold: boundary — equal to threshold does not trigge
     const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
 
     // lt == threshold: should NOT trigger (strictly greater required)
-    const e1 = try m.apply(.{ .lt = 128 }, 16);
+    const e1 = try m.apply(.{ .lt = 128 }, 16, 0);
     try testing.expect((e1.gamepad.buttons & lt_bit) == 0);
 
     // lt == threshold + 1: should trigger
-    const e2 = try m.apply(.{ .lt = 129 }, 16);
+    const e2 = try m.apply(.{ .lt = 129 }, 16, 0);
     try testing.expect((e2.gamepad.buttons & lt_bit) != 0);
 }
 
@@ -1495,9 +1493,58 @@ test "mapper: trigger_threshold: release clears button bit" {
 
     const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
 
-    const e1 = try m.apply(.{ .lt = 200 }, 16);
+    const e1 = try m.apply(.{ .lt = 200 }, 16, 0);
     try testing.expect((e1.gamepad.buttons & lt_bit) != 0);
 
-    const e2 = try m.apply(.{ .lt = 50 }, 16);
+    const e2 = try m.apply(.{ .lt = 50 }, 16, 0);
     try testing.expect((e2.gamepad.buttons & lt_bit) == 0);
+}
+
+test "mapper: #79 dual-ready ppoll — apply uses caller now_ns, tap fires at press+195ms" {
+    // Issue #79: on a single ppoll wakeup the timerfd (promote PENDING
+    // → ACTIVE) and the device fd (release) can both be ready. Before
+    // the fix, apply() re-read CLOCK_MONOTONIC internally after the
+    // timer handler ran, and the drift pushed a 195ms physical tap
+    // past the 200ms hold_timeout. Now the caller snapshots `now` once
+    // and threads it through both onTimerExpired and apply.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fps"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\tap = "A"
+        \\hold_timeout = 200
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
+
+    // Frame 1: press at t=0 → PENDING
+    const press_ns: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
+
+    // Timer fires at t=200ms → ACTIVE
+    const timer_ns: i128 = press_ns + 200_000_000;
+    _ = m.onTimerExpired(timer_ns);
+    try testing.expect(m.layer.tap_hold.?.layer_activated);
+
+    // Frame 2: release observed on the same ppoll wakeup as the timer,
+    // but the caller-supplied snapshot is the physical release instant
+    // (t=195ms — below hold_timeout). The race-case branch must still
+    // emit the tap.
+    const release_ns: i128 = press_ns + 195_000_000;
+    const ev_tap = try m.apply(.{ .buttons = 0 }, 16, release_ns);
+    try testing.expect((ev_tap.gamepad.buttons & a_mask) != 0);
+    try testing.expect(m.pending_tap_release != null);
+
+    // Next frame clears the injected tap release.
+    const ev_clear = try m.apply(.{}, 16, release_ns + 1_000_000);
+    try testing.expectEqual(@as(u64, 0), ev_clear.gamepad.buttons & a_mask);
 }

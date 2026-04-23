@@ -137,7 +137,7 @@ test "e2e: gyro activate hold_RB — RB held produces REL, released produces non
     const rb = btnMask(.RB);
 
     // RB held + gyro input → REL events expected
-    const ev_active = try m.apply(.{ .buttons = rb, .gyro_x = 10000, .gyro_y = 10000 }, 16);
+    const ev_active = try m.apply(.{ .buttons = rb, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
     var has_rel = false;
     for (ev_active.aux.slice()) |e| switch (e) {
         .rel => {
@@ -148,7 +148,7 @@ test "e2e: gyro activate hold_RB — RB held produces REL, released produces non
     try testing.expect(has_rel);
 
     // RB released → no REL events
-    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16);
+    const ev_inactive = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
     try testing.expectEqual(@as(usize, 0), ev_inactive.aux.len);
     // EMA zeroed by reset
     try testing.expectApproxEqAbs(@as(f32, 0.0), m.gyro_proc.ema_x, 1e-5);
@@ -169,7 +169,7 @@ test "e2e: gyro joystick — gyro overrides emit_state.rx/ry, no REL events" {
     var m = &ctx.mapper;
 
     // Large gyro with original rx/ry set to known value
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 }, 16, 0);
 
     // rx/ry overridden by gyro output (not the raw 5000)
     try testing.expect(ev.gamepad.rx != 5000);
@@ -196,7 +196,7 @@ test "e2e: gyro joystick — zero gyro leaves rx/ry at zero (deadzone)" {
     var m = &ctx.mapper;
 
     // gyro within deadzone → joy_x/y = 0
-    const ev = try m.apply(.{ .gyro_x = 100, .gyro_y = 100, .rx = 0, .ry = 0 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 100, .gyro_y = 100, .rx = 0, .ry = 0 }, 16, 0);
     try testing.expectEqual(@as(i16, 0), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, 0), ev.gamepad.ry);
 }
@@ -214,7 +214,7 @@ test "e2e: gyro joystick target=left_stick — gyro overrides ax/ay, not rx/ry" 
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .ax = 5000, .ay = 5000, .rx = 1234, .ry = 4321 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .ax = 5000, .ay = 5000, .rx = 1234, .ry = 4321 }, 16, 0);
 
     // ax/ay overridden by gyro (not original 5000)
     try testing.expect(ev.gamepad.ax != 5000);
@@ -244,7 +244,7 @@ test "e2e: gyro joystick target=right_stick (explicit) — same as default" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000, .ax = 1234, .ay = 4321 }, 16);
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000, .ax = 1234, .ay = 4321 }, 16, 0);
 
     // rx/ry overridden by gyro
     try testing.expect(ev.gamepad.rx != 5000);
@@ -281,12 +281,12 @@ test "e2e: layer switch resets gyro EMA — no jump after activation" {
 
     // LT press → PENDING
     const lt = btnMask(.LT);
-    _ = try m.apply(.{ .buttons = lt }, 16);
+    _ = try m.apply(.{ .buttons = lt }, 16, 0);
     // Timer → ACTIVE (active_changed fires inside onTimerExpired → reset)
-    _ = m.onTimerExpired();
+    _ = m.onTimerExpired(0);
 
     // LT release → IDLE (active_changed again → reset)
-    _ = try m.apply(.{ .buttons = 0 }, 16);
+    _ = try m.apply(.{ .buttons = 0 }, 16, 0);
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_x);
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_y);
@@ -303,7 +303,7 @@ test "e2e: no layer switch — EMA preserved across frames" {
     m.gyro_proc.ema_x = 55.0;
     m.stick_right.mouse_accum_x = 0.3;
 
-    _ = try m.apply(.{}, 16);
+    _ = try m.apply(.{}, 16, 0);
 
     try testing.expectEqual(@as(f32, 55.0), m.gyro_proc.ema_x);
     try testing.expectEqual(@as(f32, 0.3), m.stick_right.mouse_accum_x);
@@ -332,7 +332,7 @@ test "e2e: dt_ms scaling — 4 frames@4ms == 1 frame@16ms (right stick mouse)" {
 
     var total4: i32 = 0;
     for (0..4) |_| {
-        const ev = try m4.apply(.{ .rx = 10000 }, 4);
+        const ev = try m4.apply(.{ .rx = 10000 }, 4, 0);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| if (r.code == REL_X) {
                 total4 += r.value;
@@ -342,7 +342,7 @@ test "e2e: dt_ms scaling — 4 frames@4ms == 1 frame@16ms (right stick mouse)" {
     }
 
     var total16: i32 = 0;
-    const ev16 = try m16.apply(.{ .rx = 10000 }, 16);
+    const ev16 = try m16.apply(.{ .rx = 10000 }, 16, 0);
     for (ev16.aux.slice()) |e| switch (e) {
         .rel => |r| if (r.code == REL_X) {
             total16 += r.value;
@@ -366,7 +366,7 @@ test "e2e: dt_ms=1 clamp — stick still produces output (no divide-by-zero)" {
     var m = &ctx.mapper;
 
     // dt=1 is minimum; should not crash or return zero unexpectedly for large input
-    _ = try m.apply(.{ .rx = 32767 }, 1);
+    _ = try m.apply(.{ .rx = 32767 }, 1, 0);
     // Just verify no panic; accumulator may or may not cross integer threshold at dt=1
 }
 
