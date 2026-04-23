@@ -98,7 +98,7 @@ Files: `src/io/uinput.zig`
 
 ### T2a: Add `initBoxed` function
 
-- [ ] In `src/io/uinput.zig` near `pub fn create` (around line 137), add:
+- [x] In `src/io/uinput.zig` near `pub fn create` (around line 137), add:
   ```zig
   pub fn initBoxed(allocator: std.mem.Allocator, cfg: *const device.OutputConfig) !*UinputDevice {
       const p = try allocator.create(UinputDevice);
@@ -107,18 +107,18 @@ Files: `src/io/uinput.zig`
       return p;
   }
   ```
-- [ ] Verify compile: `zig build` green.
+- [x] Verify compile: `zig build` green.
 
 ### T2b: Layer 0 test for `initBoxed`
 
-- [ ] In the existing `UinputDevice` test block (mocked allocator), add
+- [x] In the existing `UinputDevice` test block (mocked allocator), add
   **`test "initBoxed: heap-allocates and returns owning pointer"`**:
   - Use `std.testing.allocator`.
   - Call `initBoxed` with a mock `OutputConfig` (reuse existing mock fixtures).
   - Assert returned pointer is non-null.
   - `defer p.close()` + `defer allocator.destroy(p)`.
   - Verify no leaks (testing allocator's leak check).
-- [ ] `zig build test` passes.
+- [x] `zig build test` passes.
 
 ---
 
