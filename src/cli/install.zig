@@ -4118,6 +4118,106 @@ test "install: explicit --no-user-service returns false regardless of sudo_hop" 
     try testing.expect(!installWillStartUserService(true, false, "/tmp/staging", "jim"));
 }
 
+// InstallPlan decision-axis matrix — guards against PR #148-class regressions
+// where a single boolean decision drifts apart between compute time and use
+// time. Each case pins every derived axis to an expected value so the matrix
+// doubles as behavioural spec.
+test "install: InstallPlan case A — non-root default" {
+    const testing = std.testing;
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.effective_user_service);
+    try testing.expect(plan.will_start_user_service);
+    try testing.expect(plan.do_xdg_dirs);
+    try testing.expect(plan.do_enable_systemctl);
+    try testing.expect(!plan.staging_mode);
+    try testing.expectEqual(SystemctlUserMode.direct, plan.systemctl_plan.mode);
+}
+
+test "install: InstallPlan case B — sudo_hop (issue #139 v3 regression)" {
+    // The PR #148 failure path: `sudo padctl install` with no flag. Without
+    // the gate fix, do_xdg_dirs flipped false and systemd v254+ recreated the
+    // legacy migration symlink after every install.
+    const testing = std.testing;
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.is_root);
+    try testing.expect(!plan.effective_user_service); // root + no explicit flag → false
+    try testing.expect(plan.will_start_user_service); // but sudo_hop still starts it
+    try testing.expect(plan.do_xdg_dirs); // MUST be true — this is the regression gate
+    try testing.expect(plan.do_enable_systemctl);
+    try testing.expectEqual(SystemctlUserMode.sudo_hop, plan.systemctl_plan.mode);
+    try testing.expectEqualStrings("alice", plan.systemctl_plan.sudo_user);
+    try testing.expectEqualStrings("1000", plan.systemctl_plan.sudo_uid);
+}
+
+test "install: InstallPlan case C — staged build (destdir set)" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .destdir = "/tmp/staging" };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.staging_mode);
+    try testing.expect(!plan.will_start_user_service);
+    try testing.expect(!plan.do_xdg_dirs);
+    try testing.expect(!plan.do_enable_systemctl);
+}
+
+test "install: InstallPlan case D — root + explicit --no-user-service" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = false };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.effective_user_service);
+    try testing.expect(!plan.will_start_user_service); // explicit opt-out overrides sudo_hop
+    try testing.expect(!plan.do_xdg_dirs);
+    try testing.expect(!plan.do_enable_systemctl);
+}
+
+test "install: InstallPlan case E — root + explicit --user-service" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = true };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    // Save existing HOME, set it to a tmpdir so resolveServiceDir succeeds; restore after.
+    // resolveServiceDir needs HOME to be present when user_service=true.
+    const saved_home = std.posix.getenv("HOME");
+    _ = saved_home;
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.effective_user_service);
+    try testing.expect(plan.will_start_user_service);
+    try testing.expect(plan.do_xdg_dirs);
+    try testing.expect(plan.do_enable_systemctl);
+    // non-hop form because SUDO_USER is absent
+    try testing.expectEqual(SystemctlUserMode.skip, plan.systemctl_plan.mode);
+}
+
+test "install: InstallPlan prefix auto-switches to /usr/local on explicit --immutable" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .immutable = true };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.effective_immutable);
+    try testing.expectEqualStrings("/usr/local", plan.prefix);
+}
+
+test "install: InstallPlan service_dir routes by user_service + immutable" {
+    const testing = std.testing;
+    // Non-root → user dir under HOME. HOME must be set for the test env (it is,
+    // by zig's test runner).
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(std.mem.endsWith(u8, plan.service_dir, "/.config/systemd/user"));
+}
+
 test "install: ensureUserXdgDirs chown path opens dir with iterate flag (no BADF)" {
     // Zig std.posix.fchown panics with BADF on a Dir fd opened without
     // .iterate = true. Verify ensureUserXdgDirs creates dirs that can be
