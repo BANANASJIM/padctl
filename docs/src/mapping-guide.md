@@ -292,7 +292,20 @@ RT = "mouse_right"        # axis > 100 → synthesize RT press → emit right cl
 
 See [Mapping Config Reference — trigger_threshold](mapping-config.md#trigger_threshold) for the full field description.
 
-> **Known limitation:** `[[macro]]` steps do **not** currently support `LT` / `RT` as `down` / `up` targets. The `.gamepad_button` dispatch arm is not yet wired in the macro engine (issue #99 + ADR-016 §3 Path A). A macro step such as `{ down = "LT" }` is silently skipped. The supported paths today are `[remap]` and the `[[layer]] trigger` field.
+LT / RT also work as `down` / `up` targets inside `[[macro]]` — press and release the virtual trigger from any macro step:
+
+```toml
+[remap]
+M1 = "macro:aim_burst"
+
+[[macro]]
+name = "aim_burst"
+steps = [
+    { down = "LT" },
+    { delay = 80 },
+    { up = "LT" },
+]
+```
 
 ### Adaptive Trigger (`[adaptive_trigger]`) — DualSense only
 

@@ -43,8 +43,6 @@ Use `padctl dump enable` to observe raw LT / RT axis readings and dial in the th
 
 Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not participate in `[remap]` or layer trigger matching.
 
-> **Known limitation:** `[[macro]]` steps do **not** currently support `LT` / `RT` as `down` / `up` targets. The macro player's `.gamepad_button` dispatch arm is not yet implemented (see ADR-016 §3 Path A and issue #99). A macro step such as `{ down = "LT" }` is silently skipped. The supported paths are `[remap]` and the `[[layer]] trigger` field.
-
 ## `[remap]`
 
 Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
