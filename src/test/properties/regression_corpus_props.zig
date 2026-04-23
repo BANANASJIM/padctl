@@ -11,9 +11,11 @@ const helpers = @import("../helpers.zig");
 const mapper_oracle = @import("../gen/mapper_oracle.zig");
 const sequence_gen = @import("../gen/sequence_gen.zig");
 const mapping = @import("../../config/mapping.zig");
+const state_mod = @import("../../core/state.zig");
 
 const OracleState = mapper_oracle.OracleState;
 const Frame = sequence_gen.Frame;
+const ButtonId = state_mod.ButtonId;
 
 const RegressionCase = struct {
     name: []const u8,
@@ -23,11 +25,27 @@ const RegressionCase = struct {
     expected_buttons: []const u64,
 };
 
-// Corpus is empty until the generative harness discovers a reproducible bug
-// and its minimal case is committed here.
-const cases = [_]RegressionCase{
-    // Cases will be added here as bugs are found
-};
+// Note on corpus shape: the RegressionCase harness threads frames into
+// `Mapper.apply(delta, dt_ms, now_ns = 0)` without a real monotonic
+// clock or calls to `onTimerExpired`. That means:
+//
+//   * Issue #79 (tap-on-layer boundary near hold_timeout) needs a real
+//     now_ns progression plus an `onTimerExpired` call between frames,
+//     so it cannot be expressed as a plain frame list. It is pinned as
+//     a targeted test below instead.
+//   * Issue #142 (commitSwitchTarget must rebuildAuxIfChanged) and
+//     Issue #131-A (zombie uinput on rebind failure) are supervisor-
+//     level bugs; `Mapper.apply` cannot drive them. Targeted
+//     supervisor tests already live in
+//     `src/supervisor.zig` ("switch to mapping with new aux KEY_*")
+//     and `src/test/properties/supervisor_sm_props.zig:451-565,628-735`.
+//     Duplicating them here as oracle-comparison corpus entries would
+//     not be meaningful — flagging explicitly and not force-fitting.
+//
+// As the harness grows to cover timing and state-machine dimensions,
+// migrate the targeted-cases list below into proper RegressionCase
+// entries.
+const cases = [_]RegressionCase{};
 
 test "regression: all corpus cases pass" {
     const allocator = testing.allocator;
@@ -58,4 +76,36 @@ test "regression: all corpus cases pass" {
             };
         }
     }
+}
+
+// --- targeted regression cases (do not fit the plain-frames corpus shape) ---
+
+test "regression targeted: issue #79 — tap-on-layer at hold_timeout-5ms emits tap" {
+    // Pre-fix repro: apply() re-read CLOCK_MONOTONIC internally after the
+    // timer handler ran; physical release at press+195ms drifted past the
+    // 200ms hold_timeout, losing the tap. The fix threads a single
+    // ppoll-wakeup snapshot through both `onTimerExpired` and `apply`.
+    const allocator = testing.allocator;
+    var ctx = try helpers.makeMapper(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\tap = "A"
+        \\hold_timeout = 200
+    , allocator);
+    defer ctx.deinit();
+
+    const lt_mask: u64 = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.LT)));
+    const a_mask: u64 = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.A)));
+
+    const press_ns: i128 = 1_000_000_000;
+    _ = try ctx.mapper.apply(.{ .buttons = lt_mask }, 16, press_ns);
+
+    const timer_ns: i128 = press_ns + 200_000_000;
+    _ = ctx.mapper.onTimerExpired(timer_ns);
+
+    const release_ns: i128 = press_ns + 195_000_000;
+    const ev = try ctx.mapper.apply(.{ .buttons = 0 }, 16, release_ns);
+    try testing.expect((ev.gamepad.buttons & a_mask) != 0);
 }
