@@ -1372,6 +1372,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/lib/systemd/system/padctl.service",
         "/lib/systemd/system/padctl-resume.service",
         "/lib/systemd/user/padctl-resume.service",
+        "/lib/systemd/user/padctl.service",
         "/lib/udev/rules.d/60-padctl.rules",
         "/lib/udev/rules.d/61-padctl-driver-block.rules",
         "/lib/udev/rules.d/99-padctl.rules",
@@ -1439,11 +1440,24 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         }
     }
 
+    // Unconditional: resolveServiceDir's non-immutable non-/usr prefix fallback
+    // (e.g. `sudo padctl install --prefix /usr/local`) also writes here.
+    {
+        const path = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user/padctl.service", .{destdir});
+        defer allocator.free(path);
+        if (std.fs.deleteFileAbsolute(path)) |_| {
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+        } else |_| {}
+    }
+
     // Immutable-specific files in /etc/ (auto-detected or explicit).
     if (effective_immutable) {
         const etc_files = [_][]const u8{
             "/etc/systemd/system/padctl.service",
             "/etc/systemd/system/padctl.service.d/immutable.conf",
+            "/etc/systemd/user/padctl.service",
             "/etc/udev/rules.d/60-padctl.rules",
             "/etc/udev/rules.d/61-padctl-driver-block.rules",
             "/etc/udev/rules.d/99-padctl.rules",
@@ -4018,4 +4032,115 @@ test "install: modules-load.d content includes uhid and uinput" {
     const testing = std.testing;
     try testing.expect(std.mem.indexOf(u8, modules_load_content, "uhid") != null);
     try testing.expect(std.mem.indexOf(u8, modules_load_content, "uinput") != null);
+}
+
+test "uninstall: removes /lib/systemd/user/padctl.service on prefix=/usr" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const unit_dir = try std.fmt.allocPrint(allocator, "{s}/usr/lib/systemd/user", .{destdir});
+    defer allocator.free(unit_dir);
+    try ensureDirAll(allocator, unit_dir);
+    const unit_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{unit_dir});
+    defer allocator.free(unit_path);
+    {
+        var f = try std.fs.createFileAbsolute(unit_path, .{});
+        f.close();
+    }
+
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, .{
+            .prefix = "/usr",
+            .destdir = destdir,
+            .immutable = false,
+            .no_immutable = true,
+            .user_service = false,
+        });
+    }
+
+    std.fs.accessAbsolute(unit_path, .{}) catch |err| {
+        try testing.expect(err == error.FileNotFound);
+        return;
+    };
+    return error.FileStillExists;
+}
+
+test "uninstall: removes /etc/systemd/user/padctl.service on immutable" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const unit_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
+    defer allocator.free(unit_dir);
+    try ensureDirAll(allocator, unit_dir);
+    const unit_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{unit_dir});
+    defer allocator.free(unit_path);
+    {
+        var f = try std.fs.createFileAbsolute(unit_path, .{});
+        f.close();
+    }
+
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, .{
+            .prefix = "/usr",
+            .destdir = destdir,
+            .immutable = true,
+            .no_immutable = false,
+            .user_service = false,
+        });
+    }
+
+    std.fs.accessAbsolute(unit_path, .{}) catch |err| {
+        try testing.expect(err == error.FileNotFound);
+        return;
+    };
+    return error.FileStillExists;
+}
+
+test "uninstall: removes /etc/systemd/user/padctl.service on non-immutable /usr/local prefix" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const unit_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
+    defer allocator.free(unit_dir);
+    try ensureDirAll(allocator, unit_dir);
+    const unit_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{unit_dir});
+    defer allocator.free(unit_path);
+    {
+        var f = try std.fs.createFileAbsolute(unit_path, .{});
+        f.close();
+    }
+
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, .{
+            .prefix = "/usr/local",
+            .destdir = destdir,
+            .immutable = false,
+            .no_immutable = true,
+            .user_service = false,
+        });
+    }
+
+    std.fs.accessAbsolute(unit_path, .{}) catch |err| {
+        try testing.expect(err == error.FileNotFound);
+        return;
+    };
+    return error.FileStillExists;
 }
