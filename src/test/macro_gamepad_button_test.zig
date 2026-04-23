@@ -193,11 +193,9 @@ test "macro #99 integration: macro:boost triggers LT via tap on output state" {
     const m1_idx = @intFromEnum(ButtonId.M1);
     const lt_bit = btnBit(.LT);
 
-    // Frame 1: press M1 — macro "boost" starts, emits LT tap.
-    const events1 = try ctx.mapper.apply(.{ .buttons = @as(u64, 1) << @as(u6, @intCast(m1_idx)) }, 16);
+    const events1 = try ctx.mapper.apply(.{ .buttons = @as(u64, 1) << @as(u6, @intCast(m1_idx)) }, 16, 0);
     try testing.expectEqual(lt_bit, events1.gamepad.buttons & lt_bit);
 
-    // Frame 2: same input, tap release scheduled by frame 1 must have cleared LT.
-    const events2 = try ctx.mapper.apply(.{ .buttons = @as(u64, 1) << @as(u6, @intCast(m1_idx)) }, 16);
+    const events2 = try ctx.mapper.apply(.{ .buttons = @as(u64, 1) << @as(u6, @intCast(m1_idx)) }, 16, 0);
     try testing.expectEqual(@as(u64, 0), events2.gamepad.buttons & lt_bit);
 }
