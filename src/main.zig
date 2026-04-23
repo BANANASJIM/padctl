@@ -83,6 +83,7 @@ pub const testing_support = struct {
     pub const mapper_e2e_test = @import("test/mapper_e2e_test.zig");
     pub const gyro_stick_e2e_test = @import("test/gyro_stick_e2e_test.zig");
     pub const macro_e2e_test = @import("test/macro_e2e_test.zig");
+    pub const macro_gamepad_button_test = @import("test/macro_gamepad_button_test.zig");
     pub const capture_e2e_test = @import("test/capture_e2e_test.zig");
     pub const supervisor_e2e_test = @import("test/supervisor_e2e_test.zig");
     pub const wasm_e2e_test = @import("test/wasm_e2e_test.zig");
@@ -1031,6 +1032,7 @@ test {
     _ = @import("core/rumble_scheduler.zig");
     _ = @import("test/bugfix_regression_test.zig");
     _ = @import("test/uhid_uniq_pairing_test.zig");
+    _ = @import("test/macro_gamepad_button_test.zig");
     _ = @import("test/properties/config_props.zig");
     _ = @import("test/properties/contract_props.zig");
     _ = @import("test/properties/device_specific_props.zig");
