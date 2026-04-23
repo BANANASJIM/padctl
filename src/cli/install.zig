@@ -694,6 +694,134 @@ pub fn installWillStartUserService(
     return false;
 }
 
+/// Snapshot of the process environment that feeds `InstallPlan.compute`.
+/// Kept as a plain struct so tests can construct synthetic environments without
+/// mutating getenv state.
+pub const EnvSnapshot = struct {
+    uid: std.posix.uid_t,
+    home: ?[]const u8,
+    sudo_user: ?[]const u8,
+    sudo_uid: ?[]const u8,
+
+    pub fn fromProcess() EnvSnapshot {
+        return .{
+            .uid = std.os.linux.getuid(),
+            .home = std.posix.getenv("HOME"),
+            .sudo_user = std.posix.getenv("SUDO_USER"),
+            .sudo_uid = std.posix.getenv("SUDO_UID"),
+        };
+    }
+};
+
+/// Single source of truth for every decision `install.run()` makes before it
+/// starts touching the filesystem. All derived axes are computed exactly once
+/// in `compute()` so later phases read a plain struct instead of re-deriving
+/// (and drifting from) the originals. This directly addresses the PR #148 gate
+/// bug where `effective_user_service` was re-tested at the wrong call site.
+pub const InstallPlan = struct {
+    // --- inputs (captured, not re-derived) ---
+    opts: InstallOptions,
+    is_root: bool,
+    sudo_user: ?[]const u8,
+    sudo_uid: ?[]const u8,
+    home: ?[]const u8,
+
+    // --- derived axes ---
+    staging_mode: bool,
+    effective_user_service: bool,
+    immutable_kind: ImmutableKind,
+    effective_immutable: bool,
+    prefix: []const u8,
+    systemctl_plan: SystemctlUserPlan,
+    will_start_user_service: bool,
+    do_xdg_dirs: bool,
+    do_enable_systemctl: bool,
+
+    // --- owned path strings (freed by deinit) ---
+    bin_dir: []const u8,
+    service_dir: []const u8,
+    share_dir: []const u8,
+    udev_dir: []const u8,
+
+    pub fn compute(allocator: std.mem.Allocator, opts: InstallOptions, env: EnvSnapshot) !InstallPlan {
+        const is_root = env.uid == 0;
+        const destdir = opts.destdir;
+        const staging_mode = destdir.len != 0;
+
+        const effective_user_service = opts.user_service orelse !is_root;
+
+        const immutable_kind = detectImmutableOs(allocator, if (staging_mode) destdir else "");
+        const effective_immutable = opts.immutable or (immutable_kind != .none and !opts.no_immutable);
+
+        const prefix = if (effective_immutable and std.mem.eql(u8, opts.prefix, "/usr"))
+            "/usr/local"
+        else
+            opts.prefix;
+
+        const systemctl_plan = planSystemctlUser(env.uid, env.sudo_user, env.sudo_uid);
+
+        const will_start_user_service = installWillStartUserService(
+            is_root,
+            opts.user_service,
+            destdir,
+            env.sudo_user,
+        );
+
+        // Pre-seeding XDG parents is required on exactly the install paths that
+        // end up starting a user-scope padctl.service — identical to
+        // `will_start_user_service`. Kept as a separate field to keep call
+        // sites self-documenting.
+        const do_xdg_dirs = will_start_user_service;
+
+        // systemctl enable/start only runs on live installs (non-staging).
+        const do_enable_systemctl = !staging_mode and will_start_user_service;
+
+        var bin_dir: []const u8 = &.{};
+        var service_dir: []const u8 = &.{};
+        var share_dir: []const u8 = &.{};
+        var udev_dir: []const u8 = &.{};
+        errdefer {
+            if (bin_dir.len != 0) allocator.free(bin_dir);
+            if (service_dir.len != 0) allocator.free(service_dir);
+            if (share_dir.len != 0) allocator.free(share_dir);
+            if (udev_dir.len != 0) allocator.free(udev_dir);
+        }
+
+        bin_dir = try std.fmt.allocPrint(allocator, "{s}{s}/bin", .{ destdir, prefix });
+        service_dir = try resolveServiceDir(allocator, destdir, prefix, effective_immutable, effective_user_service);
+        share_dir = try std.fmt.allocPrint(allocator, "{s}{s}/share/padctl/devices", .{ destdir, prefix });
+        udev_dir = try resolveUdevDir(allocator, destdir, prefix, effective_immutable);
+
+        return .{
+            .opts = opts,
+            .is_root = is_root,
+            .sudo_user = env.sudo_user,
+            .sudo_uid = env.sudo_uid,
+            .home = env.home,
+            .staging_mode = staging_mode,
+            .effective_user_service = effective_user_service,
+            .immutable_kind = immutable_kind,
+            .effective_immutable = effective_immutable,
+            .prefix = prefix,
+            .systemctl_plan = systemctl_plan,
+            .will_start_user_service = will_start_user_service,
+            .do_xdg_dirs = do_xdg_dirs,
+            .do_enable_systemctl = do_enable_systemctl,
+            .bin_dir = bin_dir,
+            .service_dir = service_dir,
+            .share_dir = share_dir,
+            .udev_dir = udev_dir,
+        };
+    }
+
+    pub fn deinit(self: *const InstallPlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.bin_dir);
+        allocator.free(self.service_dir);
+        allocator.free(self.share_dir);
+        allocator.free(self.udev_dir);
+    }
+};
+
 /// Build argv for invoking `systemctl --user <verbs...>` under the correct bus.
 /// Caller owns the returned slice and each nested string via the allocator.
 ///
