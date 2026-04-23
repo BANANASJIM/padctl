@@ -500,7 +500,7 @@ fn ensureUserXdgDirs(allocator: std.mem.Allocator, home: []const u8) !void {
             else => return err,
         };
         if (do_chown) {
-            var d = std.fs.openDirAbsolute(abs, .{}) catch continue;
+            var d = std.fs.openDirAbsolute(abs, .{ .iterate = true }) catch continue;
             defer d.close();
             std.posix.fchown(d.fd, chown_uid, chown_gid) catch {};
         }
@@ -3910,6 +3910,27 @@ test "install: ensureUserXdgDirs NOT called when root without SUDO_USER" {
     // would be .skip, no user service starts, so no XDG dirs to seed.
     try testing.expect(!installWillStartUserService(true, null, "", null));
     try testing.expect(!installWillStartUserService(true, null, "", ""));
+}
+
+test "install: ensureUserXdgDirs chown path opens dir with iterate flag (no BADF)" {
+    // Zig std.posix.fchown panics with BADF on a Dir fd opened without
+    // .iterate = true. Verify ensureUserXdgDirs creates dirs that can be
+    // re-opened with .iterate = true (proving the openDir flag is correct).
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home_path);
+
+    // Without SUDO_UID/SUDO_GID (non-root test env), chown is skipped,
+    // but the dir-creation path runs in full.
+    try ensureUserXdgDirs(allocator, home_path);
+
+    const abs = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home_path});
+    defer allocator.free(abs);
+    var d = try std.fs.openDirAbsolute(abs, .{ .iterate = true });
+    d.close();
 }
 
 test "install: buildSystemctlUserArgv direct shape" {
