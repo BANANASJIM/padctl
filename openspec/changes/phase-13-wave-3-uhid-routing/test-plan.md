@@ -59,7 +59,7 @@ is soft-gated per the Wave 1 / Wave 4 pattern (PR #127, PR #140, PR #154 B2).
 - [ ] **TP13**: Non-ASCII normalization — a device name containing non-ASCII
   bytes (e.g. `"Pad \xe4\xb8\xad"`) produces a device-id containing only ASCII
   alphanum and `-`.
-- [ ] **TP14**: FNV-16 known-answer vector — `fnv16("abc")` returns the pinned
+- [ ] **TP14**: `hash16` known-answer vector — `hash16("padctl/vader-5-pro-0000:00:14.0-1.3")` returns the pinned
   reference value (protects against silent hash changes).
 - [ ] **TP15**: Counter fallback advances — `buildUniq(alloc, n, null, 1)` and
   `buildUniq(alloc, n, null, 2)` differ at the counter substring.

@@ -339,7 +339,7 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
       if (phys_key == null) uniq_counter.* += 1;
 
       // T4g2: primary UHID card
-      const descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg);
+      const descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
       defer allocator.free(descriptor);
       const primary = try uhid_mod.UhidDevice.init(allocator, .{
           .name = cfg.device.name,
@@ -463,10 +463,12 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
 
 ### T5d: Event-loop IMU emit dispatch
 
-- [ ] Locate the per-frame dispatch in `src/event_loop.zig` where
-  `primary_output.emit(state)` is called.
 - [ ] Add an `EventLoopContext` field `imu_output: ?uinput.OutputDevice = null`.
-- [ ] After the primary emit, add:
+- [ ] `src/event_loop.zig` has **two** `ctx.output.emit(state)` call sites per
+  frame: the mapper path (~line 668) and the passthrough / `synthesizeDpadAxes`
+  branch (~line 678). Add the IMU emit block **after BOTH** primary-emit calls
+  (grep `ctx\.output\.emit` to locate the authoritative current line numbers —
+  spec-writer's numbers are from base `8adfc19` and may drift):
   ```zig
   if (ctx.imu_output) |imu_out| {
       imu_out.emit(state) catch |err| std.log.warn("imu emit failed: {}", .{err});

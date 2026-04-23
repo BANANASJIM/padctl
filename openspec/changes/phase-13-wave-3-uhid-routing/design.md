@@ -323,7 +323,7 @@ if (use_uhid) {
     if (phys_key == null) uniq_counter.* += 1;
 
     // Primary pad UHID card
-    const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg);
+    const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
     defer allocator.free(primary_descriptor);
     const primary_uhid = try uhid.UhidDevice.init(allocator, .{
         .name = cfg.device.name,
