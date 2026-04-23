@@ -2,6 +2,7 @@ const std = @import("std");
 const macro_mod = @import("macro.zig");
 const remap = @import("remap.zig");
 const timer_queue_mod = @import("timer_queue.zig");
+const state_mod = @import("state.zig");
 
 const Macro = macro_mod.Macro;
 const MacroStep = macro_mod.MacroStep;
@@ -9,6 +10,8 @@ const aux_event_mod = @import("aux_event.zig");
 const AuxEventList = aux_event_mod.AuxEventList;
 const AuxEvent = aux_event_mod.AuxEvent;
 const TimerQueue = timer_queue_mod.TimerQueue;
+const RemapTargetResolved = remap.RemapTargetResolved;
+const ButtonId = state_mod.ButtonId;
 
 pub const MacroPlayer = struct {
     macro: *const Macro,
@@ -16,6 +19,7 @@ pub const MacroPlayer = struct {
     waiting_for_release: bool,
     timer_token: u32,
     trigger_src_idx: u6,
+    held_gamepad_buttons: u64,
 
     pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
         return .{
@@ -24,12 +28,24 @@ pub const MacroPlayer = struct {
             .waiting_for_release = false,
             .timer_token = token,
             .trigger_src_idx = src_idx,
+            .held_gamepad_buttons = 0,
         };
     }
 
     /// Execute synchronous steps until delay / pause_for_release / end.
     /// Returns true when the macro is finished (caller should remove it).
-    pub fn step(self: *MacroPlayer, aux: *AuxEventList, queue: *TimerQueue) !bool {
+    ///
+    /// injected_buttons: mapper-owned bitmask for synthesized gamepad bits; tap/down/up
+    ///   of a .gamepad_button target set or clear bits here.
+    /// pending_tap_release: tap bits ORed by this frame; mapper clears them next frame
+    ///   (same cadence as the remap tap path — see mapper.emitTapEvent).
+    pub fn step(
+        self: *MacroPlayer,
+        aux: *AuxEventList,
+        queue: *TimerQueue,
+        injected_buttons: *u64,
+        pending_tap_release: *u64,
+    ) !bool {
         if (self.waiting_for_release) return false;
 
         while (self.step_index < self.macro.steps.len) {
@@ -37,17 +53,16 @@ pub const MacroPlayer = struct {
             self.step_index += 1;
             switch (s) {
                 .tap => |name| {
-                    const code = resolveKeyCode(name) orelse continue;
-                    aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
-                    aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
+                    const target = resolveTargetSafe(name) orelse continue;
+                    emitTap(target, aux, injected_buttons, pending_tap_release);
                 },
                 .down => |name| {
-                    const code = resolveKeyCode(name) orelse continue;
-                    aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
+                    const target = resolveTargetSafe(name) orelse continue;
+                    emitDown(target, aux, injected_buttons, &self.held_gamepad_buttons);
                 },
                 .up => |name| {
-                    const code = resolveKeyCode(name) orelse continue;
-                    aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
+                    const target = resolveTargetSafe(name) orelse continue;
+                    emitUp(target, aux, injected_buttons, &self.held_gamepad_buttons);
                 },
                 .delay => |ms| {
                     const deadline = std.time.nanoTimestamp() + @as(i128, ms) * std.time.ns_per_ms;
@@ -67,10 +82,12 @@ pub const MacroPlayer = struct {
         self.waiting_for_release = false;
     }
 
-    /// Emit up-events for any currently held keys (used on layer switch / cancel).
-    pub fn emitPendingReleases(self: *const MacroPlayer, aux: *AuxEventList) void {
-        // Walk steps up to step_index, track net held state per name.
-        // Simple approach: scan for down/tap before step_index, emit up for downs without a subsequent up.
+    /// Emit releases for any keys/buttons still held by this player.
+    /// Called on layer switch / macro cancel. Drops key-up aux events AND clears
+    /// held gamepad bits from injected_buttons.
+    pub fn emitPendingReleases(self: *MacroPlayer, aux: *AuxEventList, injected_buttons: *u64) void {
+        // Walk steps up to step_index, track net held state per name (keys / mouse buttons).
+        // Gamepad bits are tracked live in self.held_gamepad_buttons and cleared below.
         var held: [32]?[]const u8 = [_]?[]const u8{null} ** 32;
         var held_len: usize = 0;
 
@@ -83,7 +100,6 @@ pub const MacroPlayer = struct {
                     }
                 },
                 .up => |name| {
-                    // Remove from held list
                     for (held[0..held_len], 0..) |h, i| {
                         if (h) |hn| {
                             if (std.mem.eql(u8, hn, name)) {
@@ -94,33 +110,98 @@ pub const MacroPlayer = struct {
                         }
                     }
                 },
-                .tap => {
-                    // tap is self-contained press+release; no residual hold
-                },
+                .tap => {},
                 .delay, .pause_for_release => {},
             }
         }
 
         for (held[0..held_len]) |h| {
             const name = h orelse continue;
-            const code = resolveKeyCode(name) orelse continue;
-            aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
+            const target = resolveTargetSafe(name) orelse continue;
+            switch (target) {
+                .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
+                .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
+                .gamepad_button => {},
+                .disabled, .macro => {},
+            }
         }
+
+        injected_buttons.* &= ~self.held_gamepad_buttons;
+        self.held_gamepad_buttons = 0;
     }
 };
 
-fn resolveKeyCode(name: []const u8) ?u16 {
-    const target = remap.resolveTarget(name) catch return null;
-    return switch (target) {
-        .key => |code| code,
-        else => null,
-    };
+fn resolveTargetSafe(name: []const u8) ?RemapTargetResolved {
+    return remap.resolveTarget(name) catch null;
+}
+
+fn emitTap(
+    target: RemapTargetResolved,
+    aux: *AuxEventList,
+    injected_buttons: *u64,
+    pending_tap_release: *u64,
+) void {
+    switch (target) {
+        .key => |code| {
+            aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
+            aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
+        },
+        .mouse_button => |code| {
+            aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {};
+            aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {};
+        },
+        .gamepad_button => |dst| {
+            const mask = buttonMask(dst);
+            injected_buttons.* |= mask;
+            pending_tap_release.* |= mask;
+        },
+        .disabled, .macro => {},
+    }
+}
+
+fn emitDown(
+    target: RemapTargetResolved,
+    aux: *AuxEventList,
+    injected_buttons: *u64,
+    held_gamepad: *u64,
+) void {
+    switch (target) {
+        .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {},
+        .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {},
+        .gamepad_button => |dst| {
+            const mask = buttonMask(dst);
+            injected_buttons.* |= mask;
+            held_gamepad.* |= mask;
+        },
+        .disabled, .macro => {},
+    }
+}
+
+fn emitUp(
+    target: RemapTargetResolved,
+    aux: *AuxEventList,
+    injected_buttons: *u64,
+    held_gamepad: *u64,
+) void {
+    switch (target) {
+        .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
+        .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
+        .gamepad_button => |dst| {
+            const mask = buttonMask(dst);
+            injected_buttons.* &= ~mask;
+            held_gamepad.* &= ~mask;
+        },
+        .disabled, .macro => {},
+    }
+}
+
+fn buttonMask(id: ButtonId) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
 }
 
 // --- tests ---
 
 const testing = std.testing;
-const mapping = @import("../config/mapping.zig");
 
 fn makePlayer(m: *const Macro) MacroPlayer {
     return MacroPlayer.init(m, 1, 0);
@@ -130,23 +211,41 @@ fn dummyQueue(allocator: std.mem.Allocator) TimerQueue {
     return TimerQueue.init(allocator, -1);
 }
 
+const StepCtx = struct {
+    aux: AuxEventList = .{},
+    queue: TimerQueue,
+    injected: u64 = 0,
+    tap_release: u64 = 0,
+
+    fn init(allocator: std.mem.Allocator) StepCtx {
+        return .{ .queue = dummyQueue(allocator) };
+    }
+
+    fn deinit(self: *StepCtx) void {
+        self.queue.deinit();
+    }
+
+    fn step(self: *StepCtx, p: *MacroPlayer) !bool {
+        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release);
+    }
+};
+
 test "macro_player: tap step press then release emitted" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{.{ .tap = "KEY_B" }};
     const m = Macro{ .name = "t", .steps = &steps };
     var player = makePlayer(&m);
-    var aux = AuxEventList{};
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
 
-    const done = try player.step(&aux, &q);
+    const done = try ctx.step(&player);
     try testing.expect(done);
-    try testing.expectEqual(@as(usize, 2), aux.len);
-    switch (aux.get(0)) {
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
+    switch (ctx.aux.get(0)) {
         .key => |k| try testing.expect(k.pressed),
         else => return error.WrongType,
     }
-    switch (aux.get(1)) {
+    switch (ctx.aux.get(1)) {
         .key => |k| try testing.expect(!k.pressed),
         else => return error.WrongType,
     }
@@ -157,18 +256,17 @@ test "macro_player: down + up steps held then released" {
     const steps = [_]MacroStep{ .{ .down = "KEY_LEFTSHIFT" }, .{ .up = "KEY_LEFTSHIFT" } };
     const m = Macro{ .name = "t", .steps = &steps };
     var player = makePlayer(&m);
-    var aux = AuxEventList{};
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
 
-    const done = try player.step(&aux, &q);
+    const done = try ctx.step(&player);
     try testing.expect(done);
-    try testing.expectEqual(@as(usize, 2), aux.len);
-    switch (aux.get(0)) {
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
+    switch (ctx.aux.get(0)) {
         .key => |k| try testing.expect(k.pressed),
         else => return error.WrongType,
     }
-    switch (aux.get(1)) {
+    switch (ctx.aux.get(1)) {
         .key => |k| try testing.expect(!k.pressed),
         else => return error.WrongType,
     }
@@ -179,21 +277,18 @@ test "macro_player: delay arms timer queue returns not-done" {
     const steps = [_]MacroStep{ .{ .tap = "KEY_A" }, .{ .delay = 50 }, .{ .tap = "KEY_B" } };
     const m = Macro{ .name = "t", .steps = &steps };
     var player = makePlayer(&m);
-    var aux = AuxEventList{};
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
 
-    // First resume: executes tap A, hits delay, stops
-    const done1 = try player.step(&aux, &q);
+    const done1 = try ctx.step(&player);
     try testing.expect(!done1);
-    try testing.expectEqual(@as(usize, 2), aux.len); // only tap A (press+release)
-    try testing.expectEqual(@as(usize, 1), q.heap.count());
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
+    try testing.expectEqual(@as(usize, 1), ctx.queue.heap.count());
 
-    // Second resume (after timer): executes tap B, finishes
-    var aux2 = AuxEventList{};
-    const done2 = try player.step(&aux2, &q);
+    ctx.aux = .{};
+    const done2 = try ctx.step(&player);
     try testing.expect(done2);
-    try testing.expectEqual(@as(usize, 2), aux2.len);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
 }
 
 test "macro_player: pause_for_release halts until notifyTriggerReleased" {
@@ -201,20 +296,18 @@ test "macro_player: pause_for_release halts until notifyTriggerReleased" {
     const steps = [_]MacroStep{ .pause_for_release, .{ .tap = "KEY_A" } };
     const m = Macro{ .name = "t", .steps = &steps };
     var player = makePlayer(&m);
-    var aux = AuxEventList{};
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
 
-    const done1 = try player.step(&aux, &q);
+    const done1 = try ctx.step(&player);
     try testing.expect(!done1);
-    try testing.expectEqual(@as(usize, 0), aux.len);
+    try testing.expectEqual(@as(usize, 0), ctx.aux.len);
 
-    // notify release -> resume continues
     player.notifyTriggerReleased();
-    var aux2 = AuxEventList{};
-    const done2 = try player.step(&aux2, &q);
+    ctx.aux = .{};
+    const done2 = try ctx.step(&player);
     try testing.expect(done2);
-    try testing.expectEqual(@as(usize, 2), aux2.len);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
 }
 
 test "macro_player: emitPendingReleases down without up emits release" {
@@ -222,14 +315,13 @@ test "macro_player: emitPendingReleases down without up emits release" {
     const steps = [_]MacroStep{ .{ .down = "KEY_LEFTSHIFT" }, .{ .delay = 100 } };
     const m = Macro{ .name = "t", .steps = &steps };
     var player = makePlayer(&m);
-    var aux = AuxEventList{};
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
 
-    _ = try player.step(&aux, &q); // executes down, hits delay
+    _ = try ctx.step(&player);
 
     var aux2 = AuxEventList{};
-    player.emitPendingReleases(&aux2);
+    player.emitPendingReleases(&aux2, &ctx.injected);
     try testing.expectEqual(@as(usize, 1), aux2.len);
     switch (aux2.get(0)) {
         .key => |k| try testing.expect(!k.pressed),
@@ -242,24 +334,23 @@ test "macro_player: shift_hold — down pause_for_release up" {
     const steps = [_]MacroStep{ .{ .down = "KEY_LEFTSHIFT" }, .pause_for_release, .{ .up = "KEY_LEFTSHIFT" } };
     const m = Macro{ .name = "shift_hold", .steps = &steps };
     var player = makePlayer(&m);
-    var aux = AuxEventList{};
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
 
-    const done1 = try player.step(&aux, &q);
+    const done1 = try ctx.step(&player);
     try testing.expect(!done1);
-    try testing.expectEqual(@as(usize, 1), aux.len);
-    switch (aux.get(0)) {
+    try testing.expectEqual(@as(usize, 1), ctx.aux.len);
+    switch (ctx.aux.get(0)) {
         .key => |k| try testing.expect(k.pressed),
         else => return error.WrongType,
     }
 
     player.notifyTriggerReleased();
-    var aux2 = AuxEventList{};
-    const done2 = try player.step(&aux2, &q);
+    ctx.aux = .{};
+    const done2 = try ctx.step(&player);
     try testing.expect(done2);
-    try testing.expectEqual(@as(usize, 1), aux2.len);
-    switch (aux2.get(0)) {
+    try testing.expectEqual(@as(usize, 1), ctx.aux.len);
+    switch (ctx.aux.get(0)) {
         .key => |k| try testing.expect(!k.pressed),
         else => return error.WrongType,
     }
@@ -273,17 +364,16 @@ test "macro_player: two players advance step_index independently" {
     const mb = Macro{ .name = "b", .steps = &steps_b };
     var pa = MacroPlayer.init(&ma, 1, 0);
     var pb = MacroPlayer.init(&mb, 2, 1);
-    var q = dummyQueue(allocator);
-    defer q.deinit();
+    var ctx_a = StepCtx.init(allocator);
+    defer ctx_a.deinit();
+    var ctx_b = StepCtx.init(allocator);
+    defer ctx_b.deinit();
 
-    var auxa = AuxEventList{};
-    var auxb = AuxEventList{};
-
-    const done_a = try pa.step(&auxa, &q);
-    const done_b = try pb.step(&auxb, &q);
+    const done_a = try ctx_a.step(&pa);
+    const done_b = try ctx_b.step(&pb);
 
     try testing.expect(done_a);
     try testing.expect(done_b);
-    try testing.expectEqual(@as(usize, 4), auxa.len); // tap A + tap B
-    try testing.expectEqual(@as(usize, 2), auxb.len); // tap C
+    try testing.expectEqual(@as(usize, 4), ctx_a.aux.len);
+    try testing.expectEqual(@as(usize, 2), ctx_b.aux.len);
 }

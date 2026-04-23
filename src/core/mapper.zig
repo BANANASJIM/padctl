@@ -132,8 +132,8 @@ pub const Mapper = struct {
             // Reset dpad prev so edge detection fires on the next frame.
             self.prev.dpad_x = 0;
             self.prev.dpad_y = 0;
-            // Cancel in-flight macros; emit releases for any held keys.
-            for (self.active_macros.items) |*p| p.emitPendingReleases(&aux);
+            // Cancel in-flight macros; emit releases for any held keys/buttons.
+            for (self.active_macros.items) |*p| p.emitPendingReleases(&aux, &self.injected_buttons);
             self.active_macros.clearRetainingCapacity();
         }
 
@@ -285,9 +285,15 @@ pub const Mapper = struct {
         }
 
         // [8] resume all active macro players; remove finished ones
+        var macro_tap_release: u64 = 0;
         var i: usize = 0;
         while (i < self.active_macros.items.len) {
-            const done = self.active_macros.items[i].step(&aux, &self.timer_queue) catch |err| blk: {
+            const done = self.active_macros.items[i].step(
+                &aux,
+                &self.timer_queue,
+                &self.injected_buttons,
+                &macro_tap_release,
+            ) catch |err| blk: {
                 std.log.warn("macro step failed: {}", .{err});
                 break :blk false;
             };
@@ -296,6 +302,10 @@ pub const Mapper = struct {
             } else {
                 i += 1;
             }
+        }
+        if (macro_tap_release != 0) {
+            const existing = self.pending_tap_release orelse 0;
+            self.pending_tap_release = existing | macro_tap_release;
         }
 
         // assemble emit state
@@ -352,13 +362,19 @@ pub const Mapper = struct {
         }
 
         var aux = AuxEventList{};
+        var macro_tap_release: u64 = 0;
         var buf: [16]timer_queue_mod.Deadline = undefined;
         const expired = self.timer_queue.drainExpired(now_ns, &buf);
         for (expired) |d| {
             var idx: usize = 0;
             while (idx < self.active_macros.items.len) {
                 if (self.active_macros.items[idx].timer_token == d.token) {
-                    const done = self.active_macros.items[idx].step(&aux, &self.timer_queue) catch |err| blk: {
+                    const done = self.active_macros.items[idx].step(
+                        &aux,
+                        &self.timer_queue,
+                        &self.injected_buttons,
+                        &macro_tap_release,
+                    ) catch |err| blk: {
                         std.log.warn("macro step failed: {}", .{err});
                         break :blk false;
                     };
@@ -371,6 +387,10 @@ pub const Mapper = struct {
                 }
                 idx += 1;
             }
+        }
+        if (macro_tap_release != 0) {
+            const existing = self.pending_tap_release orelse 0;
+            self.pending_tap_release = existing | macro_tap_release;
         }
         return aux;
     }

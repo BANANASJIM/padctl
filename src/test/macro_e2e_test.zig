@@ -162,7 +162,9 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
 
     // First step: tap B (press+release), then hits delay → not done.
     var aux1 = AuxEventList{};
-    const done1 = try player.step(&aux1, &q);
+    var injected1: u64 = 0;
+    var tap_rel1: u64 = 0;
+    const done1 = try player.step(&aux1, &q, &injected1, &tap_rel1);
     try testing.expect(!done1);
     // Two events: KEY_B press + release.
     try testing.expectEqual(@as(usize, 2), aux1.len);
@@ -185,7 +187,9 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
 
     // Second step (after timer expiry): tap LEFT → done.
     var aux2 = AuxEventList{};
-    const done2 = try player.step(&aux2, &q);
+    var injected2: u64 = 0;
+    var tap_rel2: u64 = 0;
+    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2);
     try testing.expect(done2);
     try testing.expectEqual(@as(usize, 2), aux2.len);
     switch (aux2.get(0)) {
@@ -219,7 +223,9 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
 
     // First step: down LSHIFT → press emitted, then pause_for_release → halts.
     var aux1 = AuxEventList{};
-    const done1 = try player.step(&aux1, &q);
+    var injected1: u64 = 0;
+    var tap_rel1: u64 = 0;
+    const done1 = try player.step(&aux1, &q, &injected1, &tap_rel1);
     try testing.expect(!done1);
     try testing.expectEqual(@as(usize, 1), aux1.len);
     switch (aux1.get(0)) {
@@ -233,14 +239,18 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
 
     // Trigger held — no further output.
     var aux2 = AuxEventList{};
-    const done2 = try player.step(&aux2, &q);
+    var injected2: u64 = 0;
+    var tap_rel2: u64 = 0;
+    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2);
     try testing.expect(!done2);
     try testing.expectEqual(@as(usize, 0), aux2.len);
 
     // Release trigger → resume → up LSHIFT → done.
     player.notifyTriggerReleased();
     var aux3 = AuxEventList{};
-    const done3 = try player.step(&aux3, &q);
+    var injected3: u64 = 0;
+    var tap_rel3: u64 = 0;
+    const done3 = try player.step(&aux3, &q, &injected3, &tap_rel3);
     try testing.expect(done3);
     try testing.expectEqual(@as(usize, 1), aux3.len);
     switch (aux3.get(0)) {
