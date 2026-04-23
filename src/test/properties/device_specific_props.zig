@@ -11,6 +11,7 @@ const testing = std.testing;
 
 const device_mod = @import("../../config/device.zig");
 const interp_mod = @import("../../core/interpreter.zig");
+const command = @import("../../core/command.zig");
 
 const Interpreter = interp_mod.Interpreter;
 
@@ -234,4 +235,148 @@ test "device_specific: DualSense BT mode report parsing (report_id 0x31, CRC32)"
 
     try testing.expect(delta.gyro_x != null);
     try testing.expectEqual(gyro_x_val, delta.gyro_x.?);
+}
+
+// --- DualSense adaptive trigger template rendering tests ---
+//
+// fillTemplate u8 convention: Param.value is u16, the "u8" type extracts the
+// HIGH byte (value >> 8). To get byte b, pass value = @as(u16, b) << 8.
+
+fn p(name: []const u8, byte_val: u8) command.Param {
+    return .{ .name = name, .value = @as(u16, byte_val) << 8 };
+}
+
+test "dualsense: adaptive_trigger_off template renders to all-zero body except header" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+
+    const cmds = parsed.value.commands orelse return error.NoCommands;
+    const cmd = cmds.map.get("adaptive_trigger_off") orelse return error.NoCmd;
+
+    const result = try command.fillTemplate(allocator, cmd.template, &.{});
+    defer allocator.free(result);
+
+    try testing.expectEqual(@as(usize, 63), result.len);
+    try testing.expectEqual(@as(u8, 0x02), result[0]);
+    try testing.expectEqual(@as(u8, 0x0c), result[1]);
+    for (result[2..]) |b| try testing.expectEqual(@as(u8, 0), b);
+}
+
+test "dualsense: adaptive_trigger_feedback template renders correct byte positions" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+
+    const cmds = parsed.value.commands orelse return error.NoCommands;
+    const cmd = cmds.map.get("adaptive_trigger_feedback") orelse return error.NoCmd;
+
+    const result = try command.fillTemplate(allocator, cmd.template, &.{
+        p("r_position", 70),
+        p("r_strength", 200),
+        p("l_position", 50),
+        p("l_strength", 100),
+    });
+    defer allocator.free(result);
+
+    try testing.expectEqual(@as(usize, 63), result.len);
+    // Right trigger section
+    try testing.expectEqual(@as(u8, 0x01), result[11]); // mode = Feedback
+    try testing.expectEqual(@as(u8, 70), result[12]); // r_position
+    try testing.expectEqual(@as(u8, 200), result[13]); // r_strength
+    // Left trigger section
+    try testing.expectEqual(@as(u8, 0x01), result[22]); // mode = Feedback
+    try testing.expectEqual(@as(u8, 50), result[23]); // l_position
+    try testing.expectEqual(@as(u8, 100), result[24]); // l_strength
+}
+
+test "dualsense: adaptive_trigger_weapon template renders correct byte positions" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+
+    const cmds = parsed.value.commands orelse return error.NoCommands;
+    const cmd = cmds.map.get("adaptive_trigger_weapon") orelse return error.NoCmd;
+
+    const result = try command.fillTemplate(allocator, cmd.template, &.{
+        p("r_start", 20),
+        p("r_end", 100),
+        p("r_strength", 128),
+        p("l_start", 30),
+        p("l_end", 90),
+        p("l_strength", 64),
+    });
+    defer allocator.free(result);
+
+    try testing.expectEqual(@as(usize, 63), result.len);
+    try testing.expectEqual(@as(u8, 0x02), result[11]); // mode = Weapon
+    try testing.expectEqual(@as(u8, 20), result[12]); // r_start
+    try testing.expectEqual(@as(u8, 100), result[13]); // r_end
+    try testing.expectEqual(@as(u8, 128), result[14]); // r_strength
+    try testing.expectEqual(@as(u8, 0x02), result[22]); // mode = Weapon
+    try testing.expectEqual(@as(u8, 30), result[23]); // l_start
+    try testing.expectEqual(@as(u8, 90), result[24]); // l_end
+    try testing.expectEqual(@as(u8, 64), result[25]); // l_strength
+}
+
+test "dualsense: adaptive_trigger_vibration template renders correct byte positions" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+
+    const cmds = parsed.value.commands orelse return error.NoCommands;
+    const cmd = cmds.map.get("adaptive_trigger_vibration") orelse return error.NoCmd;
+
+    const result = try command.fillTemplate(allocator, cmd.template, &.{
+        p("r_position", 50),
+        p("r_amplitude", 180),
+        p("r_frequency", 20),
+        p("l_position", 40),
+        p("l_amplitude", 120),
+        p("l_frequency", 15),
+    });
+    defer allocator.free(result);
+
+    try testing.expectEqual(@as(usize, 63), result.len);
+    try testing.expectEqual(@as(u8, 0x06), result[11]); // mode = Vibration
+    try testing.expectEqual(@as(u8, 50), result[12]); // r_position
+    try testing.expectEqual(@as(u8, 180), result[13]); // r_amplitude
+    try testing.expectEqual(@as(u8, 20), result[14]); // r_frequency
+    try testing.expectEqual(@as(u8, 0x06), result[22]); // mode = Vibration
+    try testing.expectEqual(@as(u8, 40), result[23]); // l_position
+    try testing.expectEqual(@as(u8, 120), result[24]); // l_amplitude
+    try testing.expectEqual(@as(u8, 15), result[25]); // l_frequency
+}
+
+test "dualsense: adaptive_trigger_feedback substitution is position-sensitive" {
+    // Sanity check: swapping r_position and r_strength produces a different
+    // packet, proving the renderer is position-sensitive (not name-insensitive).
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualsense.toml");
+    defer parsed.deinit();
+
+    const cmds = parsed.value.commands orelse return error.NoCommands;
+    const cmd = cmds.map.get("adaptive_trigger_feedback") orelse return error.NoCmd;
+
+    const correct = try command.fillTemplate(allocator, cmd.template, &.{
+        p("r_position", 70),
+        p("r_strength", 200),
+        p("l_position", 50),
+        p("l_strength", 100),
+    });
+    defer allocator.free(correct);
+
+    // Deliberately swap position and strength values.
+    const swapped = try command.fillTemplate(allocator, cmd.template, &.{
+        p("r_position", 200),
+        p("r_strength", 70),
+        p("l_position", 100),
+        p("l_strength", 50),
+    });
+    defer allocator.free(swapped);
+
+    try testing.expect(!std.mem.eql(u8, correct, swapped));
+    // Position bytes differ at expected offsets.
+    try testing.expectEqual(@as(u8, 70), correct[12]);
+    try testing.expectEqual(@as(u8, 200), swapped[12]);
 }

@@ -293,7 +293,7 @@ pub const UhidDevice = struct {
         return self;
     }
 
-    fn sendCreate(fd: posix.fd_t, cfg: Config) InitError!void {
+    pub fn sendCreate(fd: posix.fd_t, cfg: Config) InitError!void {
         var ev = std.mem.zeroes(UhidCreate2Event);
         ev.type = UHID_CREATE2;
 
@@ -739,4 +739,96 @@ test "uhid: close() is idempotent (second call is a no-op)" {
     // buffer doesn't linger into a later test.
     var scratch: [UHID_EVENT_SIZE]u8 = undefined;
     _ = try posix.read(fds[0], &scratch);
+}
+
+test "uhid: sendCreate writes uniq bytes correctly into UHID_CREATE2 payload" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const test_uniq = "padctl/steam-deck-0";
+    const cfg = Config{
+        .vid = 0x1234,
+        .pid = 0x5678,
+        .name = "test",
+        .uniq = test_uniq,
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+
+    try UhidDevice.sendCreate(fds[1], cfg);
+
+    var buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const n = try posix.read(fds[0], &buf);
+    try testing.expectEqual(UHID_EVENT_SIZE, n);
+
+    try testing.expectEqual(UHID_CREATE2, std.mem.readInt(u32, buf[0..4], .little));
+
+    const uniq_off = @offsetOf(UhidCreate2Event, "payload") + @offsetOf(UhidCreate2Req, "uniq");
+    try testing.expectEqualSlices(u8, test_uniq, buf[uniq_off..][0..test_uniq.len]);
+    try testing.expectEqual(@as(u8, 0), buf[uniq_off + test_uniq.len]);
+}
+
+test "uhid: sendCreate truncates uniq at 63 bytes (64-byte field, NUL reserved)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const uniq_off = @offsetOf(UhidCreate2Event, "payload") + @offsetOf(UhidCreate2Req, "uniq");
+
+    // 63 bytes — fits without truncation.
+    {
+        const uniq63 = "A" ** 63;
+        const cfg = Config{
+            .vid = 0x1,
+            .pid = 0x2,
+            .name = "t",
+            .uniq = uniq63,
+            .descriptor = &[_]u8{0xC0},
+        };
+        try UhidDevice.sendCreate(fds[1], cfg);
+        var buf: [UHID_EVENT_SIZE]u8 = undefined;
+        _ = try posix.read(fds[0], &buf);
+        try testing.expectEqualSlices(u8, uniq63, buf[uniq_off..][0..63]);
+        try testing.expectEqual(@as(u8, 0), buf[uniq_off + 63]);
+    }
+
+    // 64 bytes — truncated to 63 + NUL.
+    {
+        const uniq64 = "B" ** 64;
+        const cfg = Config{
+            .vid = 0x1,
+            .pid = 0x2,
+            .name = "t",
+            .uniq = uniq64,
+            .descriptor = &[_]u8{0xC0},
+        };
+        try UhidDevice.sendCreate(fds[1], cfg);
+        var buf: [UHID_EVENT_SIZE]u8 = undefined;
+        _ = try posix.read(fds[0], &buf);
+        try testing.expectEqualSlices(u8, "B" ** 63, buf[uniq_off..][0..63]);
+        try testing.expectEqual(@as(u8, 0), buf[uniq_off + 63]);
+    }
+
+    // 80 bytes — truncated to 63 + NUL.
+    {
+        const uniq80 = "C" ** 80;
+        const cfg = Config{
+            .vid = 0x1,
+            .pid = 0x2,
+            .name = "t",
+            .uniq = uniq80,
+            .descriptor = &[_]u8{0xC0},
+        };
+        try UhidDevice.sendCreate(fds[1], cfg);
+        var buf: [UHID_EVENT_SIZE]u8 = undefined;
+        _ = try posix.read(fds[0], &buf);
+        try testing.expectEqualSlices(u8, "C" ** 63, buf[uniq_off..][0..63]);
+        try testing.expectEqual(@as(u8, 0), buf[uniq_off + 63]);
+    }
 }
