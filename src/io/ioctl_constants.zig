@@ -13,8 +13,23 @@ pub const HIDIOCGRAWPHYS = blk: {
     break :blk @as(u32, @bitCast(req));
 };
 
+/// Dynamic-size ioctl: caller picks the user buffer length. Kernel copies
+/// up to `len` bytes of the `uniq` sysfs attribute (NUL-terminated) into it.
+pub fn HIDIOCGRAWUNIQ(len: u14) u32 {
+    const req = IOCTL.Request{ .dir = 2, .io_type = 'H', .nr = 0x08, .size = len };
+    return @bitCast(req);
+}
+
 // evdev
 pub const EVIOCGRAB = IOCTL.IOW('E', 0x90, c_int);
+
+/// Dynamic-size evdev ioctl: kernel copies up to `len` bytes of the device's
+/// uniq attribute (NUL-terminated) into the user buffer. SDL reads this to
+/// pair main-pad and IMU nodes — see ADR-015 §Stage 1 AC.
+pub fn EVIOCGUNIQ(len: u14) u32 {
+    const req = IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x08, .size = len };
+    return @bitCast(req);
+}
 
 // uinput
 pub const UI_DEV_CREATE = IOCTL.IO('U', 1);

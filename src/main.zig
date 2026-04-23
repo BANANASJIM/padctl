@@ -1024,6 +1024,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("core/rumble_scheduler.zig");
     _ = @import("test/bugfix_regression_test.zig");
+    _ = @import("test/uhid_uniq_pairing_test.zig");
     _ = @import("test/properties/config_props.zig");
     _ = @import("test/properties/contract_props.zig");
     _ = @import("test/properties/device_specific_props.zig");

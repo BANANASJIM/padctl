@@ -21,6 +21,8 @@ const std = @import("std");
 const posix = std.posix;
 const state = @import("../core/state.zig");
 const uinput = @import("uinput.zig");
+const device_cfg = @import("../config/device.zig");
+const descriptor = @import("uhid_descriptor.zig");
 
 // --- Kernel protocol constants ---------------------------------------------
 
@@ -123,8 +125,14 @@ pub fn uhidCreate(
     _ = try posix.write(fd, &buf);
 }
 
-/// Send a `UHID_INPUT2` event carrying an input report payload.
+/// Send a `UHID_INPUT2` event carrying an input report payload. Rejects
+/// payloads larger than `UHID_DATA_MAX` — the kernel's `uhid_input2_req.data`
+/// is a fixed `[4096]u8` and `uhid_input2_req.size` is a `u16`, so anything
+/// beyond 4096 bytes would both overrun the payload array (panic in safe
+/// builds, silent corruption in release) and truncate in the `size` field.
 pub fn uhidInput(fd: posix.fd_t, data: []const u8) !void {
+    if (data.len > UHID_DATA_MAX) return error.PayloadTooLong;
+
     var ev = std.mem.zeroes(UhidInput2Event);
     ev.type = UHID_INPUT2;
     ev.payload.size = @intCast(data.len);
@@ -182,6 +190,12 @@ pub const Config = struct {
     version: u32 = 0,
     /// HID country code. 0 = "not localized" which matches most gamepads.
     country: u32 = 0,
+    /// Optional `[output]` section the descriptor was built from. When set,
+    /// `emit()` packs HID reports via `uhid_descriptor.encodeReport` so the
+    /// bytes on the wire match the declared layout. When null, `emit()`
+    /// falls back to a raw 4-byte stick stub (legacy tests that pass a hand
+    /// -written descriptor without a matching `OutputConfig` still work).
+    output: ?device_cfg.OutputConfig = null,
 };
 
 /// A UHID-backed output device implementing the shared `OutputDevice` vtable.
@@ -205,6 +219,9 @@ pub const UhidDevice = struct {
     /// stores the backing TOML allocator; CI tests use string literals.
     name: []const u8,
     uniq: []const u8,
+    /// Optional `OutputConfig` — when set, `emit()` dispatches to the
+    /// descriptor-driven encoder. See `Config.output`.
+    output: ?device_cfg.OutputConfig,
 
     /// Construct a `UhidDevice` against a real `/dev/uhid` fd. Opens the
     /// kernel node, populates a `UhidCreate2Req`, and writes it.
@@ -238,6 +255,7 @@ pub const UhidDevice = struct {
             .pid = cfg.pid,
             .name = cfg.name,
             .uniq = cfg.uniq,
+            .output = cfg.output,
         };
         return self;
     }
@@ -270,6 +288,7 @@ pub const UhidDevice = struct {
             .pid = cfg.pid,
             .name = cfg.name,
             .uniq = cfg.uniq,
+            .output = cfg.output,
         };
         return self;
     }
@@ -329,22 +348,33 @@ pub const UhidDevice = struct {
         self.close();
     }
 
-    /// Emit a `UHID_INPUT2` event carrying a Wave-1 stub payload derived from
-    /// `s`. The payload is 4 bytes of stick axes mapped into the 0..255 HID
-    /// logical range — enough to exercise the vtable contract and the
-    /// `UhidSimulator` consumer harness. Wave 2 replaces this with the real
-    /// descriptor-driven encoder.
+    /// Emit a `UHID_INPUT2` event carrying an input report derived from `s`.
+    /// When `Config.output` was supplied, bytes are packed by
+    /// `uhid_descriptor.encodeReport` against the exact layout declared by
+    /// the descriptor (Report ID + buttons + hat + sticks + triggers +
+    /// touchpad). When `output` is null, a 4-byte stick-only stub is sent —
+    /// retained for tests that bring a hand-written descriptor without a
+    /// matching `OutputConfig`.
     pub fn emit(self: *UhidDevice, s: state.GamepadState) uinput.EmitError!void {
-        var payload: [4]u8 = undefined;
-        payload[0] = axisToU8(s.ax);
-        payload[1] = axisToU8(s.ay);
-        payload[2] = axisToU8(s.rx);
-        payload[3] = axisToU8(s.ry);
-
-        uhidInput(self.fd, &payload) catch |err| switch (err) {
-            error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
-            else => return error.WriteFailed,
-        };
+        if (self.output) |out| {
+            var report_buf: [descriptor.MAX_REPORT_BYTES]u8 = undefined;
+            const bytes = descriptor.encodeReport(out, s, &report_buf) catch
+                return error.WriteFailed;
+            uhidInput(self.fd, bytes) catch |err| switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+                else => return error.WriteFailed,
+            };
+        } else {
+            var payload: [4]u8 = undefined;
+            payload[0] = axisToU8(s.ax);
+            payload[1] = axisToU8(s.ay);
+            payload[2] = axisToU8(s.rx);
+            payload[3] = axisToU8(s.ry);
+            uhidInput(self.fd, &payload) catch |err| switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+                else => return error.WriteFailed,
+            };
+        }
 
         self.state_snapshot = s;
     }
@@ -428,13 +458,52 @@ test "uhid: axisToU8 clamps and centres" {
     try testing.expectEqual(@as(u8, 127), UhidDevice.axisToU8(-1));
 }
 
-test "uhid: UhidDevice vtable signature matches OutputDevice" {
-    // Compile-time guardrail: if UinputDevice's vtable ever evolves (say, to
-    // add a new member), this test forces UhidDevice to be updated in
-    // lockstep before the code base can even compile its tests.
-    const uhid_vt = std.meta.fieldInfo(@TypeOf(UhidDevice.vtable), .emit).type;
-    const uinput_vt = std.meta.fieldInfo(uinput.OutputDevice.VTable, .emit).type;
-    try testing.expectEqual(uinput_vt, uhid_vt);
+test "uhid: outputDevice().emit routes through UhidDevice.emit (not a stub)" {
+    // The prior revision compared UhidDevice.vtable.emit's type to
+    // OutputDevice.VTable.emit's type — a tautology since vtable is declared
+    // as `uinput.OutputDevice.VTable{ ... }`. This replacement asserts that a
+    // vtable-routed emit call reaches the real implementation by observing
+    // the bytes written to the backing fd change with the input state.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-vtable-dispatch",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    const out = dev.outputDevice();
+    // Emit a non-zero state — axisToU8 shifts away from the 128 centre.
+    try out.emit(.{ .ax = 32767, .ay = -32768, .rx = 0, .ry = 0 });
+
+    var buf: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &buf);
+    try testing.expectEqual(UHID_INPUT2, std.mem.readInt(u32, buf[0..4], .little));
+    // Bytes 6..10 are the stick payload after the u16 size field at offset 4.
+    try testing.expectEqual(@as(u8, 255), buf[6]); // ax full positive
+    try testing.expectEqual(@as(u8, 0), buf[7]); // ay full negative
+    try testing.expectEqual(@as(u8, 128), buf[8]); // rx centre
+    try testing.expectEqual(@as(u8, 128), buf[9]); // ry centre
+
+    // A second emit with the opposite state must produce different bytes —
+    // proves the call routed into the live UhidDevice.emit each time rather
+    // than capturing the first invocation's state.
+    try out.emit(.{ .ax = -32768, .ay = 32767, .rx = 0, .ry = 0 });
+    _ = try posix.read(fds[0], &buf);
+    try testing.expectEqual(@as(u8, 0), buf[6]);
+    try testing.expectEqual(@as(u8, 255), buf[7]);
+
+    out.close();
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &scratch);
 }
 
 test "uhid: init rejects empty name" {
@@ -575,6 +644,67 @@ test "uhid: initWithFd rejects negative fd" {
     // round-trips cleanly. Use a `var` so @as survives the const inference.
     const bogus_fd: posix.fd_t = -1;
     try testing.expectError(error.InvalidFd, UhidDevice.initWithFd(alloc, bogus_fd, cfg));
+}
+
+test "uhid: uhidInput rejects oversized payload (regression H4)" {
+    // Pre-fix: uhidInput blindly `@memcpy`'d `data` into the fixed 4096-byte
+    // payload array, which panics in safe builds and corrupts adjacent
+    // memory in release. Assert a slice larger than UHID_DATA_MAX now
+    // returns error.PayloadTooLong before touching the buffer.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const oversized = try testing.allocator.alloc(u8, UHID_DATA_MAX + 1);
+    defer testing.allocator.free(oversized);
+    @memset(oversized, 0xAA);
+
+    try testing.expectError(error.PayloadTooLong, uhidInput(fds[1], oversized));
+
+    // A boundary-case payload of exactly UHID_DATA_MAX must pass.
+    const ok_size = try testing.allocator.alloc(u8, UHID_DATA_MAX);
+    defer testing.allocator.free(ok_size);
+    @memset(ok_size, 0x55);
+    try uhidInput(fds[1], ok_size);
+
+    // Drain to keep the pipe clean for later tests.
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = try posix.read(fds[0], &scratch);
+}
+
+test "uhid: emitRaw maps PayloadTooLong to WriteFailed (vtable error stability)" {
+    // `emitRaw` returns `uinput.EmitError` which is `{ WriteFailed, DeviceGone }`
+    // — adding a new variant would ripple across every vtable call site. Map
+    // oversized payloads to `WriteFailed` so the new guard stays inside the
+    // existing error set.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    var fds: [2]posix.fd_t = undefined;
+    fds = try posix.pipe();
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-payload-guard",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[1], cfg);
+    defer alloc.destroy(dev);
+
+    const oversized = try alloc.alloc(u8, UHID_DATA_MAX + 512);
+    defer alloc.free(oversized);
+    @memset(oversized, 0x42);
+
+    try testing.expectError(error.WriteFailed, dev.emitRaw(oversized));
+
+    dev.close();
+    var scratch: [UHID_EVENT_SIZE]u8 = undefined;
+    _ = posix.read(fds[0], &scratch) catch {};
 }
 
 test "uhid: close() is idempotent (second call is a no-op)" {

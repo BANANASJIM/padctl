@@ -243,6 +243,7 @@ fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []const u8
         \\SupplementaryGroups=input
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
+        \\DeviceAllow=/dev/uhid rw
         \\DeviceAllow=char-input rw
         \\
         \\[Install]
@@ -256,6 +257,76 @@ fn resolveUdevDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []c
         return std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d", .{destdir});
     }
     return std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d", .{ destdir, prefix });
+}
+
+const modules_load_content =
+    \\# padctl requires these kernel modules for virtual gamepad support
+    \\uhid
+    \\uinput
+    \\
+;
+
+fn writeModulesLoad(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool) void {
+    // Immutable systems use /etc; otherwise prefer prefix/lib/modules-load.d
+    const dir_path = if (immutable)
+        std.fmt.allocPrint(allocator, "{s}/etc/modules-load.d", .{destdir}) catch return
+    else
+        std.fmt.allocPrint(allocator, "{s}{s}/lib/modules-load.d", .{ destdir, prefix }) catch return;
+    defer allocator.free(dir_path);
+
+    ensureDirAll(allocator, dir_path) catch |err| {
+        var errbuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: modules-load.d dir not created: {}\n", .{err}) catch "warning: modules-load.d dir error\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+        return;
+    };
+
+    const conf_path = std.fmt.allocPrint(allocator, "{s}/padctl.conf", .{dir_path}) catch return;
+    defer allocator.free(conf_path);
+
+    if (std.fs.createFileAbsolute(conf_path, .{ .truncate = true })) |f| {
+        defer f.close();
+        f.writeAll(modules_load_content) catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, conf_path) catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+    } else |err| {
+        var errbuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: modules-load.d not written: {}\n", .{err}) catch "warning: modules-load.d write error\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+    }
+}
+
+/// Returns the GID for the named group by parsing /etc/group, or null on failure.
+fn groupGid(name: []const u8) ?std.os.linux.gid_t {
+    const f = std.fs.openFileAbsolute("/etc/group", .{}) catch return null;
+    defer f.close();
+    var buf: [4096]u8 = undefined;
+    const n = f.readAll(&buf) catch return null;
+    var it = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (it.next()) |line| {
+        // Format: name:password:gid:members
+        var fields = std.mem.splitScalar(u8, line, ':');
+        const gname = fields.next() orelse continue;
+        _ = fields.next(); // password
+        const gid_str = fields.next() orelse continue;
+        if (!std.mem.eql(u8, gname, name)) continue;
+        return std.fmt.parseInt(std.os.linux.gid_t, gid_str, 10) catch null;
+    }
+    return null;
+}
+
+/// Returns true if the current process is a member of the named group.
+fn userInGroup(name: []const u8) bool {
+    const target_gid = groupGid(name) orelse return false;
+    if (std.os.linux.getegid() == target_gid) return true;
+    var gids: [64]std.os.linux.gid_t = undefined;
+    const ret = std.os.linux.getgroups(gids.len, &gids[0]);
+    if (ret > gids.len) return false;
+    for (gids[0..ret]) |g| {
+        if (g == target_gid) return true;
+    }
+    return false;
 }
 
 fn ensureDir(path: []const u8) !void {
@@ -1110,8 +1181,11 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         std.fs.deleteFileAbsolute(legacy_etc) catch {};
     }
 
-    // 4d. Install mapping configs (if --mapping specified, repeatable)
-    // Track per-mapping success so 4e only writes bindings for mappings
+    // 4d. Write modules-load.d so uhid and uinput are available at boot
+    writeModulesLoad(allocator, destdir, prefix, effective_immutable);
+
+    // 4e. Install mapping configs (if --mapping specified, repeatable)
+    // Track per-mapping success so 4f only writes bindings for mappings
     // that were actually installed (avoids a config.toml entry pointing
     // at a missing mapping file).
     var mapping_failed = false;
@@ -1139,10 +1213,10 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         }
     }
 
-    // 4e. Write device→mapping bindings to /etc/padctl/config.toml so the
+    // 4f. Write device→mapping bindings to /etc/padctl/config.toml so the
     //      daemon auto-applies the mapping at boot without a manual
     //      `padctl switch`. Only process mappings that were successfully
-    //      installed in 4d — writing a binding for a missing mapping file
+    //      installed in 4e — writing a binding for a missing mapping file
     //      would make reboot auto-apply point at nothing.
     if (installed_mappings.items.len > 0) {
         const devices_src = findDevicesSourceDir(allocator, self_dir, null) catch null;
@@ -1229,6 +1303,18 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     } else {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
     }
+
+    if (!userInGroup("input")) {
+        _ = std.posix.write(std.posix.STDOUT_FILENO,
+            \\
+            \\[padctl] Note: /dev/uhid and /dev/uinput now grant rw to 'input' group members.
+            \\[padctl] For 0-sudo UHID access from SSH/headless/test sessions, add yourself:
+            \\[padctl]   sudo usermod -aG input $USER
+            \\[padctl]   (then re-login for group membership to take effect)
+            \\[padctl] Graphical desktop users do not need this — uaccess ACL handles it automatically.
+            \\
+        ) catch {};
+    }
 }
 
 pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
@@ -1289,6 +1375,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/lib/udev/rules.d/60-padctl.rules",
         "/lib/udev/rules.d/61-padctl-driver-block.rules",
         "/lib/udev/rules.d/99-padctl.rules",
+        "/lib/modules-load.d/padctl.conf",
     };
 
     for (files) |suffix| {
@@ -1360,6 +1447,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             "/etc/udev/rules.d/60-padctl.rules",
             "/etc/udev/rules.d/61-padctl-driver-block.rules",
             "/etc/udev/rules.d/99-padctl.rules",
+            "/etc/modules-load.d/padctl.conf",
         };
         for (etc_files) |suffix| {
             const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ destdir, suffix });
@@ -1559,8 +1647,9 @@ fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []const U
         try buf.appendSlice(allocator, hotplug_line);
     }
 
-    try buf.appendSlice(allocator, "\n# uinput access for logged-in users\n");
-    try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\"\n");
+    // uaccess: graphical login ACL; GROUP+MODE: headless/SSH/test fallback via 'input' group
+    try buf.appendSlice(allocator, "\nSUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
+    try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uhid\",   TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
 
     var f = try std.fs.createFileAbsolute(rules_path, .{ .truncate = true });
     defer f.close();
@@ -2205,6 +2294,9 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null); // hidraw rule
     try testing.expect(std.mem.indexOf(u8, content, "GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
+    // ADR-015: /dev/uhid must get uaccess so the user service can create
+    // virtual SDL-visible gamepads without CAP_SYS_ADMIN.
+    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\"") != null);
 }
 
 test "install: findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
@@ -2450,6 +2542,19 @@ test "install: generateSystemServiceContent uses StateDirectory (not LogsDirecto
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
     try testing.expect(std.mem.indexOf(u8, content, "LogsDirectory") == null);
+}
+
+test "install: generateSystemServiceContent grants /dev/uhid DeviceAllow (ADR-015)" {
+    // ADR-015 §Dependencies: the UHID migration needs /dev/uhid access
+    // parallel to /dev/uinput. Pre-fix the template listed only hidraw,
+    // uinput, and char-input — UhidDevice.init would have failed with
+    // EACCES on a default install.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateSystemServiceContent(allocator, "/usr/local");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "DeviceAllow=/dev/uhid rw") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "DeviceAllow=/dev/uinput rw") != null);
 }
 
 test "install: parseYesNoDefaultYes empty input is yes (default-yes)" {
@@ -3880,4 +3985,37 @@ test "install: resolveTargetHomeFromFile falls back to /home/<user> on missing p
         try testing.expectEqualStrings(home_env, result);
     }
     // Root path with fallback is covered by integration / real-machine testing.
+}
+
+test "install: udev rule grants input group and uaccess tag to uhid and uinput" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(devices_dir);
+    try ensureDirAll(allocator, devices_dir);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
+
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\",   TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
+}
+
+test "install: modules-load.d content includes uhid and uinput" {
+    const testing = std.testing;
+    try testing.expect(std.mem.indexOf(u8, modules_load_content, "uhid") != null);
+    try testing.expect(std.mem.indexOf(u8, modules_load_content, "uinput") != null);
 }
