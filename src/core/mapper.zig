@@ -293,6 +293,7 @@ pub const Mapper = struct {
                 &self.timer_queue,
                 &self.injected_buttons,
                 &macro_tap_release,
+                now_ns,
             ) catch |err| blk: {
                 std.log.warn("macro step failed: {}", .{err});
                 break :blk false;
@@ -374,6 +375,7 @@ pub const Mapper = struct {
                         &self.timer_queue,
                         &self.injected_buttons,
                         &macro_tap_release,
+                        now_ns,
                     ) catch |err| blk: {
                         std.log.warn("macro step failed: {}", .{err});
                         break :blk false;
@@ -1041,7 +1043,7 @@ test "mapper: TimerQueue.arm OOM returns error" {
     var fa = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     var q = TimerQueue.init(fa.allocator(), -1);
     defer q.deinit();
-    try testing.expectError(error.OutOfMemory, q.arm(1000, 1));
+    try testing.expectError(error.OutOfMemory, q.arm(1000, 1, 0));
 }
 
 test "mapper: active_macros append OOM is silently ignored" {

@@ -45,6 +45,7 @@ pub const MacroPlayer = struct {
         queue: *TimerQueue,
         injected_buttons: *u64,
         pending_tap_release: *u64,
+        now_ns: i128,
     ) !bool {
         if (self.waiting_for_release) return false;
 
@@ -65,8 +66,8 @@ pub const MacroPlayer = struct {
                     emitUp(target, aux, injected_buttons, &self.held_gamepad_buttons);
                 },
                 .delay => |ms| {
-                    const deadline = std.time.nanoTimestamp() + @as(i128, ms) * std.time.ns_per_ms;
-                    try queue.arm(deadline, self.timer_token);
+                    const deadline = now_ns + @as(i128, ms) * std.time.ns_per_ms;
+                    try queue.arm(deadline, self.timer_token, now_ns);
                     return false;
                 },
                 .pause_for_release => {
@@ -226,7 +227,7 @@ const StepCtx = struct {
     }
 
     fn step(self: *StepCtx, p: *MacroPlayer) !bool {
-        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release);
+        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release, 0);
     }
 };
 
