@@ -121,6 +121,15 @@ pub const AuxConfig = struct {
     buttons: ?toml.HashMap([]const u8) = null,
 };
 
+pub const ImuConfig = struct {
+    backend: []const u8 = "uinput",
+    name: ?[]const u8 = null,
+    vid: ?i64 = null,
+    pid: ?i64 = null,
+    accel_range: ?[2]i64 = null,
+    gyro_range: ?[2]i64 = null,
+};
+
 pub const TouchpadConfig = struct {
     name: ?[]const u8 = null,
     x_min: i64 = 0,
@@ -150,6 +159,7 @@ pub const OutputConfig = struct {
     aux: ?AuxConfig = null,
     touchpad: ?TouchpadConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
+    imu: ?ImuConfig = null,
 };
 
 pub const WasmOverridesConfig = struct {
@@ -314,6 +324,23 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                     const range = me.range orelse return error.InvalidConfig;
                     if (range.len != 2) return error.InvalidConfig;
                 }
+            }
+        }
+    }
+
+    // IMU backend validation (Phase 13 Wave 3 T1c).
+    // ADR-015 §Alternatives forbids "uinput primary + [output.imu] present":
+    // uinput's EVIOCGUNIQ always returns -ENOENT, so SDL's strcmp pairing
+    // check fails on the primary side. Only the "uhid" backend is legal when
+    // [output.imu] is declared; unknown strings fail closed.
+    if (cfg.output) |out| {
+        if (out.imu) |imu| {
+            if (std.mem.eql(u8, imu.backend, "uhid")) {
+                // legal
+            } else if (std.mem.eql(u8, imu.backend, "uinput")) {
+                return error.InvalidConfig;
+            } else {
+                return error.InvalidConfig;
             }
         }
     }
@@ -1091,4 +1118,129 @@ test "device: fuzz parseString: no panic on arbitrary input" {
             if (result) |r| r.deinit() else |_| {}
         }
     }.run, .{});
+}
+
+// Phase 13 Wave 3 T1d: ImuConfig validate cases.
+
+test "validate: ImuConfig default (absent) is legal" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+    try std.testing.expect(result.value.output.?.imu == null);
+}
+
+test "validate: backend=uhid + [output.imu] present is legal" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\[output.imu]
+        \\backend = "uhid"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("uhid", result.value.output.?.imu.?.backend);
+}
+
+test "validate: backend=uinput + [output.imu] present is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\[output.imu]
+        \\backend = "uinput"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: backend=unknown is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\[output.imu]
+        \\backend = "xyz"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: TOML round-trip with [output.imu] backend and name" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\name = "Pad IMU"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("uhid", result.value.output.?.imu.?.backend);
+    try std.testing.expectEqualStrings("Pad IMU", result.value.output.?.imu.?.name.?);
+}
+
+test "validate: TOML round-trip missing [output.imu] leaves imu=null" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?ImuConfig, null), result.value.output.?.imu);
 }

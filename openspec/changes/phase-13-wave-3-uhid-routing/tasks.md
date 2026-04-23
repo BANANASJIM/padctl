@@ -51,20 +51,20 @@ Files: `src/config/device.zig`
 
 ### T1a: Add `ImuConfig` struct
 
-- [ ] In `src/config/device.zig`, near existing `FfConfig` / `AuxConfig`
+- [x] In `src/config/device.zig`, near existing `FfConfig` / `AuxConfig`
   declarations, add `pub const ImuConfig = struct { backend: []const u8 = "uinput", name: ?[]const u8 = null, vid: ?i64 = null, pid: ?i64 = null, accel_range: ?[2]i64 = null, gyro_range: ?[2]i64 = null };`
-- [ ] Verify no compilation error — field defaults + types must parse under
+- [x] Verify no compilation error — field defaults + types must parse under
   existing `zig-toml` bindings.
 
 ### T1b: Add `imu` field to `OutputConfig`
 
-- [ ] In `src/config/device.zig:141-153` `OutputConfig`, add
+- [x] In `src/config/device.zig:141-153` `OutputConfig`, add
   `imu: ?ImuConfig = null,` as the last field.
-- [ ] `zig build` passes.
+- [x] `zig build` passes.
 
 ### T1c: Extend `validate` with IMU backend rules
 
-- [ ] In `src/config/device.zig:221` `pub fn validate`, at the end of the
+- [x] In `src/config/device.zig:221` `pub fn validate`, at the end of the
   per-report loop, add a top-level `if (cfg.output) |out|` block:
   - If `out.imu` is `null`: legal, no action (fall through to the rest of
     validate — do NOT use a bare `return;` here, which would skip any
@@ -73,20 +73,20 @@ Files: `src/config/device.zig`
   - If `out.imu.?.backend == "uinput"`: return `error.InvalidConfig`
     (ADR-015 forbids "uinput primary + IMU present").
   - Else (unknown backend string): return `error.InvalidConfig`.
-- [ ] No new error variant needed — reuse `error.InvalidConfig`.
+- [x] No new error variant needed — reuse `error.InvalidConfig`.
 
 ### T1d: Validate tests
 
-- [ ] In `src/config/device.zig` test block, add 4 cases:
+- [x] In `src/config/device.zig` test block, add 4 cases:
   - **`test "validate: ImuConfig default (absent) is legal"`** — pre-Wave-3 fixture round-trips.
   - **`test "validate: backend=uhid + [output.imu] present is legal"`** — succeeds.
   - **`test "validate: backend=uinput + [output.imu] present is error.InvalidConfig"`** — asserts the error.
   - **`test "validate: backend=unknown is error.InvalidConfig"`** — asserts fail-closed.
-- [ ] `zig build test` passes all 4.
+- [x] `zig build test` passes all 4.
 
 ### T1e: TOML round-trip parser test
 
-- [ ] Round-trip test: parse a TOML fragment with
+- [x] Round-trip test: parse a TOML fragment with
   `[output.imu]\nbackend = "uhid"\nname = "Pad IMU"\n`, verify
   `cfg.output.?.imu.?.backend == "uhid"` and `cfg.output.?.imu.?.name.? == "Pad IMU"`.
 
