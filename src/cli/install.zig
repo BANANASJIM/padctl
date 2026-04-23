@@ -424,23 +424,49 @@ fn removeBrokenSymlink(path: []const u8) void {
     };
 }
 
+// Removes `path` if it is a symlink, regardless of whether the target exists.
+// No-op if path is a real file/dir or does not exist. Best-effort.
+fn removeAnySymlink(path: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = std.fs.readLinkAbsolute(path, &buf) catch return;
+    std.fs.deleteFileAbsolute(path) catch |err| {
+        var errbuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &errbuf,
+            "warning: could not remove symlink {s}: {}\n",
+            .{ path, err },
+        ) catch "warning: symlink removal failed\n";
+        writeAll(std.posix.STDERR_FILENO, msg);
+    };
+}
+
 fn ensureUserXdgDirs(allocator: std.mem.Allocator, home: []const u8) !void {
+    // `.local/state/padctl` is included so systemd v254+ cannot auto-create it
+    // as a symlink to `$XDG_CONFIG_HOME/padctl` via its legacy migration path
+    // (exec-invoke.c:3044-3072). See removeAnySymlink call below.
     const dirs = [_][]const u8{
         ".config",
         ".config/systemd",
         ".config/systemd/user",
         ".local",
         ".local/state",
+        ".local/state/padctl",
         ".local/share",
     };
 
-    // Defensive cleanup: broken symlinks in StateDirectory/WorkingDirectory paths
-    // prevent systemd from creating the directory. User environments (XDG_STATE_HOME
-    // overrides, manual setup) occasionally leave these behind — padctl never creates them.
+    // Force `.local/state/padctl` to be a real directory: any pre-existing
+    // symlink there (valid or broken) is removed so the mkdir in the loop below
+    // succeeds. systemd v254+ creates a compatibility symlink from
+    // $XDG_STATE_HOME/padctl → $XDG_CONFIG_HOME/padctl when the state dir is
+    // missing and the config dir exists; that symlink makes the runtime write
+    // state to $XDG_CONFIG_HOME and breaks StateDirectory= semantics (#139).
     const state_padctl = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home});
     defer allocator.free(state_padctl);
-    removeBrokenSymlink(state_padctl);
+    removeAnySymlink(state_padctl);
 
+    // Keep defensive broken-symlink cleanup on .config/padctl: not the v254+
+    // trigger, but user environments occasionally leave dangling links that
+    // block systemd from using ConfigurationDirectory=.
     const config_padctl = try std.fmt.allocPrint(allocator, "{s}/.config/padctl", .{home});
     defer allocator.free(config_padctl);
     removeBrokenSymlink(config_padctl);
@@ -3893,7 +3919,7 @@ test "install: ensureUserXdgDirs idempotent (second call no error)" {
     try ensureUserXdgDirs(allocator, home);
 }
 
-test "install: ensureUserXdgDirs removes broken .local/state/padctl symlink" {
+test "install: ensureUserXdgDirs replaces broken .local/state/padctl symlink with real dir" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -3914,11 +3940,20 @@ test "install: ensureUserXdgDirs removes broken .local/state/padctl symlink" {
 
     try ensureUserXdgDirs(allocator, home_path);
 
-    // Post-condition: broken symlink is gone.
-    try testing.expectError(error.FileNotFound, std.fs.cwd().statFile(state_path));
+    // Post-condition: path is a real directory, not a symlink.
+    const stat_result = try std.fs.cwd().statFile(state_path);
+    try testing.expect(stat_result.kind == .directory);
+
+    var rlbuf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.NotLink, std.fs.readLinkAbsolute(state_path, &rlbuf));
 }
 
-test "install: ensureUserXdgDirs preserves valid .local/state/padctl symlink" {
+// systemd v254+ creates $XDG_STATE_HOME/padctl → $XDG_CONFIG_HOME/padctl
+// compatibility symlink (exec-invoke.c:3044-3072 legacy migration) when the
+// state dir is missing. We force the state dir to be a real directory so that
+// symlink never has a reason to exist and StateDirectory= semantics are
+// preserved — see ensureUserXdgDirs for the full explanation. Issue #139.
+test "install: ensureUserXdgDirs replaces valid .local/state/padctl symlink with real dir (systemd v254+ migration workaround)" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -3936,10 +3971,42 @@ test "install: ensureUserXdgDirs preserves valid .local/state/padctl symlink" {
 
     try ensureUserXdgDirs(allocator, home_path);
 
-    // Valid symlink must not be removed.
     const state_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home_path});
     defer allocator.free(state_path);
-    try std.fs.accessAbsolute(state_path, .{});
+
+    // Post-condition: path is a real directory, not a symlink.
+    const stat_result = try std.fs.cwd().statFile(state_path);
+    try testing.expect(stat_result.kind == .directory);
+
+    var rlbuf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.NotLink, std.fs.readLinkAbsolute(state_path, &rlbuf));
+}
+
+test "install: ensureUserXdgDirs preserves existing .local/state/padctl real directory (idempotent)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home_path);
+
+    // Seed: real directory with prior content that must survive.
+    try tmp.dir.makePath(".local/state/padctl/subdir");
+
+    const state_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl", .{home_path});
+    defer allocator.free(state_path);
+    const subdir_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/padctl/subdir", .{home_path});
+    defer allocator.free(subdir_path);
+
+    try ensureUserXdgDirs(allocator, home_path);
+
+    const stat_result = try std.fs.cwd().statFile(state_path);
+    try testing.expect(stat_result.kind == .directory);
+
+    // Prior content preserved.
+    try std.fs.accessAbsolute(subdir_path, .{});
 }
 
 test "install: resolveTargetHomeFromFile reads home from passwd" {
