@@ -447,3 +447,276 @@ test "regression-93: orphan managed entry (devname==null) with matching phys_key
 
     sup.stopAll();
 }
+
+// --- regression: issue #131-A — zombie uinput after permanent disconnect ---
+
+test "issue-131-A: suspend grace window expires → managed instance torn down if no ADD within grace_sec" {
+    // Scenario: PR #114 introduced `detach()` → `suspended = true` to survive
+    // wireless sleep/wake without losing the virtual gamepad. But if the
+    // physical device is gone permanently (battery dead, cable unplugged)
+    // the managed entry lingers forever → zombie uinput node.
+    //
+    // Fix: `suspend_grace_sec` schedules a deadline at detach time; when
+    // `gcExpiredGrace(now_ns)` runs past the deadline the managed entry is
+    // fully torn down (equivalent to pre-#114 `detachFull`).
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    // Configure a 5-second grace window.
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+
+    // Still suspended + tracked before deadline.
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns != null);
+
+    // GC at t0+3s (before deadline) → still present.
+    sup.gcExpiredGrace(t0 + 3 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // GC at t0+6s (past deadline) → torn down.
+    sup.gcExpiredGrace(t0 + 6 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "issue-131-A: suspend grace window → ADD within grace_sec re-attaches cleanly" {
+    // If a matching ADD arrives within the grace window the suspended
+    // instance is reused — its uinput stays alive, grace_deadline_ns is
+    // cleared, and `suspended = false` is restored by the rebind path.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns != null);
+
+    // Simulate rebind: in production the netlink ADD path walks
+    // `attachWithRoot` which clears grace_deadline_ns and restores
+    // `suspended = false`. The test exercises only the grace-window
+    // bookkeeping: call `clearGraceDeadline(&m)` to mirror what the
+    // rebind path does, then verify gcExpiredGrace leaves the entry
+    // intact even past the original deadline.
+    sup.clearGraceDeadline(&sup.managed.items[0]);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns == null);
+
+    sup.gcExpiredGrace(t0 + 60 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    sup.stopAll();
+}
+
+test "issue-131-A: gcExpiredGrace triggers at exact deadline (inclusive boundary)" {
+    // At `now_ns == deadline_ns` the grace window is exhausted; the entry
+    // must be torn down (gcExpiredGrace uses `now < deadline` to "keep",
+    // so equality triggers teardown).
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+    const deadline = sup.managed.items[0].grace_deadline_ns.?;
+    try testing.expectEqual(t0 + 5 * std.time.ns_per_s, deadline);
+
+    // Exactly one tick before the deadline → keep.
+    sup.gcExpiredGrace(deadline - 1);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // Exactly at the deadline → torn down.
+    sup.gcExpiredGrace(deadline);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "issue-131-A: multiple suspensions with different deadlines expire independently" {
+    // Two devices detached at different times → each torn down on its own
+    // deadline without affecting the other.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock_a, &parsed.value, "hidraw0", "keyA");
+    try attach(&sup, allocator, &mock_b, &parsed.value, "hidraw1", "keyB");
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0"); // deadline_A = t0 + 5s
+
+    sup.test_now_override_ns = t0 + 2 * std.time.ns_per_s;
+    sup.detach("hidraw1"); // deadline_B = t0 + 7s
+
+    // Skip to t0 + 6s: only A expired.
+    sup.gcExpiredGrace(t0 + 6 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns != null);
+
+    // Skip to t0 + 8s: B also expired.
+    sup.gcExpiredGrace(t0 + 8 * std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "issue-131-A: suspend_grace_sec=0 disables grace window (legacy pre-#114 behavior)" {
+    // When `suspend_grace_sec == 0`, detach() tears down immediately —
+    // equivalent to `detachFull` — restoring the pre-#114 semantics for
+    // users who prefer strict removal over sleep/wake preservation.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 0;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    sup.detach("hidraw0");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+// --- regression: PR #134 B1 — rebind failure paths must not corrupt state ---
+
+test "T-B1a: rebind dupe OOM preserves suspended + grace_deadline (no zombie join)" {
+    // PR #134 review BLOCKING B1: the original rebind block flipped
+    // `m.suspended = false` + cleared `grace_deadline_ns` before the
+    // three `dupe` calls. An OOM mid-sequence left `suspended=false`
+    // with a detached (already-joined) thread handle, so any later
+    // `stopAll` / `reload` would double-join → pthread_join UB.
+    //
+    // Fix: `finalizeRebind` only commits state after every fallible op
+    // succeeds. This test injects a FailingAllocator so the first dupe
+    // OOMs and asserts the invariants: suspended still true,
+    // grace_deadline_ns still set, and GC still reclaims the entry.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+    try testing.expect(sup.managed.items[0].suspended);
+
+    // Swap to a failing allocator for the duration of finalizeRebind.
+    const real_alloc = sup.allocator;
+    var fa = testing.FailingAllocator.init(real_alloc, .{ .fail_index = 0 });
+    sup.allocator = fa.allocator();
+    const err = sup.finalizeRebind(&sup.managed.items[0], "hidraw0", "key0");
+    sup.allocator = real_alloc;
+    try testing.expectError(error.OutOfMemory, err);
+
+    // Contract: state unchanged on failure.
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expect(sup.managed.items[0].devname == null);
+    try testing.expect(!sup.devname_map.contains("hidraw0"));
+
+    // GC past deadline still reclaims — no double-join panic.
+    sup.gcExpiredGrace(original_deadline + std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "T-B1b: rebind restart failure preserves suspended + grace_deadline" {
+    // Second half of B1: the original restart-failure branch flipped
+    // `m.suspended` back to true but left `grace_deadline_ns = null`,
+    // so `gcExpiredGrace` (`deadline orelse continue`) skipped the
+    // entry forever — a permanent zombie, which is the exact bug
+    // PR #134 claims to fix.
+    //
+    // Fix: `finalizeRebind` errors out before touching any commit
+    // field. This test forces the restart failure via
+    // `test_fail_rebind_restart` and asserts both `suspended` and
+    // `grace_deadline_ns` survive, so the grace GC still fires.
+
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try initSup(allocator);
+    defer sup.deinit();
+
+    sup.suspend_grace_sec = 5;
+
+    try attach(&sup, allocator, &mock, &parsed.value, "hidraw0", "key0");
+    const t0: u64 = 1_000 * std.time.ns_per_s;
+    sup.test_now_override_ns = t0;
+    sup.detach("hidraw0");
+
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    sup.test_fail_rebind_restart = true;
+    const err = sup.finalizeRebind(&sup.managed.items[0], "hidraw0", "key0");
+    sup.test_fail_rebind_restart = false;
+    try testing.expectError(error.TestInjectedRestartFailure, err);
+
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expect(sup.managed.items[0].devname == null);
+    try testing.expect(!sup.devname_map.contains("hidraw0"));
+
+    sup.gcExpiredGrace(original_deadline + std.time.ns_per_s);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}

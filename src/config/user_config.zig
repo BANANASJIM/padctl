@@ -16,6 +16,16 @@ pub const DiagnosticsConfig = struct {
     max_log_size_mb: i64 = 100,
 };
 
+/// Runtime supervisor tunables. All fields have production defaults and
+/// are optional — a missing `[supervisor]` section leaves them as-is.
+pub const SupervisorConfig = struct {
+    /// Issue #131-A: seconds to preserve a suspended instance's uinput so
+    /// a wireless sleep/wake cycle does not break SDL's cached eventN
+    /// reference. Negative values treated as 0 (immediate teardown);
+    /// values > u32_max clamped. See `Supervisor.suspend_grace_sec`.
+    suspend_grace_sec: i64 = 15,
+};
+
 pub const UserConfig = struct {
     /// Schema version for forward/backward compatibility. Missing = legacy
     /// v0 (pre-versioned). Current version is 1. The loader accepts any
@@ -23,6 +33,7 @@ pub const UserConfig = struct {
     version: ?i64 = null,
     device: ?[]DeviceEntry = null,
     diagnostics: DiagnosticsConfig = .{},
+    supervisor: SupervisorConfig = .{},
 };
 
 pub const ParseResult = toml.Parsed(UserConfig);
@@ -380,6 +391,37 @@ test "user_config: unknown fields ignored (forward compatibility)" {
     try std.testing.expectEqual(true, result.value.diagnostics.dump);
     try std.testing.expectEqual(@as(i64, 75), result.value.diagnostics.max_log_size_mb);
     try std.testing.expectEqualStrings("m1", findDefaultMapping(&result, "Pad").?);
+}
+
+test "user_config: supervisor section defaults when absent" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\version = 1
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(i64, 15), result.value.supervisor.suspend_grace_sec);
+}
+
+test "user_config: supervisor.suspend_grace_sec parses explicit value" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\version = 1
+        \\
+        \\[supervisor]
+        \\suspend_grace_sec = 30
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(i64, 30), result.value.supervisor.suspend_grace_sec);
 }
 
 test "findDefaultMapping: entry without default_mapping returns null" {
