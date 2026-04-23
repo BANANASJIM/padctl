@@ -2,16 +2,13 @@ const std = @import("std");
 const macro_mod = @import("macro.zig");
 const remap = @import("remap.zig");
 const timer_queue_mod = @import("timer_queue.zig");
-const state_mod = @import("state.zig");
 
 const Macro = macro_mod.Macro;
 const MacroStep = macro_mod.MacroStep;
 const aux_event_mod = @import("aux_event.zig");
 const AuxEventList = aux_event_mod.AuxEventList;
-const AuxEvent = aux_event_mod.AuxEvent;
 const TimerQueue = timer_queue_mod.TimerQueue;
 const RemapTargetResolved = remap.RemapTargetResolved;
-const ButtonId = state_mod.ButtonId;
 
 pub const MacroPlayer = struct {
     macro: *const Macro,
@@ -45,6 +42,7 @@ pub const MacroPlayer = struct {
         queue: *TimerQueue,
         injected_buttons: *u64,
         pending_tap_release: *u64,
+        now_ns: i128,
     ) !bool {
         if (self.waiting_for_release) return false;
 
@@ -54,19 +52,19 @@ pub const MacroPlayer = struct {
             switch (s) {
                 .tap => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
-                    emitTap(target, aux, injected_buttons, pending_tap_release);
+                    remap.applyTarget(target, .tap, aux, injected_buttons, pending_tap_release, null);
                 },
                 .down => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
-                    emitDown(target, aux, injected_buttons, &self.held_gamepad_buttons);
+                    remap.applyTarget(target, .press, aux, injected_buttons, null, &self.held_gamepad_buttons);
                 },
                 .up => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
-                    emitUp(target, aux, injected_buttons, &self.held_gamepad_buttons);
+                    remap.applyTarget(target, .release, aux, injected_buttons, null, &self.held_gamepad_buttons);
                 },
                 .delay => |ms| {
-                    const deadline = std.time.nanoTimestamp() + @as(i128, ms) * std.time.ns_per_ms;
-                    try queue.arm(deadline, self.timer_token);
+                    const deadline = now_ns + @as(i128, ms) * std.time.ns_per_ms;
+                    try queue.arm(deadline, self.timer_token, now_ns);
                     return false;
                 },
                 .pause_for_release => {
@@ -135,70 +133,6 @@ fn resolveTargetSafe(name: []const u8) ?RemapTargetResolved {
     return remap.resolveTarget(name) catch null;
 }
 
-fn emitTap(
-    target: RemapTargetResolved,
-    aux: *AuxEventList,
-    injected_buttons: *u64,
-    pending_tap_release: *u64,
-) void {
-    switch (target) {
-        .key => |code| {
-            aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {};
-            aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {};
-        },
-        .mouse_button => |code| {
-            aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {};
-            aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {};
-        },
-        .gamepad_button => |dst| {
-            const mask = buttonMask(dst);
-            injected_buttons.* |= mask;
-            pending_tap_release.* |= mask;
-        },
-        .disabled, .macro => {},
-    }
-}
-
-fn emitDown(
-    target: RemapTargetResolved,
-    aux: *AuxEventList,
-    injected_buttons: *u64,
-    held_gamepad: *u64,
-) void {
-    switch (target) {
-        .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {},
-        .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {},
-        .gamepad_button => |dst| {
-            const mask = buttonMask(dst);
-            injected_buttons.* |= mask;
-            held_gamepad.* |= mask;
-        },
-        .disabled, .macro => {},
-    }
-}
-
-fn emitUp(
-    target: RemapTargetResolved,
-    aux: *AuxEventList,
-    injected_buttons: *u64,
-    held_gamepad: *u64,
-) void {
-    switch (target) {
-        .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
-        .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
-        .gamepad_button => |dst| {
-            const mask = buttonMask(dst);
-            injected_buttons.* &= ~mask;
-            held_gamepad.* &= ~mask;
-        },
-        .disabled, .macro => {},
-    }
-}
-
-fn buttonMask(id: ButtonId) u64 {
-    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
-}
-
 // --- tests ---
 
 const testing = std.testing;
@@ -226,7 +160,7 @@ const StepCtx = struct {
     }
 
     fn step(self: *StepCtx, p: *MacroPlayer) !bool {
-        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release);
+        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release, 0);
     }
 };
 

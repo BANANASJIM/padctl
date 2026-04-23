@@ -46,7 +46,7 @@ test "macro #99: tap LT sets LT bit and schedules release next frame" {
     var injected: u64 = 0;
     var tap_release: u64 = 0;
 
-    const done = try player.step(&aux, &q, &injected, &tap_release);
+    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expect(done);
     try testing.expectEqual(@as(usize, 0), aux.len);
     try testing.expectEqual(btnBit(.LT), injected & btnBit(.LT));
@@ -69,7 +69,7 @@ test "macro #99: down A then up A toggles A bit" {
     var injected: u64 = 0;
     var tap_release: u64 = 0;
 
-    const done = try player.step(&aux, &q, &injected, &tap_release);
+    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expect(done);
     // down + up in one step call → net-zero; tap_release should stay clean.
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.A));
@@ -88,12 +88,12 @@ test "macro #99: down A with delay holds A bit between frames" {
     var injected: u64 = 0;
     var tap_release: u64 = 0;
 
-    const done1 = try player.step(&aux, &q, &injected, &tap_release);
+    const done1 = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expect(!done1);
     try testing.expectEqual(btnBit(.A), injected & btnBit(.A));
 
     aux = .{};
-    const done2 = try player.step(&aux, &q, &injected, &tap_release);
+    const done2 = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expect(done2);
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.A));
 }
@@ -110,7 +110,7 @@ test "macro #99: down RT then cancel clears RT via emitPendingReleases" {
     var injected: u64 = 0;
     var tap_release: u64 = 0;
 
-    _ = try player.step(&aux, &q, &injected, &tap_release);
+    _ = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expectEqual(btnBit(.RT), injected & btnBit(.RT));
 
     // Simulate layer switch / macro cancel.
@@ -133,7 +133,7 @@ test "macro #99: tap mouse_left emits mouse_button aux events" {
     var injected: u64 = 0;
     var tap_release: u64 = 0;
 
-    const done = try player.step(&aux, &q, &injected, &tap_release);
+    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expect(done);
     try testing.expectEqual(@as(usize, 2), aux.len);
     switch (aux.get(0)) {
@@ -165,7 +165,7 @@ test "macro #99: unknown target name silently skipped" {
     var injected: u64 = 0;
     var tap_release: u64 = 0;
 
-    const done = try player.step(&aux, &q, &injected, &tap_release);
+    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
     try testing.expect(done);
     // Unknown target produced nothing; KEY_A tap produced press+release.
     try testing.expectEqual(@as(usize, 2), aux.len);
