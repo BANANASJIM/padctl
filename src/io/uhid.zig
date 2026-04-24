@@ -196,6 +196,12 @@ pub const Config = struct {
     /// falls back to a raw 4-byte stick stub (legacy tests that pass a hand
     /// -written descriptor without a matching `OutputConfig` still work).
     output: ?device_cfg.OutputConfig = null,
+    /// Optional `[output.imu]` section. When set, the device is an IMU
+    /// companion card — `emit()` packs accel + gyro axes via
+    /// `uhid_descriptor.encodeImuReport` and the primary-path encoder is
+    /// bypassed. Mutually exclusive with `output` at the emit branch: if
+    /// both are set, `output` wins (primary card shape).
+    imu: ?device_cfg.ImuConfig = null,
 };
 
 /// A UHID-backed output device implementing the shared `OutputDevice` vtable.
@@ -222,6 +228,9 @@ pub const UhidDevice = struct {
     /// Optional `OutputConfig` — when set, `emit()` dispatches to the
     /// descriptor-driven encoder. See `Config.output`.
     output: ?device_cfg.OutputConfig,
+    /// Optional `ImuConfig` — when set AND `output` is null, `emit()`
+    /// dispatches to `encodeImuReport` (6 × i16 accel + gyro axes).
+    imu: ?device_cfg.ImuConfig,
 
     /// Construct a `UhidDevice` against a real `/dev/uhid` fd. Opens the
     /// kernel node, populates a `UhidCreate2Req`, and writes it.
@@ -256,6 +265,7 @@ pub const UhidDevice = struct {
             .name = cfg.name,
             .uniq = cfg.uniq,
             .output = cfg.output,
+            .imu = cfg.imu,
         };
         return self;
     }
@@ -289,6 +299,7 @@ pub const UhidDevice = struct {
             .name = cfg.name,
             .uniq = cfg.uniq,
             .output = cfg.output,
+            .imu = cfg.imu,
         };
         return self;
     }
@@ -359,6 +370,14 @@ pub const UhidDevice = struct {
         if (self.output) |out| {
             var report_buf: [descriptor.MAX_REPORT_BYTES]u8 = undefined;
             const bytes = descriptor.encodeReport(out, s, &report_buf) catch
+                return error.WriteFailed;
+            uhidInput(self.fd, bytes) catch |err| switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
+                else => return error.WriteFailed,
+            };
+        } else if (self.imu != null) {
+            var report_buf: [descriptor.IMU_REPORT_BYTES]u8 = undefined;
+            const bytes = descriptor.encodeImuReport(s, &report_buf) catch
                 return error.WriteFailed;
             uhidInput(self.fd, bytes) catch |err| switch (err) {
                 error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,

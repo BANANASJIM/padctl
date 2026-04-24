@@ -253,6 +253,26 @@ pub fn build(b: *std.Build) void {
     grace_int_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(grace_int_tests).step);
 
+    // Phase 13 Wave 3 T5f: Layer 1 routing tests — pure pipe2 fixture, no
+    // /dev/uhid, no privilege required. Hooks to the main test step so the
+    // CI green bar covers the UHID routing switch.
+    const routing_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/supervisor_uhid_routing_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    routing_mod.addImport("toml", toml_mod);
+    routing_mod.addImport("src", src_mod);
+    const routing_tests = b.addTest(.{ .root_module = routing_mod });
+    if (use_libusb) {
+        routing_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        routing_tests.addIncludePath(b.path("compat"));
+    }
+    routing_tests.linkLibC();
+    test_step.dependOn(&b.addRunArtifact(routing_tests).step);
+
     // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");
     const e2e_mod = b.createModule(.{

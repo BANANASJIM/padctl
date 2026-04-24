@@ -133,6 +133,16 @@ pub const UinputDevice = struct {
 
     const AxisStateField = enum { ax, ay, rx, ry, lt, rt, dpad_x, dpad_y };
 
+    /// Heap-allocate a `UinputDevice` so callers can store it in an owner
+    /// union alongside `*UhidDevice`. `close()` tears the uinput node down;
+    /// the caller must `allocator.destroy(p)` explicitly after `close()`.
+    pub fn initBoxed(allocator: std.mem.Allocator, cfg: *const device.OutputConfig) !*UinputDevice {
+        const p = try allocator.create(UinputDevice);
+        errdefer allocator.destroy(p);
+        p.* = try UinputDevice.create(cfg);
+        return p;
+    }
+
     pub fn create(cfg: *const device.OutputConfig) !UinputDevice {
         const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
         const fd = try std.posix.open("/dev/uinput", flags, 0);
@@ -1676,6 +1686,31 @@ test "uinput: GenericUinputDevice.emitGeneric: no change produces no write" {
 }
 
 // --- Instrumentation correctness tests ---
+
+// Phase 13 Wave 3 T2b: initBoxed heap-alloc wrapper.
+
+test "uinput: initBoxed heap-allocates and returns owning pointer" {
+    // /dev/uinput is typically root-only on CI. Skip gracefully when the
+    // node is unavailable — the FailingAllocator test below still covers
+    // the error path deterministically.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const out_cfg = device.OutputConfig{};
+    const p = UinputDevice.initBoxed(std.testing.allocator, &out_cfg) catch |err| switch (err) {
+        error.PermissionDenied, error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    p.close();
+    std.testing.allocator.destroy(p);
+}
+
+test "uinput: initBoxed propagates OutOfMemory from allocator" {
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const out_cfg = device.OutputConfig{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        UinputDevice.initBoxed(fa.allocator(), &out_cfg),
+    );
+}
 
 test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
     const padctl_log = @import("../log.zig");

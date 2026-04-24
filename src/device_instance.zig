@@ -14,6 +14,10 @@ const AuxOutputDevice = uinput.AuxOutputDevice;
 const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
 const GenericUinputDevice = uinput.GenericUinputDevice;
 const GenericOutputDevice = uinput.GenericOutputDevice;
+const uhid_mod = @import("io/uhid.zig");
+const uhid_descriptor = @import("io/uhid_descriptor.zig");
+const uniq_mod = @import("io/uniq.zig");
+const device_cfg = @import("config/device.zig");
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
@@ -73,13 +77,84 @@ pub fn openDeviceWithRetry(
     }
 }
 
+/// Primary output ownership. T3 introduces the union so T4 can route the
+/// primary card to either uinput or UHID without widening call sites.
+pub const Owner = union(enum) {
+    none,
+    uinput: *UinputDevice,
+    uhid: *uhid_mod.UhidDevice,
+};
+
+/// Test-only seam (T5). When either fd override is non-null, the UHID
+/// backend path binds the corresponding `UhidDevice` to the caller-supplied
+/// fd via `initWithFd` AND manually emits a `UHID_CREATE2` event on the fd
+/// (matching what `init` would have sent to `/dev/uhid`). Production call
+/// sites leave both fields null so the normal `openUhid` path runs.
+///
+/// `test_devices_override` (CodeRabbit PR #159 #6) skips the interface-
+/// opening loop entirely and installs the caller-provided `DeviceIO` slice.
+/// Needed so a Layer 1 test can drive `DeviceInstance.init` end-to-end
+/// without a real `/dev/hidraw*` node — otherwise `HidrawDevice.discover`
+/// would retry for ~7s and fail in CI before the routing switch is reached.
+/// The slice is consumed (stored in `DeviceInstance.devices`) and freed by
+/// `deinit`; caller must not free it.
+pub const InitOptions = struct {
+    test_primary_uhid_fd: ?posix.fd_t = null,
+    test_imu_uhid_fd: ?posix.fd_t = null,
+    test_devices_override: ?[]DeviceIO = null,
+};
+
+/// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
+/// write-end in Layer 1 fixtures) or against a freshly opened `/dev/uhid`.
+/// Behaviour is byte-identical on the wire in both branches: the same
+/// `UHID_CREATE2` payload is written.
+fn openUhidDevice(
+    allocator: std.mem.Allocator,
+    cfg: uhid_mod.Config,
+    test_fd: ?posix.fd_t,
+) !*uhid_mod.UhidDevice {
+    if (test_fd) |fd| {
+        const dev = try uhid_mod.UhidDevice.initWithFd(allocator, fd, cfg);
+        errdefer {
+            dev.close();
+            allocator.destroy(dev);
+        }
+        try uhid_mod.UhidDevice.sendCreate(fd, cfg);
+        return dev;
+    }
+    return uhid_mod.UhidDevice.init(allocator, cfg);
+}
+
+/// Layer 1 test seam for `src/test/supervisor_uhid_routing_test.zig`.
+/// Wraps `openUhidDevice` so the Layer 1 test can exercise the same code
+/// path used by the UHID routing branch without needing a full
+/// `DeviceInstance.init` call (which would pull in hidraw interface
+/// discovery that requires a real `/dev/hidraw*` node).
+pub fn openUhidDeviceForTest(
+    allocator: std.mem.Allocator,
+    cfg: uhid_mod.Config,
+    test_fd: posix.fd_t,
+) !*uhid_mod.UhidDevice {
+    return openUhidDevice(allocator, cfg, test_fd);
+}
+
 pub const DeviceInstance = struct {
     allocator: std.mem.Allocator,
     devices: []DeviceIO,
     loop: EventLoop,
     interp: Interpreter,
     mapper: ?Mapper,
-    uinput_dev: ?UinputDevice,
+    owner: Owner = .none,
+    primary_output: ?OutputDevice = null,
+    imu_output: ?OutputDevice = null,
+    /// IMU UHID companion card (T4). Separate from `owner` — the union models
+    /// the single primary output; a plain optional pair keeps the companion
+    /// card's lifetime explicit without muddying the primary invariant.
+    imu_dev: ?*uhid_mod.UhidDevice = null,
+    /// Allocator-owned backing storage for `imu_dev.name`. `UhidDevice.name`
+    /// is owned-by-caller (see `src/io/uhid.zig`); this field outlives the
+    /// kernel device and is freed in `deinit` strictly AFTER `imu_dev.close()`.
+    imu_name_owned: ?[]const u8 = null,
     aux_dev: ?AuxDevice,
     touchpad_dev: ?TouchpadDevice,
     generic_state: ?generic.GenericDeviceState,
@@ -95,21 +170,37 @@ pub const DeviceInstance = struct {
     rebuild_aux_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
-    /// init_mapping: optional MappingConfig used to auto-derive aux capabilities when
-    /// [output.aux] is absent from the device config.
-    pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig, init_mapping: ?*const MappingConfig) !DeviceInstance {
+    ///
+    /// - `init_mapping`: optional MappingConfig used to auto-derive aux
+    ///   capabilities when [output.aux] is absent from the device config.
+    /// - `phys_key`: sysfs phys path of the backing hidraw node (owned by the
+    ///   caller). Feeds the UHID `uniq` hash when `[output.imu].backend = "uhid"`;
+    ///   when null the fallback daemon counter is used.
+    /// - `uniq_counter`: pointer to the daemon-wide u16 counter owned by the
+    ///   Supervisor. Read snapshot + incremented ONLY when phys_key is null.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        cfg: *const DeviceConfig,
+        init_mapping: ?*const MappingConfig,
+        phys_key: ?[]const u8,
+        uniq_counter: *u16,
+        opts: InitOptions,
+    ) !DeviceInstance {
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
 
-        const devices = try allocator.alloc(DeviceIO, cfg.device.interface.len);
-        errdefer allocator.free(devices);
+        const override_active = opts.test_devices_override != null;
+        const devices = opts.test_devices_override orelse try allocator.alloc(DeviceIO, cfg.device.interface.len);
+        errdefer if (!override_active) allocator.free(devices);
 
         var opened: usize = 0;
         errdefer for (devices[0..opened]) |dev| dev.close();
 
-        for (cfg.device.interface, 0..) |iface, i| {
-            devices[i] = try openDeviceWithRetry(allocator, iface, vid, pid);
-            opened += 1;
+        if (!override_active) {
+            for (cfg.device.interface, 0..) |iface, i| {
+                devices[i] = try openDeviceWithRetry(allocator, iface, vid, pid);
+                opened += 1;
+            }
         }
 
         if (cfg.device.init) |init_cfg| {
@@ -133,7 +224,11 @@ pub const DeviceInstance = struct {
 
         const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
 
-        var uinput_dev: ?UinputDevice = null;
+        var owner: Owner = .none;
+        var primary_output: ?OutputDevice = null;
+        var imu_output: ?OutputDevice = null;
+        var imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
+        var imu_name_ptr: ?[]const u8 = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
         var generic_state: ?generic.GenericDeviceState = null;
@@ -145,11 +240,85 @@ pub const DeviceInstance = struct {
                 generic_uinput = try GenericUinputDevice.create(out_cfg, &generic_state.?);
             }
         } else if (cfg.output) |*out_cfg| {
-            uinput_dev = try UinputDevice.create(out_cfg);
-            uinput_dev.?.log_tag = cfg.device.name;
-            if (out_cfg.force_feedback != null) {
-                errdefer uinput_dev.?.close();
-                try loop.addUinputFf(uinput_dev.?.pollFfFd());
+            const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
+            const use_uhid = if (imu_cfg_opt) |imu_cfg|
+                std.mem.eql(u8, imu_cfg.backend, "uhid")
+            else
+                false;
+
+            if (use_uhid) {
+                // ADR-015 Stage 1: primary + IMU cards share a byte-identical
+                // uniq. Snapshot the counter once, bump only if the counter
+                // branch was taken (phys_key == null).
+                const counter_snapshot: u16 = uniq_counter.*;
+                const uniq_z = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
+                defer allocator.free(uniq_z);
+                if (phys_key == null) uniq_counter.* += 1;
+
+                const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
+                defer allocator.free(primary_descriptor);
+
+                const primary_cfg = uhid_mod.Config{
+                    .name = cfg.device.name,
+                    .uniq = std.mem.sliceTo(uniq_z, 0),
+                    .vid = @intCast(cfg.device.vid),
+                    .pid = @intCast(cfg.device.pid),
+                    .descriptor = primary_descriptor,
+                    .output = out_cfg.*,
+                };
+                const primary_uhid = try openUhidDevice(allocator, primary_cfg, opts.test_primary_uhid_fd);
+                errdefer {
+                    primary_uhid.close();
+                    allocator.destroy(primary_uhid);
+                }
+
+                if (out_cfg.force_feedback != null) {
+                    std.log.warn("rumble not supported in uhid backend until Wave 6", .{});
+                }
+
+                owner = .{ .uhid = primary_uhid };
+                primary_output = primary_uhid.outputDevice();
+
+                if (imu_cfg_opt) |imu_cfg| {
+                    const imu_desc = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(allocator, imu_cfg);
+                    defer allocator.free(imu_desc);
+
+                    const imu_name_alloc: []const u8 = if (imu_cfg.name) |n|
+                        try allocator.dupe(u8, n)
+                    else
+                        try std.fmt.allocPrint(allocator, "{s} IMU", .{cfg.device.name});
+                    errdefer allocator.free(imu_name_alloc);
+
+                    const imu_cfg_uhid = uhid_mod.Config{
+                        .name = imu_name_alloc,
+                        .uniq = std.mem.sliceTo(uniq_z, 0),
+                        .vid = @intCast(imu_cfg.vid orelse cfg.device.vid),
+                        .pid = @intCast(imu_cfg.pid orelse cfg.device.pid),
+                        .descriptor = imu_desc,
+                        .output = null,
+                        .imu = imu_cfg,
+                    };
+                    const imu_uhid = try openUhidDevice(allocator, imu_cfg_uhid, opts.test_imu_uhid_fd);
+                    errdefer {
+                        imu_uhid.close();
+                        allocator.destroy(imu_uhid);
+                    }
+                    imu_dev_ptr = imu_uhid;
+                    imu_name_ptr = imu_name_alloc;
+                    imu_output = imu_uhid.outputDevice();
+                }
+            } else {
+                const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
+                errdefer {
+                    uinput_ptr.close();
+                    allocator.destroy(uinput_ptr);
+                }
+                uinput_ptr.log_tag = cfg.device.name;
+                owner = .{ .uinput = uinput_ptr };
+                primary_output = uinput_ptr.outputDevice();
+                if (out_cfg.force_feedback != null) {
+                    try loop.addUinputFf(uinput_ptr.pollFfFd());
+                }
             }
             if (out_cfg.aux != null or init_mapping != null) {
                 const mcfg_opt = init_mapping;
@@ -210,7 +379,11 @@ pub const DeviceInstance = struct {
             .loop = loop,
             .interp = interp,
             .mapper = mapper,
-            .uinput_dev = uinput_dev,
+            .owner = owner,
+            .primary_output = primary_output,
+            .imu_output = imu_output,
+            .imu_dev = imu_dev_ptr,
+            .imu_name_owned = imu_name_ptr,
             .aux_dev = aux_dev,
             .touchpad_dev = touchpad_dev,
             .generic_state = generic_state,
@@ -223,7 +396,28 @@ pub const DeviceInstance = struct {
 
     pub fn deinit(self: *DeviceInstance) void {
         if (self.mapper) |*m| m.deinit();
-        if (self.uinput_dev) |*u| u.close();
+        // IMU teardown first: close kernel device, THEN free name backing
+        // store. `UhidDevice.name` is owned-by-caller, so freeing the backing
+        // memory before `close` would dangle the pointer while UHID_DESTROY
+        // is in flight.
+        if (self.imu_dev) |p| {
+            p.close();
+            self.allocator.destroy(p);
+        }
+        if (self.imu_name_owned) |n| {
+            self.allocator.free(n);
+        }
+        switch (self.owner) {
+            .none => {},
+            .uinput => |p| {
+                p.close();
+                self.allocator.destroy(p);
+            },
+            .uhid => |p| {
+                p.close();
+                self.allocator.destroy(p);
+            },
+        }
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
@@ -252,7 +446,7 @@ pub const DeviceInstance = struct {
                 @atomicStore(?*MappingConfig, &self.pending_mapping, null, .release);
             }
 
-            const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
+            const output = self.primary_output orelse nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
             const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
             const generic_output: ?GenericOutputDevice = if (self.generic_uinput) |*gu| gu.genericOutputDevice() else null;
@@ -267,6 +461,7 @@ pub const DeviceInstance = struct {
                 .mapper = mapper_ptr,
                 .aux_output = aux_output,
                 .touchpad_output = touchpad_output,
+                .imu_output = self.imu_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
                 .mapping_config = mcfg,
@@ -419,7 +614,9 @@ fn testInstance(
         .loop = loop,
         .interp = Interpreter.init(cfg),
         .mapper = null,
-        .uinput_dev = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
         .aux_dev = null,
         .touchpad_dev = null,
         .generic_state = null,
@@ -503,7 +700,9 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
         .loop = loop,
         .interp = Interpreter.init(&parsed.value),
         .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
-        .uinput_dev = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
         .aux_dev = null,
         .touchpad_dev = null,
         .generic_state = null,
@@ -570,7 +769,9 @@ test "DeviceInstance: updateMapping updates mapping_cfg after swap" {
         .loop = loop,
         .interp = Interpreter.init(&parsed.value),
         .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
-        .uinput_dev = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
         .aux_dev = null,
         .touchpad_dev = null,
         .generic_state = null,
@@ -648,9 +849,9 @@ test "DeviceInstance: closeDeviceIO closes device fds without touching uinput" {
         allocator.free(inst.devices);
     }
 
-    // closeDeviceIO must not crash; uinput_dev stays null (not touched)
+    // closeDeviceIO must not crash; owner stays .none (not touched)
     inst.closeDeviceIO();
-    try testing.expectEqual(@as(?@import("io/uinput.zig").UinputDevice, null), inst.uinput_dev);
+    try testing.expect(inst.owner == .none);
 }
 
 test "DeviceInstance: rebindDeviceIO replaces device fds" {
