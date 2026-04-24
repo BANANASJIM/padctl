@@ -66,21 +66,37 @@ fn waitForEvdevNode(vid: u16, pid: u16, uniq: []const u8, timeout_ms: u32) !?[64
 }
 
 fn findEvdevByUniq(vid: u16, pid: u16, expect_uniq: []const u8) !?[64]u8 {
-    var i: u8 = 0;
-    while (i < 64) : (i += 1) {
+    // Walk /sys/class/input/event*/device/uevent and pick only entries whose
+    // uevent reports a matching PRODUCT= line, then open just that event node.
+    // This avoids opening host hardware (keyboards, the user's real gamepad,
+    // active evdev grabs by padctl/Steam) which on kernel 6.18 can block in
+    // evdev_release / input_flush_device during close() and deadlock the test.
+    var dir = std.fs.openDirAbsolute("/sys/class/input", .{ .iterate = true }) catch return null;
+    defer dir.close();
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "event")) continue;
+
+        // Read /sys/class/input/eventN/device/uevent — contains "PRODUCT=bus/vid/pid/ver".
+        var uevent_path_buf: [128]u8 = undefined;
+        const uevent_path = std.fmt.bufPrint(&uevent_path_buf, "/sys/class/input/{s}/device/uevent", .{entry.name}) catch continue;
+        const uevent_file = std.fs.openFileAbsolute(uevent_path, .{}) catch continue;
+        defer uevent_file.close();
+        var uevent_buf: [4096]u8 = undefined;
+        const uevent_len = uevent_file.readAll(&uevent_buf) catch continue;
+        const uevent = uevent_buf[0..uevent_len];
+
+        if (!sysfsProductMatches(uevent, vid, pid)) continue;
+
+        // Matches by VID/PID — now open only this single device to verify uniq.
         var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/dev/input/event{d}", .{i}) catch continue;
+        const path = std.fmt.bufPrint(&path_buf, "/dev/input/{s}", .{entry.name}) catch continue;
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
         defer posix.close(fd);
 
-        var id: [4]u16 = std.mem.zeroes([4]u16); // bustype, vendor, product, version
-        const rc_id = linux.ioctl(fd, 0x80084502, @intFromPtr(&id)); // EVIOCGID
-        if (rc_id != 0) continue;
-        if (id[1] != vid or id[2] != pid) continue;
-
         var uniq_buf: [64]u8 = std.mem.zeroes([64]u8);
         const rc = linux.ioctl(fd, ioctl_constants.EVIOCGUNIQ(uniq_buf.len), @intFromPtr(&uniq_buf));
-        if (rc < 0) continue;
+        if (posix.errno(rc) != .SUCCESS) continue;
         const nul = std.mem.indexOfScalar(u8, &uniq_buf, 0) orelse uniq_buf.len;
         if (!std.mem.eql(u8, uniq_buf[0..nul], expect_uniq)) continue;
 
@@ -89,6 +105,26 @@ fn findEvdevByUniq(vid: u16, pid: u16, expect_uniq: []const u8) !?[64]u8 {
         return result;
     }
     return null;
+}
+
+/// Parse a sysfs uevent blob and return true iff a `PRODUCT=bus/vid/pid/ver`
+/// line matches the given VID/PID. `bus` is the host bus type (not our UHID
+/// pretend-USB bus), so we only check vid + pid positions.
+fn sysfsProductMatches(uevent: []const u8, vid: u16, pid: u16) bool {
+    var line_iter = std.mem.splitScalar(u8, uevent, '\n');
+    while (line_iter.next()) |line| {
+        const prefix = "PRODUCT=";
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const value = line[prefix.len..];
+        var field_iter = std.mem.splitScalar(u8, value, '/');
+        _ = field_iter.next() orelse return false; // bus
+        const vid_str = field_iter.next() orelse return false;
+        const pid_str = field_iter.next() orelse return false;
+        const parsed_vid = std.fmt.parseInt(u16, vid_str, 16) catch return false;
+        const parsed_pid = std.fmt.parseInt(u16, pid_str, 16) catch return false;
+        return parsed_vid == vid and parsed_pid == pid;
+    }
+    return false;
 }
 
 fn readUniqFromEvdevPath(path: []const u8) ![]u8 {
@@ -104,17 +140,111 @@ fn readUniqFromEvdevPath(path: []const u8) ![]u8 {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 13 Wave 5 canary — kernel-level evdev classification ioctls.
+//
+// SDL/Steam `GuessDeviceClass` keys off two ioctl signals *after* the kernel's
+// HID→evdev mapper (`drivers/hid/hid-input.c`) parses the descriptor:
+//   1. `EVIOCGPROP` → must expose `INPUT_PROP_ACCELEROMETER` (0x06) so the
+//      sensor is classified as an accelerometer, not a gamepad.
+//   2. `EVIOCGBIT(EV_KEY, ...)` → must be *empty* for the IMU node; any KEY
+//      bit set trips the gamepad heuristic and SDL won't pair the sensor.
+// The primary pad is the inverse: EV_KEY must have at least one bit so SDL
+// classifies it as a gamepad.
+//
+// Kernel constants (linux/input-event-codes.h):
+//   INPUT_PROP_ACCELEROMETER = 0x06 → byte 0 bit 6 (mask 0x40)
+//   INPUT_PROP_CNT           = 0x20 → props buffer = 4 bytes
+//   EV_KEY                   = 0x01
+//   KEY_MAX                  = 0x2ff → key bitmap = 96 bytes
+//
+// EVIOCGPROP(len)     = _IOR('E', 0x09, len)
+// EVIOCGBIT(ev, len)  = _IOR('E', 0x20 + ev, len)
+const INPUT_PROP_ACCELEROMETER: u8 = 0x06;
+const INPUT_PROP_CNT: usize = 0x20;
+const EV_KEY_CODE: u8 = 0x01;
+const KEY_MAX: usize = 0x2ff;
+const KEY_BYTES: usize = (KEY_MAX + 7) / 8 + 1; // 96 bytes
+
+fn EVIOCGPROP(len: u14) u32 {
+    const req = std.os.linux.IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x09, .size = len };
+    return @bitCast(req);
+}
+
+fn EVIOCGBIT(ev: u8, len: u14) u32 {
+    const req = std.os.linux.IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x20 + ev, .size = len };
+    return @bitCast(req);
+}
+
+fn readPropBitmap(path: []const u8) ![INPUT_PROP_CNT / 8]u8 {
+    const fd = try posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
+    defer posix.close(fd);
+
+    var props: [INPUT_PROP_CNT / 8]u8 = std.mem.zeroes([INPUT_PROP_CNT / 8]u8);
+    const rc = linux.ioctl(fd, EVIOCGPROP(@intCast(props.len)), @intFromPtr(&props));
+    if (posix.errno(rc) != .SUCCESS) return error.EvdevPropIoctlFailed;
+    return props;
+}
+
+fn readKeyBitmap(path: []const u8) ![KEY_BYTES]u8 {
+    const fd = try posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
+    defer posix.close(fd);
+
+    var key_bits: [KEY_BYTES]u8 = std.mem.zeroes([KEY_BYTES]u8);
+    const rc = linux.ioctl(fd, EVIOCGBIT(EV_KEY_CODE, @intCast(key_bits.len)), @intFromPtr(&key_bits));
+    if (posix.errno(rc) != .SUCCESS) return error.EvdevKeyBitIoctlFailed;
+    return key_bits;
+}
+
+fn hasPropBit(props: []const u8, bit: u8) bool {
+    const byte_idx: usize = bit / 8;
+    const bit_idx: u3 = @intCast(bit % 8);
+    if (byte_idx >= props.len) return false;
+    return ((props[byte_idx] >> bit_idx) & 1) == 1;
+}
+
+fn keyBitmapPopcount(bits: []const u8) usize {
+    var total: usize = 0;
+    for (bits) |b| total += @popCount(b);
+    return total;
+}
+
+fn printHex(label: []const u8, bytes: []const u8) void {
+    std.debug.print("{s} (len={d}):", .{ label, bytes.len });
+    for (bytes) |b| std.debug.print(" {x:0>2}", .{b});
+    std.debug.print("\n", .{});
+}
+
 // A minimal Generic-Desktop Gamepad descriptor for the main-pad fd — the IMU
 // fd now uses the production `UhidDescriptorBuilder.buildForImu` so this AC
 // test evaluates the exact descriptor padctl ships (previously it hard-coded
 // a copy, which let R-C B1's Sensor-page bug escape CI).
+//
+// The Wave 5 canary assertions rely on the primary pad exposing at least one
+// EV_KEY bit (so SDL classifies it as a gamepad). We include one Button Page
+// usage (BTN_SOUTH = button 1) so the kernel's hid-input mapper emits exactly
+// one BTN_* bit on the evdev node. Without this, the EV_KEY control sample
+// would be vacuous.
 const MAIN_DESCRIPTOR = [_]u8{
     0x05, 0x01, // Usage Page (Generic Desktop)
     0x09, 0x05, // Usage (Game Pad)
     0xA1, 0x01, // Collection (Application)
+    // --- Button Page: 1 button ---
+    0x05, 0x09, // Usage Page (Button)
+    0x19, 0x01, // Usage Minimum (1)
+    0x29, 0x01, // Usage Maximum (1)
+    0x15, 0x00, 0x25, 0x01, // Logical Min/Max 0..1
+    0x75, 0x01, 0x95, 0x01, // Report Size 1, Count 1
+    0x81, 0x02, // Input (Data, Var, Abs)
+    // padding to byte boundary (7 bits)
+    0x75, 0x07,
+    0x95, 0x01,
+    0x81, 0x03, // Input (Const, Var, Abs) padding
+    // --- Axis X ---
+    0x05, 0x01, // Usage Page (Generic Desktop)
     0x09, 0x30, // Usage (X)
     0x15, 0x00, 0x26, 0xFF, 0x00, // Logical Min/Max 0..255
-    0x75, 0x08, 0x95, 0x01, // Report Size/Count 8/1
+    0x75, 0x08, 0x95, 0x01, // Report Size 8, Count 1
     0x81, 0x02, // Input (Data, Var, Abs)
     0xC0, // End Collection
 };
@@ -175,6 +305,47 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
     try testing.expectEqualStrings(SHARED_UNIQ, main_uniq);
     try testing.expectEqualStrings(SHARED_UNIQ, imu_uniq);
     try testing.expectEqualSlices(u8, main_uniq, imu_uniq);
+
+    // -----------------------------------------------------------------------
+    // Wave 5 canary — kernel evdev classification. If `buildForImu`'s
+    // descriptor is kernel-accepted, the IMU node must expose
+    // INPUT_PROP_ACCELEROMETER and carry zero EV_KEY bits. The primary pad
+    // node must carry at least one EV_KEY bit (control sample).
+    // -----------------------------------------------------------------------
+    const imu_props = try readPropBitmap(imu_path[0..imu_path_len]);
+    const imu_keys = try readKeyBitmap(imu_path[0..imu_path_len]);
+    const main_keys = try readKeyBitmap(main_path[0..main_path_len]);
+
+    if (!hasPropBit(&imu_props, INPUT_PROP_ACCELEROMETER)) {
+        printHex("IMU EVIOCGPROP", &imu_props);
+        printHex("IMU EVIOCGBIT(EV_KEY)", &imu_keys);
+        std.debug.print(
+            "IMU node '{s}' lacks INPUT_PROP_ACCELEROMETER (bit 0x{x}) — SDL will NOT classify as sensor.\n",
+            .{ imu_path[0..imu_path_len], INPUT_PROP_ACCELEROMETER },
+        );
+    }
+    try testing.expect(hasPropBit(&imu_props, INPUT_PROP_ACCELEROMETER));
+
+    const imu_key_count = keyBitmapPopcount(&imu_keys);
+    if (imu_key_count != 0) {
+        printHex("IMU EVIOCGBIT(EV_KEY)", &imu_keys);
+        std.debug.print(
+            "IMU node '{s}' has {d} EV_KEY bits — SDL will reclassify as gamepad.\n",
+            .{ imu_path[0..imu_path_len], imu_key_count },
+        );
+    }
+    try testing.expectEqual(@as(usize, 0), imu_key_count);
+
+    // Control: primary pad must still look like a gamepad.
+    const main_key_count = keyBitmapPopcount(&main_keys);
+    if (main_key_count == 0) {
+        printHex("primary pad EVIOCGBIT(EV_KEY)", &main_keys);
+        std.debug.print(
+            "primary pad node '{s}' carries zero EV_KEY bits — regression: SDL will not classify as gamepad.\n",
+            .{main_path[0..main_path_len]},
+        );
+    }
+    try testing.expect(main_key_count >= 1);
 }
 
 fn sendCreateWithUniq(
