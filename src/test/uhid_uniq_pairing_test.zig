@@ -143,47 +143,47 @@ fn readUniqFromEvdevPath(path: []const u8) ![]u8 {
 // ---------------------------------------------------------------------------
 // Phase 13 Wave 5 canary — kernel-level evdev classification ioctls.
 //
-// SDL/Steam `GuessDeviceClass` keys off two ioctl signals *after* the kernel's
-// HID→evdev mapper (`drivers/hid/hid-input.c`) parses the descriptor:
-//   1. `EVIOCGPROP` → must expose `INPUT_PROP_ACCELEROMETER` (0x06) so the
-//      sensor is classified as an accelerometer, not a gamepad.
-//   2. `EVIOCGBIT(EV_KEY, ...)` → must be *empty* for the IMU node; any KEY
-//      bit set trips the gamepad heuristic and SDL won't pair the sensor.
-// The primary pad is the inverse: EV_KEY must have at least one bit so SDL
-// classifies it as a gamepad.
+// The kernel's generic HID→evdev mapper (`drivers/hid/hid-input.c`) does NOT
+// set `INPUT_PROP_ACCELEROMETER` for our descriptor — that bit is only
+// hard-coded by device-specific drivers (hid-sony / hid-nintendo / hid-
+// playstation). Both systemd-udev's `input_id` builtin and SDL's
+// `SDL_EVDEV_GuessDeviceClass` fall back to a heuristic instead:
+//
+//   "EV_KEY empty AND ABS_X + ABS_Y + ABS_Z present" → classify as
+//   accelerometer/sensor.
+//
+// The padctl Wave 3 IMU descriptor (`UhidDescriptorBuilder.buildForImu`)
+// emits a Generic-Desktop Multi-axis Controller with Usage X/Y/Z + Rx/Ry/Rz
+// and no Button Page usages, which the kernel maps to ABS_X/Y/Z + ABS_RX/RY/RZ
+// with no EV_KEY bits. This test verifies those kernel-observable signals
+// so any regression (e.g. reintroducing a Button Page) flips red.
+//
+// The ENV{ID_INPUT_ACCELEROMETER} tag is enforced by the shipped udev rule
+// `/lib/udev/rules.d/90-padctl.rules` (or `/etc/udev/rules.d/` on immutable
+// systems) and is verified separately via udev's `input_id` output in
+// system-integration tests — this file stays focused on the kernel-level
+// heuristic signals that must hold regardless of udev availability.
 //
 // Kernel constants (linux/input-event-codes.h):
-//   INPUT_PROP_ACCELEROMETER = 0x06 → byte 0 bit 6 (mask 0x40)
-//   INPUT_PROP_CNT           = 0x20 → props buffer = 4 bytes
-//   EV_KEY                   = 0x01
-//   KEY_MAX                  = 0x2ff → key bitmap = 96 bytes
+//   EV_KEY = 0x01, EV_ABS = 0x03
+//   KEY_MAX = 0x2ff → key bitmap = 96 bytes
+//   ABS_MAX = 0x3f  → abs bitmap = 8 bytes
+//   ABS_X = 0x00, ABS_Y = 0x01, ABS_Z = 0x02
 //
-// EVIOCGPROP(len)     = _IOR('E', 0x09, len)
-// EVIOCGBIT(ev, len)  = _IOR('E', 0x20 + ev, len)
-const INPUT_PROP_ACCELEROMETER: u8 = 0x06;
-const INPUT_PROP_CNT: usize = 0x20;
+// EVIOCGBIT(ev, len) = _IOR('E', 0x20 + ev, len)
 const EV_KEY_CODE: u8 = 0x01;
+const EV_ABS_CODE: u8 = 0x03;
 const KEY_MAX: usize = 0x2ff;
 const KEY_BYTES: usize = (KEY_MAX + 7) / 8 + 1; // 96 bytes
-
-fn EVIOCGPROP(len: u14) u32 {
-    const req = std.os.linux.IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x09, .size = len };
-    return @bitCast(req);
-}
+const ABS_MAX: usize = 0x3f;
+const ABS_BYTES: usize = (ABS_MAX + 7) / 8 + 1; // 8 bytes
+const ABS_X: u8 = 0x00;
+const ABS_Y: u8 = 0x01;
+const ABS_Z: u8 = 0x02;
 
 fn EVIOCGBIT(ev: u8, len: u14) u32 {
     const req = std.os.linux.IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x20 + ev, .size = len };
     return @bitCast(req);
-}
-
-fn readPropBitmap(path: []const u8) ![INPUT_PROP_CNT / 8]u8 {
-    const fd = try posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
-    defer posix.close(fd);
-
-    var props: [INPUT_PROP_CNT / 8]u8 = std.mem.zeroes([INPUT_PROP_CNT / 8]u8);
-    const rc = linux.ioctl(fd, EVIOCGPROP(@intCast(props.len)), @intFromPtr(&props));
-    if (posix.errno(rc) != .SUCCESS) return error.EvdevPropIoctlFailed;
-    return props;
 }
 
 fn readKeyBitmap(path: []const u8) ![KEY_BYTES]u8 {
@@ -196,11 +196,21 @@ fn readKeyBitmap(path: []const u8) ![KEY_BYTES]u8 {
     return key_bits;
 }
 
-fn hasPropBit(props: []const u8, bit: u8) bool {
-    const byte_idx: usize = bit / 8;
-    const bit_idx: u3 = @intCast(bit % 8);
-    if (byte_idx >= props.len) return false;
-    return ((props[byte_idx] >> bit_idx) & 1) == 1;
+fn readAbsBitmap(path: []const u8) ![ABS_BYTES]u8 {
+    const fd = try posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
+    defer posix.close(fd);
+
+    var abs_bits: [ABS_BYTES]u8 = std.mem.zeroes([ABS_BYTES]u8);
+    const rc = linux.ioctl(fd, EVIOCGBIT(EV_ABS_CODE, @intCast(abs_bits.len)), @intFromPtr(&abs_bits));
+    if (posix.errno(rc) != .SUCCESS) return error.EvdevAbsBitIoctlFailed;
+    return abs_bits;
+}
+
+fn hasAbsBit(bits: []const u8, code: u8) bool {
+    const byte_idx: usize = code / 8;
+    const bit_idx: u3 = @intCast(code % 8);
+    if (byte_idx >= bits.len) return false;
+    return ((bits[byte_idx] >> bit_idx) & 1) == 1;
 }
 
 fn keyBitmapPopcount(bits: []const u8) usize {
@@ -307,24 +317,25 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
     try testing.expectEqualSlices(u8, main_uniq, imu_uniq);
 
     // -----------------------------------------------------------------------
-    // Wave 5 canary — kernel evdev classification. If `buildForImu`'s
-    // descriptor is kernel-accepted, the IMU node must expose
-    // INPUT_PROP_ACCELEROMETER and carry zero EV_KEY bits. The primary pad
-    // node must carry at least one EV_KEY bit (control sample).
+    // Wave 5 canary — kernel evdev classification. The heuristic implemented
+    // by systemd-udev's `input_id` builtin AND by SDL's
+    // `SDL_EVDEV_GuessDeviceClass` is: *no EV_KEY bits set* AND
+    // *ABS_X + ABS_Y + ABS_Z present* → accelerometer/sensor. Our Wave 3
+    // `buildForImu` descriptor maps to this exact shape. The primary pad is
+    // the inverse control sample: at least one EV_KEY bit must be set so
+    // SDL classifies it as a gamepad.
+    //
+    // We deliberately do NOT assert `INPUT_PROP_ACCELEROMETER` on the evdev
+    // node — kernel `hid-input.c` never sets that bit for generic HID (only
+    // hid-sony/hid-nintendo/hid-playstation do, via hard-coded quirks). The
+    // bit is set instead by user-space via our shipped udev rule
+    // `/lib/udev/rules.d/90-padctl.rules`, which tags
+    // `ENV{ID_INPUT_ACCELEROMETER}=1` — that tag is orthogonal to this
+    // kernel-level heuristic test and is validated separately.
     // -----------------------------------------------------------------------
-    const imu_props = try readPropBitmap(imu_path[0..imu_path_len]);
     const imu_keys = try readKeyBitmap(imu_path[0..imu_path_len]);
+    const imu_abs = try readAbsBitmap(imu_path[0..imu_path_len]);
     const main_keys = try readKeyBitmap(main_path[0..main_path_len]);
-
-    if (!hasPropBit(&imu_props, INPUT_PROP_ACCELEROMETER)) {
-        printHex("IMU EVIOCGPROP", &imu_props);
-        printHex("IMU EVIOCGBIT(EV_KEY)", &imu_keys);
-        std.debug.print(
-            "IMU node '{s}' lacks INPUT_PROP_ACCELEROMETER (bit 0x{x}) — SDL will NOT classify as sensor.\n",
-            .{ imu_path[0..imu_path_len], INPUT_PROP_ACCELEROMETER },
-        );
-    }
-    try testing.expect(hasPropBit(&imu_props, INPUT_PROP_ACCELEROMETER));
 
     const imu_key_count = keyBitmapPopcount(&imu_keys);
     if (imu_key_count != 0) {
@@ -335,6 +346,20 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
         );
     }
     try testing.expectEqual(@as(usize, 0), imu_key_count);
+
+    // ABS_X/Y/Z present is the other half of the heuristic — without these,
+    // the kernel has no axes to classify and both udev + SDL fall through
+    // to "unknown".
+    if (!hasAbsBit(&imu_abs, ABS_X) or !hasAbsBit(&imu_abs, ABS_Y) or !hasAbsBit(&imu_abs, ABS_Z)) {
+        printHex("IMU EVIOCGBIT(EV_ABS)", &imu_abs);
+        std.debug.print(
+            "IMU node '{s}' missing one of ABS_X/Y/Z — heuristic classification will fail.\n",
+            .{imu_path[0..imu_path_len]},
+        );
+    }
+    try testing.expect(hasAbsBit(&imu_abs, ABS_X));
+    try testing.expect(hasAbsBit(&imu_abs, ABS_Y));
+    try testing.expect(hasAbsBit(&imu_abs, ABS_Z));
 
     // Control: primary pad must still look like a gamepad.
     const main_key_count = keyBitmapPopcount(&main_keys);
