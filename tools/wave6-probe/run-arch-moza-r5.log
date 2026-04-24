@@ -1,0 +1,39 @@
+[probe] kernel: 6.18.9-arch1-2
+[probe] /dev/uhid present: True
+[probe] rdesc length: 324 bytes
+[probe] module hid_universal_pidff already loaded/built-in
+[probe] modprobe hid_microsoft: ok=True err=''
+[probe] module hid already loaded/built-in
+[probe] UHID device created; dispatching events for 2s to let kernel bind
+[probe] sys_path: /sys/devices/virtual/misc/uhid/0003:11FF:1211.02AD
+[probe] hidraw_nodes: ['/dev/hidraw1']
+[probe] device_nodes: ['/dev/input/event3']
+
+=== VERDICT ===
+{
+  "kernel": "6.18.9-arch1-2",
+  "rdesc_len": 324,
+  "vid_pid": "11ff:1211",
+  "bus": "USB",
+  "sys_path": "/sys/devices/virtual/misc/uhid/0003:11FF:1211.02AD",
+  "hidraw_nodes": [
+    "/dev/hidraw1"
+  ],
+  "evdev_nodes": [
+    "/dev/input/event3"
+  ],
+  "ff_capabilities": {
+    "event3": "0"
+  },
+  "modalias": "hid:b0003g0001v000011FFp00001211",
+  "bound_driver": null,
+  "dmesg_slice": "padctl-wave6-probe-mark-1-1777023866\ninput: Moza R5 (Wave6 Probe) as /devices/virtual/misc/uhid/0003:11FF:1211.02AD/input/input707\nhid-universal-pidff 0003:11FF:1211.02AD: input,hidraw1: USB HID v0.00 Joystick [Moza R5 (Wave6 Probe)] on padctl/wave6-probe\nhid-universal-pidff 0003:11FF:1211.02AD: Error initialising force feedback\nBUG: kernel NULL pointer dereference, address: 00000000000000a8\n#PF: supervisor read access in kernel mode\n#PF: error_code(0x0000) - not-present page\nPGD 0 P4D 0 \nOops: Oops: 0000 [#1] SMP NOPTI\nCPU: 21 UID: 0 PID: 2972861 Comm: (udev-worker) Tainted: G S         OE       6.18.9-arch1-2 #1 PREEMPT(full)  acc0345693780c55f83aaf9a0c9efd10d8da358f\nTainted: [S]=CPU_OUT_OF_SPEC, [O]=OOT_MODULE, [E]=UNSIGNED_MODULE\nHardware name: ASUS System Product Name/PRIME Z790-P, BIOS 1658 05/22/2024\nRIP: 0010:hid_hw_open+0x71/0xa0\nCode: 04 48 83 c4 08 5b 5d c3 cc cc cc cc 48 8b 83 e0 1b 00 00 48 89 df 48 8b 40 10 2e 2e 2e ff d0 85 c0 75 25 48 8b 93 d0 1b 00 00 <48> 8b 92 a8 00 00 00 48 85 d2 74 bb 89 44 24 04 48 89 df 2e 2e 2e\nRSP: 0018:ffffd2af4f7239e8 EFLAGS: 00010246\nRAX: 0000000000000000 RBX: ffff8aaa8203c000 RCX: 0000000000080050\nRDX: 0000000000000000 RSI: 0000000000000286 RDI: ffff8ac9b0b99178\nRBP: ffff8aaa8203dbe8 R08: ffff8ac7177a4483 R09: 000000000000000b\nR10: ffffd2af4f7239c0 R11: ffff8ac71da19000 R12: ffff8ab4f60e9c08\nR13: ffff8ac71da1f038 R14: ffff8aaad4e844c0 R15: ffff8ab4f60e9f90\nFS:  00007f6982bd7840(0000) GS:ffff8aca2482f000(0000) knlGS:0000000000000000\nCS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033\nCR2: 00000000000000a8 CR3: 0000000b68cf3006 CR4: 0000000000f72ef0\nPKRU: 55555554\nCall Trace:\n <TASK>\n input_open_device+0x9c/0x120\n evdev_open+0x1e7/0x210\n chrdev_open+0xad/0x240\n ? __pfx_chrdev_open+0x10/0x10\n do_dentry_open+0x240/0x480\n vfs_open+0x30/0x100\n path_openat+0x7ea/0x12e0\n do_filp_open+0xd8/0x180\n ? path_openat+0x942/0x12e0\n ? alloc_fd+0x12e/0x190\n do_sys_openat2+0x88/0xe0\n __x64_sys_openat+0x61/0xa0\n do_syscall_64+0x81/0x7f0\n ? do_sys_openat2+0xa2/0xe0\n ? __x64_sys_openat+0x61/0xa0\n ? do_syscall_64+0x81/0x7f0\n ? refill_obj_stock+0x12e/0x240\n ? __memcg_slab_free_hook+0xf4/0x140\n ? kmem_cache_free+0x549/0x5d0\n ? __x64_sys_close+0x3d/0x80\n ? __x64_sys_close+0x3d/0x80\n ? do_syscall_64+0x81/0x7f0\n ? __irq_exit_rcu+0x4c/0xf0\n entry_SYSCALL_64_after_hwframe+0x76/0x7e\nRIP: 0033:0x7f69824a23be\nCode: 4d 89 d8 e8 64 bb 00 00 4c 8b 5d f8 41 8b 93 08 03 00 00 59 5e 48 83 f8 fc 74 11 c9 c3 0f 1f 80 00 00 00 00 48 8b 45 10 0f 05 <c9> c3 83 e2 39 83 fa 08 75 e7 e8 03 ff ff ff 0f 1f 00 f3 0f 1e fa\nRSP: 002b:00007fffa1919a90 EFLAGS: 00000202 ORIG_RAX: 0000000000000101\nRAX: ffffffffffffffda RBX: 00000000fffffffe RCX: 00007f69824a23be\nRDX: 0000000000080900 RSI: 00007fffa1919b50 RDI: ffffffffffffff9c\nRBP: 00007fffa1919aa0 R08: 0000000000000000 R09: 0000000000000000\nR10: 0000000000000000 R11: 0000000000000202 R12: 00005642535333b0\nR13: 0000000000000037 R14: 00005642538065a0 R15: 0000000000080900\n </TASK>\nModules linked in: hid_microsoft ff_memless hid_universal_pidff tcp_diag inet_diag nf_conntrack_netlink iptable_raw veth xt_tcpudp xt_mark xt_conntrack xt_MASQUERADE xfrm_user xfrm_algo xt_set ip_set xt_addrtype ccm snd_seq_dummy snd_hrtimer rfcomm snd_seq snd_seq_device nft_masq nft_ct nft_reject_ipv4 nf_reject_ipv4 nft_reject act_csum cls_u32 sch_htb tun ip6table_nat ip6table_filter ip6_tables iptable_nat nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 iptable_filter ip_tables x_tables nf_tables bridge stp llc overlay uhid cmac algif_hash algif_skcipher af_alg bnep vfat fat btusb btmtk btrtl btbcm btintel hid_logitech_hidpp bluetooth mousedev joydev snd_sof_pci_intel_tgl snd_sof_pci_intel_cnl snd_sof_intel_hda_generic soundwire_intel snd_sof_intel_hda_sdw_bpt snd_sof_intel_hda_common snd_soc_hdac_hda iwlmvm snd_sof_intel_hda_mlink snd_sof_intel_hda soundwire_cadence snd_sof_pci intel_rapl_msr snd_sof_xtensa_dsp intel_rapl_common mac80211 snd_sof snd_sof_utils intel_uncore_frequency\n snd_soc_acpi_intel_match intel_uncore_frequency_common ptp snd_soc_acpi_intel_sdca_quirks intel_tcc_cooling soundwire_generic_allocation pps_core x86_pkg_temp_thermal snd_soc_acpi libarc4 intel_powerclamp soundwire_bus coretemp snd_hda_codec_alc662 snd_soc_sdca snd_hda_codec_realtek_lib crc8 snd_hda_codec_atihdmi snd_hda_codec_nvhdmi snd_hda_codec_generic snd_hda_codec_hdmi snd_soc_avs iwlwifi snd_soc_hda_codec kvm_intel snd_hda_ext_core snd_hda_intel eeepc_wmi snd_hda_codec asus_wmi cfg80211 kvm platform_profile snd_hda_core sparse_keymap snd_soc_core nvidia_drm(OE) snd_intel_dspcfg iTCO_wdt polyval_clmulni snd_compress r8169 ghash_clmulni_intel snd_intel_sdw_acpi intel_pmc_bxt ac97_bus aesni_intel snd_hwdep snd_pcm_dmaengine iTCO_vendor_support spd5118 nvidia_modeset(OE) realtek rapl snd_pcm i2c_i801 intel_cstate mdio_devres snd_timer libphy spi_nor intel_pmc_core i2c_smbus pmt_telemetry snd mtd intel_uncore wmi_bmof pcspkr rfkill i2c_mux mdio_bus mei_me pmt_discovery soundcore mei pmt_class\n nvidia_uvm(OE) hid_logitech_dj intel_pmc_ssram_telemetry intel_vsec acpi_tad pinctrl_alderlake acpi_pad mac_hid nvidia(OE) i2c_dev ntsync crypto_user nfnetlink amdgpu amdxcp i2c_algo_bit drm_ttm_helper ttm drm_exec drm_panel_backlight_quirks gpu_sched drm_suballoc_helper nvme drm_buddy nvme_core drm_display_helper nvme_keyring intel_lpss_pci cec nvme_auth intel_lpss spi_intel_pci hkdf video idma64 spi_intel wmi vfio_pci vfio_pci_core irqbypass vfio_iommu_type1 vfio iommufd\nCR2: 00000000000000a8\n---[ end trace 0000000000000000 ]---\nRIP: 0010:hid_hw_open+0x71/0xa0\nCode: 04 48 83 c4 08 5b 5d c3 cc cc cc cc 48 8b 83 e0 1b 00 00 48 89 df 48 8b 40 10 2e 2e 2e ff d0 85 c0 75 25 48 8b 93 d0 1b 00 00 <48> 8b 92 a8 00 00 00 48 85 d2 74 bb 89 44 24 04 48 89 df 2e 2e 2e\nRSP: 0018:ffffd2af4f7239e8 EFLAGS: 00010246\nRAX: 0000000000000000 RBX: ffff8aaa8203c000 RCX: 0000000000080050\nRDX: 0000000000000000 RSI: 0000000000000286 RDI: ffff8ac9b0b99178\nRBP: ffff8aaa8203dbe8 R08: ffff8ac7177a4483 R09: 000000000000000b\nR10: ffffd2af4f7239c0 R11: ffff8ac71da19000 R12: ffff8ab4f60e9c08\nR13: ffff8ac71da1f038 R14: ffff8aaad4e844c0 R15: ffff8ab4f60e9f90\nFS:  00007f6982bd7840(0000) GS:ffff8aca2482f000(0000) knlGS:0000000000000000\nCS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033\nCR2: 00000000000000a8 CR3: 0000000b68cf3006 CR4: 0000000000f72ef0\nPKRU: 55555554\nnote: (udev-worker)[2972861] exited with irqs disabled\n",
+  "uhid_output_events_seen": 0,
+  "PIDFF_BOUND": false,
+  "verdict_basis": {
+    "driver_bound": "",
+    "ff_caps_nonzero": false,
+    "pidff_driver_bound": false,
+    "pidff_init_in_dmesg": false
+  }
+}
