@@ -56,7 +56,7 @@ int main(void) {
             int efd = open(path, O_RDONLY | O_NONBLOCK);
             if (efd < 0) continue;
             unsigned short id[4] = {0};
-            if (ioctl(efd, 0x80084502, id) == 0 && id[1] == 0xFADE) {
+            if (ioctl(efd, 0x80084502, id) == 0 && id[1] == 0xFADE && id[2] == 0xBEEF) {
                 printf("  FOUND %s: bus=%04x vid=%04x pid=%04x\n",
                        path, id[0], id[1], id[2]);
                 close(efd);

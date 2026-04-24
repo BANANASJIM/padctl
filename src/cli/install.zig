@@ -289,21 +289,16 @@ const imu_udev_rules_content =
     \\
 ;
 
-fn writeImuUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan) void {
-    const rules_path = std.fmt.allocPrint(allocator, "{s}/90-padctl.rules", .{plan.udev_dir}) catch return;
+fn writeImuUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/90-padctl.rules", .{plan.udev_dir});
     defer allocator.free(rules_path);
 
-    if (std.fs.createFileAbsolute(rules_path, .{ .truncate = true })) |f| {
-        defer f.close();
-        f.writeAll(imu_udev_rules_content) catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
-    } else |err| {
-        var errbuf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&errbuf, "warning: 90-padctl.rules not written: {}\n", .{err}) catch "warning: 90-padctl.rules write error\n";
-        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-    }
+    var f = try std.fs.createFileAbsolute(rules_path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(imu_udev_rules_content);
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 }
 
 fn writeModulesLoad(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool) void {
@@ -1170,7 +1165,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 
     try installUdevRules(allocator, &plan, device_entries.items);
     try cleanupLegacyUdevFiles(allocator, &plan);
-    writeImuUdevRules(allocator, &plan);
+    try writeImuUdevRules(allocator, &plan);
     writeModulesLoad(allocator, plan.opts.destdir, plan.prefix, plan.effective_immutable);
 
     var installed_mappings = std.ArrayList([]const u8){};
