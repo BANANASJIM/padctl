@@ -1,0 +1,6 @@
+# padctl UHID IMU nodes: tag as accelerometer so SDL/Steam recognize them
+# as sensors instead of joysticks. Matches padctl's uniq pattern `padctl/*`
+# and a name containing "IMU" (padctl's convention for the IMU UHID card).
+# Also untags ID_INPUT_JOYSTICK to avoid SDL opening the sensor as a gamepad.
+SUBSYSTEM=="input", ATTRS{uniq}=="padctl/*", ATTRS{name}=="*IMU*", \
+  ENV{ID_INPUT_ACCELEROMETER}="1", ENV{ID_INPUT_JOYSTICK}=""

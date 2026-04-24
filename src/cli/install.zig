@@ -266,6 +266,46 @@ const modules_load_content =
     \\
 ;
 
+// Static udev rule tagging padctl's UHID IMU nodes as accelerometers so
+// systemd-udev's `input_id` builtin and SDL's `SDL_EVDEV_GuessDeviceClass`
+// treat them as sensors rather than joysticks. Kernel `hid-input.c` does not
+// set `INPUT_PROP_ACCELEROMETER` for generic HID — both the udev builtin and
+// SDL fall back to a heuristic ("no EV_KEY + ABS_X/Y/Z"); this explicit tag
+// hardens that signal and additionally clears `ID_INPUT_JOYSTICK` so SDL
+// never opens the sensor node as a gamepad.
+//
+// Match criteria:
+//   - SUBSYSTEM == input: only evdev nodes, never hidraw.
+//   - ATTRS{uniq} == "padctl/*": set by padctl via UHID_CREATE2 (`buildUniq`).
+//   - ATTRS{name} == "*IMU*": padctl IMU companion card uses "<device> IMU"
+//     (see device_instance.zig T5c) or an explicit imu.name override.
+const imu_udev_rules_content =
+    \\# padctl UHID IMU nodes: tag as accelerometer so SDL/Steam recognize them
+    \\# as sensors instead of joysticks. Matches padctl's uniq pattern `padctl/*`
+    \\# and a name containing "IMU" (padctl's convention for the IMU UHID card).
+    \\# Also untags ID_INPUT_JOYSTICK to avoid SDL opening the sensor as a gamepad.
+    \\SUBSYSTEM=="input", ATTRS{uniq}=="padctl/*", ATTRS{name}=="*IMU*", \
+    \\  ENV{ID_INPUT_ACCELEROMETER}="1", ENV{ID_INPUT_JOYSTICK}=""
+    \\
+;
+
+fn writeImuUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan) void {
+    const rules_path = std.fmt.allocPrint(allocator, "{s}/90-padctl.rules", .{plan.udev_dir}) catch return;
+    defer allocator.free(rules_path);
+
+    if (std.fs.createFileAbsolute(rules_path, .{ .truncate = true })) |f| {
+        defer f.close();
+        f.writeAll(imu_udev_rules_content) catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, rules_path) catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+    } else |err| {
+        var errbuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "warning: 90-padctl.rules not written: {}\n", .{err}) catch "warning: 90-padctl.rules write error\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+    }
+}
+
 fn writeModulesLoad(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool) void {
     // Immutable systems use /etc; otherwise prefer prefix/lib/modules-load.d
     const dir_path = if (immutable)
@@ -1130,6 +1170,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
 
     try installUdevRules(allocator, &plan, device_entries.items);
     try cleanupLegacyUdevFiles(allocator, &plan);
+    writeImuUdevRules(allocator, &plan);
     writeModulesLoad(allocator, plan.opts.destdir, plan.prefix, plan.effective_immutable);
 
     var installed_mappings = std.ArrayList([]const u8){};
@@ -1632,6 +1673,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/lib/systemd/user/padctl.service",
         "/lib/udev/rules.d/60-padctl.rules",
         "/lib/udev/rules.d/61-padctl-driver-block.rules",
+        "/lib/udev/rules.d/90-padctl.rules",
         "/lib/udev/rules.d/99-padctl.rules",
         "/lib/modules-load.d/padctl.conf",
     };
@@ -1717,6 +1759,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             "/etc/systemd/user/padctl.service",
             "/etc/udev/rules.d/60-padctl.rules",
             "/etc/udev/rules.d/61-padctl-driver-block.rules",
+            "/etc/udev/rules.d/90-padctl.rules",
             "/etc/udev/rules.d/99-padctl.rules",
             "/etc/modules-load.d/padctl.conf",
         };
@@ -4612,4 +4655,62 @@ test "uninstall: removes /etc/systemd/user/padctl.service on non-immutable /usr/
         return;
     };
     return error.FileStillExists;
+}
+
+// -----------------------------------------------------------------------------
+// Phase 13 Wave 5 — static udev rule tests. These validate the embedded
+// `imu_udev_rules_content` and the on-disk `udev/90-padctl.rules` are well-
+// formed and carry the critical ENV tags. Layer 0 only — no systemd needed.
+// -----------------------------------------------------------------------------
+
+test "install: imu_udev_rules_content matches input subsystem and padctl uniq" {
+    const testing = std.testing;
+    try testing.expect(std.mem.indexOf(u8, imu_udev_rules_content, "SUBSYSTEM==\"input\"") != null);
+    try testing.expect(std.mem.indexOf(u8, imu_udev_rules_content, "ATTRS{uniq}==\"padctl/") != null);
+    try testing.expect(std.mem.indexOf(u8, imu_udev_rules_content, "ATTRS{name}==\"*IMU*\"") != null);
+}
+
+test "install: imu_udev_rules_content sets accelerometer and clears joystick" {
+    const testing = std.testing;
+    try testing.expect(std.mem.indexOf(u8, imu_udev_rules_content, "ENV{ID_INPUT_ACCELEROMETER}=\"1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, imu_udev_rules_content, "ENV{ID_INPUT_JOYSTICK}=\"\"") != null);
+}
+
+test "install: imu_udev_rules_content is syntactically well-formed" {
+    const testing = std.testing;
+    // Every non-empty, non-comment logical line must contain at least one
+    // key=value or key==value token. A logical line is the physical line
+    // plus any backslash-continuations. We only check the tokens exist.
+    var logical = std.ArrayList(u8){};
+    defer logical.deinit(testing.allocator);
+
+    var it = std.mem.splitScalar(u8, imu_udev_rules_content, '\n');
+    while (it.next()) |raw| {
+        var line = std.mem.trimRight(u8, raw, " \t\r");
+        const is_continuation = std.mem.endsWith(u8, line, "\\");
+        if (is_continuation) line = line[0 .. line.len - 1];
+        try logical.appendSlice(testing.allocator, line);
+        if (!is_continuation) {
+            const l = std.mem.trim(u8, logical.items, " \t");
+            defer logical.clearRetainingCapacity();
+            if (l.len == 0) continue;
+            if (l[0] == '#') continue;
+            try testing.expect(std.mem.indexOf(u8, l, "==") != null or
+                std.mem.indexOf(u8, l, "=") != null);
+        }
+    }
+}
+
+test "install: on-disk udev/90-padctl.rules mirrors embedded content" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    // The repo ships the same rule body as a standalone file for packagers
+    // that do not execute `padctl install`. Skip gracefully when the test
+    // runs outside the repo tree (e.g. from an installed binary).
+    const cwd = std.fs.cwd();
+    const file = cwd.openFile("udev/90-padctl.rules", .{}) catch return;
+    defer file.close();
+    const body = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(body);
+    try testing.expectEqualStrings(imu_udev_rules_content, body);
 }
