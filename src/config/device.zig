@@ -122,7 +122,10 @@ pub const AuxConfig = struct {
 };
 
 pub const ImuConfig = struct {
-    backend: []const u8 = "uinput",
+    // Default is "uhid" so bare `ImuConfig{}` literals are validator-legal and
+    // a TOML `[output.imu]` block without an explicit `backend` key picks the
+    // only accepted value (validate() rejects "uinput" per ADR-015).
+    backend: []const u8 = "uhid",
     name: ?[]const u8 = null,
     vid: ?i64 = null,
     pid: ?i64 = null,
@@ -1243,4 +1246,28 @@ test "validate: TOML round-trip missing [output.imu] leaves imu=null" {
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectEqual(@as(?ImuConfig, null), result.value.output.?.imu);
+}
+
+test "validate: [output.imu] without explicit backend defaults to uhid and passes validate" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\[output.imu]
+        \\name = "Pad IMU"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("uhid", result.value.output.?.imu.?.backend);
 }

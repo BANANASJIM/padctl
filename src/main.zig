@@ -1019,9 +1019,9 @@ pub fn main() !void {
         break :blk null;
     };
 
-    // Phase 13 Wave 3: one-shot daemon path has a single device; the counter
-    // value is never consulted when phys_key is null-meaningless, but the
-    // parameter must be a valid pointer.
+    // Phase 13 Wave 3: one-shot daemon has a single device with no phys_key
+    // probe, so buildUniq falls back to the counter. Starting at 1 keeps the
+    // instance hex "0001" stable across runs for consistent uniq strings.
     var main_uniq_counter: u16 = 1;
     var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null, &main_uniq_counter, .{}) catch |err| {
         std.log.err("failed to init device: {}", .{err});

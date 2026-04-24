@@ -28,10 +28,17 @@ Source: `decisions/015-uhid-imu-migration.md@92caade`:20-28, §Alternatives.
    because uinput's `EVIOCGUNIQ` is always `-ENOENT`, so SDL `strcmp` would fail
    on the primary side even if the IMU side carried a uniq.
 3. **No `EV_KEY` in IMU descriptor** — SDL `GuessDeviceClass()` treats any device
-   advertising `EV_KEY` as a gamepad, not a sensor. IMU descriptor carries only
-   `INPUT_PROP_ACCELEROMETER` + abs axes.
-4. **Default `backend = "uinput"`** — existing `devices/*.toml` with no `[output.imu]`
-   section see zero behaviour change.
+   advertising `EV_KEY` as a gamepad, not a sensor. IMU descriptor is a Generic
+   Desktop Multi-axis Controller with six i16 axes (3 accel + 3 gyro); the
+   kernel's `hid-input.c` mapper auto-sets `INPUT_PROP_ACCELEROMETER` from the
+   "3+3 axes, no EV_KEY" shape (see T5a revision note for why Sensor Page was
+   rejected).
+4. **No behaviour change when `[output.imu]` is absent** — existing
+   `devices/*.toml` without an `[output.imu]` section leave `cfg.output.imu`
+   null and run the legacy uinput-primary path unchanged. When `[output.imu]`
+   IS declared, `ImuConfig.backend` defaults to `"uhid"` (the only validator-
+   legal value — see `src/config/device.zig` `validate()`); an explicit
+   `backend = "uinput"` is rejected per ADR-015.
 5. **Layer 0+1 tests run zero-privilege** in `zig build test`. Layer 2 is a soft
    gate via `PADCTL_TEST_REQUIRE_UHID=1`.
 
@@ -41,9 +48,10 @@ Violating any of these at implementation time fails the spec.
 
 ## Behavioural Parity Contract
 
-When `[output.imu]` is absent (old TOML) OR `[output.imu].backend = "uinput"`:
-the post-Wave-3 codepath MUST be byte-equivalent to pre-Wave-3 in
-**every** observable dimension:
+When `[output.imu]` is absent (old TOML): the post-Wave-3 codepath MUST be
+byte-equivalent to pre-Wave-3 in **every** observable dimension. (The other
+historical fallback — `[output.imu].backend = "uinput"` — was rejected by
+`validate` during T1 and is no longer a runtime path; see Decision D9.)
 
 - `UinputDevice.create` still runs with the same `OutputConfig`
 - emit ordering, FF poll interface, vtable close semantics unchanged
@@ -78,7 +86,12 @@ Add a nested TOML section mapped to a new `ImuConfig` struct, and extend
 
 ```zig
 pub const ImuConfig = struct {
-    backend: []const u8 = "uinput",       // "uinput" (default) | "uhid"
+    // Default is "uhid" — the only validator-legal backend when [output.imu]
+    // is declared (validate() rejects "uinput" per ADR-015). A bare
+    // `[output.imu]` block with no explicit `backend` key is therefore legal
+    // and picks the intended path; `ImuConfig{}` literals in Zig code are
+    // likewise legal-by-construction.
+    backend: []const u8 = "uhid",         // only "uhid" is accepted; "uinput" → InvalidConfig
     name: ?[]const u8 = null,             // override for IMU uhid name; fallback "<device.name> IMU"
     vid: ?i64 = null,                     // optional override; defaults to primary vid
     pid: ?i64 = null,                     // optional override; defaults to primary pid
@@ -537,11 +550,23 @@ HID report descriptor bytes emitted:
 
 | Block | Usage | Logical range | Report size |
 |-------|-------|---------------|-------------|
-| Usage Page Sensor (0x20) | — | — | — |
-| `INPUT_PROP_ACCELEROMETER` | — | — | — |
-| Usage Motion Accelerator X/Y/Z (0x0473/0x0474/0x0475) | `ABS_X/Y/Z` | `imu_cfg.accel_range` or `{-32768, 32767}` | 2 bytes × 3 |
-| Usage Motion Gyrometer X/Y/Z (0x0476/0x0477/0x0478) | `ABS_RX/RY/RZ` | `imu_cfg.gyro_range` or `{-32768, 32767}` | 2 bytes × 3 |
+| Usage Page Generic Desktop (0x05 0x01) | — | — | — |
+| Usage Multi-axis Controller (0x09 0x08) | — | — | — |
+| Usage X/Y/Z (0x30/0x31/0x32) | `ABS_X/Y/Z` accel | `imu_cfg.accel_range` or `{-32768, 32767}` | 2 bytes × 3 |
+| Usage Rx/Ry/Rz (0x33/0x34/0x35) | `ABS_RX/RY/RZ` gyro | `imu_cfg.gyro_range` or `{-32768, 32767}` | 2 bytes × 3 |
 | **No `EV_KEY`**, **no `EV_ABS` stick axes** | — | — | — |
+
+> **Descriptor revision history.** The first implementation of `buildForImu`
+> used Usage Page Sensor (0x20) + `INPUT_PROP_ACCELEROMETER` + Motion
+> Accelerator/Gyrometer usages (0x0473–0x0478). Reviewer R-C B1 caught that
+> Sensor Page descriptors bind to `hid-sensor-hub` and expose an IIO device
+> (`/sys/bus/iio/devices/iio:deviceN`) — NOT an `/dev/input/eventN` node —
+> which SDL's evdev-only pipeline never sees. The descriptor was retargeted
+> to Generic Desktop + Multi-axis Controller with 6 axes and no buttons:
+> Linux's `drivers/hid/hid-input.c` auto-sets `INPUT_PROP_ACCELEROMETER` from
+> the "3+3 i16 axes, no EV_KEY" shape, so the property is still set on the
+> resulting evdev node without being declared in the HID descriptor itself.
+> See ADR-015 §Alternatives and `review/reviewer-phase-14.md` R-C B1.
 
 Byte-exact golden-file test added in the `src/io/uhid_descriptor.zig` test
 block, matching the style of Wave 2's `buildFromOutput` tests. The golden

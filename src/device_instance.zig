@@ -90,9 +90,18 @@ pub const Owner = union(enum) {
 /// fd via `initWithFd` AND manually emits a `UHID_CREATE2` event on the fd
 /// (matching what `init` would have sent to `/dev/uhid`). Production call
 /// sites leave both fields null so the normal `openUhid` path runs.
+///
+/// `test_devices_override` (CodeRabbit PR #159 #6) skips the interface-
+/// opening loop entirely and installs the caller-provided `DeviceIO` slice.
+/// Needed so a Layer 1 test can drive `DeviceInstance.init` end-to-end
+/// without a real `/dev/hidraw*` node — otherwise `HidrawDevice.discover`
+/// would retry for ~7s and fail in CI before the routing switch is reached.
+/// The slice is consumed (stored in `DeviceInstance.devices`) and freed by
+/// `deinit`; caller must not free it.
 pub const InitOptions = struct {
     test_primary_uhid_fd: ?posix.fd_t = null,
     test_imu_uhid_fd: ?posix.fd_t = null,
+    test_devices_override: ?[]DeviceIO = null,
 };
 
 /// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
@@ -180,15 +189,18 @@ pub const DeviceInstance = struct {
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
 
-        const devices = try allocator.alloc(DeviceIO, cfg.device.interface.len);
-        errdefer allocator.free(devices);
+        const override_active = opts.test_devices_override != null;
+        const devices = opts.test_devices_override orelse try allocator.alloc(DeviceIO, cfg.device.interface.len);
+        errdefer if (!override_active) allocator.free(devices);
 
         var opened: usize = 0;
         errdefer for (devices[0..opened]) |dev| dev.close();
 
-        for (cfg.device.interface, 0..) |iface, i| {
-            devices[i] = try openDeviceWithRetry(allocator, iface, vid, pid);
-            opened += 1;
+        if (!override_active) {
+            for (cfg.device.interface, 0..) |iface, i| {
+                devices[i] = try openDeviceWithRetry(allocator, iface, vid, pid);
+                opened += 1;
+            }
         }
 
         if (cfg.device.init) |init_cfg| {

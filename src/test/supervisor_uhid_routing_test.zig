@@ -10,11 +10,16 @@
 //!
 //! `UhidSimulator` is NOT used here: it is an input-side harness that
 //! produces a virtual HID node for padctl to consume, not a write-capture
-//! interceptor for `UHID_CREATE2` events. A higher-level
-//! `DeviceInstance.init` test would additionally require mocking the
-//! hidraw interface discovery path; that coverage lives in the Layer 2
-//! integration tests (`supervisor_uhid_grace_integration_test.zig`,
-//! privilege-gated on `/dev/uhid`).
+//! interceptor for `UHID_CREATE2` events.
+//!
+//! The final test in this file drives `DeviceInstance.init` end-to-end via
+//! the `InitOptions.test_devices_override` + `test_*_uhid_fd` seams so the
+//! routing switch inside `init` is exercised directly — the prior tests
+//! would stay green even if that switch degenerated to always-uinput (the
+//! root cause of R-C BLOCKING slipping past CI initially). Additional
+//! coverage at the `/dev/uhid` kernel level lives in the Layer 2 integration
+//! tests (`supervisor_uhid_grace_integration_test.zig`, privilege-gated on
+//! `PADCTL_TEST_REQUIRE_UHID`).
 
 const std = @import("std");
 const posix = std.posix;
@@ -24,6 +29,9 @@ const testing = std.testing;
 const src = @import("src");
 const device_mod = src.config.device;
 const device_instance = src.device_instance;
+const DeviceInstance = device_instance.DeviceInstance;
+const DeviceIO = src.io.device_io.DeviceIO;
+const MockDeviceIO = src.testing_support.mock_device_io.MockDeviceIO;
 const uhid = src.io.uhid;
 const uhid_descriptor = src.io.uhid_descriptor;
 const uniq_mod = src.io.uniq;
@@ -243,4 +251,90 @@ test "routing: parseString rejects backend=uinput + [output.imu]" {
     const allocator = testing.allocator;
     const result = device_mod.parseString(allocator, TEST_TOML_ILLEGAL);
     try testing.expectError(error.InvalidConfig, result);
+}
+
+const TEST_TOML_UHID_LEGAL =
+    \\[device]
+    \\name = "Routing E2E Pad"
+    \\vid = 0x1234
+    \\pid = 0x5678
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "input"
+    \\interface = 0
+    \\size = 8
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\left_x = { offset = 1, type = "i8" }
+    \\[output]
+    \\name = "Routing E2E Pad"
+    \\axes = { left_x = { code = "ABS_X", min = -128, max = 127 } }
+    \\buttons = { a = "BTN_SOUTH" }
+    \\[output.imu]
+    \\backend = "uhid"
+    \\name = "Routing E2E IMU"
+;
+
+// End-to-end routing test (CodeRabbit PR #159 #6). Exercises the `use_uhid`
+// switch inside `DeviceInstance.init` directly — the earlier tests go through
+// `openUhidDeviceForTest`, which bypasses the switch and would stay green even
+// if the routing decision regressed to always-uinput (the root cause of R-C
+// BLOCKING initially slipping past CI). Reverse-verification: temporarily
+// forcing `use_uhid = false` in `device_instance.zig` flips `owner` to
+// `.uinput`, which fails the `.uhid` assertions below.
+test "DeviceInstance.init: backend=uhid TOML routes via InitOptions test seam" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const primary_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(primary_fds[0]);
+    const imu_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(imu_fds[0]);
+
+    const parsed = try device_mod.parseString(allocator, TEST_TOML_UHID_LEGAL);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const devices = try allocator.alloc(DeviceIO, 1);
+    devices[0] = mock.deviceIO();
+
+    var counter: u16 = 1;
+    var inst = try DeviceInstance.init(
+        allocator,
+        &parsed.value,
+        null,
+        null,
+        &counter,
+        .{
+            .test_primary_uhid_fd = primary_fds[1],
+            .test_imu_uhid_fd = imu_fds[1],
+            .test_devices_override = devices,
+        },
+    );
+    defer inst.deinit();
+
+    switch (inst.owner) {
+        .uhid => {},
+        else => {
+            std.debug.print("owner was {s}, expected .uhid\n", .{@tagName(inst.owner)});
+            try testing.expect(false);
+        },
+    }
+    try testing.expect(inst.primary_output != null);
+    try testing.expect(inst.imu_dev != null);
+    try testing.expect(inst.imu_output != null);
+
+    const scratch = try allocator.alloc(u8, uhid.UHID_EVENT_SIZE);
+    defer allocator.free(scratch);
+
+    const primary_ev = try readCreate2(primary_fds[0], scratch);
+    const imu_ev = try readCreate2(imu_fds[0], scratch);
+    try testing.expectEqualStrings(uniqSlice(&primary_ev), uniqSlice(&imu_ev));
+    try testing.expect(std.mem.startsWith(u8, uniqSlice(&primary_ev), "padctl/"));
 }

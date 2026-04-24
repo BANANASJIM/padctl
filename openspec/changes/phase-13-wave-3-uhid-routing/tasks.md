@@ -52,7 +52,12 @@ Files: `src/config/device.zig`
 ### T1a: Add `ImuConfig` struct
 
 - [x] In `src/config/device.zig`, near existing `FfConfig` / `AuxConfig`
-  declarations, add `pub const ImuConfig = struct { backend: []const u8 = "uinput", name: ?[]const u8 = null, vid: ?i64 = null, pid: ?i64 = null, accel_range: ?[2]i64 = null, gyro_range: ?[2]i64 = null };`
+  declarations, add `pub const ImuConfig = struct { backend: []const u8 = "uhid", name: ?[]const u8 = null, vid: ?i64 = null, pid: ?i64 = null, accel_range: ?[2]i64 = null, gyro_range: ?[2]i64 = null };`.
+  The default is `"uhid"` (NOT `"uinput"`) so bare `ImuConfig{}` literals and
+  TOML `[output.imu]` blocks without an explicit `backend` key are validator-
+  legal — `validate()` rejects `"uinput"` per ADR-015 (see T1c), so the legacy
+  default would have been self-invalidating. Revised during CodeRabbit review
+  on PR #159.
 - [x] Verify no compilation error — field defaults + types must parse under
   existing `zig-toml` bindings.
 
@@ -77,12 +82,13 @@ Files: `src/config/device.zig`
 
 ### T1d: Validate tests
 
-- [x] In `src/config/device.zig` test block, add 4 cases:
+- [x] In `src/config/device.zig` test block, add 5 cases:
   - **`test "validate: ImuConfig default (absent) is legal"`** — pre-Wave-3 fixture round-trips.
   - **`test "validate: backend=uhid + [output.imu] present is legal"`** — succeeds.
   - **`test "validate: backend=uinput + [output.imu] present is error.InvalidConfig"`** — asserts the error.
   - **`test "validate: backend=unknown is error.InvalidConfig"`** — asserts fail-closed.
-- [x] `zig build test` passes all 4.
+  - **`test "validate: [output.imu] without explicit backend defaults to uhid and passes validate"`** — guards the T1a default flip (CodeRabbit PR #159).
+- [x] `zig build test` passes all 5.
 
 ### T1e: TOML round-trip parser test
 
@@ -378,7 +384,9 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
 - [x] `zig build test` passes.
 - [x] With `[output.imu].backend = "uhid"` fixture: primary UHID card built,
   no IMU card (that is T5).
-- [x] With default / `"uinput"`: existing behaviour byte-identical.
+- [x] With `[output.imu]` absent: existing uinput behaviour byte-identical.
+  (The legacy `backend = "uinput"` runtime path no longer exists — validate
+  rejects that combination per T1c.)
 
 ---
 
@@ -397,11 +405,19 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
       imu_cfg: device.ImuConfig,
   ) BuildError![]u8 { ... }
   ```
-- [x] Emit HID report descriptor: Usage Page Sensor (0x20),
-  `INPUT_PROP_ACCELEROMETER`, Motion Accelerator X/Y/Z (Usage 0x0473/0x0474/0x0475),
-  Motion Gyrometer X/Y/Z (Usage 0x0476/0x0477/0x0478). No `EV_KEY`. No sticks.
-  Logical range from `imu_cfg.accel_range` / `imu_cfg.gyro_range` (fallback
-  `{-32768, 32767}`).
+- [x] Emit HID report descriptor: Usage Page Generic Desktop (`0x05 0x01`),
+  Usage Multi-axis Controller (`0x09 0x08`), accelerometer axes X/Y/Z
+  (`0x30/0x31/0x32`), gyrometer axes Rx/Ry/Rz (`0x33/0x34/0x35`). Six i16
+  axes total; no `EV_KEY`; no sticks. Logical range from
+  `imu_cfg.accel_range` / `imu_cfg.gyro_range` (fallback `{-32768, 32767}`).
+  `INPUT_PROP_ACCELEROMETER` is NOT declared in the descriptor — the kernel's
+  `drivers/hid/hid-input.c` HID→evdev mapper sets it automatically from the
+  "3+3 axes, no EV_KEY" shape. **Revision note (CodeRabbit PR #159 + R-C B1,
+  commit `270db70`):** the first implementation used Usage Page Sensor (0x20)
+  + Motion Accelerator/Gyrometer usages (0x0473–0x0478). Sensor Page
+  descriptors bind to `hid-sensor-hub` and expose an IIO device instead of an
+  evdev node, which is invisible to SDL. The Generic Desktop retarget above
+  is what landed in the branch.
 
 ### T5b: Golden-file test for IMU descriptor
 
@@ -415,8 +431,12 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
 - [x] Second test **`test "buildForImu: custom ranges alter logical min/max bytes"`**
   — override ranges, verify descriptor bytes at the range offsets change as
   expected.
-- [x] Third test **`test "buildForImu: descriptor contains no EV_KEY byte"`**
-  — scan descriptor for Usage Page Button (0x09) and assert absence.
+- [x] Third test **`test "buildForImu: descriptor contains no Usage Page Button (EV_KEY)"`**
+  — scan descriptor for the 2-byte sequence `0x05 0x09` (Usage Page Button)
+  and assert absence. A companion control test (`test "buildForImu: primary
+  pad descriptor DOES emit Usage Page Button (control sample)"`) asserts
+  `buildFromOutput` still emits that byte pair, so the IMU check is not
+  vacuous if the byte signature itself ever shifts.
 
 ### T5c: IMU card construction in T4g block
 

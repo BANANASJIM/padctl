@@ -451,7 +451,7 @@ pub const UhidDescriptorBuilder = struct {
 /// card's `INPUT_REPORT_ID` — the two cards live on separate UHID fds so the
 /// IDs never collide on the wire, but a different value makes descriptor
 /// decoding easier when diagnosing logs.
-pub const IMU_REPORT_ID: u8 = 1;
+pub const IMU_REPORT_ID: u8 = 2;
 
 /// Wire size of an IMU input report — 1 byte ID + 6 × i16 axes.
 pub const IMU_REPORT_BYTES: usize = 1 + 6 * 2;
@@ -1083,7 +1083,7 @@ test "buildForImu: default ranges produce the pinned golden descriptor" {
         0x05, 0x01, // Usage Page (Generic Desktop)
         0x09, 0x08, // Usage (Multi-axis Controller)
         0xA1, 0x01, // Collection (Application)
-        0x85, IMU_REPORT_ID, // Report ID (1)
+        0x85, IMU_REPORT_ID, // Report ID (2)
 
         // Accelerometer — X/Y/Z
         0x09, 0x30, // Usage (X)
