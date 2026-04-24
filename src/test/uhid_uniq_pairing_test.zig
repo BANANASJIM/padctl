@@ -33,6 +33,8 @@ const linux = std.os.linux;
 const testing = std.testing;
 
 const uhid = @import("../io/uhid.zig");
+const uhid_descriptor = @import("../io/uhid_descriptor.zig");
+const device_cfg = @import("../config/device.zig");
 const ioctl_constants = @import("../io/ioctl_constants.zig");
 
 const SHARED_UNIQ = "padctl/uniq-pair-test-0";
@@ -102,7 +104,11 @@ fn readUniqFromEvdevPath(path: []const u8) ![]u8 {
     return out;
 }
 
-const MINIMAL_DESCRIPTOR = [_]u8{
+// A minimal Generic-Desktop Gamepad descriptor for the main-pad fd — the IMU
+// fd now uses the production `UhidDescriptorBuilder.buildForImu` so this AC
+// test evaluates the exact descriptor padctl ships (previously it hard-coded
+// a copy, which let R-C B1's Sensor-page bug escape CI).
+const MAIN_DESCRIPTOR = [_]u8{
     0x05, 0x01, // Usage Page (Generic Desktop)
     0x09, 0x05, // Usage (Game Pad)
     0xA1, 0x01, // Collection (Application)
@@ -130,20 +136,26 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
     const IMU_VID: u16 = 0xFADE;
     const IMU_PID: u16 = 0xC002;
 
+    // Build the IMU descriptor from production code — ensures the AC test
+    // exercises the same byte stream that ships in DeviceInstance.init.
+    const imu_cfg = device_cfg.ImuConfig{};
+    const imu_desc = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(testing.allocator, imu_cfg);
+    defer testing.allocator.free(imu_desc);
+
     // Create two UHID devices sharing the same uniq.
     const main_fd = try uhid.openUhid();
     defer {
         uhid.uhidDestroy(main_fd);
         posix.close(main_fd);
     }
-    try sendCreateWithUniq(main_fd, MAIN_VID, MAIN_PID, "padctl-main", SHARED_UNIQ);
+    try sendCreateWithUniq(main_fd, MAIN_VID, MAIN_PID, "padctl-main", SHARED_UNIQ, &MAIN_DESCRIPTOR);
 
     const imu_fd = try uhid.openUhid();
     defer {
         uhid.uhidDestroy(imu_fd);
         posix.close(imu_fd);
     }
-    try sendCreateWithUniq(imu_fd, IMU_VID, IMU_PID, "padctl-imu", SHARED_UNIQ);
+    try sendCreateWithUniq(imu_fd, IMU_VID, IMU_PID, "padctl-imu", SHARED_UNIQ, imu_desc);
 
     // Wait for evdev nodes to appear.
     const main_path = (try waitForEvdevNode(MAIN_VID, MAIN_PID, SHARED_UNIQ, 2000)) orelse
@@ -165,18 +177,26 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
     try testing.expectEqualSlices(u8, main_uniq, imu_uniq);
 }
 
-fn sendCreateWithUniq(fd: posix.fd_t, vid: u16, pid: u16, name: []const u8, uniq: []const u8) !void {
+fn sendCreateWithUniq(
+    fd: posix.fd_t,
+    vid: u16,
+    pid: u16,
+    name: []const u8,
+    uniq: []const u8,
+    descriptor: []const u8,
+) !void {
     var ev = std.mem.zeroes(uhid.UhidCreate2Event);
     ev.type = uhid.UHID_CREATE2;
     const name_copy = @min(name.len, ev.payload.name.len - 1);
     @memcpy(ev.payload.name[0..name_copy], name[0..name_copy]);
     const uniq_copy = @min(uniq.len, ev.payload.uniq.len - 1);
     @memcpy(ev.payload.uniq[0..uniq_copy], uniq[0..uniq_copy]);
-    ev.payload.rd_size = @intCast(MINIMAL_DESCRIPTOR.len);
+    if (descriptor.len > ev.payload.rd_data.len) return error.DescriptorTooLarge;
+    ev.payload.rd_size = @intCast(descriptor.len);
     ev.payload.bus = uhid.BUS_USB;
     ev.payload.vendor = vid;
     ev.payload.product = pid;
-    @memcpy(ev.payload.rd_data[0..MINIMAL_DESCRIPTOR.len], &MINIMAL_DESCRIPTOR);
+    @memcpy(ev.payload.rd_data[0..descriptor.len], descriptor);
 
     const bytes = std.mem.asBytes(&ev);
     var buf: [uhid.UHID_EVENT_SIZE]u8 = std.mem.zeroes([uhid.UHID_EVENT_SIZE]u8);
