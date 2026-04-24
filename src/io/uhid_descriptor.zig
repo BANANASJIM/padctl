@@ -384,7 +384,93 @@ pub const UhidDescriptorBuilder = struct {
 
         return buf.toOwnedSlice(allocator);
     }
+
+    /// Build a HID report descriptor for an IMU companion card. Emits a
+    /// sensor-page collection with accelerometer and gyrometer 16-bit
+    /// axes only — no buttons, no sticks, no triggers. ADR-015 §Alternatives
+    /// requires the IMU card to carry NO `EV_KEY`-equivalent usage so SDL's
+    /// `GuessDeviceClass` classifies it as a sensor.
+    ///
+    /// Report layout (report ID `IMU_REPORT_ID`):
+    ///   1 byte  report ID
+    ///   6 × i16 accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z
+    ///
+    /// Caller owns the returned bytes (`allocator.free`).
+    pub fn buildForImu(
+        allocator: std.mem.Allocator,
+        imu_cfg: device.ImuConfig,
+    ) BuildError![]u8 {
+        var buf = std.ArrayList(u8){};
+        errdefer buf.deinit(allocator);
+
+        const accel_range: [2]i64 = imu_cfg.accel_range orelse .{ -32768, 32767 };
+        const gyro_range: [2]i64 = imu_cfg.gyro_range orelse .{ -32768, 32767 };
+        const accel_min = std.math.cast(i32, accel_range[0]) orelse return error.InvalidOutputConfig;
+        const accel_max = std.math.cast(i32, accel_range[1]) orelse return error.InvalidOutputConfig;
+        const gyro_min = std.math.cast(i32, gyro_range[0]) orelse return error.InvalidOutputConfig;
+        const gyro_max = std.math.cast(i32, gyro_range[1]) orelse return error.InvalidOutputConfig;
+
+        try writeItem1(&buf, allocator, 0x05, 0x20); // Usage Page (Sensor)
+        try writeItem1(&buf, allocator, 0x09, 0x02); // Usage (Motion)
+        try writeItem1(&buf, allocator, 0xA1, 0x01); // Collection (Application)
+
+        try writeItem1(&buf, allocator, 0x85, IMU_REPORT_ID);
+
+        try writeItem1(&buf, allocator, 0x09, 0x73); // Usage (Motion: Accelerometer 3D)
+        try writeItem1(&buf, allocator, 0xA1, 0x02); // Collection (Logical)
+        try writeItem2(&buf, allocator, 0x0A, 0x0453);
+        try writeItem2(&buf, allocator, 0x0A, 0x0454);
+        try writeItem2(&buf, allocator, 0x0A, 0x0455);
+        try writeLogicalMin(&buf, allocator, accel_min);
+        try writeLogicalMax(&buf, allocator, accel_max);
+        try writeItem1(&buf, allocator, 0x75, 16);
+        try writeItem1(&buf, allocator, 0x95, 3);
+        try writeItem1(&buf, allocator, 0x81, 0x02);
+        try writeByte(&buf, allocator, 0xC0);
+
+        try writeItem1(&buf, allocator, 0x09, 0x76); // Usage (Motion: Gyrometer 3D)
+        try writeItem1(&buf, allocator, 0xA1, 0x02);
+        try writeItem2(&buf, allocator, 0x0A, 0x0457);
+        try writeItem2(&buf, allocator, 0x0A, 0x0458);
+        try writeItem2(&buf, allocator, 0x0A, 0x0459);
+        try writeLogicalMin(&buf, allocator, gyro_min);
+        try writeLogicalMax(&buf, allocator, gyro_max);
+        try writeItem1(&buf, allocator, 0x75, 16);
+        try writeItem1(&buf, allocator, 0x95, 3);
+        try writeItem1(&buf, allocator, 0x81, 0x02);
+        try writeByte(&buf, allocator, 0xC0);
+
+        try writeByte(&buf, allocator, 0xC0);
+
+        if (buf.items.len > uhid.HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
+        return buf.toOwnedSlice(allocator);
+    }
 };
+
+/// Report ID used for IMU input reports. Distinct from the primary gamepad
+/// card's `INPUT_REPORT_ID` — the two cards live on separate UHID fds so the
+/// IDs never collide on the wire, but a different value makes descriptor
+/// decoding easier when diagnosing logs.
+pub const IMU_REPORT_ID: u8 = 1;
+
+/// Wire size of an IMU input report — 1 byte ID + 6 × i16 axes.
+pub const IMU_REPORT_BYTES: usize = 1 + 6 * 2;
+
+/// Encode a GamepadState into the IMU wire report. Layout is fixed
+/// (accel_x/y/z, gyro_x/y/z — all i16 little-endian) and matches the
+/// descriptor emitted by `buildForImu`.
+pub fn encodeImuReport(gs: state_mod.GamepadState, buf: []u8) EncodeError![]u8 {
+    if (buf.len < IMU_REPORT_BYTES) return error.ReportTooLong;
+    @memset(buf[0..IMU_REPORT_BYTES], 0);
+    buf[0] = IMU_REPORT_ID;
+    std.mem.writeInt(i16, buf[1..][0..2], gs.accel_x, .little);
+    std.mem.writeInt(i16, buf[3..][0..2], gs.accel_y, .little);
+    std.mem.writeInt(i16, buf[5..][0..2], gs.accel_z, .little);
+    std.mem.writeInt(i16, buf[7..][0..2], gs.gyro_x, .little);
+    std.mem.writeInt(i16, buf[9..][0..2], gs.gyro_y, .little);
+    std.mem.writeInt(i16, buf[11..][0..2], gs.gyro_z, .little);
+    return buf[0..IMU_REPORT_BYTES];
+}
 
 // ---------------------------------------------------------------------------
 // Input report encoder — mirrors the descriptor layout byte-for-byte.
@@ -980,6 +1066,108 @@ test "descriptor: FFB-only output (no input buttons/axes) produces a valid descr
         }
     }
     try testing.expect(found);
+}
+
+// --- buildForImu tests (Phase 13 Wave 3 T5a/T5b) ---------------------------
+
+test "buildForImu: default ranges produce the pinned golden descriptor" {
+    const imu = device.ImuConfig{};
+    const desc = try UhidDescriptorBuilder.buildForImu(testing.allocator, imu);
+    defer testing.allocator.free(desc);
+
+    const expected = [_]u8{
+        0x05, 0x20,
+        0x09, 0x02,
+        0xA1, 0x01,
+        0x85, IMU_REPORT_ID,
+        0x09, 0x73,
+        0xA1, 0x02,
+        0x0A, 0x53,
+        0x04, 0x0A,
+        0x54, 0x04,
+        0x0A, 0x55,
+        0x04, 0x16,
+        0x00, 0x80,
+        0x26, 0xFF,
+        0x7F, 0x75,
+        0x10, 0x95,
+        0x03, 0x81,
+        0x02, 0xC0,
+        0x09, 0x76,
+        0xA1, 0x02,
+        0x0A, 0x57,
+        0x04, 0x0A,
+        0x58, 0x04,
+        0x0A, 0x59,
+        0x04, 0x16,
+        0x00, 0x80,
+        0x26, 0xFF,
+        0x7F, 0x75,
+        0x10, 0x95,
+        0x03, 0x81,
+        0x02, 0xC0,
+        0xC0,
+    };
+    try testing.expectEqualSlices(u8, &expected, desc);
+    try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
+}
+
+test "buildForImu: custom ranges alter logical min/max bytes" {
+    const imu = device.ImuConfig{
+        .accel_range = .{ -16384, 16384 },
+        .gyro_range = .{ -16384, 16384 },
+    };
+    const desc = try UhidDescriptorBuilder.buildForImu(testing.allocator, imu);
+    defer testing.allocator.free(desc);
+
+    var seen: usize = 0;
+    var i: usize = 0;
+    while (i + 2 < desc.len) : (i += 1) {
+        if (desc[i] == 0x16 and desc[i + 1] == 0x00 and desc[i + 2] == 0xC0) {
+            seen += 1;
+            i += 2;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "buildForImu: descriptor contains no Usage Page Button (EV_KEY)" {
+    const imu = device.ImuConfig{};
+    const desc = try UhidDescriptorBuilder.buildForImu(testing.allocator, imu);
+    defer testing.allocator.free(desc);
+    var i: usize = 0;
+    while (i + 1 < desc.len) : (i += 1) {
+        if (desc[i] == 0x05 and desc[i + 1] == 0x09) {
+            std.debug.print("unexpected Usage Page Button at offset {d}\n", .{i});
+            try testing.expect(false);
+        }
+    }
+}
+
+test "encodeImuReport: round-trips 6 axes into 13-byte wire report" {
+    var buf: [IMU_REPORT_BYTES]u8 = undefined;
+    const gs = state_mod.GamepadState{
+        .accel_x = 100,
+        .accel_y = -200,
+        .accel_z = 300,
+        .gyro_x = -400,
+        .gyro_y = 500,
+        .gyro_z = -600,
+    };
+    const report = try encodeImuReport(gs, &buf);
+    try testing.expectEqual(IMU_REPORT_BYTES, report.len);
+    try testing.expectEqual(IMU_REPORT_ID, report[0]);
+    try testing.expectEqual(@as(i16, 100), std.mem.readInt(i16, report[1..][0..2], .little));
+    try testing.expectEqual(@as(i16, -200), std.mem.readInt(i16, report[3..][0..2], .little));
+    try testing.expectEqual(@as(i16, 300), std.mem.readInt(i16, report[5..][0..2], .little));
+    try testing.expectEqual(@as(i16, -400), std.mem.readInt(i16, report[7..][0..2], .little));
+    try testing.expectEqual(@as(i16, 500), std.mem.readInt(i16, report[9..][0..2], .little));
+    try testing.expectEqual(@as(i16, -600), std.mem.readInt(i16, report[11..][0..2], .little));
+}
+
+test "encodeImuReport: rejects undersized buffer" {
+    var tiny: [IMU_REPORT_BYTES - 1]u8 = undefined;
+    try testing.expectError(error.ReportTooLong, encodeImuReport(.{}, &tiny));
 }
 
 // --- encodeReport tests (H3 regression) ------------------------------------

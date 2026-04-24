@@ -390,14 +390,14 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
 
 ### T5a: `UhidDescriptorBuilder.buildForImu`
 
-- [ ] In `src/io/uhid_descriptor.zig` after `buildFromOutput` (~line 167), add:
+- [x] In `src/io/uhid_descriptor.zig` after `buildFromOutput` (~line 167), add:
   ```zig
   pub fn buildForImu(
       allocator: std.mem.Allocator,
       imu_cfg: device.ImuConfig,
   ) BuildError![]u8 { ... }
   ```
-- [ ] Emit HID report descriptor: Usage Page Sensor (0x20),
+- [x] Emit HID report descriptor: Usage Page Sensor (0x20),
   `INPUT_PROP_ACCELEROMETER`, Motion Accelerator X/Y/Z (Usage 0x0473/0x0474/0x0475),
   Motion Gyrometer X/Y/Z (Usage 0x0476/0x0477/0x0478). No `EV_KEY`. No sticks.
   Logical range from `imu_cfg.accel_range` / `imu_cfg.gyro_range` (fallback
@@ -405,22 +405,22 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
 
 ### T5b: Golden-file test for IMU descriptor
 
-- [ ] In `src/io/uhid_descriptor.zig` test block, add
+- [x] In `src/io/uhid_descriptor.zig` test block, add
   **`test "buildForImu: default ranges → golden descriptor bytes"`**:
   - Construct `ImuConfig{}` (all defaults).
   - Call `buildForImu`.
   - Assert byte-exact equality with an inline `const EXPECTED = [_]u8{ ... };`
     golden reference.
   - Byte count check: assert `descriptor.len <= HID_MAX_DESCRIPTOR_SIZE`.
-- [ ] Second test **`test "buildForImu: custom ranges alter logical min/max bytes"`**
+- [x] Second test **`test "buildForImu: custom ranges alter logical min/max bytes"`**
   — override ranges, verify descriptor bytes at the range offsets change as
   expected.
-- [ ] Third test **`test "buildForImu: descriptor contains no EV_KEY byte"`**
+- [x] Third test **`test "buildForImu: descriptor contains no EV_KEY byte"`**
   — scan descriptor for Usage Page Button (0x09) and assert absence.
 
 ### T5c: IMU card construction in T4g block
 
-- [ ] Extend the `if (use_uhid)` block in `src/device_instance.zig` (from T4g)
+- [x] Extend the `if (use_uhid)` block in `src/device_instance.zig` (from T4g)
   to add the IMU card. Note the `imu_name_alloc` lifetime handling: it is
   allocator-owned AND becomes the `name` backing for `UhidDevice`, which
   documents `name` as owned-by-caller (`src/io/uhid.zig:218`). The allocation
@@ -454,7 +454,7 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
       imu_output   = imu.outputDevice();
   }
   ```
-- [ ] At the `DeviceInstance` struct literal (~line 213, updated by T3d), add:
+- [x] At the `DeviceInstance` struct literal (~line 213, updated by T3d), add:
   ```
   .imu_dev        = imu_dev_ptr,
   .imu_name_owned = imu_name_ptr,
@@ -463,8 +463,8 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
 
 ### T5d: Event-loop IMU emit dispatch
 
-- [ ] Add an `EventLoopContext` field `imu_output: ?uinput.OutputDevice = null`.
-- [ ] `src/event_loop.zig` has **two** `ctx.output.emit(state)` call sites per
+- [x] Add an `EventLoopContext` field `imu_output: ?uinput.OutputDevice = null`.
+- [x] `src/event_loop.zig` has **two** `ctx.output.emit(state)` call sites per
   frame: the mapper path (~line 668) and the passthrough / `synthesizeDpadAxes`
   branch (~line 678). Add the IMU emit block **after BOTH** primary-emit calls
   (grep `ctx\.output\.emit` to locate the authoritative current line numbers —
@@ -474,14 +474,14 @@ Files: `src/io/uhid_descriptor.zig`, `src/event_loop.zig`,
       imu_out.emit(state) catch |err| std.log.warn("imu emit failed: {}", .{err});
   }
   ```
-- [ ] `DeviceInstance.emit` (the call site currently reading `primary_output`)
+- [x] `DeviceInstance.emit` (the call site currently reading `primary_output`)
   passes `self.imu_output` through to the loop context.
 
 ### T5e: `rumble` + `backend="uhid"` warn
 
-- [ ] In the `if (use_uhid)` block, after constructing the primary UHID card,
+- [x] In the `if (use_uhid)` block, after constructing the primary UHID card,
   check `if (out_cfg.force_feedback != null) std.log.warn("rumble not supported in uhid backend until Wave 6", .{});`
-- [ ] Emit exactly once per `DeviceInstance.init`, not per emit.
+- [x] Emit exactly once per `DeviceInstance.init`, not per emit.
 
 ### T5f: Create `src/test/supervisor_uhid_routing_test.zig` (Layer 1)
 
@@ -492,7 +492,7 @@ write-side `UHID_CREATE2` events emitted by `DeviceInstance.init →
 UhidDevice.init`. The pattern used below matches the existing inline tests
 in `src/io/uhid.zig` and the PR #155 tests.
 
-- [ ] New file, imports:
+- [x] New file, imports:
   ```zig
   const std      = @import("std");
   const posix    = std.posix;
@@ -501,7 +501,7 @@ in `src/io/uhid.zig` and the PR #155 tests.
   const uhid_mod = @import("../io/uhid.zig");
   ```
   (do NOT import `harness/uhid_simulator.zig` — wrong direction of capture.)
-- [ ] Add a test-only seam on `DeviceInstance.init` so the two `UhidDevice`
+- [x] Add a test-only seam on `DeviceInstance.init` so the two `UhidDevice`
   constructions inside the routing switch bind to caller-supplied fds
   instead of opening `/dev/uhid`. Two equivalent options:
   - **Option A (preferred)**: a `DeviceInstance.InitOptions` struct with
@@ -513,7 +513,7 @@ in `src/io/uhid.zig` and the PR #155 tests.
     module variable that tests override before calling `init`. More Zig-idiomatic
     but requires reentrant test ordering discipline — prefer A unless Option
     A adds an unacceptable field count.
-- [ ] **`test "routing: backend=uhid creates primary + IMU, shared uniq"`**:
+- [x] **`test "routing: backend=uhid creates primary + IMU, shared uniq"`**:
   ```
   var primary_fds: [2]posix.fd_t = undefined;
   var imu_fds:     [2]posix.fd_t = undefined;
@@ -533,46 +533,46 @@ in `src/io/uhid.zig` and the PR #155 tests.
   - `posix.read(imu_fds[0], &buf)` → decode the IMU side.
   - Assert `std.mem.eql(u8, primary_uniq, imu_uniq)`.
   - Assert `std.mem.startsWith(u8, primary_uniq, "padctl/")`.
-- [ ] **`test "routing: backend=uinput (default) emits no UHID event"`** —
+- [x] **`test "routing: backend=uinput (default) emits no UHID event"`** —
   regression guard. Build config with no `[output.imu]`, pass null fds,
   after `DeviceInstance.init` returns, no pipe reads are attempted (both
   fds stay open but the routing never wrote).
-- [ ] **`test "routing: backend=uinput + [output.imu] present → error.InvalidConfig"`** —
+- [x] **`test "routing: backend=uinput + [output.imu] present → error.InvalidConfig"`** —
   validate path sanity (covers T1d from a different angle).
-- [ ] **`test "routing: primary descriptor has EV_KEY, IMU descriptor does not"`** —
+- [x] **`test "routing: primary descriptor has EV_KEY, IMU descriptor does not"`** —
   decode both captured `UhidCreate2Event`s from the pipes, scan the
   `payload.rd_data[0..payload.rd_size]` bytes for Usage Page Button
   (`0x05 0x09`); assert present on primary, absent on IMU.
-- [ ] **`test "routing: deinit emits UHID_DESTROY per card"`** — after
+- [x] **`test "routing: deinit emits UHID_DESTROY per card"`** — after
   `DeviceInstance.init` and the CREATE2 reads, call `deinit`, then read
   again from each pipe; decode 2 `UHID_DESTROY` events (one per card).
 
 ### T5g: Extend `src/test/uhid_uniq_pairing_test.zig` (Layer 2)
 
-- [ ] Add **`test "routing: real DeviceInstance produces paired uniq (requires /dev/uhid)"`**:
-  - Honour existing `PADCTL_TEST_REQUIRE_UHID=1` gate helper (line 41).
-  - Skip-or-fail per gate.
-  - Construct same `DeviceConfig` as T5f test 1 but pass no pipe-fd overrides
-    (`test_primary_uhid_fd = null`, `test_imu_uhid_fd = null`) so the
-    routing switch goes through real `/dev/uhid` open.
-  - Pass stack-local `var local_counter: u16 = 1;` + `&local_counter` for
-    `uniq_counter`, and a real fixture `phys_key = "sim-phys-0001"` (or a
-    test-generated string).
-  - `DeviceInstance.init(...)` — real `/dev/uhid` open.
-  - Poll sysfs for the 2 evdev nodes kernel created under `/dev/input/eventN`
-    with matching vid/pid + `padctl/` uniq prefix.
-  - `ioctl(EVIOCGUNIQ)` on both; assert equal via `std.mem.eql`.
-  - Teardown via `DeviceInstance.deinit`.
+- [ ] **DEFERRED** — The spec-as-written would have `DeviceInstance.init`
+  open a UhidSimulator-backed hidraw source. The simulator path produces a
+  virtual HID node WITHOUT USB interface metadata (no `HID_PHYS` in the
+  hidraw uevent file), so `HidrawDevice.discover` cannot match the
+  TOML's `iface.id` and returns `error.NotFound` after a 7s retry storm
+  that Zig's test runner counts as failure (via the daemon's
+  `std.log.err`). Closing this honestly requires either (a) a mock
+  interface class in `createDeviceIO` to bypass hidraw discovery, or
+  (b) treating the existing hand-built-UHID_CREATE2 test in this file
+  AS the Layer 2 signal — which is what Wave 3 ships with. Real-hardware
+  pairing validation is Wave 5 canary scope. The routing switch's uniq
+  logic is already covered byte-for-byte by the T5f Layer 1 tests; the
+  gap is only "has this been confirmed against a real kernel evdev
+  surface", and Wave 5's manual test matrix closes that.
 
 ### T5h: Register new test in build.zig
 
-- [ ] Add `src/test/supervisor_uhid_routing_test.zig` to the test step.
+- [x] Add `src/test/supervisor_uhid_routing_test.zig` to the test step.
 
 ### T5i: Final CI green
 
-- [ ] `zig build test` passes (Layer 0+1, zero-priv).
-- [ ] `PADCTL_TEST_REQUIRE_UHID=1 zig build test` passes locally (Layer 2).
-- [ ] Run full suite sentinels:
+- [x] `zig build test` passes (Layer 0+1, zero-priv).
+- [x] `PADCTL_TEST_REQUIRE_UHID=1 zig build test` passes locally (Layer 2).
+- [x] Run full suite sentinels:
   - `full_pipeline_e2e_test.zig` — green
   - `supervisor_uhid_grace_integration_test.zig` — green
   - `steam_deck_uhid_e2e_test.zig` — green

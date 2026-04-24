@@ -136,9 +136,8 @@ test "buildUniq: output <= MAX_UNIQ_LEN including NUL" {
 
 test "buildUniq: non-ASCII bytes fold to '-'" {
     const allocator = testing.allocator;
-    // "Pad " followed by UTF-8 bytes for the CJK character 中. Each byte is
-    // non-ASCII-alphanum so should collapse into a trailing '-' that is
-    // trimmed, leaving "pad".
+    // "Pad " followed by a 3-byte UTF-8 CJK sequence. Each non-ASCII byte
+    // folds to '-' and the resulting run is trimmed, leaving "pad".
     const uniq = try buildUniq(allocator, "Pad \xe4\xb8\xad", null, 1);
     defer allocator.free(uniq);
     try testing.expectEqualStrings("padctl/pad-ctr0001", uniq);

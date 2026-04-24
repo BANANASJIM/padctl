@@ -78,7 +78,7 @@ test "issue-131-A integration: UHID disconnect triggers grace teardown on real k
         allocator.destroy(instance_ptr);
     };
     var local_counter: u16 = 1;
-    instance_ptr.* = try DeviceInstance.init(allocator, &parsed.value, null, null, &local_counter);
+    instance_ptr.* = try DeviceInstance.init(allocator, &parsed.value, null, null, &local_counter, .{});
 
     var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
@@ -137,7 +137,7 @@ test "issue-131-A integration: rebind within grace keeps uinput alive" {
         allocator.destroy(instance_ptr);
     };
     var local_counter: u16 = 1;
-    instance_ptr.* = try DeviceInstance.init(allocator, &parsed.value, null, null, &local_counter);
+    instance_ptr.* = try DeviceInstance.init(allocator, &parsed.value, null, null, &local_counter, .{});
 
     var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();

@@ -1023,7 +1023,7 @@ pub fn main() !void {
     // value is never consulted when phys_key is null-meaningless, but the
     // parameter must be a valid pointer.
     var main_uniq_counter: u16 = 1;
-    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null, &main_uniq_counter) catch |err| {
+    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null, &main_uniq_counter, .{}) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };

@@ -1512,7 +1512,7 @@ pub const Supervisor = struct {
                 const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
                     if (default_pr_ptr) |p| {
@@ -2002,7 +2002,7 @@ pub const Supervisor = struct {
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
             if (default_pr_ptr) |p| {

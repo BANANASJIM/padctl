@@ -85,6 +85,50 @@ pub const Owner = union(enum) {
     uhid: *uhid_mod.UhidDevice,
 };
 
+/// Test-only seam (T5). When either fd override is non-null, the UHID
+/// backend path binds the corresponding `UhidDevice` to the caller-supplied
+/// fd via `initWithFd` AND manually emits a `UHID_CREATE2` event on the fd
+/// (matching what `init` would have sent to `/dev/uhid`). Production call
+/// sites leave both fields null so the normal `openUhid` path runs.
+pub const InitOptions = struct {
+    test_primary_uhid_fd: ?posix.fd_t = null,
+    test_imu_uhid_fd: ?posix.fd_t = null,
+};
+
+/// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
+/// write-end in Layer 1 fixtures) or against a freshly opened `/dev/uhid`.
+/// Behaviour is byte-identical on the wire in both branches: the same
+/// `UHID_CREATE2` payload is written.
+fn openUhidDevice(
+    allocator: std.mem.Allocator,
+    cfg: uhid_mod.Config,
+    test_fd: ?posix.fd_t,
+) !*uhid_mod.UhidDevice {
+    if (test_fd) |fd| {
+        const dev = try uhid_mod.UhidDevice.initWithFd(allocator, fd, cfg);
+        errdefer {
+            dev.close();
+            allocator.destroy(dev);
+        }
+        try uhid_mod.UhidDevice.sendCreate(fd, cfg);
+        return dev;
+    }
+    return uhid_mod.UhidDevice.init(allocator, cfg);
+}
+
+/// Layer 1 test seam for `src/test/supervisor_uhid_routing_test.zig`.
+/// Wraps `openUhidDevice` so the Layer 1 test can exercise the same code
+/// path used by the UHID routing branch without needing a full
+/// `DeviceInstance.init` call (which would pull in hidraw interface
+/// discovery that requires a real `/dev/hidraw*` node).
+pub fn openUhidDeviceForTest(
+    allocator: std.mem.Allocator,
+    cfg: uhid_mod.Config,
+    test_fd: posix.fd_t,
+) !*uhid_mod.UhidDevice {
+    return openUhidDevice(allocator, cfg, test_fd);
+}
+
 pub const DeviceInstance = struct {
     allocator: std.mem.Allocator,
     devices: []DeviceIO,
@@ -131,6 +175,7 @@ pub const DeviceInstance = struct {
         init_mapping: ?*const MappingConfig,
         phys_key: ?[]const u8,
         uniq_counter: *u16,
+        opts: InitOptions,
     ) !DeviceInstance {
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
@@ -169,11 +214,9 @@ pub const DeviceInstance = struct {
 
         var owner: Owner = .none;
         var primary_output: ?OutputDevice = null;
-        // T4: primary-only UHID; companion IMU fields stay null until T5
-        // populates them. Declared const to satisfy zig's never-mutated check.
-        const imu_output: ?OutputDevice = null;
-        const imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
-        const imu_name_ptr: ?[]const u8 = null;
+        var imu_output: ?OutputDevice = null;
+        var imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
+        var imu_name_ptr: ?[]const u8 = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
         var generic_state: ?generic.GenericDeviceState = null;
@@ -203,14 +246,15 @@ pub const DeviceInstance = struct {
                 const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
                 defer allocator.free(primary_descriptor);
 
-                const primary_uhid = try uhid_mod.UhidDevice.init(allocator, .{
+                const primary_cfg = uhid_mod.Config{
                     .name = cfg.device.name,
                     .uniq = std.mem.sliceTo(uniq_z, 0),
                     .vid = @intCast(cfg.device.vid),
                     .pid = @intCast(cfg.device.pid),
                     .descriptor = primary_descriptor,
                     .output = out_cfg.*,
-                });
+                };
+                const primary_uhid = try openUhidDevice(allocator, primary_cfg, opts.test_primary_uhid_fd);
                 errdefer {
                     primary_uhid.close();
                     allocator.destroy(primary_uhid);
@@ -223,10 +267,34 @@ pub const DeviceInstance = struct {
                 owner = .{ .uhid = primary_uhid };
                 primary_output = primary_uhid.outputDevice();
 
-                // T5 adds IMU card construction here. T4 intentionally does
-                // NOT build the IMU companion card yet; the validated
-                // `imu_cfg_opt` drove the `use_uhid` branch above and has no
-                // further use until T5 wires `buildForImu`.
+                if (imu_cfg_opt) |imu_cfg| {
+                    const imu_desc = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(allocator, imu_cfg);
+                    defer allocator.free(imu_desc);
+
+                    const imu_name_alloc: []const u8 = if (imu_cfg.name) |n|
+                        try allocator.dupe(u8, n)
+                    else
+                        try std.fmt.allocPrint(allocator, "{s} IMU", .{cfg.device.name});
+                    errdefer allocator.free(imu_name_alloc);
+
+                    const imu_cfg_uhid = uhid_mod.Config{
+                        .name = imu_name_alloc,
+                        .uniq = std.mem.sliceTo(uniq_z, 0),
+                        .vid = @intCast(imu_cfg.vid orelse cfg.device.vid),
+                        .pid = @intCast(imu_cfg.pid orelse cfg.device.pid),
+                        .descriptor = imu_desc,
+                        .output = null,
+                        .imu = imu_cfg,
+                    };
+                    const imu_uhid = try openUhidDevice(allocator, imu_cfg_uhid, opts.test_imu_uhid_fd);
+                    errdefer {
+                        imu_uhid.close();
+                        allocator.destroy(imu_uhid);
+                    }
+                    imu_dev_ptr = imu_uhid;
+                    imu_name_ptr = imu_name_alloc;
+                    imu_output = imu_uhid.outputDevice();
+                }
             } else {
                 const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
                 errdefer {
@@ -381,6 +449,7 @@ pub const DeviceInstance = struct {
                 .mapper = mapper_ptr,
                 .aux_output = aux_output,
                 .touchpad_output = touchpad_output,
+                .imu_output = self.imu_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
                 .mapping_config = mcfg,

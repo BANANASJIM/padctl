@@ -217,6 +217,11 @@ pub const EventLoopContext = struct {
     mapper: ?*mapper_mod.Mapper = null,
     aux_output: ?AuxOutputDevice = null,
     touchpad_output: ?TouchpadOutputDevice = null,
+    /// Phase 13 Wave 3: optional IMU companion output. Populated when the
+    /// UHID backend is active and `[output.imu]` is present. `emit` receives
+    /// the same `GamepadState` as the primary — the IMU encoder reads only
+    /// accel/gyro axes and ignores the rest.
+    imu_output: ?OutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
     mapping_config: ?*const MappingConfig = null,
@@ -669,6 +674,11 @@ pub const EventLoop = struct {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;
                                 };
+                                if (ctx.imu_output) |imu_out| {
+                                    imu_out.emit(events.gamepad) catch |err| {
+                                        std.log.warn("imu emit failed: {}", .{err});
+                                    };
+                                }
                                 if (ctx.touchpad_output) |tp| tp.emitTouch(events.gamepad) catch {};
                                 if (ctx.aux_output) |ao| {
                                     if (events.aux.len > 0) ao.emitAux(events.aux.slice()) catch {};
@@ -679,6 +689,11 @@ pub const EventLoop = struct {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;
                                 };
+                                if (ctx.imu_output) |imu_out| {
+                                    imu_out.emit(self.gamepad_state) catch |err| {
+                                        std.log.warn("imu emit failed: {}", .{err});
+                                    };
+                                }
                                 if (ctx.touchpad_output) |tp| tp.emitTouch(self.gamepad_state) catch {};
                             }
                         }
