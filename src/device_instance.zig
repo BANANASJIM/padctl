@@ -15,6 +15,9 @@ const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
 const GenericUinputDevice = uinput.GenericUinputDevice;
 const GenericOutputDevice = uinput.GenericOutputDevice;
 const uhid_mod = @import("io/uhid.zig");
+const uhid_descriptor = @import("io/uhid_descriptor.zig");
+const uniq_mod = @import("io/uniq.zig");
+const device_cfg = @import("config/device.zig");
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
@@ -91,6 +94,14 @@ pub const DeviceInstance = struct {
     owner: Owner = .none,
     primary_output: ?OutputDevice = null,
     imu_output: ?OutputDevice = null,
+    /// IMU UHID companion card (T4). Separate from `owner` — the union models
+    /// the single primary output; a plain optional pair keeps the companion
+    /// card's lifetime explicit without muddying the primary invariant.
+    imu_dev: ?*uhid_mod.UhidDevice = null,
+    /// Allocator-owned backing storage for `imu_dev.name`. `UhidDevice.name`
+    /// is owned-by-caller (see `src/io/uhid.zig`); this field outlives the
+    /// kernel device and is freed in `deinit` strictly AFTER `imu_dev.close()`.
+    imu_name_owned: ?[]const u8 = null,
     aux_dev: ?AuxDevice,
     touchpad_dev: ?TouchpadDevice,
     generic_state: ?generic.GenericDeviceState,
@@ -106,9 +117,21 @@ pub const DeviceInstance = struct {
     rebuild_aux_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
-    /// init_mapping: optional MappingConfig used to auto-derive aux capabilities when
-    /// [output.aux] is absent from the device config.
-    pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig, init_mapping: ?*const MappingConfig) !DeviceInstance {
+    ///
+    /// - `init_mapping`: optional MappingConfig used to auto-derive aux
+    ///   capabilities when [output.aux] is absent from the device config.
+    /// - `phys_key`: sysfs phys path of the backing hidraw node (owned by the
+    ///   caller). Feeds the UHID `uniq` hash when `[output.imu].backend = "uhid"`;
+    ///   when null the fallback daemon counter is used.
+    /// - `uniq_counter`: pointer to the daemon-wide u16 counter owned by the
+    ///   Supervisor. Read snapshot + incremented ONLY when phys_key is null.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        cfg: *const DeviceConfig,
+        init_mapping: ?*const MappingConfig,
+        phys_key: ?[]const u8,
+        uniq_counter: *u16,
+    ) !DeviceInstance {
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
 
@@ -146,6 +169,11 @@ pub const DeviceInstance = struct {
 
         var owner: Owner = .none;
         var primary_output: ?OutputDevice = null;
+        // T4: primary-only UHID; companion IMU fields stay null until T5
+        // populates them. Declared const to satisfy zig's never-mutated check.
+        const imu_output: ?OutputDevice = null;
+        const imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
+        const imu_name_ptr: ?[]const u8 = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
         var generic_state: ?generic.GenericDeviceState = null;
@@ -157,16 +185,60 @@ pub const DeviceInstance = struct {
                 generic_uinput = try GenericUinputDevice.create(out_cfg, &generic_state.?);
             }
         } else if (cfg.output) |*out_cfg| {
-            const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
-            errdefer {
-                uinput_ptr.close();
-                allocator.destroy(uinput_ptr);
-            }
-            uinput_ptr.log_tag = cfg.device.name;
-            owner = .{ .uinput = uinput_ptr };
-            primary_output = uinput_ptr.outputDevice();
-            if (out_cfg.force_feedback != null) {
-                try loop.addUinputFf(uinput_ptr.pollFfFd());
+            const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
+            const use_uhid = if (imu_cfg_opt) |imu_cfg|
+                std.mem.eql(u8, imu_cfg.backend, "uhid")
+            else
+                false;
+
+            if (use_uhid) {
+                // ADR-015 Stage 1: primary + IMU cards share a byte-identical
+                // uniq. Snapshot the counter once, bump only if the counter
+                // branch was taken (phys_key == null).
+                const counter_snapshot: u16 = uniq_counter.*;
+                const uniq_z = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
+                defer allocator.free(uniq_z);
+                if (phys_key == null) uniq_counter.* += 1;
+
+                const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
+                defer allocator.free(primary_descriptor);
+
+                const primary_uhid = try uhid_mod.UhidDevice.init(allocator, .{
+                    .name = cfg.device.name,
+                    .uniq = std.mem.sliceTo(uniq_z, 0),
+                    .vid = @intCast(cfg.device.vid),
+                    .pid = @intCast(cfg.device.pid),
+                    .descriptor = primary_descriptor,
+                    .output = out_cfg.*,
+                });
+                errdefer {
+                    primary_uhid.close();
+                    allocator.destroy(primary_uhid);
+                }
+
+                if (out_cfg.force_feedback != null) {
+                    std.log.warn("rumble not supported in uhid backend until Wave 6", .{});
+                }
+
+                owner = .{ .uhid = primary_uhid };
+                primary_output = primary_uhid.outputDevice();
+
+                // T5 adds IMU card construction here. T4 intentionally does
+                // NOT build the IMU companion card yet; the validated
+                // `imu_cfg_opt` drove the `use_uhid` branch above and has no
+                // further use until T5 wires `buildForImu`.
+            } else {
+                const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
+                errdefer {
+                    uinput_ptr.close();
+                    allocator.destroy(uinput_ptr);
+                }
+                uinput_ptr.log_tag = cfg.device.name;
+                owner = .{ .uinput = uinput_ptr };
+                primary_output = uinput_ptr.outputDevice();
+                if (out_cfg.force_feedback != null) {
+                    try loop.addUinputFf(uinput_ptr.pollFfFd());
+                }
             }
             if (out_cfg.aux != null or init_mapping != null) {
                 const mcfg_opt = init_mapping;
@@ -229,7 +301,9 @@ pub const DeviceInstance = struct {
             .mapper = mapper,
             .owner = owner,
             .primary_output = primary_output,
-            .imu_output = null,
+            .imu_output = imu_output,
+            .imu_dev = imu_dev_ptr,
+            .imu_name_owned = imu_name_ptr,
             .aux_dev = aux_dev,
             .touchpad_dev = touchpad_dev,
             .generic_state = generic_state,
@@ -242,6 +316,17 @@ pub const DeviceInstance = struct {
 
     pub fn deinit(self: *DeviceInstance) void {
         if (self.mapper) |*m| m.deinit();
+        // IMU teardown first: close kernel device, THEN free name backing
+        // store. `UhidDevice.name` is owned-by-caller, so freeing the backing
+        // memory before `close` would dangle the pointer while UHID_DESTROY
+        // is in flight.
+        if (self.imu_dev) |p| {
+            p.close();
+            self.allocator.destroy(p);
+        }
+        if (self.imu_name_owned) |n| {
+            self.allocator.free(n);
+        }
         switch (self.owner) {
             .none => {},
             .uinput => |p| {

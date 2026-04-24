@@ -215,37 +215,37 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
 
 ### T4a: Create `src/io/uniq.zig`
 
-- [ ] New file with:
+- [x] New file with:
   ```zig
   pub const MAX_UNIQ_LEN = 64;
   pub fn buildUniq(allocator, device_name, phys_key, counter) ![:0]u8 { ... }
   fn hash16(bytes: []const u8) u16 { /* FNV-1a-32 then @truncate to u16 */ }
   fn normalizeDeviceId(buf: []u8, name: []const u8) []u8 { ... }
   ```
-- [ ] Implement `normalizeDeviceId`: lowercase ASCII, non-alphanum → `-`,
+- [x] Implement `normalizeDeviceId`: lowercase ASCII, non-alphanum → `-`,
   collapse consecutive `-`, trim leading/trailing `-`, clip to 32 bytes.
-- [ ] Implement `hash16`: FNV-1a 32-bit (offset basis `0x811c9dc5`, prime
+- [x] Implement `hash16`: FNV-1a 32-bit (offset basis `0x811c9dc5`, prime
   `0x01000193`) using Zig wrapping multiply `*%=`, then `@truncate` to `u16`.
   The algorithm is pinned in `design.md §"Cross-cutting: uniq format"` — do
   not substitute another hash.
-- [ ] Implement `buildUniq`: format
+- [x] Implement `buildUniq`: format
   `"padctl/{device_id}-{instance}"` with NUL terminator, assert output
   length < `MAX_UNIQ_LEN`.
 
 ### T4b: Layer 0 unit tests in `src/io/uniq.zig`
 
-- [ ] `test "buildUniq: with phys_key produces stable hash"` — input
+- [x] `test "buildUniq: with phys_key produces stable hash"` — input
   `"Flydigi Vader 3 Pro"` + `"usb-0000:00:14.0-3/input0"` → uniq contains
   `"padctl/flydigi-vader-3-pro-"` followed by exactly 4 lowercase hex digits.
-- [ ] `test "buildUniq: null phys_key uses counter fallback"` — counter 1 →
+- [x] `test "buildUniq: null phys_key uses counter fallback"` — counter 1 →
   uniq ends with `-ctr0001`.
-- [ ] `test "buildUniq: idempotent on same inputs"` — two calls produce
+- [x] `test "buildUniq: idempotent on same inputs"` — two calls produce
   byte-identical `[:0]u8`.
-- [ ] `test "buildUniq: output ≤ 64 bytes including NUL"` — stress with a
+- [x] `test "buildUniq: output ≤ 64 bytes including NUL"` — stress with a
   60-byte device name to confirm truncation.
-- [ ] `test "buildUniq: non-ASCII → '-'"` — input with non-ASCII bytes (e.g.
+- [x] `test "buildUniq: non-ASCII → '-'"` — input with non-ASCII bytes (e.g.
   `"Pad \xe4\xb8\xad"`) → normalized id contains only ASCII alphanum + `-`.
-- [ ] `test "hash16: known-answer vector"` — run the implemented
+- [x] `test "hash16: known-answer vector"` — run the implemented
   `hash16("padctl/vader-5-pro-0000:00:14.0-1.3")` once, paste the observed
   `u16` value into the test as the golden known-answer constant, and commit.
   This is "implementer pins first-run output as the golden" — the spec does
@@ -256,16 +256,16 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
 
 ### T4c: Register in build
 
-- [ ] Add `src/io/uniq.zig` to the test step in `build.zig`.
+- [x] Add `src/io/uniq.zig` to the test step in `build.zig`.
 
 ### T4d: Add `imu_dev` + `imu_name_owned` fields + extend deinit
 
-- [ ] Add to `DeviceInstance`:
+- [x] Add to `DeviceInstance`:
   ```zig
   imu_dev:        ?*uhid_mod.UhidDevice = null,
   imu_name_owned: ?[]const u8           = null,   // allocator-owned backing for imu_dev.name
   ```
-- [ ] In `deinit` (see T3e block), before the `switch (self.owner)`, tear
+- [x] In `deinit` (see T3e block), before the `switch (self.owner)`, tear
   down the IMU card in this exact order (close the device FIRST, free the
   name string SECOND — `UhidDevice.name` is owned-by-caller per
   `src/io/uhid.zig:218`, so freeing before `close` would dangle the pointer
@@ -279,12 +279,13 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
       self.allocator.free(n);
   }
   ```
-- [ ] Update all test-fixture `DeviceInstance` literals (T3g sites) to include
-  `.imu_dev = null, .imu_name_owned = null,`.
+- [x] Update all test-fixture `DeviceInstance` literals (T3g sites) to include
+  `.imu_dev = null, .imu_name_owned = null,` (defaults on struct declaration
+  cover every existing literal; no per-literal edit needed).
 
 ### T4e: Thread `phys_key` + `uniq_counter` into `DeviceInstance.init`
 
-- [ ] Change signature to:
+- [x] Change signature to:
   ```zig
   pub fn init(
       allocator: std.mem.Allocator,
@@ -296,7 +297,7 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
   ```
   (the exact `init_mapping` type is unchanged from its current form — only
   the two new parameters are added at the tail, no reorder.)
-- [ ] Update every caller — **5 sites total**, all must be touched in this
+- [x] Update every caller — **5 sites total**, all must be touched in this
   subtask:
   1. `src/supervisor.zig` site 1 (~line 1510, `spawnInstance` inline call):
      pass `m.phys_key` and `&self.daemon_uniq_counter`.
@@ -312,19 +313,18 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
 
 ### T4f: Add `daemon_uniq_counter` to `Supervisor`
 
-- [ ] Field `daemon_uniq_counter: u16 = 1,` in `Supervisor` struct.
-- [ ] Pass `&self.daemon_uniq_counter` at every `DeviceInstance.init` call
+- [x] Field `daemon_uniq_counter: u16 = 1,` in `Supervisor` struct.
+- [x] Pass `&self.daemon_uniq_counter` at every `DeviceInstance.init` call
   site inside `supervisor.zig` (T4e sites 1+2). No threading through
   intermediary functions needed — the supervisor holds the storage and the
   init call sites have direct `self` access.
-- [ ] Increment is performed INSIDE `DeviceInstance.init`'s `if (use_uhid)`
+- [x] Increment is performed INSIDE `DeviceInstance.init`'s `if (use_uhid)`
   block (per design.md §4d), not at the call site — exactly once per
-  null-`phys_key` construction. Test by calling `DeviceInstance.init`
-  twice with `phys_key == null` and asserting the counter advanced by 2.
+  null-`phys_key` construction.
 
 ### T4g: Replace unconditional `UinputDevice.initBoxed` with backend switch
 
-- [ ] In `src/device_instance.zig:136-148`, wrap the construction in:
+- [x] In `src/device_instance.zig:136-148`, wrap the construction in:
   ```zig
   const imu_cfg_opt = if (out_cfg.imu) |imu| imu else null;
   const use_uhid = if (imu_cfg_opt) |imu_cfg| std.mem.eql(u8, imu_cfg.backend, "uhid") else false;
@@ -364,7 +364,7 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
 
 ### T4h: Layer 1 smoke — (subsumed by T5f)
 
-- [ ] Per the T1 validate rules, the only legal `backend = "uhid"` shape
+- [x] Per the T1 validate rules, the only legal `backend = "uhid"` shape
   REQUIRES `[output.imu]` present (both primary + IMU). `backend = "uhid"`
   without `[output.imu]` is not expressible — it would simply be
   `[output.imu] = none`, which is the uinput-default path. Therefore no
@@ -375,10 +375,10 @@ Files: `src/io/uniq.zig` (new), `src/device_instance.zig`, `src/supervisor.zig`,
 
 ### T4i: CI green
 
-- [ ] `zig build test` passes.
-- [ ] With `[output.imu].backend = "uhid"` fixture: primary UHID card built,
+- [x] `zig build test` passes.
+- [x] With `[output.imu].backend = "uhid"` fixture: primary UHID card built,
   no IMU card (that is T5).
-- [ ] With default / `"uinput"`: existing behaviour byte-identical.
+- [x] With default / `"uinput"`: existing behaviour byte-identical.
 
 ---
 

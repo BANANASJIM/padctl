@@ -183,6 +183,11 @@ pub const Supervisor = struct {
     /// "restart failed after bookkeeping" branch without racing real
     /// thread creation.
     test_fail_rebind_restart: bool = false,
+    /// Phase 13 Wave 3: daemon-wide fallback counter for UHID uniq strings
+    /// when `phys_key` is null (virtual / Bluetooth devices without sysfs
+    /// phys). Passed by pointer into every `DeviceInstance.init` call site;
+    /// see `src/io/uniq.zig`.
+    daemon_uniq_counter: u16 = 1,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -1507,7 +1512,7 @@ pub const Supervisor = struct {
                 const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
                     if (default_pr_ptr) |p| {
@@ -1997,7 +2002,7 @@ pub const Supervisor = struct {
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
             if (default_pr_ptr) |p| {

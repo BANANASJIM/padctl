@@ -71,6 +71,7 @@ pub const io = struct {
     pub const uinput = @import("io/uinput.zig");
     pub const uhid = @import("io/uhid.zig");
     pub const uhid_descriptor = @import("io/uhid_descriptor.zig");
+    pub const uniq = @import("io/uniq.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const netlink = @import("io/netlink.zig");
 };
@@ -1018,7 +1019,11 @@ pub fn main() !void {
         break :blk null;
     };
 
-    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping) catch |err| {
+    // Phase 13 Wave 3: one-shot daemon path has a single device; the counter
+    // value is never consulted when phys_key is null-meaningless, but the
+    // parameter must be a valid pointer.
+    var main_uniq_counter: u16 = 1;
+    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null, &main_uniq_counter) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };
@@ -1030,6 +1035,7 @@ pub fn main() !void {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("core/rumble_scheduler.zig");
+    _ = @import("io/uniq.zig");
     _ = @import("test/bugfix_regression_test.zig");
     _ = @import("test/uhid_uniq_pairing_test.zig");
     _ = @import("test/macro_gamepad_button_test.zig");
