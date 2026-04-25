@@ -1413,7 +1413,7 @@ fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, entr
     // plug cycle. Proactively writing to sysfs unbind covers devices that
     // are already claimed by a blocking driver at install time.
     if (!plan.staging_mode and plan.is_root) {
-        probeAndUnbindDrivers(allocator, entries);
+        probeAndUnbindDrivers(allocator, entries, "");
     }
 }
 
@@ -2023,19 +2023,20 @@ fn generateDriverBlockRules(allocator: std.mem.Allocator, dirs: []const []const 
     try generateDriverBlockRulesFromEntries(allocator, entries.items, rules_path);
 }
 
-/// Walk /sys/bus/usb/drivers/<driver>/ and synchronously unbind any device
-/// whose idVendor:idProduct matches an entry in `entries`. Called after writing
-/// the udev rule file and before udevadm trigger so already-attached devices
-/// are evicted without needing a reboot.
-/// Requires root; silently skips (debug log) on permission errors so non-root
-/// and staging-mode callers are unaffected.
-fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntry) void {
+/// Walk <sys_root>/sys/bus/usb/drivers/<driver>/ and synchronously unbind any
+/// device whose idVendor:idProduct matches an entry in `entries`. Called after
+/// writing the udev rule file and before udevadm trigger so already-attached
+/// devices are evicted without needing a reboot.
+/// Requires root; skips (warn log) on permission errors so non-root and
+/// staging-mode callers are unaffected.
+/// `sys_root` is "" in production; tests inject a tmpDir path (P9).
+fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntry, sys_root: []const u8) void {
     for (entries) |entry| {
         for (entry.block_kernel_drivers) |driver| {
             const driver_path = std.fmt.allocPrint(
                 allocator,
-                "/sys/bus/usb/drivers/{s}",
-                .{driver},
+                "{s}/sys/bus/usb/drivers/{s}",
+                .{ sys_root, driver },
             ) catch continue;
             defer allocator.free(driver_path);
 
@@ -2055,15 +2056,15 @@ fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntr
 
                 const vendor_path = std.fmt.allocPrint(
                     allocator,
-                    "/sys/bus/usb/devices/{s}/idVendor",
-                    .{dev_name},
+                    "{s}/sys/bus/usb/devices/{s}/idVendor",
+                    .{ sys_root, dev_name },
                 ) catch continue;
                 defer allocator.free(vendor_path);
 
                 const product_path = std.fmt.allocPrint(
                     allocator,
-                    "/sys/bus/usb/devices/{s}/idProduct",
-                    .{dev_name},
+                    "{s}/sys/bus/usb/devices/{s}/idProduct",
+                    .{ sys_root, dev_name },
                 ) catch continue;
                 defer allocator.free(product_path);
 
@@ -2074,18 +2075,18 @@ fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntr
 
                 const unbind_path = std.fmt.allocPrint(
                     allocator,
-                    "/sys/bus/usb/drivers/{s}/unbind",
-                    .{driver},
+                    "{s}/sys/bus/usb/drivers/{s}/unbind",
+                    .{ sys_root, driver },
                 ) catch continue;
                 defer allocator.free(unbind_path);
 
                 if (std.fs.openFileAbsolute(unbind_path, .{ .mode = .write_only })) |f| {
                     defer f.close();
                     f.writeAll(de.name) catch |err| {
-                        std.log.debug("unbind {s} from {s}: {}", .{ de.name, driver, err });
+                        std.log.warn("could not unbind {s} from kernel driver (try replug or reboot to evict the shadow device): {}", .{ de.name, err });
                     };
                 } else |err| {
-                    std.log.debug("open unbind for {s}/{s}: {}", .{ driver, de.name, err });
+                    std.log.warn("could not unbind {s} from kernel driver (try replug or reboot to evict the shadow device): {}", .{ de.name, err });
                 }
             }
         }
@@ -3420,6 +3421,82 @@ test "install: readSysHex parses 4-digit lowercase hex" {
 
     const val = try readSysHex(hex_path);
     try testing.expectEqual(@as(u16, 0x37d7), val);
+}
+
+test "install: probeAndUnbindDrivers writes matching interface to unbind, skips non-matching" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    // Build fake /sys tree: sys/bus/usb/drivers/xpad/ and sys/bus/usb/devices/
+    try tmp.dir.makePath("sys/bus/usb/drivers/xpad");
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4");
+    try tmp.dir.makePath("sys/bus/usb/devices/2-2.1");
+
+    // Matching device: VID 37d7 PID 2401
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idVendor", .{});
+        defer f.close();
+        try f.writeAll("37d7\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idProduct", .{});
+        defer f.close();
+        try f.writeAll("2401\n");
+    }
+
+    // Non-matching device
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idVendor", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idProduct", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+
+    // Symlinks in drivers/xpad/ pointing at device nodes (relative, as real sysfs does)
+    const drivers_xpad_path = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/drivers/xpad", .{tmp_path});
+    defer allocator.free(drivers_xpad_path);
+    {
+        const sl1 = try std.fmt.allocPrint(allocator, "{s}/1-1.4:1.0", .{drivers_xpad_path});
+        defer allocator.free(sl1);
+        try std.posix.symlink("../../../devices/1-1.4", sl1);
+    }
+    {
+        const sl2 = try std.fmt.allocPrint(allocator, "{s}/2-2.1:1.0", .{drivers_xpad_path});
+        defer allocator.free(sl2);
+        try std.posix.symlink("../../../devices/2-2.1", sl2);
+    }
+
+    // unbind file (writable regular file, simulates sysfs write target)
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/drivers/xpad/unbind", .{});
+        defer f.close();
+    }
+
+    const entries = [_]UdevEntry{.{
+        .name = "Test Device",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .block_kernel_drivers = &[_][]const u8{"xpad"},
+    }};
+    probeAndUnbindDrivers(allocator, &entries, tmp_path);
+
+    // The matching interface must have been written to unbind.
+    const unbind_path = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/drivers/xpad/unbind", .{tmp_path});
+    defer allocator.free(unbind_path);
+    var uf = try std.fs.openFileAbsolute(unbind_path, .{});
+    defer uf.close();
+    const written = try uf.readToEndAlloc(allocator, 64);
+    defer allocator.free(written);
+    try testing.expectEqualStrings("1-1.4:1.0", written);
 }
 
 test "install: generateDriverBlockRules skips when no drivers configured" {
