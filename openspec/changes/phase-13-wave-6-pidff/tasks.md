@@ -30,6 +30,12 @@ T5 ──┬──> T1 ──┐
   AND Wave 5 hardware regression matrix completion (out-of-band).
 
 Recommended order: **T5 → (T1 + T2 + T3 parallel) → T4 → T6 → T7**.
+
+Note: the engineering plan listed T5 as depending on T1
+(`engineering/phase-13-wave-plan.md@fb1a3d6` Wave 6 T table); the
+spec promotes T5 to root prerequisite because `ForceFeedbackConfig`
+(T5's deliverable) must exist before `buildForPid` (T1) can reference
+it. Behavior unchanged; ordering rationalized.
 PR cadence: 3-4 PRs serial:
 
 - PR-A: T5 + T3 (~120 + 120 LoC schema + read-side plumbing)
@@ -120,8 +126,13 @@ Files: `src/io/uhid_descriptor.zig`
   Shared Parameter Blocks 0xAA.
 
 Implementer pins exact byte sequences against `hid-tools` canonical
-PID descriptor and against probe Run 2's working descriptor (Moza R5
-case). Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
+PID descriptor and against the implementer-pinned 12-report PID
+descriptor (recorded on first successful real-hardware run when kernel
+shows `hid-universal-pidff` FFB init success — no OOPS, no
+`pidff_find_reports -ENODEV`). Probe Run 2 evidence is for bustype
+acceptance + driver binding ONLY; probe Run 2's 7-of-12 descriptor
+caused FFB init failure and must NOT be used as a byte reference.
+Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
 
 ### T1c: `validateMandatoryReports`
 
@@ -151,11 +162,14 @@ case). Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
     `buildForPid` with a Moza-R5-style fixture (vid=0x11FF, pid=0x1211,
     one axis, no buttons), assert `validateMandatoryReports(result)`
     returns success.
-  - **`test "buildForPid: matches reference Moza R5 descriptor (golden)"`**
+  - **`test "buildForPid: matches reference PID descriptor (Moza R5)"`**
     — inline `const EXPECTED = [_]u8{ ... };` byte array; assert
     `std.mem.eql(u8, result, EXPECTED)`. The implementer pins the
-    bytes from the first run, after manually verifying against probe
-    Run 2's descriptor.
+    bytes from the first successful real-hardware run (kernel shows
+    `hid-universal-pidff` FFB init without `Error initialising force
+    feedback`). Probe Run 2 does NOT supply these bytes — probe Run 2's
+    7-of-12 descriptor caused FFB failure; the correct byte sequence
+    must be derived from USB HID PID 1.01 §4.x and pinned empirically.
   - **`test "buildForPid: synthetic incomplete descriptor → IncompletePidDescriptor"`**
     — directly call `validateMandatoryReports` on a hand-crafted
     8-of-12 descriptor; assert error.
@@ -180,6 +194,15 @@ Files: `src/config/device.zig`, `src/device_instance.zig`,
 ### T2a: Read `clone_vid_pid` in `DeviceInstance`
 
 Note: T5 lands the field. T2 only reads it.
+
+Verification step (T2a precondition): inspect the Wave 3
+`src/device_instance.zig` routing block (commit `849b6e3`) to confirm
+whether `cfg.device.vid` / `cfg.device.pid` are passed to the primary
+UHID card today. If yes (the current Wave 6 design assumes this), then
+`clone_vid_pid = false` becomes a NEW behavior (restore `FADE:C001`)
+and `clone_vid_pid = true` keeps current behavior. If Wave 3 already
+used `FADE:C001`, the Wave 5 coordination note in design.md may be
+moot — document the finding in the PR description.
 
 - [ ] In `src/device_instance.zig` (the Wave 3 `if (use_uhid)` block at
   the routing switch), determine effective vendor/product:
@@ -493,6 +516,12 @@ block (Wave 3), add:
 
 Files: `src/test/wave6_pidff_e2e_test.zig` (new),
 `src/test/harness/uhid_simulator.zig`, `build.zig`
+
+Note: the engineering plan named this file
+`supervisor_pid_forwarding_test.zig`
+(`engineering/phase-13-wave-plan.md@fb1a3d6`); the spec adopts
+`wave6_pidff_e2e_test.zig` for naming consistency with Wave 3/4 test
+files.
 
 ### T6a: Extend `UhidSimulator` with `injectOutput`
 
