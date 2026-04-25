@@ -55,6 +55,11 @@ Dependency graph: `T1 → T6`, `T2 → T6`, `T5 → T1, T2`, `T3 → T4 → T6`,
 Total: ~1090 LoC (code + Layer 0+1 tests). PR cadence: 3-4 PRs serial
 (T1+T3 / T2+T5 / T4+T6 / T7 doc-only).
 
+Note: revised upward from the engineering plan's rough estimate
+(~300-500 LoC) per detailed sub-task breakdown. The plan estimate
+predates the explicit T4 `FfbForwarder` module and the T5 schema
+validate matrix tests.
+
 ## Success Criteria
 
 - `[output.force_feedback].backend = "uhid"` + `kind = "pid"` causes the

@@ -263,8 +263,10 @@ Descriptor layout (top-to-bottom byte stream):
 
 Byte counts above are illustrative (probe pidff_probe.py uses a similar
 layout). Implementer pins exact byte sequences against `hid-tools`
-canonical output and against probe Run 2's working descriptor; the
-golden test pins the byte sequence once produced.
+canonical output and against the implementer-derived 12-report PID
+descriptor (validated on first real-hardware run when
+`hid-universal-pidff` binds without `Error initialising force
+feedback`); the golden test pins the byte sequence once produced.
 
 ### 12-of-12 mandatory validator
 
@@ -288,7 +290,7 @@ observed in probe Run 2 cannot be triggered by padctl.
 | File | Before | After |
 |------|--------|-------|
 | `src/io/uhid_descriptor.zig` | `buildFromOutput` only | adds `buildForPid` + `validateMandatoryReports` + golden tests |
-| `src/io/uhid_descriptor.zig` test block | rumble + IMU goldens | adds `test "buildForPid: 12 mandatory reports present"` (per device class) + `test "buildForPid: matches probe Run 2 working descriptor"` (Moza R5 reference) |
+| `src/io/uhid_descriptor.zig` test block | rumble + IMU goldens | adds `test "buildForPid: 12 mandatory reports present"` (per device class) + `test "buildForPid: matches reference PID descriptor (Moza R5)"` (byte sequence implementer-pinned from first successful real-hardware run; NOT from the probe — see probe evidence scope below) |
 
 ---
 
@@ -580,6 +582,16 @@ device-wide selector independent of `[output.imu]` — is intentionally
 deferred. It would touch Wave 3's settled design and is not justified
 for one wave's worth of cleanliness.)
 
+Note: this `[output.imu]` overloading as a routing flag for non-IMU
+wheels is a known design compromise. Wave 6 keeps it to avoid
+invalidating Wave 3's settled design. A cleaner alternative —
+promoting `[output].backend = "uhid"` as a device-wide selector — is
+intentionally deferred to a post-Wave-6 cleanup; if a maintainer adds
+many wheel TOMLs and the overloading becomes a friction point, the
+deferred fix should be reconsidered. (No deviations/ entry in
+docs-repo at this point — the compromise is contained in this single
+Wave 6 design decision.)
+
 ### Files affected
 
 | File | Before | After |
@@ -751,7 +763,7 @@ formal landing in code-repo `.github/workflows/`.)
 
 | # | Risk | Probability | Mitigation | Owner |
 |---|------|-------------|------------|-------|
-| R1 | Incomplete PID descriptor → `pidff_find_reports -ENODEV` → kernel OOPS in `hid_hw_open+0x71` (probe Run 2 evidence) | Low (T1 validator catches) | T1 `validateMandatoryReports` runs at `buildForPid` time, not at runtime; `error.IncompletePidDescriptor` aborts daemon before `UHID_CREATE2`. Golden-byte test compares against probe Run 2's working descriptor for one wheel class. First-real-hardware run includes `dmesg -w` review. | T1 implementer |
+| R1 | Incomplete PID descriptor → `pidff_find_reports -ENODEV` → kernel OOPS in `hid_hw_open+0x71` (probe Run 2 evidence: 7-of-12 descriptor caused FFB init failure + kernel NULL-deref) | Low (T1 validator catches) | T1 `validateMandatoryReports` runs at `buildForPid` time, not at runtime; `error.IncompletePidDescriptor` aborts daemon before `UHID_CREATE2`. Golden-byte test compares against an implementer-pinned 12-report descriptor; the byte sequence is recorded after first real-hardware run when kernel logs show successful FFB initialization (no `pidff_find_reports -ENODEV` and no kernel OOPS). First-real-hardware run includes `dmesg -w` review. | T1 implementer |
 | R2 | VID/PID cloning legal/branding pushback | Low | Documented as kernel-driven structural requirement (probe RESEARCH-REPORT §4.3); `clone_vid_pid` defaults to `false` and is per-device opt-in; release-note copy explains. InputPlumber and inputtino set the precedent. | T2 implementer + maintainer release notes |
 | R3 | `hid-universal-pidff` vs vendor-specific drivers (`hid-lg4ff`, `hid-tmff`) compatibility matrix | Medium | T7 first round covers `hid-universal-pidff` only (default 6.x path). Vendor-driver paths (kernel-5.15 G29 via `hid-lg4ff`) are opportunistic — Phase B CI workflow exercises G29 on 5.15. Mismatched-driver TOMLs deferred to Wave 6 follow-up. | T7 implementer |
 | R4 | `UHID_OUTPUT` rate (peak ~500Hz on aggressive FFB) saturating event loop | Medium | T3 design uses single drain loop, no per-event allocation. T4 tracks `drops_eagain` and rate; if observed `> 200 Hz` sustained, dedicated worker thread proposed for Wave 6 follow-up. T6 e2e test asserts 3 reports/tick handled cleanly. | T3 + T4 implementers |
@@ -824,5 +836,5 @@ evidence base.
 | D6 | Single `OutputReport` slice borrowed from read buffer (no copy) | `pollOutputReport` returns a view into `buf`. Caller (`FfbForwarder.forward`) consumes synchronously. Avoids per-event allocation in the hot path. |
 | D7 | Drain-all per ppoll tick (initial implementation) | Lower latency than bounded drain. If R4 saturation manifests, swap to bounded loop with no other code changes. |
 | D8 | Phase B CI workflow uses Logitech G29 VID/PID on `ubuntu-22.04` | G29 binds to `hid-lg4ff` on 5.15 (no `hid-universal-pidff` yet); G29 is the most-likely available 5.15 path. Failing this run is the single concrete signal forcing 5.15 → Option (a). |
-| D9 | T1's golden test references probe Run 2's working descriptor for one wheel | Real-kernel-bound descriptor is the strongest correctness anchor. New device classes added later via T7 may diverge — golden test asserts equality, not correctness for all wheels; per-class goldens added as needed. |
+| D9 | T1's golden test pins an implementer-derived 12-report PID descriptor for one wheel class | The byte sequence is recorded after the first real-hardware run shows successful `hid-universal-pidff` FFB init (no OOPS, no `pidff_find_reports -ENODEV`). Probe Run 2 provides evidence for bustype acceptance + driver binding ONLY — it does NOT supply a working descriptor (Run 2's 7-of-12 descriptor caused FFB init failure). New device classes added later via T7 may diverge — per-class goldens added as needed. |
 | D10 | No FFB transformation in padctl (byte-faithful only) | ADR-015 Option (a) hard constraint. Any transformation would need a separate ADR and re-opening of the Stage 3 decision — out of Wave 6 scope. |

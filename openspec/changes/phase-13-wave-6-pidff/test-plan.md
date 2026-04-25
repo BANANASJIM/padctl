@@ -24,8 +24,13 @@ PR #140, PR #154 B2, PR #160).
   returns a non-empty descriptor; `validateMandatoryReports(result)`
   returns success (12 reports present).
 - [ ] **TP2**: Output bytes are byte-equal to an inline golden reference
-  (Moza R5 case, pinned from probe Run 2's working descriptor on first
-  test run).
+  (Moza R5 case, pinned by implementer on first successful real-hardware
+  run when kernel logs show `hid-universal-pidff` FFB init without
+  `Error initialising force feedback`). Probe Run 2 evidence covers
+  bustype acceptance + driver binding ONLY — it does not supply a
+  working descriptor (probe Run 2's 7-of-12 descriptor caused FFB init
+  failure + kernel NULL-deref; the implementer must build a complete
+  12-report descriptor per USB HID PID 1.01 §4.x).
 - [ ] **TP3**: `validateMandatoryReports` on a hand-crafted 11-of-12
   descriptor (one report ID stripped) returns
   `error.IncompletePidDescriptor`.
