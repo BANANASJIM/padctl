@@ -2083,10 +2083,10 @@ fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntr
                 if (std.fs.openFileAbsolute(unbind_path, .{ .mode = .write_only })) |f| {
                     defer f.close();
                     f.writeAll(de.name) catch |err| {
-                        std.log.warn("could not unbind {s} from kernel driver (try replug or reboot to evict the shadow device): {}", .{ de.name, err });
+                        std.log.warn("could not unbind {s} from kernel driver '{s}' (try replug or reboot to evict the shadow device): {}", .{ de.name, driver, err });
                     };
                 } else |err| {
-                    std.log.warn("could not unbind {s} from kernel driver (try replug or reboot to evict the shadow device): {}", .{ de.name, err });
+                    std.log.warn("could not unbind {s} from kernel driver '{s}' (try replug or reboot to evict the shadow device): {}", .{ de.name, driver, err });
                 }
             }
         }
