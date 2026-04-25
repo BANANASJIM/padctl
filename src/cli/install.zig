@@ -1407,6 +1407,14 @@ fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, entr
         const msg = std.fmt.bufPrint(&errbuf, "warning: driver block rules not generated: {}\n", .{err}) catch "warning: driver block rules error\n";
         _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
     };
+
+    // Evict already-attached devices without waiting for reboot.
+    // udevadm trigger only sends add events; bind rules fire on the next
+    // plug cycle. Proactively writing to sysfs unbind covers devices that
+    // are already claimed by a blocking driver at install time.
+    if (!plan.staging_mode and plan.is_root) {
+        probeAndUnbindDrivers(allocator, entries);
+    }
 }
 
 fn cleanupLegacyUdevFiles(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
@@ -1995,7 +2003,7 @@ fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries: []
         for (e.block_kernel_drivers) |driver| {
             const line = try std.fmt.allocPrint(
                 allocator,
-                "ACTION==\"bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",
+                "ACTION==\"add|bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",
                 .{ e.vid, e.pid, driver, driver, e.name },
             );
             defer allocator.free(line);
@@ -2013,6 +2021,84 @@ fn generateDriverBlockRules(allocator: std.mem.Allocator, dirs: []const []const 
     var entries = try collectDeviceEntries(allocator, dirs);
     defer freeDeviceEntries(allocator, &entries);
     try generateDriverBlockRulesFromEntries(allocator, entries.items, rules_path);
+}
+
+/// Walk /sys/bus/usb/drivers/<driver>/ and synchronously unbind any device
+/// whose idVendor:idProduct matches an entry in `entries`. Called after writing
+/// the udev rule file and before udevadm trigger so already-attached devices
+/// are evicted without needing a reboot.
+/// Requires root; silently skips (debug log) on permission errors so non-root
+/// and staging-mode callers are unaffected.
+fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntry) void {
+    for (entries) |entry| {
+        for (entry.block_kernel_drivers) |driver| {
+            const driver_path = std.fmt.allocPrint(
+                allocator,
+                "/sys/bus/usb/drivers/{s}",
+                .{driver},
+            ) catch continue;
+            defer allocator.free(driver_path);
+
+            var driver_dir = std.fs.openDirAbsolute(driver_path, .{ .iterate = true }) catch continue;
+            defer driver_dir.close();
+
+            var it = driver_dir.iterate();
+            while (it.next() catch null) |de| {
+                // USB device symlinks look like "1-1.4:1.0" (interface notation).
+                if (de.kind != .sym_link and de.kind != .directory) continue;
+                if (de.name.len == 0 or de.name[0] < '0' or de.name[0] > '9') continue;
+
+                // Read idVendor and idProduct from the parent device node.
+                // Strip the interface suffix ":N.M" to get the device name.
+                const colon = std.mem.lastIndexOf(u8, de.name, ":") orelse continue;
+                const dev_name = de.name[0..colon];
+
+                const vendor_path = std.fmt.allocPrint(
+                    allocator,
+                    "/sys/bus/usb/devices/{s}/idVendor",
+                    .{dev_name},
+                ) catch continue;
+                defer allocator.free(vendor_path);
+
+                const product_path = std.fmt.allocPrint(
+                    allocator,
+                    "/sys/bus/usb/devices/{s}/idProduct",
+                    .{dev_name},
+                ) catch continue;
+                defer allocator.free(product_path);
+
+                const vid = readSysHex(vendor_path) catch continue;
+                const pid = readSysHex(product_path) catch continue;
+
+                if (vid != entry.vid or pid != entry.pid) continue;
+
+                const unbind_path = std.fmt.allocPrint(
+                    allocator,
+                    "/sys/bus/usb/drivers/{s}/unbind",
+                    .{driver},
+                ) catch continue;
+                defer allocator.free(unbind_path);
+
+                if (std.fs.openFileAbsolute(unbind_path, .{ .mode = .write_only })) |f| {
+                    defer f.close();
+                    f.writeAll(de.name) catch |err| {
+                        std.log.debug("unbind {s} from {s}: {}", .{ de.name, driver, err });
+                    };
+                } else |err| {
+                    std.log.debug("open unbind for {s}/{s}: {}", .{ driver, de.name, err });
+                }
+            }
+        }
+    }
+}
+
+fn readSysHex(path: []const u8) !u16 {
+    var f = try std.fs.openFileAbsolute(path, .{});
+    defer f.close();
+    var buf: [8]u8 = undefined;
+    const n = try f.read(&buf);
+    const trimmed = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    return std.fmt.parseInt(u16, trimmed, 16);
 }
 
 fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rules_path: []const u8, prefix: []const u8) !void {
@@ -3261,10 +3347,79 @@ test "install: generateDriverBlockRules produces unbind rules" {
     const content = try file.readToEndAlloc(allocator, 8192);
     defer allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"bind\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"add|bind\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "DRIVER==\"xpad\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "37d7") != null);
     try testing.expect(std.mem.indexOf(u8, content, "unbind") != null);
+}
+
+test "install: generateDriverBlockRules uses add|bind action for udevadm trigger compatibility" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(devices_dir);
+    try std.fs.makeDirAbsolute(devices_dir);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/vader5.toml", .{devices_dir});
+    defer allocator.free(toml_path);
+    {
+        var file = try std.fs.createFileAbsolute(toml_path, .{});
+        defer file.close();
+        try file.writeAll(
+            \\[device]
+            \\name = "Vader 5 Pro"
+            \\vid = 0x0f0d
+            \\pid = 0x00c1
+            \\block_kernel_drivers = ["xpad", "hid_generic"]
+        );
+    }
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    const dirs = [_][]const u8{devices_dir};
+    try generateDriverBlockRules(allocator, &dirs, rules_path);
+
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 8192);
+    defer allocator.free(content);
+
+    // add catches udevadm trigger (synthetic add); bind catches future plug-in.
+    // Neither ACTION=="bind" alone (misses trigger) nor ACTION=="add" alone
+    // (misses genuine bind) is correct.
+    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"add|bind\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"bind\"") == null or
+        std.mem.indexOf(u8, content, "ACTION==\"add|bind\"") != null);
+    // Both drivers must appear.
+    try testing.expect(std.mem.indexOf(u8, content, "DRIVER==\"xpad\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "DRIVER==\"hid_generic\"") != null);
+}
+
+test "install: readSysHex parses 4-digit lowercase hex" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const hex_path = try std.fmt.allocPrint(allocator, "{s}/idVendor", .{tmp_path});
+    defer allocator.free(hex_path);
+    {
+        var f = try std.fs.createFileAbsolute(hex_path, .{});
+        defer f.close();
+        try f.writeAll("37d7\n");
+    }
+
+    const val = try readSysHex(hex_path);
+    try testing.expectEqual(@as(u16, 0x37d7), val);
 }
 
 test "install: generateDriverBlockRules skips when no drivers configured" {
