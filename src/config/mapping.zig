@@ -251,9 +251,39 @@ fn validateAdaptiveTrigger(at: *const AdaptiveTriggerConfig) !void {
     return error.InvalidConfig;
 }
 
+fn remapHasTriggerKey(map: *const toml.HashMap([]const u8)) bool {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (std.mem.eql(u8, key, "LT") or std.mem.eql(u8, key, "RT")) return true;
+    }
+    return false;
+}
+
+// Returns true when LT/RT appear in any remap but trigger_threshold is not set.
+// Exposed for testing; warn at validate time so users see the failure mode before runtime.
+pub fn needsTriggerThresholdWarn(cfg: *const MappingConfig) bool {
+    if (cfg.trigger_threshold != null) return false;
+    if (cfg.remap) |*m| {
+        if (remapHasTriggerKey(m)) return true;
+    }
+    if (cfg.layer) |layers| {
+        for (layers) |*layer| {
+            if (layer.remap) |*m| {
+                if (remapHasTriggerKey(m)) return true;
+            }
+        }
+    }
+    return false;
+}
+
 pub fn validate(cfg: *const MappingConfig) !void {
     if (cfg.remap) |*m| try checkRemapMacros(cfg, m);
     if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
+
+    if (needsTriggerThresholdWarn(cfg)) {
+        std.log.warn("config: LT/RT used in [remap] or [layer.remap] without trigger_threshold — analog triggers are not synthesized into button events; add trigger_threshold = 128 (or your preferred 0-255 value) to enable", .{});
+    }
 
     const layers = cfg.layer orelse return;
 
@@ -836,4 +866,83 @@ test "mapping: fuzz parseString: no panic on arbitrary input" {
             if (result) |r| r.deinit() else |_| {}
         }
     }.run, .{});
+}
+
+test "mapping: needsTriggerThresholdWarn: LT in top-level remap without trigger_threshold" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\LT = "mouse_left"
+    );
+    defer result.deinit();
+    try std.testing.expect(needsTriggerThresholdWarn(&result.value));
+}
+
+test "mapping: needsTriggerThresholdWarn: RT in top-level remap without trigger_threshold" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\RT = "mouse_right"
+    );
+    defer result.deinit();
+    try std.testing.expect(needsTriggerThresholdWarn(&result.value));
+}
+
+test "mapping: needsTriggerThresholdWarn: LT in layer remap without trigger_threshold" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\LT = "mouse_left"
+    );
+    defer result.deinit();
+    try std.testing.expect(needsTriggerThresholdWarn(&result.value));
+}
+
+test "mapping: needsTriggerThresholdWarn: RT in layer remap without trigger_threshold" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\RT = "KEY_F1"
+    );
+    defer result.deinit();
+    try std.testing.expect(needsTriggerThresholdWarn(&result.value));
+}
+
+test "mapping: needsTriggerThresholdWarn: no warn when trigger_threshold set" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\trigger_threshold = 128
+        \\
+        \\[remap]
+        \\LT = "mouse_left"
+        \\RT = "mouse_right"
+    );
+    defer result.deinit();
+    try std.testing.expect(!needsTriggerThresholdWarn(&result.value));
+}
+
+test "mapping: needsTriggerThresholdWarn: no warn when LT/RT not in remap" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = "KEY_F1"
+        \\B = "mouse_left"
+    );
+    defer result.deinit();
+    try std.testing.expect(!needsTriggerThresholdWarn(&result.value));
+}
+
+test "mapping: needsTriggerThresholdWarn: no warn on empty config" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, "");
+    defer result.deinit();
+    try std.testing.expect(!needsTriggerThresholdWarn(&result.value));
 }
