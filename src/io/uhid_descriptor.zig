@@ -68,6 +68,7 @@ pub const PID_SET_CONDITION_REPORT_ID: u8 = 3;
 pub const PID_SET_PERIODIC_REPORT_ID: u8 = 4;
 pub const PID_SET_CONSTANT_FORCE_REPORT_ID: u8 = 5;
 pub const PID_SET_RAMP_FORCE_REPORT_ID: u8 = 6;
+pub const PID_BLOCK_FREE_REPORT_ID: u8 = 7;
 pub const PID_EFFECT_OPERATION_REPORT_ID: u8 = 10;
 pub const PID_DEVICE_CONTROL_REPORT_ID: u8 = 11;
 pub const PID_DEVICE_GAIN_REPORT_ID: u8 = 12;
@@ -75,22 +76,20 @@ pub const PID_CREATE_NEW_EFFECT_REPORT_ID: u8 = 13;
 pub const PID_BLOCK_LOAD_REPORT_ID: u8 = 14;
 pub const PID_POOL_REPORT_ID: u8 = 15;
 
-// 12 mandatory PID reports per HID PID 1.01 §4. Kernel `pidff_find_reports`
-// fails (-ENODEV → kernel OOPS in `hid_hw_open`) when any of these are
-// absent — see probe Run 2 evidence in `tools/wave6-probe/RESEARCH-REPORT.md`.
+// Per drivers/hid/usbhid/hid-pidff.c::pidff_reports[0..PID_REQUIRED_REPORTS]
+// (8 mandatory usages: 0x21, 0x77, 0x7d, 0x7f, 0x89, 0x90, 0x96, 0xab).
+// Set Envelope/Condition/Periodic/Constant/Ramp are emitted but kernel-optional
+// (not validated here). Kernel pidff_find_reports rejects with -ENODEV if any
+// of these 8 are absent — see probe Run 2 in tools/wave6-probe/RESEARCH-REPORT.md.
 const PID_MANDATORY_REPORT_IDS = [_]u8{
-    PID_SET_EFFECT_REPORT_ID,
-    PID_SET_ENVELOPE_REPORT_ID,
-    PID_SET_CONDITION_REPORT_ID,
-    PID_SET_PERIODIC_REPORT_ID,
-    PID_SET_CONSTANT_FORCE_REPORT_ID,
-    PID_SET_RAMP_FORCE_REPORT_ID,
-    PID_EFFECT_OPERATION_REPORT_ID,
-    PID_DEVICE_CONTROL_REPORT_ID,
-    PID_DEVICE_GAIN_REPORT_ID,
-    PID_CREATE_NEW_EFFECT_REPORT_ID,
-    PID_BLOCK_LOAD_REPORT_ID,
-    PID_POOL_REPORT_ID,
+    PID_SET_EFFECT_REPORT_ID, // 1,  usage 0x21
+    PID_BLOCK_FREE_REPORT_ID, // 7,  usage 0x90
+    PID_EFFECT_OPERATION_REPORT_ID, // 10, usage 0x77
+    PID_DEVICE_CONTROL_REPORT_ID, // 11, usage 0x96
+    PID_DEVICE_GAIN_REPORT_ID, // 12, usage 0x7d
+    PID_CREATE_NEW_EFFECT_REPORT_ID, // 13, usage 0xab
+    PID_BLOCK_LOAD_REPORT_ID, // 14, usage 0x89
+    PID_POOL_REPORT_ID, // 15, usage 0x7f
 };
 
 /// Input report ID used for the main gamepad report. Kept `1` so a simple
@@ -488,14 +487,15 @@ pub const UhidDescriptorBuilder = struct {
     /// Used when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`
     /// (T5 schema). The descriptor contains a Joystick application
     /// preamble (one X axis is enough for the kernel to attach) followed by
-    /// 9 output reports (Set Effect / Set Envelope / Set Condition / Set
-    /// Periodic / Set Constant Force / Set Ramp Force / Effect Operation /
-    /// Device Control / Device Gain) and 3 feature reports (Create New
-    /// Effect / Block Load / PID Pool) — all 12 mandatory reports per
-    /// HID PID 1.01 §4.x.
+    /// 10 output reports (Set Effect / Set Envelope / Set Condition / Set
+    /// Periodic / Set Constant Force / Set Ramp Force / Block Free / Effect
+    /// Operation / Device Control / Device Gain) and 3 feature reports (Create
+    /// New Effect / Block Load / PID Pool). Emits all 8 kernel-mandatory reports
+    /// (pidff_reports[0..PID_REQUIRED_REPORTS]) plus the 5 optional waveform
+    /// parameter reports.
     ///
     /// `validateMandatoryReports` runs at the end and returns
-    /// `error.IncompletePidDescriptor` if any of the 12 IDs is missing,
+    /// `error.IncompletePidDescriptor` if any of the 8 mandatory IDs is missing,
     /// fail-closing the daemon before kernel `pidff_find_reports` would
     /// crash on a malformed device.
     ///
@@ -542,6 +542,7 @@ pub const UhidDescriptorBuilder = struct {
         try emitPidSetPeriodicReport(&buf, allocator);
         try emitPidSetConstantForceReport(&buf, allocator);
         try emitPidSetRampForceReport(&buf, allocator);
+        try emitPidBlockFreeReport(&buf, allocator);
         try emitPidEffectOperationReport(&buf, allocator);
         try emitPidDeviceControlReport(&buf, allocator);
         try emitPidDeviceGainReport(&buf, allocator);
@@ -795,6 +796,20 @@ fn emitPidSetRampForceReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocat
     try writeByte(buf, allocator, 0xC0);
 }
 
+fn emitPidBlockFreeReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x90); // Usage (Block Free Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02); // Collection (Logical)
+    try writeItem1(buf, allocator, 0x85, PID_BLOCK_FREE_REPORT_ID);
+    // Effect Block Index — u8 1..40
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02); // Output (Data, Var, Abs)
+    try writeByte(buf, allocator, 0xC0);
+}
+
 fn emitPidEffectOperationReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
     try writeItem1(buf, allocator, 0x09, 0x77); // Usage (Effect Operation Report)
     try writeItem1(buf, allocator, 0xA1, 0x02);
@@ -925,10 +940,10 @@ fn emitPidBlockLoadReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator)
     try writeItem1(buf, allocator, 0x95, 0x01);
     try writeItem1(buf, allocator, 0xB1, 0x00);
     try writeByte(buf, allocator, 0xC0);
-    // RAM Pool Available (0xAC) — u32
+    // RAM Pool Available (0xAC) — u16
     try writeItem1(buf, allocator, 0x09, 0xAC);
     try writeItem1(buf, allocator, 0x15, 0x00);
-    try writeItem4(buf, allocator, 0x27, 0xFFFF);
+    try writeItem2(buf, allocator, 0x26, 0xFFFF);
     try writeItem1(buf, allocator, 0x75, 0x10);
     try writeItem1(buf, allocator, 0x95, 0x01);
     try writeItem1(buf, allocator, 0xB1, 0x02);
@@ -1734,7 +1749,7 @@ test "buildForImu: primary pad descriptor DOES emit Usage Page Button (control s
 
 // --- buildForPid tests (Phase 13 Wave 6 T1) --------------------------------
 
-test "buildForPid: 12 mandatory PID reports present" {
+test "buildForPid: 8 mandatory PID reports present per kernel pidff_find_reports" {
     const out = device.OutputConfig{ .name = "moza-r5-fixture", .vid = 0x11FF, .pid = 0x1211 };
     const ffb = device.ForceFeedbackConfig{
         .backend = "uhid",
@@ -1794,7 +1809,7 @@ test "buildForPid: validateMandatoryReports rejects truncated descriptor" {
     try testing.expectError(error.IncompletePidDescriptor, validateMandatoryReports(&partial));
 }
 
-test "buildForPid: validateMandatoryReports accepts all 12 IDs in any order" {
+test "buildForPid: validateMandatoryReports accepts all 8 IDs in any order" {
     // Synthetic descriptor that simply lists every required Report ID.
     var bytes: [PID_MANDATORY_REPORT_IDS.len * 2]u8 = undefined;
     var idx: usize = 0;
@@ -1804,6 +1819,27 @@ test "buildForPid: validateMandatoryReports accepts all 12 IDs in any order" {
         idx += 2;
     }
     try validateMandatoryReports(&bytes);
+}
+
+test "buildForPid: descriptor includes Block Free report (kernel-required)" {
+    const out = device.OutputConfig{ .name = "block-free-check", .vid = 0x11FF, .pid = 0x1211 };
+    const ffb = device.ForceFeedbackConfig{ .backend = "uhid", .kind = "pid" };
+    const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
+    defer testing.allocator.free(desc);
+
+    // Walk the byte stream looking for Usage (0x09) 0x90 (Block Free Report).
+    var found_usage_90 = false;
+    var i: usize = 0;
+    while (i < desc.len) {
+        const prefix = desc[i];
+        const size = hidItemSize(prefix);
+        if (prefix == 0x09 and size == 1 and i + 1 < desc.len and desc[i + 1] == 0x90) {
+            found_usage_90 = true;
+            break;
+        }
+        i += 1 + size;
+    }
+    try testing.expect(found_usage_90);
 }
 
 test "buildForPid: stays within HID_MAX_DESCRIPTOR_SIZE" {
