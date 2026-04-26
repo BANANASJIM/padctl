@@ -17,6 +17,8 @@ const GenericOutputDevice = uinput.GenericOutputDevice;
 const uhid_mod = @import("io/uhid.zig");
 const uhid_descriptor = @import("io/uhid_descriptor.zig");
 const uniq_mod = @import("io/uniq.zig");
+const ffb_mod = @import("io/ffb_forwarder.zig");
+const FfbForwarder = ffb_mod.FfbForwarder;
 const device_cfg = @import("config/device.zig");
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
@@ -102,6 +104,9 @@ pub const InitOptions = struct {
     test_primary_uhid_fd: ?posix.fd_t = null,
     test_imu_uhid_fd: ?posix.fd_t = null,
     test_devices_override: ?[]DeviceIO = null,
+    /// Test-only: substitute for the physical hidraw write-end used by FfbForwarder.
+    /// When non-null, FfbForwarder.init receives this fd instead of the real device fd.
+    test_physical_hidraw_fd: ?posix.fd_t = null,
 };
 
 /// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
@@ -164,6 +169,8 @@ pub const DeviceInstance = struct {
     pending_mapping: ?*MappingConfig,
     stopped: bool,
     poll_timeout_ms: ?u32 = null,
+    /// Wave 6 T4: active only when force_feedback.backend="uhid" + kind="pid".
+    ffb_forwarder: ?FfbForwarder = null,
     // Test-only observability hook for issue #142 regression: counts
     // rebuildAuxIfChanged invocations so tests can verify the switch path
     // actually rebuilds aux caps without relying on /dev/uinput.
@@ -228,6 +235,7 @@ pub const DeviceInstance = struct {
         var primary_output: ?OutputDevice = null;
         var imu_output: ?OutputDevice = null;
         var imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
+        var ffb_fwd: ?FfbForwarder = null;
         var imu_name_ptr: ?[]const u8 = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
@@ -315,6 +323,23 @@ pub const DeviceInstance = struct {
                     imu_name_ptr = imu_name_alloc;
                     imu_output = imu_uhid.outputDevice();
                 }
+
+                // Wire FfbForwarder when backend=uhid + kind=pid (Wave 6 PID FFB).
+                // Callback registration is deferred to run() so the pointer
+                // to ffb_forwarder is stable (DeviceInstance is heap-allocated
+                // by the Supervisor before run() is called).
+                if (out_cfg.force_feedback) |pid_ffb| {
+                    if (std.mem.eql(u8, pid_ffb.backend, "uhid") and
+                        std.mem.eql(u8, pid_ffb.kind, "pid"))
+                    {
+                        const phys_fd = opts.test_physical_hidraw_fd orelse
+                            if (devices.len > 0) devices[0].pollfd().fd else -1;
+                        if (phys_fd >= 0) {
+                            ffb_fwd = FfbForwarder.init(phys_fd);
+                            try loop.addUhidOutput(primary_uhid.fd);
+                        }
+                    }
+                }
             } else {
                 const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
                 errdefer {
@@ -399,6 +424,7 @@ pub const DeviceInstance = struct {
             .device_cfg = cfg,
             .pending_mapping = null,
             .stopped = false,
+            .ffb_forwarder = ffb_fwd,
         };
     }
 
@@ -422,10 +448,14 @@ pub const DeviceInstance = struct {
                 self.allocator.destroy(p);
             },
             .uhid => |p| {
+                // Clear callback before closing so no in-flight report reaches
+                // a stale FfbForwarder pointer after the device is gone.
+                p.clearOutputCallback();
                 p.close();
                 self.allocator.destroy(p);
             },
         }
+        if (self.ffb_forwarder) |*fwd| fwd.deinit();
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
@@ -437,6 +467,12 @@ pub const DeviceInstance = struct {
     /// Thread entry point. Runs the event loop; applies pending mapping swaps
     /// between iterations (woken via stop_pipe by updateMapping).
     pub fn run(self: *DeviceInstance) !void {
+        // Register FfbForwarder callback now that self is stable on the heap.
+        if (self.ffb_forwarder != null) {
+            if (self.owner == .uhid) {
+                self.owner.uhid.setOutputCallback(ffb_mod.forwarderCallback, &self.ffb_forwarder.?);
+            }
+        }
         while (!@atomicLoad(bool, &self.stopped, .acquire)) {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
@@ -477,6 +513,10 @@ pub const DeviceInstance = struct {
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
                 .device_tag = self.device_cfg.device.name,
+                .uhid_primary = switch (self.owner) {
+                    .uhid => |p| p,
+                    else => null,
+                },
             }) catch |err| {
                 std.log.err("event loop failed: {}", .{err});
                 break;
