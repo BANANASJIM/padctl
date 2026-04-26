@@ -133,6 +133,16 @@ pub const ImuConfig = struct {
     gyro_range: ?[2]i64 = null,
 };
 
+// T1 stub — full schema (parser plumbing, validate matrix, TOML round-trip)
+// lands in T5. T1 only needs the type to exist so `buildForPid` can take a
+// reference. See openspec/changes/phase-13-wave-6-pidff/ for the full T5
+// shape (`backend`, `kind`, `clone_vid_pid`).
+pub const ForceFeedbackConfig = struct {
+    backend: []const u8 = "uinput",
+    kind: []const u8 = "rumble",
+    clone_vid_pid: bool = false,
+};
+
 pub const TouchpadConfig = struct {
     name: ?[]const u8 = null,
     x_min: i64 = 0,
