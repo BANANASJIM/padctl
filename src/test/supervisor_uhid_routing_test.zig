@@ -337,6 +337,9 @@ test "DeviceInstance.init: backend=uhid TOML routes via InitOptions test seam" {
     const imu_ev = try readCreate2(imu_fds[0], scratch);
     try testing.expectEqualStrings(uniqSlice(&primary_ev), uniqSlice(&imu_ev));
     try testing.expect(std.mem.startsWith(u8, uniqSlice(&primary_ev), "padctl/"));
+    // clone_vid_pid absent → primary card must use daemon identity, not device VID/PID.
+    try testing.expectEqual(@as(u32, 0xFADE), primary_ev.payload.vendor);
+    try testing.expectEqual(@as(u32, 0xC001), primary_ev.payload.product);
 }
 
 // Phase 13 Wave 6 T2 tests: clone_vid_pid routing.

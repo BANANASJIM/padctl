@@ -158,7 +158,10 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
 /// Kernel sends `UHID_OUTPUT` when the HID driver writes an output report.
 pub const UHID_OUTPUT: u32 = 6;
 
-/// Mirror of `struct uhid_output_req` from the kernel UAPI (packed field order).
+/// Mirror of `struct uhid_output_req` from the kernel UAPI.
+/// The kernel struct is __packed__ (4099 bytes); Zig extern struct is 4100 bytes
+/// due to u16 alignment padding after rtype. The trailing pad is harmless because
+/// pollOutputReport reads via pointer cast into a full UHID_EVENT_SIZE buffer.
 /// data[0] is the HID report ID; data[1..size-1] is the payload.
 pub const UhidOutputReq = extern struct {
     data: [UHID_DATA_MAX]u8,
@@ -659,8 +662,8 @@ test "uhid_device_vtable_match: emit + close frame UHID_INPUT2 / UHID_DESTROY" {
     try testing.expectEqual(UHID_INPUT2, event_type);
 
     // UhidInput2Event = { u32 type, UhidInput2Req payload }. The payload is
-    // `extern struct { u16 size; [4096]u8 data }` and inherits a 2-byte
-    // alignment, so it sits at offset 4.
+    // `extern struct { u16 size; [4096]u8 data }` (2-byte aligned), so it sits
+    // at offset 4.
     const size = std.mem.readInt(u16, buf[4..6], .little);
     try testing.expectEqual(@as(u16, 4), size);
 
@@ -920,8 +923,9 @@ test "uhid: UHID_OUTPUT constant is 6" {
 }
 
 test "uhid: UhidOutputReq layout matches kernel UAPI" {
-    // data[4096] + size(u16) + rtype(u8) = 4099 bytes packed.
-    try testing.expectEqual(@as(usize, 4099), @sizeOf(UhidOutputReq));
+    // data[4096] + size(u16) + rtype(u8) = 4099 kernel packed bytes;
+    // extern struct rounds to 4100 due to u16 alignment (1-byte trailing pad).
+    try testing.expectEqual(@as(usize, 4100), @sizeOf(UhidOutputReq));
     try testing.expectEqual(@as(usize, 0), @offsetOf(UhidOutputReq, "data"));
     try testing.expectEqual(@as(usize, 4096), @offsetOf(UhidOutputReq, "size"));
     try testing.expectEqual(@as(usize, 4098), @offsetOf(UhidOutputReq, "rtype"));

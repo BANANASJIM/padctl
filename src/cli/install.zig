@@ -1977,7 +1977,7 @@ fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []const U
         if (!e.clone_vid_pid) continue;
         const rule = try std.fmt.allocPrint(
             allocator,
-            "KERNELS==\"uhid\", SUBSYSTEM==\"input\", ENV{{ID_VENDOR_ID}}==\"{x:0>4}\", ENV{{ID_MODEL_ID}}==\"{x:0>4}\", TAG+=\"uaccess\"\n",
+            "KERNELS==\"uhid\", SUBSYSTEM==\"input\", ATTRS{{id/vendor}}==\"{x:0>4}\", ATTRS{{id/product}}==\"{x:0>4}\", TAG+=\"uaccess\"\n",
             .{ e.vid, e.pid },
         );
         defer allocator.free(rule);
@@ -4835,7 +4835,7 @@ test "install: clone_vid_pid=true emits per-VID/PID udev rule" {
     defer allocator.free(content);
 
     // Per-VID/PID rule must be present for the cloned identity
-    try testing.expect(std.mem.indexOf(u8, content, "ENV{ID_VENDOR_ID}==\"11ff\", ENV{ID_MODEL_ID}==\"1211\", TAG+=\"uaccess\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{id/vendor}==\"11ff\", ATTRS{id/product}==\"1211\", TAG+=\"uaccess\"") != null);
     // Generic UHID wildcard rule must also still be present
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\"") != null);
 }
@@ -4878,7 +4878,7 @@ test "install: clone_vid_pid=false produces no per-VID/PID rule" {
     defer allocator.free(content);
 
     // No per-VID/PID ENV rule should be present
-    try testing.expect(std.mem.indexOf(u8, content, "ENV{ID_VENDOR_ID}") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{id/vendor}") == null);
 }
 
 test "install: modules-load.d content includes uhid and uinput" {
