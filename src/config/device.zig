@@ -378,6 +378,11 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                 const imu_present = if (out.imu) |_| true else false;
                 if (!imu_present) return error.InvalidConfig;
             }
+
+            // clone_vid_pid=true is meaningless without a real VID/PID to clone.
+            if (ffb.clone_vid_pid) {
+                if (cfg.device.vid == 0 or cfg.device.pid == 0) return error.InvalidConfig;
+            }
         }
     }
 }
@@ -1440,4 +1445,56 @@ test "force_feedback: TOML round-trip" {
     try std.testing.expectEqualStrings("uhid", ffb.backend);
     try std.testing.expectEqualStrings("pid", ffb.kind);
     try std.testing.expect(ffb.clone_vid_pid);
+}
+
+// Phase 13 Wave 6 T2d: clone_vid_pid validate tests.
+
+const ffb_zero_vid_toml =
+    \\[device]
+    \\name = "Zero VID Wheel"
+    \\vid = 0x0000
+    \\pid = 0x1211
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 4
+;
+
+test "validate: clone_vid_pid=true requires non-zero device.vid/pid" {
+    const allocator = std.testing.allocator;
+    // Zero vid — must reject
+    const toml_zero_vid = ffb_zero_vid_toml ++
+        \\
+        \\[output]
+        \\name = "Zero VID Wheel"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\[output.force_feedback]
+        \\backend       = "uhid"
+        \\kind          = "pid"
+        \\clone_vid_pid = true
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_zero_vid));
+}
+
+test "validate: clone_vid_pid=false with zero device.vid is legal" {
+    const allocator = std.testing.allocator;
+    // clone_vid_pid=false (default) — zero vid is fine, no clonable identity needed
+    const toml_zero_vid_no_clone = ffb_zero_vid_toml ++
+        \\
+        \\[output]
+        \\name = "Zero VID Wheel"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\[output.force_feedback]
+        \\backend       = "uhid"
+        \\kind          = "pid"
+        \\clone_vid_pid = false
+    ;
+    const result = try parseString(allocator, toml_zero_vid_no_clone);
+    defer result.deinit();
+    try std.testing.expect(!result.value.output.?.force_feedback.?.clone_vid_pid);
 }
