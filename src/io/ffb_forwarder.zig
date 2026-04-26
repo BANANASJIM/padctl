@@ -38,7 +38,8 @@ pub const FfbForwarder = struct {
                 return;
             },
             else => {
-                std.log.warn("ffb forwarder: hidraw write error: {}", .{err});
+                std.log.warn("ffb forwarder: hidraw write error {}, disabling", .{err});
+                self.state = .disabled;
                 return;
             },
         };
