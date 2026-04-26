@@ -273,6 +273,24 @@ pub fn build(b: *std.Build) void {
     routing_tests.linkLibC();
     test_step.dependOn(&b.addRunArtifact(routing_tests).step);
 
+    // Wave 6 T3: UHID_OUTPUT dispatch tests — pure pipe2, no /dev/uhid required.
+    const uhid_output_dispatch_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/uhid_output_dispatch_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    uhid_output_dispatch_mod.addImport("toml", toml_mod);
+    uhid_output_dispatch_mod.addImport("src", src_mod);
+    const uhid_output_dispatch_tests = b.addTest(.{ .root_module = uhid_output_dispatch_mod });
+    if (use_libusb) {
+        uhid_output_dispatch_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        uhid_output_dispatch_tests.addIncludePath(b.path("compat"));
+    }
+    uhid_output_dispatch_tests.linkLibC();
+    test_step.dependOn(&b.addRunArtifact(uhid_output_dispatch_tests).step);
+
     // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");
     const e2e_mod = b.createModule(.{
