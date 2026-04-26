@@ -74,6 +74,7 @@ pub const io = struct {
     pub const uniq = @import("io/uniq.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const netlink = @import("io/netlink.zig");
+    pub const ffb_forwarder = @import("io/ffb_forwarder.zig");
 };
 
 pub const testing_support = struct {
