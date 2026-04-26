@@ -258,11 +258,23 @@ pub const DeviceInstance = struct {
                 const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
                 defer allocator.free(primary_descriptor);
 
+                const ffb_cfg = out_cfg.force_feedback orelse device_cfg.ForceFeedbackConfig{};
+                // clone_vid_pid=true: wheel's real VID/PID (hid-universal-pidff modalias binding).
+                // clone_vid_pid=false (default): daemon identity so non-PID devices stay as FADE:C001.
+                const effective_vid: u16 = if (ffb_cfg.clone_vid_pid)
+                    @intCast(cfg.device.vid)
+                else
+                    0xFADE;
+                const effective_pid: u16 = if (ffb_cfg.clone_vid_pid)
+                    @intCast(cfg.device.pid)
+                else
+                    0xC001;
+
                 const primary_cfg = uhid_mod.Config{
                     .name = cfg.device.name,
                     .uniq = std.mem.sliceTo(uniq_z, 0),
-                    .vid = @intCast(cfg.device.vid),
-                    .pid = @intCast(cfg.device.pid),
+                    .vid = effective_vid,
+                    .pid = effective_pid,
                     .descriptor = primary_descriptor,
                     .output = out_cfg.*,
                 };
@@ -270,10 +282,6 @@ pub const DeviceInstance = struct {
                 errdefer {
                     primary_uhid.close();
                     allocator.destroy(primary_uhid);
-                }
-
-                if (out_cfg.force_feedback != null) {
-                    std.log.warn("rumble not supported in uhid backend until Wave 6", .{});
                 }
 
                 owner = .{ .uhid = primary_uhid };
