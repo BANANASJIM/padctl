@@ -428,6 +428,70 @@ test "wave6_pidff: physical hidraw close → forwarder disabled" {
     try testing.expectEqual(.disabled, fwd.state);
 }
 
+// TP35: No [output.force_feedback] block → ffb_forwarder must remain null after init.
+// Gating condition for the FFB path: ensures non-PID devices never get a forwarder wired,
+// preventing arbitrary UHID_OUTPUT bytes from leaking into the wrong hidraw fd.
+test "wave6_pidff: no force_feedback block → no FfbForwarder wired (TP35)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const primary_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(primary_fds[0]);
+
+    const imu_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(imu_fds[0]);
+
+    const TOML_NO_FFB =
+        \\[device]
+        \\name = "Generic Gamepad"
+        \\vid = 0x054C
+        \\pid = 0x0CE6
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "input"
+        \\interface = 0
+        \\size = 8
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\left_x = { offset = 1, type = "i8" }
+        \\[output]
+        \\name = "Generic Gamepad Out"
+        \\axes = { left_x = { code = "ABS_X", min = -128, max = 127 } }
+        \\[output.imu]
+        \\backend = "uhid"
+        \\name = "Generic Gamepad IMU"
+    ;
+
+    const parsed = try device_mod.parseString(allocator, TOML_NO_FFB);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const devices = try allocator.alloc(DeviceIO, 1);
+    devices[0] = mock.deviceIO();
+
+    var counter: u16 = 1;
+    var inst = try DeviceInstance.init(
+        allocator,
+        &parsed.value,
+        null,
+        null,
+        &counter,
+        .{
+            .test_primary_uhid_fd = primary_fds[1],
+            .test_imu_uhid_fd = imu_fds[1],
+            .test_devices_override = devices,
+        },
+    );
+    defer inst.deinit();
+
+    try testing.expectEqual(null, inst.ffb_forwarder);
+}
+
 // TP34 (second part): clone_vid_pid=false uses daemon identity 0xFADE:0xC001.
 test "wave6_pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
