@@ -5,6 +5,7 @@ const ioctl = @import("../io/ioctl_constants.zig");
 const hidraw = @import("../io/hidraw.zig");
 const readPhysicalPath = hidraw.readPhysicalPath;
 const readInterfaceId = hidraw.readInterfaceId;
+const toml_extract = @import("toml_extract.zig");
 
 const DEFAULT_CONFIG_DIR = "/usr/share/padctl/devices";
 const MAX_HIDRAW = 64;
@@ -192,9 +193,9 @@ fn findConfigInDir(
 fn tomlMatchesVidPid(allocator: std.mem.Allocator, path: []const u8, vid: u16, pid: u16, iface_id: ?u8) !??bool {
     const content = try std.fs.cwd().readFileAlloc(allocator, path, 256 * 1024);
     defer allocator.free(content);
-    const file_vid = extractHexField(content, "vid") orelse return null;
-    const file_pid = extractHexField(content, "pid") orelse return null;
-    if (file_vid != vid or file_pid != pid) return null;
+    const info = (try toml_extract.extractDeviceVidPid(allocator, content)) orelse return null;
+    toml_extract.freeDeviceInfo(allocator, info);
+    if (info.vid != vid or info.pid != pid) return null;
     return matchInterfaceId(content, iface_id);
 }
 
