@@ -1,5 +1,6 @@
 const std = @import("std");
 const paths = @import("../config/paths.zig");
+const toml_extract = @import("toml_extract.zig");
 
 fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
     const exec_start = if (std.mem.eql(u8, prefix, "/usr"))
@@ -2443,25 +2444,21 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
     const content = try f.readToEndAlloc(allocator, 1 << 20);
     defer allocator.free(content);
 
+    const dev = (try toml_extract.extractDeviceVidPid(allocator, content)) orelse return;
+    errdefer toml_extract.freeDeviceInfo(allocator, dev);
+
     var name_buf: [256]u8 = undefined;
     var name: []const u8 = std.fs.path.stem(path);
-    var vid: ?u16 = null;
-    var pid: ?u16 = null;
-    var block_drivers: []const []const u8 = &.{};
     var in_device_section = false;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-
-        // Track TOML sections — only extract from [device]
         if (trimmed.len > 0 and trimmed[0] == '[') {
             in_device_section = std.mem.startsWith(u8, trimmed, "[device]");
             continue;
         }
-
         if (!in_device_section) continue;
-
         if (isFieldKey(trimmed, "name")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
                 const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
@@ -2469,35 +2466,15 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
                 @memcpy(name_buf[0..n], val[0..n]);
                 name = name_buf[0..n];
             }
-        } else if (isFieldKey(trimmed, "vid")) {
-            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
-                vid = parseHexOrDec(u16, val) catch continue;
-            }
-        } else if (isFieldKey(trimmed, "pid")) {
-            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
-                pid = parseHexOrDec(u16, val) catch continue;
-            }
-        } else if (isFieldKey(trimmed, "block_kernel_drivers")) {
-            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                block_drivers = parseStringArray(allocator, trimmed[eq + 1 ..]) catch &.{};
-            }
         }
     }
 
-    if (vid != null and pid != null) {
-        try entries.append(allocator, .{
-            .name = try allocator.dupe(u8, name),
-            .vid = vid.?,
-            .pid = pid.?,
-            .block_kernel_drivers = block_drivers,
-        });
-    } else {
-        // Clean up block_drivers if we didn't create an entry
-        for (block_drivers) |d| allocator.free(d);
-        if (block_drivers.len > 0) allocator.free(block_drivers);
-    }
+    try entries.append(allocator, .{
+        .name = try allocator.dupe(u8, name),
+        .vid = dev.vid,
+        .pid = dev.pid,
+        .block_kernel_drivers = dev.block_kernel_drivers,
+    });
 }
 
 fn parseHexOrDec(comptime T: type, s: []const u8) !T {
