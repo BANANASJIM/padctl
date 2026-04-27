@@ -4,4 +4,4 @@ set -euo pipefail
 OUT_DIR="${1:-kcov-output}"
 rm -rf "$OUT_DIR"
 
-timeout 600 zig build test -Dtest-coverage --summary all
+zig build -j1 test -Dtest-coverage

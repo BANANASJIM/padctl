@@ -35,17 +35,18 @@ jobs:
       - name: Install system dependencies
         if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
-      # Three separate `zig build` processes to avoid Zig issue #22453
-      # (flock AB/BA deadlock on cache manifests when test, test-safe, and
-      # check-fmt run via a single scheduler that compiles libusb glue + wasm3
-      # C objects from multiple zig-cc invocations concurrently). Per-process
-      # serialization gives each Zig invocation its own .zig-cache lock space.
+      # -j1 + three separate `zig build` processes to avoid Zig issue #22453
+      # (flock AB/BA deadlock on cache manifests). Each `zig cc` runs serially
+      # both inter-step (one zig build at a time) and intra-step (one C compile
+      # at a time within each zig build). Trade-off: slower CI vs guaranteed
+      # green-bar. Empirically observed: parallel zig cc still deadlocks on
+      # the wasm3 + libusb glue cache locks even within a single `zig build`.
       - name: Run all checks (serial via separate processes)
         run: |
           set -e
-          zig build ${{ matrix.zig_args }} test
-          zig build ${{ matrix.zig_args }} test-safe
-          zig build ${{ matrix.zig_args }} check-fmt
+          zig build ${{ matrix.zig_args }} -j1 test
+          zig build ${{ matrix.zig_args }} -j1 test-safe
+          zig build ${{ matrix.zig_args }} -j1 check-fmt
 
   check:
     name: check
@@ -76,7 +77,7 @@ jobs:
           set -o pipefail
           rm -rf .zig-cache
           export TSAN_OPTIONS="halt_on_error=1:verbosity=1:history_size=7:log_path=$PWD/tsan"
-          timeout 600 zig build test-tsan --summary all 2>&1 | tee tsan-build.log
+          zig build -j1 test-tsan 2>&1 | tee tsan-build.log
       - name: TSAN diagnostics
         if: failure()
         run: |
@@ -141,7 +142,7 @@ jobs:
               ${DISTRO_SETUP}
               curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
               tar -xJf /tmp/zig.tar.xz -C /tmp
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test-safe
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-fmt
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false -j1 test
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false -j1 test-safe
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false -j1 check-fmt
             "

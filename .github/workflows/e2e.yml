@@ -33,9 +33,9 @@ jobs:
       - name: Run e2e tests
         env:
           PADCTL_TEST_REQUIRE_UHID: ${{ steps.uhid_probe.outputs.uhid_ok == 'true' && '1' || '0' }}
-        run: zig build test-e2e
+        run: zig build -j1 test-e2e
       - name: Run integration tests (UHID)
         if: steps.uhid_probe.outputs.uhid_ok == 'true'
         env:
           PADCTL_TEST_REQUIRE_UHID: "1"
-        run: zig build test-integration
+        run: zig build -j1 test-integration
