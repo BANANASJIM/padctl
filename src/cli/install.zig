@@ -2234,7 +2234,10 @@ fn tomlEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
                 try out.append(allocator, c);
             },
             '\n', '\r' => return error.InvalidDeviceName,
-            else => try out.append(allocator, c),
+            else => {
+                if ((c < 0x20 and c != '\t') or c == 0x7f) return error.InvalidDeviceName;
+                try out.append(allocator, c);
+            },
         }
     }
     return out.toOwnedSlice(allocator);
@@ -4999,9 +5002,22 @@ test "tomlEscape: carriage return rejected with error.InvalidDeviceName" {
     try std.testing.expectError(error.InvalidDeviceName, tomlEscape(allocator, "bad\rname"));
 }
 
-test "tomlEscape: round-trip via manual parse produces original string" {
-    // Verify that escaping and then unescaping yields the original value.
-    // We simulate TOML basic-string unescaping for the two escape sequences.
+test "tomlEscape rejects NUL byte (0x00)" {
+    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(std.testing.allocator, "bad\x00name"));
+}
+
+test "tomlEscape rejects DEL byte (0x7f)" {
+    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(std.testing.allocator, "bad\x7fname"));
+}
+
+test "tomlEscape passes \\t (0x09) through unchanged" {
+    const out = try tomlEscape(std.testing.allocator, "col1\tcol2");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("col1\tcol2", out);
+}
+
+test "tomlEscape: round-trip via real TOML parser" {
+    const toml = @import("toml");
     const allocator = std.testing.allocator;
     const inputs = [_][]const u8{
         "Sony \"DualSense\"",
@@ -5012,19 +5028,13 @@ test "tomlEscape: round-trip via manual parse produces original string" {
     for (inputs) |input| {
         const escaped = try tomlEscape(allocator, input);
         defer allocator.free(escaped);
+        const toml_text = try std.fmt.allocPrint(allocator, "name = \"{s}\"\n", .{escaped});
+        defer allocator.free(toml_text);
 
-        // Unescape: replace \" → " and \\ → \
-        var unescaped = std.ArrayList(u8){};
-        defer unescaped.deinit(allocator);
-        var i: usize = 0;
-        while (i < escaped.len) : (i += 1) {
-            if (escaped[i] == '\\' and i + 1 < escaped.len) {
-                try unescaped.append(allocator, escaped[i + 1]);
-                i += 1;
-            } else {
-                try unescaped.append(allocator, escaped[i]);
-            }
-        }
-        try std.testing.expectEqualStrings(input, unescaped.items);
+        var parser = toml.Parser(struct { name: []const u8 }).init(allocator);
+        defer parser.deinit();
+        const parsed = try parser.parseString(toml_text);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(input, parsed.value.name);
     }
 }
