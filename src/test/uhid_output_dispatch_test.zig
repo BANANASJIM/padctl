@@ -12,14 +12,13 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const testing = std.testing;
 
-const src = @import("src");
-const uhid = src.io.uhid;
+const uhid = @import("../io/uhid.zig");
 const UhidDevice = uhid.UhidDevice;
 const OutputReport = uhid.OutputReport;
 const UHID_EVENT_SIZE = uhid.UHID_EVENT_SIZE;
 const UHID_OUTPUT = uhid.UHID_OUTPUT;
 const UhidOutputReq = uhid.UhidOutputReq;
-const event_loop_mod = src.event_loop;
+const event_loop_mod = @import("../event_loop.zig");
 const EventLoop = event_loop_mod.EventLoop;
 const EventLoopContext = event_loop_mod.EventLoopContext;
 

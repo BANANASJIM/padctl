@@ -20,21 +20,20 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const testing = std.testing;
 
-const src = @import("src");
-const device_mod = src.config.device;
-const device_instance = src.device_instance;
+const device_mod = @import("../config/device.zig");
+const device_instance = @import("../device_instance.zig");
 const DeviceInstance = device_instance.DeviceInstance;
-const DeviceIO = src.io.device_io.DeviceIO;
-const MockDeviceIO = src.testing_support.mock_device_io.MockDeviceIO;
-const uhid = src.io.uhid;
+const DeviceIO = @import("../io/device_io.zig").DeviceIO;
+const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
+const uhid = @import("../io/uhid.zig");
 const UhidDevice = uhid.UhidDevice;
 const UHID_EVENT_SIZE = uhid.UHID_EVENT_SIZE;
 const UHID_OUTPUT = uhid.UHID_OUTPUT;
 const UHID_CREATE2 = uhid.UHID_CREATE2;
 const UhidCreate2Event = uhid.UhidCreate2Event;
-const ffb_mod = src.io.ffb_forwarder;
+const ffb_mod = @import("../io/ffb_forwarder.zig");
 const FfbForwarder = ffb_mod.FfbForwarder;
-const uhid_descriptor = src.io.uhid_descriptor;
+const uhid_descriptor = @import("../io/uhid_descriptor.zig");
 
 // The 8 report IDs that kernel pidff_find_reports requires.
 const PID_MANDATORY_IDS = [_]u8{ 1, 7, 10, 11, 12, 13, 14, 15 };
