@@ -74,6 +74,7 @@ pub const io = struct {
     pub const uniq = @import("io/uniq.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const netlink = @import("io/netlink.zig");
+    pub const ffb_forwarder = @import("io/ffb_forwarder.zig");
 };
 
 pub const testing_support = struct {
@@ -93,8 +94,6 @@ pub const testing_support = struct {
     pub const auto_device_test = @import("test/auto_device_test.zig");
     pub const transform_boundary_test = @import("test/transform_boundary_test.zig");
     pub const bugfix_regression_test = @import("test/bugfix_regression_test.zig");
-    pub const uhid_output_dispatch_test = @import("test/uhid_output_dispatch_test.zig");
-    pub const wave6_pidff_e2e_test = @import("test/wave6_pidff_e2e_test.zig");
     pub const interpreter_props = @import("test/properties/interpreter_props.zig");
     pub const render_props = @import("test/properties/render_props.zig");
     pub const config_props = @import("test/properties/config_props.zig");
