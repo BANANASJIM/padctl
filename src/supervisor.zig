@@ -3008,3 +3008,93 @@ test "supervisor: startFromDirs loads configs from two dirs" {
     // The key assertion: startFromDirs did not error out after scanning the first dir.
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
+
+// Issue #136 regression: padctl switch (no arg) returned "no devices connected" even
+// when a device was active. The fix queries STATUS, extracts the device name, reads
+// default_mapping from config, then calls handleSwitch with the resolved name.
+// This test exercises all three steps without a real daemon process.
+test "supervisor: issue #136: STATUS -> default_mapping lookup -> handleSwitch succeeds" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    const base_dir = "/tmp/padctl_supervisor_test_issue136";
+    std.fs.deleteTreeAbsolute(base_dir) catch {};
+    try std.fs.makeDirAbsolute(base_dir);
+    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+
+    const mapping_path = try std.fmt.allocPrint(allocator, "{s}/foo.toml", .{base_dir});
+    defer allocator.free(mapping_path);
+    {
+        const f = try std.fs.createFileAbsolute(mapping_path, .{});
+        f.close();
+    }
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst, null);
+
+    // Step 1: STATUS response contains the connected device name.
+    sup.handleStatus(resp_fds[0]);
+    var status_buf: [256]u8 = undefined;
+    const status_n = try posix.read(resp_fds[1], &status_buf);
+    const status_resp = status_buf[0..status_n];
+    try testing.expect(std.mem.indexOf(u8, status_resp, "device=T") != null);
+
+    // Step 2: parse device name from STATUS (mirrors resolveDefaultMapping logic).
+    const prefix = "STATUS device=";
+    var device_name: []const u8 = "";
+    var line_it = std.mem.splitScalar(u8, status_resp, '\n');
+    while (line_it.next()) |line| {
+        if (std.mem.startsWith(u8, line, prefix)) {
+            const rest = line[prefix.len..];
+            if (std.mem.indexOf(u8, rest, " state=")) |end| {
+                device_name = rest[0..end];
+            }
+        }
+    }
+    try testing.expectEqualStrings("T", device_name);
+
+    // Step 3: load config.toml with default_mapping for this device.
+    const config_str =
+        \\[[device]]
+        \\name = "T"
+        \\default_mapping = "foo"
+    ;
+    var toml_parser = @import("toml").Parser(user_config_mod.UserConfig).init(allocator);
+    defer toml_parser.deinit();
+    var cfg_result = try toml_parser.parseString(config_str);
+    defer cfg_result.deinit();
+    const mapping_name = user_config_mod.findDefaultMapping(&cfg_result, device_name);
+    try testing.expect(mapping_name != null);
+    try testing.expectEqualStrings("foo", mapping_name.?);
+
+    // Step 4: handleSwitch with the resolved name returns OK.
+    sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+    sup.handleSwitch(resp_fds[0], mapping_name.?, null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("OK foo\n", resp_buf[0..n]);
+}

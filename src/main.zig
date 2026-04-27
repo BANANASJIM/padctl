@@ -1357,14 +1357,13 @@ fn writeConfigToml(
 }
 
 fn parseDeviceFromStatus(resp: []const u8) ?[]const u8 {
-    // Format: "STATUS device=NAME active=BOOL\n"
+    // Format: "STATUS device=NAME state=active\n"
     const prefix = "STATUS device=";
     var it = std.mem.splitScalar(u8, resp, '\n');
     while (it.next()) |line| {
         if (std.mem.startsWith(u8, line, prefix)) {
             const rest = line[prefix.len..];
-            // Find " active=" delimiter
-            if (std.mem.indexOf(u8, rest, " active=")) |end| {
+            if (std.mem.indexOf(u8, rest, " state=")) |end| {
                 return rest[0..end];
             }
         }
@@ -1479,10 +1478,17 @@ test "main: parseDumpFromSlice: unknown subcommand" {
 }
 
 test "main: parseDeviceFromStatus extracts device name" {
-    const resp = "STATUS device=Flydigi Vader 5 Pro active=true\n";
+    const resp = "STATUS device=Flydigi Vader 5 Pro state=active\n";
     const name = parseDeviceFromStatus(resp);
     try testing.expect(name != null);
     try testing.expectEqualStrings("Flydigi Vader 5 Pro", name.?);
+}
+
+test "main: parseDeviceFromStatus extracts suspended device name" {
+    const resp = "STATUS device=Sony DualSense state=suspended\n";
+    const name = parseDeviceFromStatus(resp);
+    try testing.expect(name != null);
+    try testing.expectEqualStrings("Sony DualSense", name.?);
 }
 
 test "main: parseDeviceFromStatus returns null for empty response" {
@@ -1492,6 +1498,60 @@ test "main: parseDeviceFromStatus returns null for empty response" {
 
 test "main: parseDeviceFromStatus: bare STATUS response returns null (no devices)" {
     try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("STATUS\n"));
+}
+
+test "main: parseDeviceFromStatus: old 'active=' format returns null (regression guard)" {
+    // Supervisor emits 'state=', not 'active='. This ensures the parser uses the correct delimiter.
+    try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("STATUS device=Some Pad active=true\n"));
+}
+
+test "main: parseDeviceFromStatus + findDefaultMapping resolves no-arg switch (issue #136)" {
+    const allocator = std.testing.allocator;
+    const user_config_mod = @import("config/user_config.zig");
+    const toml = @import("toml");
+
+    const status_resp = "STATUS device=Flydigi Vader 5 Pro state=active\n";
+    const device_name = parseDeviceFromStatus(status_resp);
+    try testing.expect(device_name != null);
+    try testing.expectEqualStrings("Flydigi Vader 5 Pro", device_name.?);
+
+    const config_str =
+        \\[[device]]
+        \\name = "Flydigi Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+    var parser = toml.Parser(user_config_mod.UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(config_str);
+    defer result.deinit();
+
+    const mapping = user_config_mod.findDefaultMapping(&result, device_name.?);
+    try testing.expect(mapping != null);
+    try testing.expectEqualStrings("fps", mapping.?);
+}
+
+test "main: parseDeviceFromStatus + findDefaultMapping: no default_mapping returns null (issue #136 negative)" {
+    const allocator = std.testing.allocator;
+    const user_config_mod = @import("config/user_config.zig");
+    const toml = @import("toml");
+
+    const status_resp = "STATUS device=Unknown Pad state=active\n";
+    const device_name = parseDeviceFromStatus(status_resp);
+    try testing.expect(device_name != null);
+
+    const config_str =
+        \\[[device]]
+        \\name = "Flydigi Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+    var parser = toml.Parser(user_config_mod.UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(config_str);
+    defer result.deinit();
+
+    // Device not in config → returns null → caller emits specific error, not "no devices connected"
+    const mapping = user_config_mod.findDefaultMapping(&result, device_name.?);
+    try testing.expectEqual(@as(?[]const u8, null), mapping);
 }
 
 test "escapeTomlString: escapes special characters" {
