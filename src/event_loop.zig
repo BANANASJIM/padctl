@@ -28,8 +28,8 @@ const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
 
-// signalfd(0) + stop_pipe(1) + macro timerfd(2) + rumble_stop_fd(3) + per-interface fds + uinput FF fd
-pub const MAX_FDS = 11;
+// signalfd(0) + stop_pipe(1) + layer timerfd(2) + rumble_stop_fd(3) + macro timerfd(4) + per-interface fds + uinput FF fd
+pub const MAX_FDS = 12;
 
 const signalfd_siginfo_size = 128;
 
@@ -307,15 +307,19 @@ pub const EventLoop = struct {
     signal_fd: posix.fd_t,
     stop_r: posix.fd_t,
     stop_w: posix.fd_t,
-    // device fds start at slot 2 (after signalfd + stop_pipe)
+    // device fds start at slot 5 (after signalfd + stop_pipe + timer_fd + rumble_stop_fd + macro_timer_fd)
     device_base: usize,
+    /// Dedicated timerfd for layer hold-trigger arm/disarm (slot 2).
+    /// Written by `timer_request` returned from `Mapper.apply()`.
     timer_fd: posix.fd_t,
-    /// Dedicated timerfd for userspace rumble auto-stop. Separate from
-    /// `timer_fd` (which is reserved for macro timing) to keep the two
-    /// concerns from stomping on each other's arm/disarm schedule.
+    /// Dedicated timerfd for userspace rumble auto-stop (slot 3).
     rumble_stop_fd: posix.fd_t,
     /// pollfds slot where `rumble_stop_fd` is registered.
     rumble_stop_slot: usize,
+    /// Dedicated timerfd for macro delay / TimerQueue (slot 4).
+    /// Passed to `Mapper.init` so `TimerQueue` arms only this fd, keeping
+    /// it independent from the layer-hold `timer_fd`.
+    macro_timer_fd: posix.fd_t,
     /// State machine that tracks per-effect deadlines and decides when
     /// to fire a stop frame. See src/core/rumble_scheduler.zig.
     rumble_scheduler: RumbleScheduler,
@@ -363,6 +367,9 @@ pub const EventLoop = struct {
         const rumble_stop_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
         errdefer posix.close(rumble_stop_fd);
 
+        const macro_timer_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+        errdefer posix.close(macro_timer_fd);
+
         var loop = EventLoop{
             .pollfds = undefined,
             .fd_count = 0,
@@ -374,6 +381,7 @@ pub const EventLoop = struct {
             .rumble_stop_fd = rumble_stop_fd,
             .rumble_stop_slot = 3,
             .rumble_scheduler = .{},
+            .macro_timer_fd = macro_timer_fd,
             .uinput_ff_slot = null,
             .disconnected = false,
             .running = false,
@@ -382,14 +390,15 @@ pub const EventLoop = struct {
             .last_rumble_ns = 0,
         };
 
-        // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = macro timerfd,
-        // slot 3 = rumble-stop timerfd
+        // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = layer timerfd,
+        // slot 3 = rumble-stop timerfd, slot 4 = macro timerfd
         loop.pollfds[0] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[1] = .{ .fd = stop_r, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[2] = .{ .fd = timer_fd, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[3] = .{ .fd = rumble_stop_fd, .events = posix.POLL.IN, .revents = 0 };
-        loop.fd_count = 4;
-        loop.device_base = 4;
+        loop.pollfds[4] = .{ .fd = macro_timer_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.fd_count = 5;
+        loop.device_base = 5;
 
         return loop;
     }
@@ -476,8 +485,8 @@ pub const EventLoop = struct {
                 break;
             }
 
-            // Mapper timerfd (slot 2) is drained after the device fd loop
-            // below — see issue #79.
+            // Layer timerfd (slot 2) is handled inline; macro timerfd (slot 4) is
+            // drained after the device fd loop below — see issue #79.
 
             // Check rumble auto-stop timerfd (slot 3).
             if (self.pollfds[3].revents & posix.POLL.IN != 0) {
@@ -701,13 +710,26 @@ pub const EventLoop = struct {
                 }
             }
 
-            // Mapper timerfd (slot 2): drained after device fds so an
+            // Layer timerfd (slot 2): drained after device fds so an
             // on-wakeup tap release reaches apply() before PENDING is
             // promoted to ACTIVE (issue #79). Both handlers share the
             // `now` snapshot taken right after ppoll.
             if (self.pollfds[2].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
+                if (ctx.mapper) |m| {
+                    const aux = m.onTimerExpired(now);
+                    if (aux.len > 0) {
+                        if (ctx.aux_output) |ao| ao.emitAux(aux.slice()) catch {};
+                    }
+                }
+            }
+
+            // Macro timerfd (slot 4): separate fd so macro delays cannot be
+            // clobbered by layer-hold arm/disarm (issue #72).
+            if (self.pollfds[4].revents & posix.POLL.IN != 0) {
+                var expiry: [8]u8 = undefined;
+                _ = posix.read(self.macro_timer_fd, &expiry) catch {};
                 if (ctx.mapper) |m| {
                     const macro_aux = m.onTimerExpired(now);
                     if (macro_aux.len > 0) {
@@ -730,6 +752,7 @@ pub const EventLoop = struct {
         posix.close(self.stop_w);
         posix.close(self.timer_fd);
         posix.close(self.rumble_stop_fd);
+        posix.close(self.macro_timer_fd);
     }
 };
 
@@ -772,11 +795,12 @@ test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     defer posix.close(pfds[1]);
 
     try loop.addUinputFf(pfds[0]);
-    // Fixed slots 0..3 are signalfd, stop_pipe, macro timerfd, rumble_stop_fd;
-    // the FF fd becomes slot 4, fd_count goes 4 → 5.
-    try testing.expectEqual(@as(usize, 5), loop.fd_count);
-    try testing.expectEqual(@as(?usize, 4), loop.uinput_ff_slot);
-    try testing.expectEqual(pfds[0], loop.pollfds[4].fd);
+    // Fixed slots 0..4 are signalfd, stop_pipe, layer timer_fd,
+    // rumble_stop_fd, macro_timer_fd; the FF fd becomes slot 5,
+    // fd_count goes 5 → 6.
+    try testing.expectEqual(@as(usize, 6), loop.fd_count);
+    try testing.expectEqual(@as(?usize, 5), loop.uinput_ff_slot);
+    try testing.expectEqual(pfds[0], loop.pollfds[5].fd);
 }
 
 test "event_loop: EventLoop: Disconnected device causes loop to exit without panic" {
@@ -841,9 +865,10 @@ test "event_loop: EventLoop.initManaged creates eventfd and timerfds" {
     try testing.expect(loop.signal_fd >= 0);
     try testing.expect(loop.timer_fd >= 0);
     try testing.expect(loop.rumble_stop_fd >= 0);
-    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = macro timerfd,
-    // slot 3 = rumble-stop timerfd
-    try testing.expectEqual(@as(usize, 4), loop.fd_count);
+    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = layer timer_fd,
+    // slot 3 = rumble-stop timerfd, slot 4 = macro timerfd
+    try testing.expect(loop.macro_timer_fd >= 0);
+    try testing.expectEqual(@as(usize, 5), loop.fd_count);
 }
 
 test "event_loop: EventLoop.stop wakes ppoll" {
@@ -865,10 +890,11 @@ test "event_loop: EventLoop.addDevice registers fd" {
     const dev = mock.deviceIO();
 
     try loop.addDevice(dev);
-    // Fixed slots: 0=signalfd, 1=stop_pipe, 2=macro timerfd, 3=rumble_stop_fd.
-    // First device lands at slot 4, fd_count goes from 4 → 5.
-    try testing.expectEqual(@as(usize, 5), loop.fd_count);
-    try testing.expectEqual(mock.pipe_r, loop.pollfds[4].fd);
+    // Fixed slots: 0=signalfd, 1=stop_pipe, 2=layer timer_fd,
+    // 3=rumble_stop_fd, 4=macro timerfd. First device lands at slot 5,
+    // fd_count goes 5 → 6.
+    try testing.expectEqual(@as(usize, 6), loop.fd_count);
+    try testing.expectEqual(mock.pipe_r, loop.pollfds[5].fd);
 }
 
 test "event_loop: EventLoop.addDevice rejects overflow" {
@@ -876,15 +902,15 @@ test "event_loop: EventLoop.addDevice rejects overflow" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    // Fill remaining slots (already have 4: signalfd + stop_pipe + macro
-    // timerfd + rumble-stop timerfd).
-    var mocks: [MAX_FDS - 4]MockDeviceIO = undefined;
-    for (0..MAX_FDS - 4) |i| {
+    // Fill remaining slots (already have 5: signalfd + stop_pipe +
+    // layer timer_fd + rumble-stop timerfd + macro timerfd).
+    var mocks: [MAX_FDS - 5]MockDeviceIO = undefined;
+    for (0..MAX_FDS - 5) |i| {
         mocks[i] = try MockDeviceIO.init(allocator, &.{});
     }
-    defer for (0..MAX_FDS - 4) |i| mocks[i].deinit();
+    defer for (0..MAX_FDS - 5) |i| mocks[i].deinit();
 
-    for (0..MAX_FDS - 4) |i| {
+    for (0..MAX_FDS - 5) |i| {
         const dev = mocks[i].deviceIO();
         try loop.addDevice(dev);
     }
@@ -945,7 +971,7 @@ test "event_loop: EventLoop timerfd: mapper.onTimerExpired invoked on timer expi
     );
     defer mapper_empty.deinit();
 
-    var m = try mapper_mod.Mapper.init(&mapper_empty.value, loop.timer_fd, allocator);
+    var m = try mapper_mod.Mapper.init(&mapper_empty.value, loop.macro_timer_fd, allocator);
     defer m.deinit();
 
     // Put layer in PENDING so timer expiry advances it to ACTIVE
