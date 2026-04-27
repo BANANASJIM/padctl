@@ -51,7 +51,7 @@ jobs:
           version: 0.15.2
 
       - name: Build native (musl to avoid glibc errno gaps)
-        run: zig build -Doptimize=ReleaseSafe -Dlibusb=false -Dtarget=x86_64-linux-musl
+        run: zig build -j1 -Doptimize=ReleaseSafe -Dlibusb=false -Dtarget=x86_64-linux-musl
 
       - name: Generate install artifacts
         run: sudo ./zig-out/bin/padctl install --destdir "$PWD/staging" --prefix /usr --no-enable --no-start
@@ -83,7 +83,7 @@ jobs:
           path: staging/
 
       - name: Build
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
+        run: zig build -j1 -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
 
       - name: Package
         env:

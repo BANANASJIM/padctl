@@ -22,7 +22,7 @@ jobs:
         with:
           version: 0.15.2
       - name: Build
-        run: zig build
+        run: zig build -j1
       - name: Validate all device configs
         run: |
           for f in devices/**/*.toml; do
