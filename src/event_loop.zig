@@ -307,7 +307,7 @@ pub const EventLoop = struct {
     signal_fd: posix.fd_t,
     stop_r: posix.fd_t,
     stop_w: posix.fd_t,
-    // device fds start at slot 2 (after signalfd + stop_pipe)
+    // device fds start at slot 5 (after signalfd + stop_pipe + timer_fd + rumble_stop_fd + macro_timer_fd)
     device_base: usize,
     /// Dedicated timerfd for layer hold-trigger arm/disarm (slot 2).
     /// Written by `timer_request` returned from `Mapper.apply()`.
@@ -795,11 +795,12 @@ test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     defer posix.close(pfds[1]);
 
     try loop.addUinputFf(pfds[0]);
-    // Fixed slots 0..3 are signalfd, stop_pipe, macro timerfd, rumble_stop_fd;
-    // the FF fd becomes slot 4, fd_count goes 4 → 5.
-    try testing.expectEqual(@as(usize, 5), loop.fd_count);
-    try testing.expectEqual(@as(?usize, 4), loop.uinput_ff_slot);
-    try testing.expectEqual(pfds[0], loop.pollfds[4].fd);
+    // Fixed slots 0..4 are signalfd, stop_pipe, layer timer_fd,
+    // rumble_stop_fd, macro_timer_fd; the FF fd becomes slot 5,
+    // fd_count goes 5 → 6.
+    try testing.expectEqual(@as(usize, 6), loop.fd_count);
+    try testing.expectEqual(@as(?usize, 5), loop.uinput_ff_slot);
+    try testing.expectEqual(pfds[0], loop.pollfds[5].fd);
 }
 
 test "event_loop: EventLoop: Disconnected device causes loop to exit without panic" {
@@ -864,9 +865,10 @@ test "event_loop: EventLoop.initManaged creates eventfd and timerfds" {
     try testing.expect(loop.signal_fd >= 0);
     try testing.expect(loop.timer_fd >= 0);
     try testing.expect(loop.rumble_stop_fd >= 0);
-    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = macro timerfd,
-    // slot 3 = rumble-stop timerfd
-    try testing.expectEqual(@as(usize, 4), loop.fd_count);
+    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = layer timer_fd,
+    // slot 3 = rumble-stop timerfd, slot 4 = macro timerfd
+    try testing.expect(loop.macro_timer_fd >= 0);
+    try testing.expectEqual(@as(usize, 5), loop.fd_count);
 }
 
 test "event_loop: EventLoop.stop wakes ppoll" {
@@ -888,10 +890,11 @@ test "event_loop: EventLoop.addDevice registers fd" {
     const dev = mock.deviceIO();
 
     try loop.addDevice(dev);
-    // Fixed slots: 0=signalfd, 1=stop_pipe, 2=macro timerfd, 3=rumble_stop_fd.
-    // First device lands at slot 4, fd_count goes from 4 → 5.
-    try testing.expectEqual(@as(usize, 5), loop.fd_count);
-    try testing.expectEqual(mock.pipe_r, loop.pollfds[4].fd);
+    // Fixed slots: 0=signalfd, 1=stop_pipe, 2=layer timer_fd,
+    // 3=rumble_stop_fd, 4=macro timerfd. First device lands at slot 5,
+    // fd_count goes 5 → 6.
+    try testing.expectEqual(@as(usize, 6), loop.fd_count);
+    try testing.expectEqual(mock.pipe_r, loop.pollfds[5].fd);
 }
 
 test "event_loop: EventLoop.addDevice rejects overflow" {
@@ -899,8 +902,8 @@ test "event_loop: EventLoop.addDevice rejects overflow" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    // Fill remaining slots (already have 4: signalfd + stop_pipe + macro
-    // timerfd + rumble-stop timerfd + macro timerfd).
+    // Fill remaining slots (already have 5: signalfd + stop_pipe +
+    // layer timer_fd + rumble-stop timerfd + macro timerfd).
     var mocks: [MAX_FDS - 5]MockDeviceIO = undefined;
     for (0..MAX_FDS - 5) |i| {
         mocks[i] = try MockDeviceIO.init(allocator, &.{});
