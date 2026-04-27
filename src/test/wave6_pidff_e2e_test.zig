@@ -35,9 +35,6 @@ const ffb_mod = @import("../io/ffb_forwarder.zig");
 const FfbForwarder = ffb_mod.FfbForwarder;
 const uhid_descriptor = @import("../io/uhid_descriptor.zig");
 
-// The 8 report IDs that kernel pidff_find_reports requires.
-const PID_MANDATORY_IDS = [_]u8{ 1, 7, 10, 11, 12, 13, 14, 15 };
-
 const DUMMY_DESCRIPTOR = [_]u8{ 0x05, 0x01, 0xC0 };
 
 const TOML_MOZA_CLONE =
@@ -231,9 +228,10 @@ test "wave6_pidff: end-to-end UHID_OUTPUT → hidraw forward (Set Effect / Effec
     try testing.expectEqual(@as(u64, 0), fwd.drops_eagain);
 }
 
-// TP31: buildForPid emits all 8 mandatory PID report IDs.
-// Also verifies that a hand-crafted 7-of-8 partial descriptor is missing one.
-test "wave6_pidff: PID descriptor includes all 8 mandatory report IDs" {
+// TP31: buildForPid emits all 8 PID Usages required by kernel
+// pidff_find_reports (drivers/hid/usbhid/hid-pidff.c). Kernel matches by
+// HID Usage on PID Usage Page 0x0F, NOT by Report ID.
+test "wave6_pidff: PID descriptor exposes all 8 kernel-required Usages" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -245,43 +243,32 @@ test "wave6_pidff: PID descriptor includes all 8 mandatory report IDs" {
     const desc = try uhid_descriptor.UhidDescriptorBuilder.buildForPid(allocator, out, ffb_cfg);
     defer allocator.free(desc);
 
-    for (PID_MANDATORY_IDS) |id| {
-        var found = false;
-        var i: usize = 0;
-        while (i + 1 < desc.len) : (i += 1) {
-            if (desc[i] == 0x85 and desc[i + 1] == id) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) std.debug.print("wave6: missing mandatory PID report ID {d}\n", .{id});
-        try testing.expect(found);
-    }
-
+    try uhid_descriptor.validateMandatoryReports(desc);
     try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
 
-    // Sanity: a 7-of-8 hand-crafted partial descriptor is missing exactly one ID.
-    const partial = [_]u8{
-        0x85, 1,  0xC0, 0x85, 7,  0xC0,
-        0x85, 10, 0xC0, 0x85, 11, 0xC0,
-        0x85, 12, 0xC0, 0x85, 13, 0xC0,
-        0x85, 14,
-        0xC0,
-        // ID 15 absent
-    };
-    var missing: u32 = 0;
-    for (PID_MANDATORY_IDS) |id| {
-        var found = false;
-        var j: usize = 0;
-        while (j + 1 < partial.len) : (j += 1) {
-            if (partial[j] == 0x85 and partial[j + 1] == id) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) missing += 1;
+    // Negative: a hand-crafted partial descriptor missing the Set Effect
+    // (0x21) Usage must fail validation. This is the failure mode kernel
+    // pidff_find_reports rejects with -ENODEV.
+    var partial_buf: [256]u8 = undefined;
+    var partial_len: usize = 0;
+    partial_buf[partial_len] = 0x05;
+    partial_buf[partial_len + 1] = 0x0F;
+    partial_len += 2;
+    const usages_present = [_]u8{ 0x77, 0x7d, 0x7f, 0x89, 0x90, 0x96, 0xab };
+    for (usages_present) |u| {
+        partial_buf[partial_len] = 0x09;
+        partial_buf[partial_len + 1] = u;
+        partial_len += 2;
+        partial_buf[partial_len] = 0xA1;
+        partial_buf[partial_len + 1] = 0x02;
+        partial_len += 2;
+        partial_buf[partial_len] = 0xC0;
+        partial_len += 1;
     }
-    try testing.expectEqual(@as(u32, 1), missing);
+    try testing.expectError(
+        error.MissingMandatoryPidUsage,
+        uhid_descriptor.validateMandatoryReports(partial_buf[0..partial_len]),
+    );
 }
 
 // TP34 (from test-plan): clone_vid_pid=true passes real VID/PID to UHID_CREATE2.
