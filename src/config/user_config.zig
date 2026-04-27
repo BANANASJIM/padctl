@@ -135,6 +135,98 @@ pub fn findDefaultMapping(result: *const ParseResult, device_name: []const u8) ?
     return null;
 }
 
+/// Atomically rewrite `config_path` from `cfg`, preserving every section.
+///
+/// Writes `version`, then `[diagnostics]` and `[supervisor]` (each emitted
+/// only when at least one field differs from its struct default — keeps
+/// fresh files terse), then every `[[device]]` entry. Strings are TOML
+/// basic-string escaped.
+///
+/// Atomicity: serialise to `<config_path>.tmp`, fsync, then rename(2) onto
+/// `config_path`. rename(2) is atomic on POSIX filesystems, so a crash or
+/// kill mid-write never leaves the live config truncated. The parent
+/// directory must exist; callers create it before invoking this helper.
+pub fn writeAtomic(
+    allocator: std.mem.Allocator,
+    config_path: []const u8,
+    cfg: *const UserConfig,
+) !void {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try emitToml(buf.writer(allocator), cfg);
+
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{config_path});
+    defer allocator.free(tmp_path);
+
+    {
+        var f = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
+        defer f.close();
+        f.writeAll(buf.items) catch |err| {
+            std.fs.deleteFileAbsolute(tmp_path) catch {};
+            return err;
+        };
+        f.sync() catch {};
+    }
+    errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
+    try std.posix.rename(tmp_path, config_path);
+}
+
+/// Serialise `cfg` to a TOML writer. Sections with all-default values are
+/// elided so a fresh-install config stays minimal; any non-default field
+/// triggers full emission of that section.
+pub fn emitToml(writer: anytype, cfg: *const UserConfig) !void {
+    try writer.print("version = {d}\n", .{cfg.version orelse CURRENT_VERSION});
+
+    const diag = cfg.diagnostics;
+    const diag_default = DiagnosticsConfig{};
+    if (diag.dump != diag_default.dump or diag.max_log_size_mb != diag_default.max_log_size_mb) {
+        try writer.print("\n[diagnostics]\ndump = {}\nmax_log_size_mb = {d}\n", .{ diag.dump, diag.max_log_size_mb });
+    }
+
+    const sup = cfg.supervisor;
+    const sup_default = SupervisorConfig{};
+    if (sup.suspend_grace_sec != sup_default.suspend_grace_sec) {
+        try writer.print("\n[supervisor]\nsuspend_grace_sec = {d}\n", .{sup.suspend_grace_sec});
+    }
+
+    if (cfg.device) |entries| {
+        for (entries) |d| {
+            try writer.writeAll("\n[[device]]\nname = \"");
+            try escapeTomlString(writer, d.name);
+            try writer.writeAll("\"\n");
+            if (d.default_mapping) |m| {
+                try writer.writeAll("default_mapping = \"");
+                try escapeTomlString(writer, m);
+                try writer.writeAll("\"\n");
+            }
+        }
+    }
+}
+
+/// Escape a TOML basic-string payload (between the enclosing `"`).
+/// Covers backslash, double-quote, and all control bytes per the spec —
+/// otherwise a name containing `"` or a path with `\` produces malformed
+/// TOML that the next load rejects, silently dropping every binding.
+pub fn escapeTomlString(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0C => try writer.writeAll("\\f"),
+            0...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
+                var esc_buf: [6]u8 = undefined;
+                const escaped = std.fmt.bufPrint(&esc_buf, "\\u{X:0>4}", .{c}) catch unreachable;
+                try writer.writeAll(escaped);
+            },
+            else => try writer.writeByte(c),
+        }
+    }
+}
+
 // --- tests ---
 
 test "load: returns null when config.toml absent" {
@@ -438,4 +530,134 @@ test "findDefaultMapping: entry without default_mapping returns null" {
     defer result.deinit();
 
     try std.testing.expectEqual(@as(?[]const u8, null), findDefaultMapping(&result, "Foo Pad"));
+}
+
+test "writeAtomic round-trips [supervisor] section" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
+    defer allocator.free(config_path);
+
+    const cfg = UserConfig{
+        .version = CURRENT_VERSION,
+        .supervisor = .{ .suspend_grace_sec = 30 },
+    };
+    try writeAtomic(allocator, config_path, &cfg);
+
+    var result = (try loadFromDir(allocator, dir_path)).?;
+    defer result.deinit();
+    try std.testing.expectEqual(@as(i64, 30), result.value.supervisor.suspend_grace_sec);
+}
+
+test "writeAtomic round-trips [diagnostics] section" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
+    defer allocator.free(config_path);
+
+    const cfg = UserConfig{
+        .version = CURRENT_VERSION,
+        .diagnostics = .{ .dump = true, .max_log_size_mb = 50 },
+    };
+    try writeAtomic(allocator, config_path, &cfg);
+
+    var result = (try loadFromDir(allocator, dir_path)).?;
+    defer result.deinit();
+    try std.testing.expectEqual(true, result.value.diagnostics.dump);
+    try std.testing.expectEqual(@as(i64, 50), result.value.diagnostics.max_log_size_mb);
+}
+
+test "writeAtomic preserves all sections through device-mutation flow" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
+    defer allocator.free(config_path);
+
+    const seed =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = true
+        \\max_log_size_mb = 50
+        \\
+        \\[supervisor]
+        \\suspend_grace_sec = 30
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+    {
+        const f = try tmp.dir.createFile("config.toml", .{});
+        defer f.close();
+        try f.writeAll(seed);
+    }
+
+    // Simulate `padctl switch`: load -> mutate device entry -> writeAtomic.
+    var loaded = (try loadFromDir(allocator, dir_path)).?;
+    defer loaded.deinit();
+
+    const new_devices = try allocator.alloc(DeviceEntry, 1);
+    defer allocator.free(new_devices);
+    new_devices[0] = .{ .name = "Vader 5 Pro", .default_mapping = "racing" };
+
+    const mutated = UserConfig{
+        .version = loaded.value.version,
+        .device = new_devices,
+        .diagnostics = loaded.value.diagnostics,
+        .supervisor = loaded.value.supervisor,
+    };
+    try writeAtomic(allocator, config_path, &mutated);
+
+    var reloaded = (try loadFromDir(allocator, dir_path)).?;
+    defer reloaded.deinit();
+    try std.testing.expectEqual(true, reloaded.value.diagnostics.dump);
+    try std.testing.expectEqual(@as(i64, 50), reloaded.value.diagnostics.max_log_size_mb);
+    try std.testing.expectEqual(@as(i64, 30), reloaded.value.supervisor.suspend_grace_sec);
+    try std.testing.expectEqualStrings("racing", findDefaultMapping(&reloaded, "Vader 5 Pro").?);
+}
+
+test "writeAtomic leaves no .tmp sidecar after success" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
+    defer allocator.free(config_path);
+
+    const cfg = UserConfig{ .version = CURRENT_VERSION };
+    try writeAtomic(allocator, config_path, &cfg);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("config.toml.tmp", .{}));
+    try tmp.dir.access("config.toml", .{});
+}
+
+test "writeAtomic escapes TOML special characters in device names" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
+    defer allocator.free(config_path);
+
+    const devices = try allocator.alloc(DeviceEntry, 1);
+    defer allocator.free(devices);
+    devices[0] = .{ .name = "Quote\"Backslash\\Pad", .default_mapping = "m1" };
+    const cfg = UserConfig{ .version = CURRENT_VERSION, .device = devices };
+    try writeAtomic(allocator, config_path, &cfg);
+
+    var result = (try loadFromDir(allocator, dir_path)).?;
+    defer result.deinit();
+    try std.testing.expectEqualStrings("m1", findDefaultMapping(&result, "Quote\"Backslash\\Pad").?);
 }

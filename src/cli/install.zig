@@ -2322,54 +2322,46 @@ fn writeBinding(
         };
     }
 
-    // Serialize: version + diagnostics + all existing entries (replacing
-    // the conflict target if one was found) + new entry if none matched.
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.print("version = {d}\n", .{version});
-
-    // Preserve [diagnostics] section if present.
-    if (existing) |e| {
-        const diag = e.value.diagnostics;
-        if (diag.dump or diag.max_log_size_mb != 100) {
-            try w.print("\n[diagnostics]\ndump = {}\nmax_log_size_mb = {d}\n", .{ diag.dump, diag.max_log_size_mb });
-        }
-    }
-
-    const esc_device_name = try tomlEscape(allocator, device_name);
-    defer allocator.free(esc_device_name);
-    const esc_mapping_name = try tomlEscape(allocator, mapping_name);
-    defer allocator.free(esc_mapping_name);
-
-    var wrote_target = false;
+    // Build a UserConfig with the target device added/replaced; every other
+    // section ([diagnostics], [supervisor], unrelated [[device]]) is carried
+    // forward from the parsed existing config. writeAtomic handles the
+    // atomic .tmp + fsync + rename(2).
+    var has_target = false;
     if (devices) |devs| {
         for (devs) |d| {
             if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
-                // Replace this entry with the new mapping.
-                try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ esc_device_name, esc_mapping_name });
-                wrote_target = true;
-            } else {
-                // Preserve unrelated entry.
-                const esc_name = try tomlEscape(allocator, d.name);
-                defer allocator.free(esc_name);
-                try w.print("\n[[device]]\nname = \"{s}\"\n", .{esc_name});
-                if (d.default_mapping) |m| {
-                    const esc_m = try tomlEscape(allocator, m);
-                    defer allocator.free(esc_m);
-                    try w.print("default_mapping = \"{s}\"\n", .{esc_m});
-                }
+                has_target = true;
+                break;
             }
         }
     }
-    if (!wrote_target) {
-        try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ esc_device_name, esc_mapping_name });
+    const old_count = if (devices) |d| d.len else 0;
+    const new_count = if (has_target) old_count else old_count + 1;
+    var new_devices = try allocator.alloc(user_config_mod.DeviceEntry, new_count);
+    defer allocator.free(new_devices);
+
+    var idx: usize = 0;
+    if (devices) |devs| {
+        for (devs) |d| {
+            if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
+                new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name };
+            } else {
+                new_devices[idx] = d;
+            }
+            idx += 1;
+        }
+    }
+    if (!has_target) {
+        new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name };
     }
 
-    // Write the file.
-    var f = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(buf.items);
+    const cfg = user_config_mod.UserConfig{
+        .version = version,
+        .device = new_devices,
+        .diagnostics = if (existing) |e| e.value.diagnostics else .{},
+        .supervisor = if (existing) |e| e.value.supervisor else .{},
+    };
+    try user_config_mod.writeAtomic(allocator, config_path, &cfg);
 }
 
 /// Copy `path` to `path.bak.YYYYMMDD-HHMMSS`. Returns an error if the

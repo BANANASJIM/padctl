@@ -17,8 +17,9 @@ pub const WriteError = error{
 };
 
 /// Write `[diagnostics] dump = <value>` to `{dir_path}/config.toml`.
-/// Preserves ALL existing fields (version, devices, other diagnostics fields).
-/// Only the `dump` field within `[diagnostics]` is changed.
+/// Preserves ALL existing fields (version, devices, [supervisor], other
+/// diagnostics fields). Only the `dump` field within `[diagnostics]` is
+/// changed. Delegates atomic .tmp+fsync+rename to `user_config.writeAtomic`.
 ///
 /// Returns error.MalformedConfig if the existing file contains invalid TOML
 /// (the file is left untouched — the caller should warn and proceed with IPC).
@@ -31,95 +32,35 @@ pub fn writeDiagnosticsConfig(allocator: std.mem.Allocator, dir_path: []const u8
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
     defer allocator.free(config_path);
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}/config.toml.tmp", .{dir_path});
-    defer allocator.free(tmp_path);
 
-    // Read existing config to preserve all fields.
-    var existing_version: ?i64 = null;
-    var existing_diag: user_config_mod.DiagnosticsConfig = .{};
-    var existing_devices: ?[]const user_config_mod.DeviceEntry = null;
     var existing_pr: ?user_config_mod.ParseResult = null;
     defer if (existing_pr) |*pr| pr.deinit();
-
     if (user_config_mod.loadFromDir(allocator, dir_path)) |maybe| {
-        if (maybe) |pr| {
-            existing_pr = pr;
-            existing_version = pr.value.version;
-            existing_diag = pr.value.diagnostics;
-            existing_devices = pr.value.device;
-        }
+        if (maybe) |pr| existing_pr = pr;
         // null = file not found → fresh config, proceed.
     } else |err| switch (err) {
         error.MalformedConfig => return error.MalformedConfig,
     }
 
-    // Update only the dump field; preserve everything else.
-    existing_diag.dump = dump;
+    var diag: user_config_mod.DiagnosticsConfig = if (existing_pr) |pr| pr.value.diagnostics else .{};
+    diag.dump = dump;
 
-    // Build the config content in a growable buffer — a [[device]] list
-    // with many entries can exceed any reasonable stack ceiling.
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    const cfg = user_config_mod.UserConfig{
+        .version = if (existing_pr) |pr| pr.value.version else null,
+        .device = if (existing_pr) |pr| pr.value.device else null,
+        .diagnostics = diag,
+        .supervisor = if (existing_pr) |pr| pr.value.supervisor else .{},
+    };
 
-    w.print("version = {d}\n\n", .{existing_version orelse user_config_mod.CURRENT_VERSION}) catch return error.OutOfMemory;
-    w.print("[diagnostics]\ndump = {}\nmax_log_size_mb = {d}\n", .{ existing_diag.dump, existing_diag.max_log_size_mb }) catch return error.OutOfMemory;
-
-    if (existing_devices) |devices| {
-        for (devices) |dev| {
-            // Escape TOML strings: names or mapping paths containing `"`,
-            // `\`, or control bytes would otherwise produce malformed TOML
-            // that the next parse rejects — silently dropping all bindings.
-            w.writeAll("\n[[device]]\nname = \"") catch return error.OutOfMemory;
-            escapeTomlString(w, dev.name) catch return error.OutOfMemory;
-            w.writeAll("\"\n") catch return error.OutOfMemory;
-            if (dev.default_mapping) |m| {
-                w.writeAll("default_mapping = \"") catch return error.OutOfMemory;
-                escapeTomlString(w, m) catch return error.OutOfMemory;
-                w.writeAll("\"\n") catch return error.OutOfMemory;
-            }
-        }
-    }
-
-    // Atomic write: populate sibling temp file, fsync, rename(2) over the
-    // target. rename(2) is atomic on POSIX filesystems, so a mid-write
-    // failure (ENOSPC, EIO) never leaves the live config truncated.
-    {
-        var f = std.fs.createFileAbsolute(tmp_path, .{ .truncate = true }) catch return error.AccessDenied;
-        defer f.close();
-        f.writeAll(buf.items) catch {
-            std.fs.deleteFileAbsolute(tmp_path) catch {};
-            return error.InputOutput;
-        };
-        f.sync() catch {};
-    }
-    errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
-    std.posix.rename(tmp_path, config_path) catch return error.InputOutput;
-}
-
-/// Escape a TOML basic-string payload (content between the enclosing `"`).
-/// Must cover backslash, double-quote, and all control bytes per the TOML
-/// spec; otherwise a device name containing `"` or a path with `\` silently
-/// produces malformed TOML that the next load-from-dir pass rejects —
-/// which would drop every [[device]] binding.
-fn escapeTomlString(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '\\' => try writer.writeAll("\\\\"),
-            '"' => try writer.writeAll("\\\""),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x08 => try writer.writeAll("\\b"),
-            0x0C => try writer.writeAll("\\f"),
-            0...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
-                var esc_buf: [6]u8 = undefined;
-                const escaped = std.fmt.bufPrint(&esc_buf, "\\u{X:0>4}", .{c}) catch unreachable;
-                try writer.writeAll(escaped);
-            },
-            else => try writer.writeByte(c),
-        }
-    }
+    user_config_mod.writeAtomic(allocator, config_path, &cfg) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.AccessDenied => return error.AccessDenied,
+        error.FileNotFound => return error.FileNotFound,
+        error.IsDir => return error.IsDir,
+        error.NoSpaceLeft => return error.NoSpaceLeft,
+        error.SystemResources => return error.SystemResources,
+        else => return error.InputOutput,
+    };
 }
 
 /// Run `padctl dump status`: query daemon for live state, read log file stats.
