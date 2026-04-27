@@ -220,10 +220,15 @@ test "layer timer expiry must NOT drain macro queue (PR #171 follow-up)" {
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
     const initial_step_index = m.active_macros.items[0].step_index;
 
-    // t=10ms: press LT → layer PENDING; hold deadline at t=110ms.
+    // Arm the layer PENDING directly: routing through m.apply() with the LT
+    // mask would set active_changed=true and intentionally clear active_macros
+    // (cancel-on-layer-arm; see macro_e2e_test.zig "shift_hold" test), which
+    // would mask the regression covered here.
     const press_lt_ns: i128 = 10 * std.time.ns_per_ms;
-    const lt_mask = helpers.btnMask(.LT);
-    _ = try m.apply(.{ .buttons = a_mask | lt_mask }, 16, press_lt_ns);
+    _ = m.layer.onTriggerPress("fps", 100, press_lt_ns);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqual(layer_mod.TapHoldPhase.pending, m.layer.tap_hold.?.phase);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
     // Layer-only handler must NOT advance the macro player (whose deadline is
     // far in the future at t=510ms). The macro must still be at the same step.
