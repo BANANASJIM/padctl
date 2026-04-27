@@ -214,7 +214,15 @@ pub const ParseResult = toml.Parsed(MappingConfig);
 pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
     var parser = toml.Parser(MappingConfig).init(allocator);
     defer parser.deinit();
-    return parser.parseString(content);
+    const result = try parser.parseString(content);
+    if (lintUnknownFields(allocator, content)) |findings| {
+        defer {
+            var f = findings;
+            f.deinit(allocator);
+        }
+        warnLintFindings(findings.items);
+    } else |_| {} // lint failure (OOM) must not break parsing
+    return result;
 }
 
 pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
@@ -275,6 +283,241 @@ pub fn needsTriggerThresholdWarn(cfg: *const MappingConfig) bool {
         }
     }
     return false;
+}
+
+// --- schema lint: detect unknown keys in known table contexts ---
+//
+// Rationale: the underlying TOML library (sam701/zig-toml) silently ignores
+// unknown fields by design (forward-compat). For mapping configs that is the
+// wrong tradeoff — typos like `trigger_threshold = 128` placed inside
+// [[layer]] (instead of top-level) silently break the user's setup (#163).
+// This linter re-walks the raw TOML text and warns on any key that does not
+// belong to the schema for the current table context.
+
+pub const LintFinding = struct {
+    line: usize, // 1-based line number
+    table: []const u8, // table path or "" for top-level; borrowed from input
+    unknown_key: []const u8, // borrowed from input
+};
+
+const TableKind = enum {
+    top_level,
+    free_form, // HashMap-backed: any key allowed
+    mapping_config,
+    layer_config,
+    gyro_config,
+    stick_pair_config,
+    stick_config,
+    dpad_config,
+    adaptive_trigger_config,
+    adaptive_trigger_param_config,
+    macro_config,
+    unknown, // unrecognised header — skip lint (do not punish forward-compat sections)
+};
+
+fn structFieldNames(comptime T: type) []const []const u8 {
+    const fields = @typeInfo(T).@"struct".fields;
+    comptime var names: [fields.len][]const u8 = undefined;
+    inline for (fields, 0..) |f, i| names[i] = f.name;
+    const final = names;
+    return &final;
+}
+
+fn allowlistFor(kind: TableKind) ?[]const []const u8 {
+    return switch (kind) {
+        .top_level, .mapping_config => structFieldNames(MappingConfig),
+        .layer_config => structFieldNames(LayerConfig),
+        .gyro_config => structFieldNames(GyroConfig),
+        .stick_pair_config => structFieldNames(StickPairConfig),
+        .stick_config => structFieldNames(StickConfig),
+        .dpad_config => structFieldNames(DpadConfig),
+        .adaptive_trigger_config => structFieldNames(AdaptiveTriggerConfig),
+        .adaptive_trigger_param_config => structFieldNames(AdaptiveTriggerParamConfig),
+        .macro_config => structFieldNames(Macro),
+        .free_form, .unknown => null,
+    };
+}
+
+fn classifyTable(header: []const u8) TableKind {
+    if (header.len == 0) return .top_level;
+
+    if (std.mem.eql(u8, header, "remap")) return .free_form;
+    if (std.mem.eql(u8, header, "gyro")) return .gyro_config;
+    if (std.mem.eql(u8, header, "stick")) return .stick_pair_config;
+    if (std.mem.eql(u8, header, "stick.left") or std.mem.eql(u8, header, "stick.right")) return .stick_config;
+    if (std.mem.eql(u8, header, "dpad")) return .dpad_config;
+    if (std.mem.eql(u8, header, "adaptive_trigger")) return .adaptive_trigger_config;
+    if (std.mem.eql(u8, header, "adaptive_trigger.left") or
+        std.mem.eql(u8, header, "adaptive_trigger.right")) return .adaptive_trigger_param_config;
+
+    if (std.mem.eql(u8, header, "layer")) return .layer_config;
+    if (std.mem.eql(u8, header, "layer.remap")) return .free_form;
+    if (std.mem.eql(u8, header, "layer.gyro")) return .gyro_config;
+    if (std.mem.eql(u8, header, "layer.stick_left") or
+        std.mem.eql(u8, header, "layer.stick_right")) return .stick_config;
+    if (std.mem.eql(u8, header, "layer.dpad")) return .dpad_config;
+    if (std.mem.eql(u8, header, "layer.adaptive_trigger")) return .adaptive_trigger_config;
+    if (std.mem.eql(u8, header, "layer.adaptive_trigger.left") or
+        std.mem.eql(u8, header, "layer.adaptive_trigger.right")) return .adaptive_trigger_param_config;
+
+    if (std.mem.eql(u8, header, "macro")) return .macro_config;
+
+    return .unknown;
+}
+
+// Find the first occurrence of `c` in `s` outside of double-quoted spans.
+fn indexOfUnquoted(s: []const u8, c: u8) ?usize {
+    var in_str = false;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
+        if (ch == '\\' and i + 1 < s.len and in_str) {
+            i += 1;
+            continue;
+        }
+        if (ch == '"') {
+            in_str = !in_str;
+            continue;
+        }
+        if (!in_str and ch == c) return i;
+    }
+    return null;
+}
+
+fn trimWhitespace(s: []const u8) []const u8 {
+    return std.mem.trim(u8, s, " \t\r\n");
+}
+
+fn isValidBareKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    for (key) |c| {
+        const ok = (c >= 'A' and c <= 'Z') or
+            (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or
+            c == '_' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// Increase / decrease bracket depth for chars on a line, respecting
+// quoted spans. Returns net depth delta.
+fn bracketDelta(s: []const u8) i32 {
+    var depth: i32 = 0;
+    var in_str = false;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
+        if (ch == '\\' and i + 1 < s.len and in_str) {
+            i += 1;
+            continue;
+        }
+        if (ch == '"') {
+            in_str = !in_str;
+            continue;
+        }
+        if (in_str) continue;
+        if (ch == '#') break; // comment to end-of-line
+        switch (ch) {
+            '[', '{' => depth += 1,
+            ']', '}' => depth -= 1,
+            else => {},
+        }
+    }
+    return depth;
+}
+
+fn keyIsKnown(allowlist: []const []const u8, key: []const u8) bool {
+    for (allowlist) |name| {
+        if (std.mem.eql(u8, name, key)) return true;
+    }
+    return false;
+}
+
+/// Walk raw TOML text and collect findings for keys that do not match the
+/// schema of the enclosing table. Caller owns the returned ArrayList.
+///
+/// This is intentionally a lightweight line-based scan — it does NOT replace
+/// the TOML parser. Multi-line values (arrays, inline tables spanning lines)
+/// are skipped while bracket depth is non-zero, so keys nested inside arrays
+/// of inline tables (e.g. macro `steps = [{ tap = "B" }, ...]`) are not
+/// mis-classified as top-level keys.
+pub fn lintUnknownFields(allocator: std.mem.Allocator, raw_toml: []const u8) !std.ArrayList(LintFinding) {
+    var findings: std.ArrayList(LintFinding) = .empty;
+    errdefer findings.deinit(allocator);
+
+    var current_header: []const u8 = "";
+    var depth: i32 = 0;
+    var line_no: usize = 0;
+
+    var it = std.mem.splitScalar(u8, raw_toml, '\n');
+    while (it.next()) |raw_line| {
+        line_no += 1;
+
+        // Strip a trailing comment but only when not inside an open bracket /
+        // quoted span — the cheap path is fine for our purposes.
+        const trimmed_full = trimWhitespace(raw_line);
+        if (trimmed_full.len == 0) continue;
+        if (trimmed_full[0] == '#') continue;
+
+        // If currently inside a multi-line value, just track depth.
+        if (depth > 0) {
+            depth += bracketDelta(raw_line);
+            if (depth < 0) depth = 0;
+            continue;
+        }
+
+        // Section header: [foo] or [[foo]]
+        if (trimmed_full[0] == '[') {
+            if (std.mem.startsWith(u8, trimmed_full, "[[")) {
+                const end = std.mem.indexOf(u8, trimmed_full, "]]") orelse continue;
+                current_header = trimWhitespace(trimmed_full[2..end]);
+            } else {
+                const end = std.mem.indexOfScalar(u8, trimmed_full, ']') orelse continue;
+                current_header = trimWhitespace(trimmed_full[1..end]);
+            }
+            continue;
+        }
+
+        // Otherwise: candidate `key = value` line.
+        const eq_idx = indexOfUnquoted(trimmed_full, '=') orelse continue;
+        const key_raw = trimWhitespace(trimmed_full[0..eq_idx]);
+        const value_raw = if (eq_idx + 1 < trimmed_full.len) trimmed_full[eq_idx + 1 ..] else "";
+
+        // Bare keys only — quoted/dotted keys are uncommon in our schema and
+        // safer to skip than to mis-flag.
+        if (!isValidBareKey(key_raw)) {
+            depth += bracketDelta(value_raw);
+            if (depth < 0) depth = 0;
+            continue;
+        }
+
+        const kind = classifyTable(current_header);
+        if (allowlistFor(kind)) |allow| {
+            if (!keyIsKnown(allow, key_raw)) {
+                try findings.append(allocator, .{
+                    .line = line_no,
+                    .table = current_header,
+                    .unknown_key = key_raw,
+                });
+            }
+        }
+
+        depth += bracketDelta(value_raw);
+        if (depth < 0) depth = 0;
+    }
+
+    return findings;
+}
+
+fn warnLintFindings(findings: []const LintFinding) void {
+    for (findings) |f| {
+        if (f.table.len == 0) {
+            std.log.warn("config: unknown key '{s}' at top-level (line {d}) — typo or misplaced field?", .{ f.unknown_key, f.line });
+        } else {
+            std.log.warn("config: unknown key '{s}' inside [{s}] (line {d}) — typo or misplaced field?", .{ f.unknown_key, f.table, f.line });
+        }
+    }
 }
 
 pub fn validate(cfg: *const MappingConfig) !void {
@@ -945,4 +1188,132 @@ test "mapping: needsTriggerThresholdWarn: no warn on empty config" {
     const result = try parseString(allocator, "");
     defer result.deinit();
     try std.testing.expect(!needsTriggerThresholdWarn(&result.value));
+}
+
+// --- lintUnknownFields tests ---
+
+fn findFinding(items: []const LintFinding, table: []const u8, key: []const u8) ?LintFinding {
+    for (items) |f| {
+        if (std.mem.eql(u8, f.table, table) and std.mem.eql(u8, f.unknown_key, key)) return f;
+    }
+    return null;
+}
+
+test "lintUnknownFields: trigger_threshold inside [[layer]] is flagged (issue #163 class)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "fps"
+        \\trigger = "Select"
+        \\trigger_threshold = 128
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expect(findFinding(findings.items, "layer", "trigger_threshold") != null);
+}
+
+test "lintUnknownFields: typo at top-level is flagged" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\name = "test"
+        \\tigger_threshold = 128
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expect(findFinding(findings.items, "", "tigger_threshold") != null);
+    // legitimate key must not be flagged
+    try std.testing.expect(findFinding(findings.items, "", "name") == null);
+}
+
+test "lintUnknownFields: HashMap context like [remap] does not flag arbitrary keys" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[remap]
+        \\RT = "mouse_right"
+        \\LT = "mouse_left"
+        \\Y = "KEY_F1"
+        \\M1 = "macro:dodge_roll"
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "lintUnknownFields: known fields produce no warnings" {
+    const allocator = std.testing.allocator;
+    var findings = try lintUnknownFields(allocator, test_toml_full);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "lintUnknownFields: nested [layer.gyro] context routes to GyroConfig allowlist" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\
+        \\[layer.gyro]
+        \\mode = "mouse"
+        \\unknown_gyro_field = 42
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expect(findFinding(findings.items, "layer.gyro", "unknown_gyro_field") != null);
+    // legit gyro field must not be flagged
+    try std.testing.expect(findFinding(findings.items, "layer.gyro", "mode") == null);
+}
+
+test "lintUnknownFields: [[macro]] steps array does not mis-flag inline-table keys" {
+    const allocator = std.testing.allocator;
+    var findings = try lintUnknownFields(allocator, test_toml_macro);
+    defer findings.deinit(allocator);
+    // `tap`, `down`, `up`, `delay` appear inside `steps = [...]` array — they
+    // must not be classified as Macro fields and must not flag.
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "lintUnknownFields: forward-compat field flagged once with table context" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\name = "ok"
+        \\
+        \\[gyro]
+        \\mode = "mouse"
+        \\some_future_gyro_knob = 1.0
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    try std.testing.expectEqualStrings("gyro", findings.items[0].table);
+    try std.testing.expectEqualStrings("some_future_gyro_knob", findings.items[0].unknown_key);
+}
+
+test "lintUnknownFields: comments and blank lines are skipped" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\# top-level comment
+        \\name = "ok"
+        \\
+        \\# another comment
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\# a layer comment with key = 1 inside it should not match
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "lintUnknownFields: unknown table header skipped (forward-compat)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[some_future_section]
+        \\anything = "goes"
+        \\here = 42
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
 }
