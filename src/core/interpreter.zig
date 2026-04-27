@@ -394,7 +394,7 @@ fn compileReport(report: *const ReportConfig) CompiledReport {
 
     if (report.button_group) |bg| {
         if (bg.source.size > 8) {
-            std.log.err("button_group source.size={d} exceeds u64 (max 8); skipping", .{bg.source.size});
+            std.log.warn("button_group source.size={d} exceeds u64 (max 8); skipping", .{bg.source.size});
             return cr;
         }
         var cbg = CompiledButtonGroup{
