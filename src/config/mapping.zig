@@ -549,6 +549,13 @@ pub fn validate(cfg: *const MappingConfig) !void {
         seen_buf[seen_len] = layer.name;
         seen_len += 1;
 
+        if (layer.tap) |tap| {
+            if (std.mem.startsWith(u8, tap, "macro:")) {
+                std.log.err("config: layer '{s}' tap = \"{s}\" — macro targets are not supported as layer tap actions; use a gamepad button or key instead", .{ layer.name, tap });
+                return error.LayerTapCannotBeMacro;
+            }
+        }
+
         if (layer.remap) |*m| try checkRemapMacros(cfg, m);
         if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
     }
@@ -1316,4 +1323,36 @@ test "lintUnknownFields: unknown table header skipped (forward-compat)" {
     var findings = try lintUnknownFields(allocator, toml_str);
     defer findings.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "validate: layer tap cannot be macro:..." {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "x"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\tap = "macro:single_shot"
+        \\
+        \\[[macro]]
+        \\name = "single_shot"
+        \\steps = [{ tap = "A" }]
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.LayerTapCannotBeMacro, validate(&result.value));
+}
+
+test "validate: layer tap to gamepad button works (regression)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\tap = "mouse_side"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try validate(&result.value);
 }
