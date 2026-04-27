@@ -19,7 +19,7 @@ jobs:
           version: 0.15.2
 
       - name: Build padctl (no libusb — install flow only needs the static binary)
-        run: zig build -Dlibusb=false -j1
+        run: zig build -Dlibusb=false
 
       - name: Run install-flow sandbox
         run: |

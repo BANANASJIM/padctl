@@ -33,7 +33,7 @@ jobs:
             | tar xz -C /usr/local/bin
 
       - name: Build padctl
-        run: zig build -j1
+        run: zig build
 
       - name: Validate all device configs
         run: |
