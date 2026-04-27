@@ -35,11 +35,17 @@ jobs:
       - name: Install system dependencies
         if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
-      - name: Run all checks
-        # check-all-serial runs test → safe → fmt sequentially to avoid a
-        # Zig build-cache deadlock observed when test and test-safe compile
-        # concurrently (~25 min hang in check-all on PR #166 CI matrix).
-        run: zig build ${{ matrix.zig_args }} check-all-serial
+      # Three separate `zig build` processes to avoid Zig issue #22453
+      # (flock AB/BA deadlock on cache manifests when test, test-safe, and
+      # check-fmt run via a single scheduler that compiles libusb glue + wasm3
+      # C objects from multiple zig-cc invocations concurrently). Per-process
+      # serialization gives each Zig invocation its own .zig-cache lock space.
+      - name: Run all checks (serial via separate processes)
+        run: |
+          set -e
+          zig build ${{ matrix.zig_args }} test
+          zig build ${{ matrix.zig_args }} test-safe
+          zig build ${{ matrix.zig_args }} check-fmt
 
   check:
     name: check
@@ -135,5 +141,7 @@ jobs:
               ${DISTRO_SETUP}
               curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
               tar -xJf /tmp/zig.tar.xz -C /tmp
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all-serial
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test-safe
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-fmt
             "
