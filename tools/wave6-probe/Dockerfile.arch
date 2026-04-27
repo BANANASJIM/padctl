@@ -1,0 +1,12 @@
+# Arch Linux container for Wave 6 PIDff probe.
+# Docker shares host kernel, so this tests kernel 6.18.x behavior.
+FROM archlinux:base
+
+RUN pacman -Sy --noconfirm --needed python hid-tools util-linux kmod \
+    && pacman -Scc --noconfirm
+
+WORKDIR /probe
+COPY pidff_probe.py /probe/pidff_probe.py
+RUN chmod +x /probe/pidff_probe.py
+
+ENTRYPOINT ["python3", "/probe/pidff_probe.py"]
