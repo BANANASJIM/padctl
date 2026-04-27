@@ -249,10 +249,17 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
-            const use_uhid = if (imu_cfg_opt) |imu_cfg|
-                std.mem.eql(u8, imu_cfg.backend, "uhid")
-            else
-                false;
+            // Enter UHID path when IMU backend=uhid (ADR-015 gamepad+IMU) OR
+            // when force_feedback.backend=uhid (Wave 6 racing wheel PID FFB).
+            const use_uhid = blk: {
+                if (imu_cfg_opt) |imu_cfg| {
+                    if (std.mem.eql(u8, imu_cfg.backend, "uhid")) break :blk true;
+                }
+                if (out_cfg.force_feedback) |ffb| {
+                    if (std.mem.eql(u8, ffb.backend, "uhid")) break :blk true;
+                }
+                break :blk false;
+            };
 
             if (use_uhid) {
                 // ADR-015 Stage 1: primary + IMU cards share a byte-identical
@@ -263,7 +270,16 @@ pub const DeviceInstance = struct {
                 defer allocator.free(uniq_z);
                 if (phys_key == null) uniq_counter.* += 1;
 
-                const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
+                // PID devices need the HID PID descriptor so that kernel
+                // hid-universal-pidff's pidff_find_reports finds all 8 mandatory
+                // usages; buildFromOutput emits only a gamepad descriptor.
+                const primary_descriptor = if (out_cfg.force_feedback) |ffb|
+                    if (std.mem.eql(u8, ffb.backend, "uhid") and std.mem.eql(u8, ffb.kind, "pid"))
+                        try uhid_descriptor.UhidDescriptorBuilder.buildForPid(allocator, out_cfg.*, ffb)
+                    else
+                        try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*)
+                else
+                    try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
                 defer allocator.free(primary_descriptor);
 
                 const ffb_cfg = out_cfg.force_feedback orelse device_cfg.ForceFeedbackConfig{};
@@ -332,6 +348,15 @@ pub const DeviceInstance = struct {
                     if (std.mem.eql(u8, pid_ffb.backend, "uhid") and
                         std.mem.eql(u8, pid_ffb.kind, "pid"))
                     {
+                        // TODO(wave6-T7): devices[0] is a heuristic — it is correct
+                        // for single-interface wheels but may select the wrong
+                        // interface on multi-interface devices (e.g. wheels with a
+                        // separate HID++ control interface at index 0 and the FFB
+                        // interface at index 1). T7 will surface real cases; for
+                        // now, warn at startup when >1 interface is present.
+                        if (devices.len > 1) {
+                            std.log.warn("wave6 PID FFB: {d} interfaces found; using devices[0] as hidraw fd — may be wrong for multi-interface wheels (T7 follow-up)", .{devices.len});
+                        }
                         const phys_fd = opts.test_physical_hidraw_fd orelse
                             if (devices.len > 0) devices[0].pollfd().fd else -1;
                         if (phys_fd >= 0) {

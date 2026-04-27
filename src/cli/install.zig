@@ -1913,10 +1913,16 @@ fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) 
             j += 1;
         }
         if (dup) {
-            // Prefer the entry with richer data (block_kernel_drivers populated)
+            // Merge richer data from the duplicate into the kept entry.
             if (entries.items[i].block_kernel_drivers.len == 0 and entries.items[j].block_kernel_drivers.len > 0) {
                 entries.items[i].block_kernel_drivers = entries.items[j].block_kernel_drivers;
                 entries.items[j].block_kernel_drivers = &.{};
+            }
+            // clone_vid_pid is a boolean OR: if either duplicate has it set,
+            // the merged result must also have it (one TOML may carry the flag
+            // and the other may not, e.g. when two reports share a VID:PID).
+            if (entries.items[j].clone_vid_pid) {
+                entries.items[i].clone_vid_pid = true;
             }
             const removed = entries.items[j];
             allocator.free(removed.name);

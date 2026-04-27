@@ -21,10 +21,11 @@ bustype filter in the `hid_pidff_init` callers (`hid-lg4ff`/`hid-tmff`/
 
 Wave 6 also closes two probe-discovered constraints downstream of bustype:
 
-1. **Descriptor completeness**: `pidff_find_reports()` requires all 12 PID
-   mandatory reports. Missing any → `-ENODEV` → `Error initialising force
-   feedback` → on kernel 6.18 a NULL deref OOPS in `hid_hw_open+0x71` (probe
-   Run 2). Wave 6's descriptor builder ships all 12.
+1. **Descriptor completeness**: `pidff_find_reports()` requires the 8 kernel-mandatory
+   PID reports (`PID_REQUIRED_REPORTS 8`: IDs 1, 7, 10, 11, 12, 13, 14, 15).
+   Missing any → `-ENODEV` → `Error initialising force feedback` → on kernel 6.18
+   a NULL deref OOPS in `hid_hw_open+0x71` (probe Run 2). Wave 6's descriptor
+   builder ships all 8 mandatory reports plus 5 optional ones.
 2. **VID/PID cloning**: padctl's default UHID VID/PID `FADE:C00x` is not in
    the `hid-universal-pidff` alias table. Without the wheel's real VID/PID,
    kernel falls through to `hid-generic` and FFB never initialises. Wave 6
@@ -42,7 +43,7 @@ Closing this wave unblocks:
 
 | Task | Summary | File (primary) | LoC |
 |------|---------|----------------|-----|
-| T1 | `UhidDescriptorBuilder.buildForPid` — PID output collection, all 12 mandatory reports, defensive 12-of-12 validator, byte-exact golden test | `src/io/uhid_descriptor.zig` | ~250 |
+| T1 | `UhidDescriptorBuilder.buildForPid` — PID output collection, 8 kernel-mandatory + 5 optional reports, defensive 8-mandatory validator, byte-exact golden test | `src/io/uhid_descriptor.zig` | ~250 |
 | T2 | VID/PID cloning — `OutputConfig.force_feedback.clone_vid_pid` opt-in; primary UHID card vendor/product overridden from `[device]` when true; udev rules emit per-cloned-VID/PID match | `src/config/device.zig`, `src/device_instance.zig`, `src/cli/install.zig` | ~150 |
 | T3 | `UHID_OUTPUT` event handler — `src/io/uhid.zig` adds `pollOutputReport()` + `onOutputReport(report_id, payload)` callback; payload-parse unit tests | `src/io/uhid.zig`, `src/io/uhid_types.zig` | ~120 |
 | T4 | `FfbForwarder` — write FFB bytes to physical hidraw fd, EAGAIN/EACCES/ENODEV classification, rate ceiling + dropped-packet counter | `src/io/ffb_forwarder.zig` (new), `src/supervisor.zig`, `src/io/hidraw.zig` | ~250 |

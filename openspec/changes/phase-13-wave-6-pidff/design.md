@@ -4,7 +4,7 @@
 
 | File | Role |
 |------|------|
-| `src/io/uhid_descriptor.zig` | T1: `UhidDescriptorBuilder.buildForPid` + 12-report mandatory validator + golden-byte tests |
+| `src/io/uhid_descriptor.zig` | T1: `UhidDescriptorBuilder.buildForPid` + 8-mandatory-report validator + golden-byte tests |
 | `src/config/device.zig` | T5: `[output.force_feedback]` schema (`backend`, `kind`, `clone_vid_pid`); T2: `clone_vid_pid` accessor + validate; T1: descriptor selection by `kind` |
 | `src/device_instance.zig` | T2: VID/PID override on primary UHID card when `clone_vid_pid = true`; T3/T4: plumb `FfbForwarder` into instance lifetime; T1: descriptor selection (`buildForPid` vs `buildFromOutput`) |
 | `src/cli/install.zig` | T2: emit udev rule per cloned VID/PID for `KERNELS=="uhid"` + `ENV{ID_VENDOR_ID}=="...", ENV{ID_MODEL_ID}=="..."` so the cloned device gets `uaccess` |
@@ -34,10 +34,13 @@ in `engineering/phase-13-wave-plan.md@fb1a3d6`:225-234.
    the direct `hid_pidff_init` callers (`hid-lg4ff` / `hid-tmff` /
    `hid-sony`); same setting works on both.
 2. **Descriptor completeness**: when `kind = "pid"`, the descriptor MUST
-   contain all 12 PID mandatory reports (Set Effect, Set Envelope, Set
-   Condition, Set Periodic, Set Constant Force, Set Ramp Force, Effect
-   Operation, Device Control, Device Gain, Create New Effect, Block Load,
-   PID Pool). `pidff_find_reports()` returns `-ENODEV` on any missing
+   contain the 8 reports that `pidff_find_reports()` treats as mandatory
+   (kernel `#define PID_REQUIRED_REPORTS 8`, usages 0x21 Set Effect,
+   0x77 Effect Operation, 0x96 Device Control, 0x7d Device Gain, 0xab
+   Create New Effect, 0x89 Block Load, 0x7f PID Pool, 0x90 Block Free).
+   Four additional reports (Set Envelope, Set Condition, Set Periodic,
+   Set Constant Force, Set Ramp Force) are emitted but are not gating.
+   `pidff_find_reports()` returns `-ENODEV` on any missing mandatory
    report; downstream `evdev_open()` then triggers a NULL deref OOPS in
    `hid_hw_open+0x71` (probe Run 2 evidence). T1 ships a defensive
    build-time validator that fails closed.
@@ -247,33 +250,40 @@ Descriptor layout (top-to-bottom byte stream):
 | Generic Desktop Joystick application collection | preamble | unchanged from `buildFromOutput` for axes + buttons |
 | Axes / buttons / hat (existing) | from `cfg` | reused builder helpers |
 | **PID output collection start** (`0x05 0x0F` Usage Page Physical Interface Device) | — | new |
-| Set Effect Report (ID 1, ~13 bytes payload) | mandatory | Effect Type, Duration, Sample Period, Gain, Trigger Button, Axes Enable, Direction X, Direction Y |
-| Set Envelope Report (ID 2, ~7 bytes payload) | mandatory | Attack Level, Fade Level, Attack Time, Fade Time |
-| Set Condition Report (ID 3, ~9 bytes payload) | mandatory | Center Point Offset, Positive Coefficient, Negative Coefficient, Positive Saturation, Negative Saturation, Dead Band |
-| Set Periodic Report (ID 4, ~11 bytes payload) | mandatory | Magnitude, Offset, Phase, Period |
-| Set Constant Force Report (ID 5, ~3 bytes payload) | mandatory | Magnitude |
-| Set Ramp Force Report (ID 6, ~5 bytes payload) | mandatory | Ramp Start, Ramp End |
-| Effect Operation Report (ID 10, ~3 bytes payload) | mandatory | Operation (Start / Start Solo / Stop), Loop Count |
-| Device Control Report (ID 11, ~1 byte payload) | mandatory | Disable / Enable / Stop / Reset / Pause / Continue |
-| Device Gain Report (ID 12, ~1 byte payload) | mandatory | Gain |
+| Set Effect Report (ID 1, ~13 bytes payload) | **kernel-mandatory** | Effect Type, Duration, Sample Period, Gain, Trigger Button, Axes Enable, Direction X, Direction Y |
+| Set Envelope Report (ID 2, ~7 bytes payload) | optional (emitted) | Attack Level, Fade Level, Attack Time, Fade Time |
+| Set Condition Report (ID 3, ~9 bytes payload) | optional (emitted) | Center Point Offset, Positive Coefficient, Negative Coefficient, Positive Saturation, Negative Saturation, Dead Band |
+| Set Periodic Report (ID 4, ~11 bytes payload) | optional (emitted) | Magnitude, Offset, Phase, Period |
+| Set Constant Force Report (ID 5, ~3 bytes payload) | optional (emitted) | Magnitude |
+| Set Ramp Force Report (ID 6, ~5 bytes payload) | optional (emitted) | Ramp Start, Ramp End |
+| Block Free Report (ID 7, ~1 byte payload) | **kernel-mandatory** | Effect Block Index |
+| Effect Operation Report (ID 10, ~3 bytes payload) | **kernel-mandatory** | Operation (Start / Start Solo / Stop), Loop Count |
+| Device Control Report (ID 11, ~1 byte payload) | **kernel-mandatory** | Disable / Enable / Stop / Reset / Pause / Continue |
+| Device Gain Report (ID 12, ~1 byte payload) | **kernel-mandatory** | Gain |
 | **PID feature collection** | — | feature reports below |
-| Create New Effect Report (ID 13, feature) | mandatory | Effect Type |
-| Block Load Report (ID 14, feature) | mandatory | Effect Block Index, Block Load Status, RAM Pool Available |
-| PID Pool Report (ID 15, feature) | mandatory | RAM Pool Size, Simultaneous Effects Max, Device Managed Pool, Shared Parameter Blocks |
+| Create New Effect Report (ID 13, feature) | **kernel-mandatory** | Effect Type |
+| Block Load Report (ID 14, feature) | **kernel-mandatory** | Effect Block Index, Block Load Status, RAM Pool Available |
+| PID Pool Report (ID 15, feature) | **kernel-mandatory** | RAM Pool Size, Simultaneous Effects Max, Device Managed Pool, Shared Parameter Blocks |
+
+Kernel-mandatory = required by `pidff_find_reports` (`PID_REQUIRED_REPORTS 8`); report IDs 1, 7, 10, 11, 12, 13, 14, 15.
+Optional = emitted by `buildForPid` but not validated by the kernel gate; omitting them would still bind.
 
 Byte counts above are illustrative (probe pidff_probe.py uses a similar
 layout). Implementer pins exact byte sequences against `hid-tools`
-canonical output and against the implementer-derived 12-report PID
+canonical output and against the implementer-derived 8-mandatory-report PID
 descriptor (validated on first real-hardware run when
 `hid-universal-pidff` binds without `Error initialising force
 feedback`); the golden test pins the byte sequence once produced.
 
-### 12-of-12 mandatory validator
+### 8-of-8 mandatory validator
 
 After byte emission, before returning, T1 runs:
 
 ```zig
-const REQUIRED_REPORTS = [_]u8{ 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15 };
+// Per drivers/hid/usbhid/hid-pidff.c pidff_reports[0..PID_REQUIRED_REPORTS].
+// Report IDs map to usages: 1→0x21, 7→0x90, 10→0x77, 11→0x96, 12→0x7d,
+// 13→0xab, 14→0x89, 15→0x7f.
+const REQUIRED_REPORTS = [_]u8{ 1, 7, 10, 11, 12, 13, 14, 15 };
 fn validateMandatoryReports(descriptor: []const u8) !void {
     var seen: [16]bool = .{false} ** 16;
     // walk descriptor bytes, record every Report ID (0x85 prefix)
@@ -290,7 +300,7 @@ observed in probe Run 2 cannot be triggered by padctl.
 | File | Before | After |
 |------|--------|-------|
 | `src/io/uhid_descriptor.zig` | `buildFromOutput` only | adds `buildForPid` + `validateMandatoryReports` + golden tests |
-| `src/io/uhid_descriptor.zig` test block | rumble + IMU goldens | adds `test "buildForPid: 12 mandatory reports present"` (per device class) + `test "buildForPid: matches reference PID descriptor (Moza R5)"` (byte sequence implementer-pinned from first successful real-hardware run; NOT from the probe — see probe evidence scope below) |
+| `src/io/uhid_descriptor.zig` test block | rumble + IMU goldens | adds `test "buildForPid: 8 mandatory PID reports present per kernel pidff_find_reports"` + `test "buildForPid: matches reference PID descriptor (Moza R5)"` (byte sequence implementer-pinned from first successful real-hardware run; NOT from the probe — see probe evidence scope below) |
 
 ---
 
@@ -763,7 +773,7 @@ formal landing in code-repo `.github/workflows/`.)
 
 | # | Risk | Probability | Mitigation | Owner |
 |---|------|-------------|------------|-------|
-| R1 | Incomplete PID descriptor → `pidff_find_reports -ENODEV` → kernel OOPS in `hid_hw_open+0x71` (probe Run 2 evidence: 7-of-12 descriptor caused FFB init failure + kernel NULL-deref) | Low (T1 validator catches) | T1 `validateMandatoryReports` runs at `buildForPid` time, not at runtime; `error.IncompletePidDescriptor` aborts daemon before `UHID_CREATE2`. Golden-byte test compares against an implementer-pinned 12-report descriptor; the byte sequence is recorded after first real-hardware run when kernel logs show successful FFB initialization (no `pidff_find_reports -ENODEV` and no kernel OOPS). First-real-hardware run includes `dmesg -w` review. | T1 implementer |
+| R1 | Incomplete PID descriptor → `pidff_find_reports -ENODEV` → kernel OOPS in `hid_hw_open+0x71` (probe Run 2 evidence: 7-of-8 mandatory reports caused FFB init failure + kernel NULL-deref) | Low (T1 validator catches) | T1 `validateMandatoryReports` runs at `buildForPid` time, not at runtime; `error.IncompletePidDescriptor` aborts daemon before `UHID_CREATE2`. Golden-byte test compares against an implementer-pinned descriptor; the byte sequence is recorded after first real-hardware run when kernel logs show successful FFB initialization (no `pidff_find_reports -ENODEV` and no kernel OOPS). First-real-hardware run includes `dmesg -w` review. | T1 implementer |
 | R2 | VID/PID cloning legal/branding pushback | Low | Documented as kernel-driven structural requirement (probe RESEARCH-REPORT §4.3); `clone_vid_pid` defaults to `false` and is per-device opt-in; release-note copy explains. InputPlumber and inputtino set the precedent. | T2 implementer + maintainer release notes |
 | R3 | `hid-universal-pidff` vs vendor-specific drivers (`hid-lg4ff`, `hid-tmff`) compatibility matrix | Medium | T7 first round covers `hid-universal-pidff` only (default 6.x path). Vendor-driver paths (kernel-5.15 G29 via `hid-lg4ff`) are opportunistic — Phase B CI workflow exercises G29 on 5.15. Mismatched-driver TOMLs deferred to Wave 6 follow-up. | T7 implementer |
 | R4 | `UHID_OUTPUT` rate (peak ~500Hz on aggressive FFB) saturating event loop | Medium | T3 design uses single drain loop, no per-event allocation. T4 tracks `drops_eagain` and rate; if observed `> 200 Hz` sustained, dedicated worker thread proposed for Wave 6 follow-up. T6 e2e test asserts 3 reports/tick handled cleanly. | T3 + T4 implementers |
@@ -831,10 +841,10 @@ evidence base.
 | D1 | `[output.force_feedback]` is a separate sub-table from `[output.imu]` | IMU and FFB are orthogonal capabilities; even though Wave 6 happens to require both UHID-backed (since PID is on the primary card and primary is gated by IMU), conflating them in TOML would lock future redesign. |
 | D2 | `kind = "pid"` requires `backend = "uhid"`; `kind = "rumble"` allows either | Rumble has TWO valid backends (legacy uinput, future Wave 5 UHID); PID has only one (UHID). Validate matrix encodes this. |
 | D3 | `clone_vid_pid` default `false` (NOT `true`) | Default `false` keeps non-PID devices on `FADE:C001` daemon-identity. Wave 5 PRs that flip backends explicitly choose `true` per device. Less surprising than implicit cloning. |
-| D4 | 12-of-12 mandatory validator at build time, not runtime | Probe Run 2 demonstrated kernel OOPS on incomplete descriptor; making this a build-time `BuildError` instead of a runtime `error.UhidCreateFailed` removes the entire failure mode by construction. |
+| D4 | 8-mandatory-report validator at build time, not runtime | Probe Run 2 demonstrated kernel OOPS on incomplete descriptor; making this a build-time `BuildError` instead of a runtime `error.UhidCreateFailed` removes the entire failure mode by construction. The kernel requires exactly 8 mandatory reports (`PID_REQUIRED_REPORTS 8`); 4 others are emitted but are not gating. |
 | D5 | `FfbForwarder` borrows physical hidraw fd, doesn't own | Supervisor already owns the fd through input-grab lifetime; introducing a second owner creates close-ordering hazards. Forwarder is a pass-through, lifetime ≤ supervisor's fd lifetime. |
 | D6 | Single `OutputReport` slice borrowed from read buffer (no copy) | `pollOutputReport` returns a view into `buf`. Caller (`FfbForwarder.forward`) consumes synchronously. Avoids per-event allocation in the hot path. |
 | D7 | Drain-all per ppoll tick (initial implementation) | Lower latency than bounded drain. If R4 saturation manifests, swap to bounded loop with no other code changes. |
 | D8 | Phase B CI workflow uses Logitech G29 VID/PID on `ubuntu-22.04` | G29 binds to `hid-lg4ff` on 5.15 (no `hid-universal-pidff` yet); G29 is the most-likely available 5.15 path. Failing this run is the single concrete signal forcing 5.15 → Option (a). |
-| D9 | T1's golden test pins an implementer-derived 12-report PID descriptor for one wheel class | The byte sequence is recorded after the first real-hardware run shows successful `hid-universal-pidff` FFB init (no OOPS, no `pidff_find_reports -ENODEV`). Probe Run 2 provides evidence for bustype acceptance + driver binding ONLY — it does NOT supply a working descriptor (Run 2's 7-of-12 descriptor caused FFB init failure). New device classes added later via T7 may diverge — per-class goldens added as needed. |
+| D9 | T1's golden test pins an implementer-derived PID descriptor (8 mandatory + 5 optional reports) for one wheel class | The byte sequence is recorded after the first real-hardware run shows successful `hid-universal-pidff` FFB init (no OOPS, no `pidff_find_reports -ENODEV`). Probe Run 2 provides evidence for bustype acceptance + driver binding ONLY — it does NOT supply a working descriptor (Run 2's 7-of-8 mandatory report descriptor caused FFB init failure). New device classes added later via T7 may diverge — per-class goldens added as needed. |
 | D10 | No FFB transformation in padctl (byte-faithful only) | ADR-015 Option (a) hard constraint. Any transformation would need a separate ADR and re-opening of the Stage 3 decision — out of Wave 6 scope. |

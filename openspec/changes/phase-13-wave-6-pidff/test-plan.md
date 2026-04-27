@@ -35,10 +35,11 @@ PR #140, PR #154 B2, PR #160).
   descriptor (one report ID stripped) returns
   `error.IncompletePidDescriptor`.
 - [ ] **TP4**: Output descriptor length ≤ `HID_MAX_DESCRIPTOR_SIZE` (4096)
-  for the maximum-axis-count + 12-PID-report stress case.
-- [ ] **TP5**: Descriptor contains all 12 mandatory `0x85 NN` Report ID
+  for the maximum-axis-count + 8-mandatory + 5-optional PID-report stress case.
+- [ ] **TP5**: Descriptor contains all 8 kernel-mandatory `0x85 NN` Report ID
   prefixes — direct byte scan asserts presence of each NN ∈
-  `{ 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15 }`.
+  `{ 1, 7, 10, 11, 12, 13, 14, 15 }` (per `PID_REQUIRED_REPORTS 8` in
+  `drivers/hid/usbhid/hid-pidff.c`).
 
 ### T5 — `[output.force_feedback]` schema validate
 

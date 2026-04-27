@@ -99,38 +99,31 @@ Files: `src/io/uhid_descriptor.zig`
 - [ ] After axis/button blocks, emit Usage Page Physical Interface
   Device (`0x05 0x0F`) marker.
 
-### T1b: Emit all 12 PID mandatory reports
+### T1b: Emit PID reports (8 kernel-mandatory + 4 optional)
 
-- [ ] Set Effect Report (ID 1) — Effect Type usage 0x25, Duration 0x50,
-  Sample Period 0x54, Gain 0x52, Trigger Button 0x53, Axes Enable 0x55,
-  Direction X 0x56, Direction Y 0x57. Layout matches USB PID 1.01 §4.1.
-- [ ] Set Envelope Report (ID 2) — Attack Level 0x5B, Fade Level 0x5E,
-  Attack Time 0x5C, Fade Time 0x5D.
-- [ ] Set Condition Report (ID 3) — Center Point Offset 0x60,
-  Positive Coefficient 0x61, Negative Coefficient 0x62, Positive Saturation
-  0x63, Negative Saturation 0x64, Dead Band 0x65.
-- [ ] Set Periodic Report (ID 4) — Magnitude 0x70, Offset 0x71, Phase 0x72,
-  Period 0x73.
-- [ ] Set Constant Force Report (ID 5) — Magnitude 0x70.
-- [ ] Set Ramp Force Report (ID 6) — Ramp Start 0x75, Ramp End 0x76.
-- [ ] Effect Operation Report (ID 10) — Operation 0x78 (Start 0x79 / Start
-  Solo 0x7A / Stop 0x7B), Loop Count 0x7C.
-- [ ] Device Control Report (ID 11) — Disable 0x97, Enable 0x98, Stop 0x99,
-  Reset 0x9A, Pause 0x9B, Continue 0x9C.
-- [ ] Device Gain Report (ID 12) — Gain 0x7E.
-- [ ] Create New Effect feature Report (ID 13) — Effect Type 0xAB.
-- [ ] Block Load feature Report (ID 14) — Effect Block Index 0xAE,
-  Block Load Status 0xAC, RAM Pool Available 0xAB (Result).
-- [ ] PID Pool feature Report (ID 15) — RAM Pool Size 0x80,
-  Simultaneous Effects Max 0x83, Device Managed Pool 0xA9,
-  Shared Parameter Blocks 0xAA.
+Kernel-mandatory reports (must all be present; `pidff_find_reports` returns -ENODEV if any absent):
+- [ ] Set Effect Report (ID 1, usage 0x21) — Effect Type, Duration, Sample Period, Gain, Trigger Button, Axes Enable, Direction X/Y. USB PID 1.01 §4.1.
+- [ ] Block Free Report (ID 7, usage 0x90) — Effect Block Index.
+- [ ] Effect Operation Report (ID 10, usage 0x77) — Operation (Start/Start Solo/Stop), Loop Count.
+- [ ] Device Control Report (ID 11, usage 0x96) — Disable/Enable/Stop/Reset/Pause/Continue.
+- [ ] Device Gain Report (ID 12, usage 0x7d) — Gain.
+- [ ] Create New Effect feature Report (ID 13, usage 0xab) — Effect Type.
+- [ ] Block Load feature Report (ID 14, usage 0x89) — Effect Block Index, Block Load Status, RAM Pool Available.
+- [ ] PID Pool feature Report (ID 15, usage 0x7f) — RAM Pool Size, Simultaneous Effects Max, Device Managed Pool, Shared Parameter Blocks.
+
+Optional reports (emitted but not validated by `pidff_find_reports`):
+- [ ] Set Envelope Report (ID 2) — Attack Level, Fade Level, Attack Time, Fade Time.
+- [ ] Set Condition Report (ID 3) — Center Point Offset, Pos/Neg Coefficient, Pos/Neg Saturation, Dead Band.
+- [ ] Set Periodic Report (ID 4) — Magnitude, Offset, Phase, Period.
+- [ ] Set Constant Force Report (ID 5) — Magnitude.
+- [ ] Set Ramp Force Report (ID 6) — Ramp Start, Ramp End.
 
 Implementer pins exact byte sequences against `hid-tools` canonical
-PID descriptor and against the implementer-pinned 12-report PID
+PID descriptor and against the implementer-pinned 8-mandatory-report PID
 descriptor (recorded on first successful real-hardware run when kernel
 shows `hid-universal-pidff` FFB init success — no OOPS, no
 `pidff_find_reports -ENODEV`). Probe Run 2 evidence is for bustype
-acceptance + driver binding ONLY; probe Run 2's 7-of-12 descriptor
+acceptance + driver binding ONLY; probe Run 2's 7-of-8 mandatory descriptor
 caused FFB init failure and must NOT be used as a byte reference.
 Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
 
@@ -139,7 +132,8 @@ Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
 - [ ] Add private function:
   ```zig
   fn validateMandatoryReports(descriptor: []const u8) BuildError!void {
-      const REQUIRED = [_]u8{ 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15 };
+      // Per kernel pidff_reports[0..PID_REQUIRED_REPORTS] (8 entries).
+      const REQUIRED = [_]u8{ 1, 7, 10, 11, 12, 13, 14, 15 };
       var seen: [16]bool = .{false} ** 16;
       var i: usize = 0;
       while (i < descriptor.len) {
@@ -158,7 +152,7 @@ Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
 ### T1d: Golden-byte test
 
 - [ ] In `src/io/uhid_descriptor.zig` test block, add:
-  - **`test "buildForPid: 12 mandatory reports present"`** — call
+  - **`test "buildForPid: 8 mandatory PID reports present per kernel pidff_find_reports"`** — call
     `buildForPid` with a Moza-R5-style fixture (vid=0x11FF, pid=0x1211,
     one axis, no buttons), assert `validateMandatoryReports(result)`
     returns success.
@@ -168,16 +162,16 @@ Report-ID byte sequencing follows USB HID 1.11 §6.2.2.
     bytes from the first successful real-hardware run (kernel shows
     `hid-universal-pidff` FFB init without `Error initialising force
     feedback`). Probe Run 2 does NOT supply these bytes — probe Run 2's
-    7-of-12 descriptor caused FFB failure; the correct byte sequence
+    7-of-8 mandatory descriptor caused FFB failure; the correct byte sequence
     must be derived from USB HID PID 1.01 §4.x and pinned empirically.
   - **`test "buildForPid: synthetic incomplete descriptor → IncompletePidDescriptor"`**
     — directly call `validateMandatoryReports` on a hand-crafted
-    8-of-12 descriptor; assert error.
+    7-of-8 mandatory descriptor; assert error.
 
 ### T1e: Defensive byte-count check
 
 - [ ] Assert `descriptor.len <= HID_MAX_DESCRIPTOR_SIZE` (4096); add
-  test for stress case (all 12 reports + max axes/buttons).
+  test for stress case (all 8 mandatory + 5 optional reports + max axes/buttons).
 
 ### T1f: Build + test gate
 

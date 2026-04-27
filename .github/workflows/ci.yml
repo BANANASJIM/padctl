@@ -36,8 +36,10 @@ jobs:
         if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
       - name: Run all checks
-        run: |
-          timeout 600 zig build ${{ matrix.zig_args }} check-all --summary all
+        # check-all-serial runs test → safe → fmt sequentially to avoid a
+        # Zig build-cache deadlock observed when test and test-safe compile
+        # concurrently (~25 min hang in check-all on PR #166 CI matrix).
+        run: zig build ${{ matrix.zig_args }} check-all-serial
 
   check:
     name: check
@@ -133,5 +135,5 @@ jobs:
               ${DISTRO_SETUP}
               curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
               tar -xJf /tmp/zig.tar.xz -C /tmp
-              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all --summary all
+              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all-serial
             "

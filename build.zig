@@ -161,11 +161,27 @@ pub fn build(b: *std.Build) void {
     const fmt = b.addFmt(.{ .paths = &.{ "src/", "tools/" }, .check = true });
     fmt_step.dependOn(&fmt.step);
 
-    // check-all: single CI gate (test + safe + fmt; tsan excluded — crashes on some CI runners)
-    const check_all = b.step("check-all", "Run all checks (test + safe + fmt)");
+    // check-all: parallel CI gate (test + safe + fmt run concurrently by Zig build).
+    // Known issue: hangs at ~25 min on some CI runners when the parallel test
+    // executables contend on Zig's incremental compilation cache under load.
+    // Use check-all-serial instead when check-all hangs.
+    const check_all = b.step("check-all", "Run all checks in parallel (test + safe + fmt)");
     check_all.dependOn(test_step);
     check_all.dependOn(safe_step);
     check_all.dependOn(fmt_step);
+
+    // check-all-serial: sequential fallback for CI runners where parallel
+    // compilation causes a deadlock in the Zig build cache.  Each step
+    // waits for the previous to finish, so test and test-safe never compile
+    // simultaneously.  Used in CI instead of check-all.
+    const serial_fmt = b.step("_serial-fmt", "");
+    serial_fmt.dependOn(fmt_step);
+    const serial_safe = b.step("_serial-safe", "");
+    serial_safe.dependOn(safe_step);
+    serial_safe.dependOn(serial_fmt);
+    const check_all_serial = b.step("check-all-serial", "Run all checks sequentially (test → safe → fmt)");
+    check_all_serial.dependOn(test_step);
+    check_all_serial.dependOn(serial_safe);
 
     // fuzz: continuous fuzzing (zig build fuzz --fuzz)
     const fuzz_step = b.step("fuzz", "Fuzz test (use: zig build fuzz --fuzz)");

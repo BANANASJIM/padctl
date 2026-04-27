@@ -462,6 +462,10 @@ pub const UhidDevice = struct {
             error.WouldBlock => return null,
             else => return err,
         };
+        // A short read leaves buf[n..UHID_EVENT_SIZE] uninitialised; the req.size
+        // field lives past offset 4100, so even a read of 4095 bytes would let us
+        // parse a garbage size and walk off the end of data[].
+        if (n < UHID_EVENT_SIZE) return error.IncompleteUhidEvent;
         if (n < 4) return null;
         const ev_type = std.mem.readInt(u32, buf[0..4], .little);
         if (ev_type != UHID_OUTPUT) return null;
