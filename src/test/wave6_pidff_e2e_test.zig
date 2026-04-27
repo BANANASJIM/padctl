@@ -390,7 +390,7 @@ test "wave6_pidff: physical hidraw close → forwarder disabled" {
     defer posix.close(uhid_fds[0]);
     defer posix.close(uhid_fds[1]);
 
-    const hidraw_fds = try posix.pipe2(.{});
+    const hidraw_fds = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(hidraw_fds[0]);
     // hidraw_fds[1] is closed mid-test; do NOT defer a second close.
 
@@ -416,7 +416,10 @@ test "wave6_pidff: physical hidraw close → forwarder disabled" {
     // Successful round-trip first.
     try writeUhidOutputEvent(uhid_fds[1], &[_]u8{ 0x01, 0x42 });
     _ = try drainAndForward(dev, &fwd, &uhid_buf);
-    _ = posix.read(hidraw_fds[0], &read_buf) catch {};
+    _ = posix.read(hidraw_fds[0], &read_buf) catch |err| switch (err) {
+        error.WouldBlock => {},
+        else => return err,
+    };
     try testing.expectEqual(@as(u64, 1), fwd.writes_total);
 
     // Close physical hidraw write-end; next forward must set state=.disabled.
