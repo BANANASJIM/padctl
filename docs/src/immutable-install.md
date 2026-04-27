@@ -24,7 +24,7 @@ What the script does:
 1. **Detects** immutable OS (checks for ostree or read-only `/usr`)
 2. **Installs dependencies** via Homebrew (Zig compiler, libusb) — no system reboot needed
 3. **Clones and builds** padctl from source with `ReleaseSafe` optimization
-4. **Installs** the daemon, systemd services, udev rules, and reconnect scripts
+4. **Installs** the daemon, systemd service, udev rules, and reconnect scripts
 5. **Persists** the selected mapping as a device binding in `/etc/padctl/config.toml` (auto-applies on every boot)
 6. **Applies** the mapping to the current session
 7. **Verifies** the installation
@@ -55,9 +55,10 @@ The `padctl install --immutable` flag changes where system files are placed:
 | Binaries | `/usr/bin/` | `/usr/local/bin/` |
 | Service file | `/usr/lib/systemd/system/` | `/etc/systemd/system/` |
 | Service drop-in | *(not created)* | `/etc/systemd/system/padctl.service.d/immutable.conf` |
-| Resume service | `/usr/lib/systemd/system/` | `/etc/systemd/system/` |
 | udev rules | `/usr/lib/udev/rules.d/` | `/etc/udev/rules.d/` |
 | Device configs | `/usr/share/padctl/devices/` | `/usr/local/share/padctl/devices/` |
+
+> `padctl-resume.service` was removed (issue #131-B); udev hotplug handles post-suspend reconnect.
 
 Files in `/etc/` persist across system updates on immutable distros.
 

@@ -46,8 +46,10 @@ padctl switch fps
 Every switch automatically saves your choice to `~/.config/padctl/config.toml`, so you can restore it later with a bare switch:
 
 ```sh
-padctl switch          # re-applies the last-switched mapping from user config
+padctl switch          # re-applies default_mapping from config.toml for the connected device
 ```
+
+Bare `padctl switch` queries the running daemon for the connected device name, then looks up `default_mapping` in `config.toml` (user path first, then `/etc/padctl/config.toml`). If no entry is found it exits with `error: no default_mapping in config.toml for device "<name>"`.
 
 ### Persist across reboots (`--persist`)
 
@@ -280,6 +282,11 @@ Bind in remap: `M1 = "macro:dodge_roll"`
 
 ### Trigger Threshold — analog LT / RT as digital buttons {#trigger-threshold}
 
+> **Warning:** `trigger_threshold` must be at the top level of the mapping file.
+> Placing it inside `[[layer]]` is silently ignored.
+> To use `LT` / `RT` as remap source keys or layer triggers, set this field once
+> at the top of your mapping file, outside any layer block.
+
 LT / RT are analog axes by default and cannot be used directly as `[remap]` source keys. Once `trigger_threshold` is declared, padctl synthesizes digital button events from the axis values each frame, making them available for `[remap]` and layer triggers:
 
 ```toml
@@ -313,7 +320,7 @@ Configures the resistance profile of the DualSense L2/R2 triggers. See [Mapping 
 
 ## Full Example
 
-See [`config/example-mapping.toml`](https://github.com/BANANASJIM/padctl/blob/main/config/example-mapping.toml) in the repository for a complete working config covering base remaps, two layers (hold + toggle), and macros.
+A copy-paste-ready example covering every major feature is included in the repository at [`examples/mappings/comprehensive.toml`](https://github.com/BANANASJIM/padctl/blob/main/examples/mappings/comprehensive.toml). It covers base remaps, two layers (hold + toggle), macros, stick modes, and gyro.
 
 ## Reference
 
