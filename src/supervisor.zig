@@ -885,7 +885,7 @@ pub const Supervisor = struct {
 
                 // Rebuild the mapper so layer state/timers do not keep slices into
                 // the old mapping arena after the reset above.
-                var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
+                var new_mapper = try Mapper.init(map_copy, m.instance.loop.macro_timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
                 m.instance.rebuildAuxIfChanged(map_copy, old_mapping_cfg) catch |err| {
@@ -1159,7 +1159,7 @@ pub const Supervisor = struct {
     }
 
     fn applySwitchMapping(self: *Supervisor, m: *ManagedInstance, parsed_ptr: *mapping_cfg.ParseResult) !void {
-        const new_mapper = try Mapper.init(&parsed_ptr.value, m.instance.loop.timer_fd, self.allocator);
+        const new_mapper = try Mapper.init(&parsed_ptr.value, m.instance.loop.macro_timer_fd, self.allocator);
         m.instance.stop();
         m.thread.join();
         self.clearSwitchMapping(m);
@@ -1261,7 +1261,7 @@ pub const Supervisor = struct {
                 return;
             };
             parsed_ptr.* = parsed;
-            const new_mapper = Mapper.init(&parsed_ptr.value, m.instance.loop.timer_fd, self.allocator) catch {
+            const new_mapper = Mapper.init(&parsed_ptr.value, m.instance.loop.macro_timer_fd, self.allocator) catch {
                 parsed_ptr.deinit();
                 self.allocator.destroy(parsed_ptr);
                 cs.sendResponse(fd, "ERR switch-failed\n");
@@ -2455,7 +2455,7 @@ test "supervisor: Supervisor: reload null mapping clears existing mapper" {
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     inst.mapping_cfg = &parsed_map.value;
-    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
+    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.macro_timer_fd, allocator);
     try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
@@ -2491,7 +2491,7 @@ test "supervisor: reload with malformed TOML keeps old mapping active" {
 
     const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
     inst.mapping_cfg = &parsed_map.value;
-    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
+    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.macro_timer_fd, allocator);
     try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();

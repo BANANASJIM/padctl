@@ -1,8 +1,11 @@
 const std = @import("std");
 const testing = std.testing;
+const posix = std.posix;
 const render = @import("../debug/render.zig");
 const hidraw = @import("../io/hidraw.zig");
 const Supervisor = @import("../supervisor.zig").Supervisor;
+const EventLoop = @import("../event_loop.zig").EventLoop;
+const armTimer = @import("../event_loop.zig").armTimer;
 
 // -- Test 1: renderFrame with empty raw slice --
 
@@ -100,4 +103,28 @@ test "walker: finds toml files in subdirectories" {
 
     // iterate() would find only top.toml (1); walk() finds all 3
     try testing.expectEqual(@as(usize, 3), toml_count);
+}
+
+// -- Test 6 (issue #72): macro timer and layer hold timer are independent fds --
+// Regression: both MacroPlayer delay and layer hold-trigger used the same timerfd.
+// A layer-hold arm/disarm after apply() would silently overwrite the macro delay,
+// causing { delay = N } steps to never fire and subsequent macro steps to be skipped.
+// Fix: EventLoop.macro_timer_fd is a dedicated timerfd for TimerQueue; timer_fd is
+// layer-hold only.  The two fds never share a timerfd_settime call path.
+
+test "issue #72: macro_timer_fd and timer_fd are independent — layer arm does not clobber macro delay" {
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    // Arm the macro timer for 30ms.
+    armTimer(loop.macro_timer_fd, 30);
+
+    // Immediately overwrite the layer timer (simulating timer_request.arm from apply()).
+    // Before the fix both pointed at the same fd, so this would kill the macro timer.
+    armTimer(loop.timer_fd, 5000);
+
+    // Macro timer must still fire within 200ms despite the layer arm above.
+    var pfd = [1]posix.pollfd{.{ .fd = loop.macro_timer_fd, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = try posix.poll(&pfd, 200);
+    try testing.expectEqual(@as(usize, 1), ready);
 }

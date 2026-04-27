@@ -359,7 +359,7 @@ pub const DeviceInstance = struct {
             }
         }
         const mapper: ?Mapper = if (init_mapping) |mcfg|
-            Mapper.init(mcfg, loop.timer_fd, allocator) catch |err| blk: {
+            Mapper.init(mcfg, loop.macro_timer_fd, allocator) catch |err| blk: {
                 std.log.warn("failed to init mapper from default_mapping: {}", .{err});
                 break :blk null;
             }
@@ -433,7 +433,7 @@ pub const DeviceInstance = struct {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
                 const old_mcfg: ?*const MappingConfig = if (self.mapper) |*m| m.config else self.mapping_cfg;
-                if (Mapper.init(new, self.loop.timer_fd, self.allocator)) |nm| {
+                if (Mapper.init(new, self.loop.macro_timer_fd, self.allocator)) |nm| {
                     if (self.mapper) |*m| m.deinit();
                     self.mapper = nm;
                     self.mapping_cfg = new;
@@ -699,7 +699,7 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
         .devices = devices,
         .loop = loop,
         .interp = Interpreter.init(&parsed.value),
-        .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
+        .mapper = try Mapper.init(&mapping_parsed.value, loop.macro_timer_fd, allocator),
         .owner = .none,
         .primary_output = null,
         .imu_output = null,
@@ -768,7 +768,7 @@ test "DeviceInstance: updateMapping updates mapping_cfg after swap" {
         .devices = devices,
         .loop = loop,
         .interp = Interpreter.init(&parsed.value),
-        .mapper = try Mapper.init(&mapping_parsed.value, loop.timer_fd, allocator),
+        .mapper = try Mapper.init(&mapping_parsed.value, loop.macro_timer_fd, allocator),
         .owner = .none,
         .primary_output = null,
         .imu_output = null,
