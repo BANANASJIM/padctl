@@ -2223,6 +2223,23 @@ pub fn stdinPrompt(
 ///   - Same `default_mapping` → no-op (idempotent).
 ///   - `conflict_mode == .force` → backup + overwrite.
 ///   - `conflict_mode == .interactive` → prompt user at stdin (keep/overwrite/abort).
+/// Escape a TOML basic-string value: backslash and double-quote.
+fn tomlEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
+    for (s) |c| {
+        switch (c) {
+            '"', '\\' => {
+                try out.append(allocator, '\\');
+                try out.append(allocator, c);
+            },
+            '\n', '\r' => return error.InvalidDeviceName,
+            else => try out.append(allocator, c),
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 ///   - `conflict_mode == .skip` → log warning, keep existing (non-destructive default).
 ///
 /// Other `[[device]]` entries in the file are preserved. The version field is
@@ -2316,24 +2333,33 @@ fn writeBinding(
         }
     }
 
+    const esc_device_name = try tomlEscape(allocator, device_name);
+    defer allocator.free(esc_device_name);
+    const esc_mapping_name = try tomlEscape(allocator, mapping_name);
+    defer allocator.free(esc_mapping_name);
+
     var wrote_target = false;
     if (devices) |devs| {
         for (devs) |d| {
             if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
                 // Replace this entry with the new mapping.
-                try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+                try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ esc_device_name, esc_mapping_name });
                 wrote_target = true;
             } else {
                 // Preserve unrelated entry.
-                try w.print("\n[[device]]\nname = \"{s}\"\n", .{d.name});
+                const esc_name = try tomlEscape(allocator, d.name);
+                defer allocator.free(esc_name);
+                try w.print("\n[[device]]\nname = \"{s}\"\n", .{esc_name});
                 if (d.default_mapping) |m| {
-                    try w.print("default_mapping = \"{s}\"\n", .{m});
+                    const esc_m = try tomlEscape(allocator, m);
+                    defer allocator.free(esc_m);
+                    try w.print("default_mapping = \"{s}\"\n", .{esc_m});
                 }
             }
         }
     }
     if (!wrote_target) {
-        try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+        try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ esc_device_name, esc_mapping_name });
     }
 
     // Write the file.
@@ -4940,4 +4966,65 @@ test "install: on-disk udev/90-padctl.rules mirrors embedded content" {
     const body = try file.readToEndAlloc(allocator, 64 * 1024);
     defer allocator.free(body);
     try testing.expectEqualStrings(imu_udev_rules_content, body);
+}
+
+test "tomlEscape: plain ASCII passes through" {
+    const allocator = std.testing.allocator;
+    const out = try tomlEscape(allocator, "Hello");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("Hello", out);
+}
+
+test "tomlEscape: double quote is escaped" {
+    const allocator = std.testing.allocator;
+    const out = try tomlEscape(allocator, "Sony \"DualSense\"");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("Sony \\\"DualSense\\\"", out);
+}
+
+test "tomlEscape: backslash is escaped" {
+    const allocator = std.testing.allocator;
+    const out = try tomlEscape(allocator, "path\\to");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("path\\\\to", out);
+}
+
+test "tomlEscape: newline rejected with error.InvalidDeviceName" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(allocator, "bad\nname"));
+}
+
+test "tomlEscape: carriage return rejected with error.InvalidDeviceName" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(allocator, "bad\rname"));
+}
+
+test "tomlEscape: round-trip via manual parse produces original string" {
+    // Verify that escaping and then unescaping yields the original value.
+    // We simulate TOML basic-string unescaping for the two escape sequences.
+    const allocator = std.testing.allocator;
+    const inputs = [_][]const u8{
+        "Sony \"DualSense\"",
+        "path\\to\\device",
+        "mixed \\\"quotes\\\"",
+        "plain name",
+    };
+    for (inputs) |input| {
+        const escaped = try tomlEscape(allocator, input);
+        defer allocator.free(escaped);
+
+        // Unescape: replace \" → " and \\ → \
+        var unescaped = std.ArrayList(u8){};
+        defer unescaped.deinit(allocator);
+        var i: usize = 0;
+        while (i < escaped.len) : (i += 1) {
+            if (escaped[i] == '\\' and i + 1 < escaped.len) {
+                try unescaped.append(allocator, escaped[i + 1]);
+                i += 1;
+            } else {
+                try unescaped.append(allocator, escaped[i]);
+            }
+        }
+        try std.testing.expectEqualStrings(input, unescaped.items);
+    }
 }
