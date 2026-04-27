@@ -37,6 +37,12 @@ Optional build flags:
 - `-Dlibusb=false` — disable libusb linkage (uses hidraw-only path)
 - `-Dwasm=false` — disable WASM plugin runtime
 
+> **GCC 15 build failure (issue #147):** Arch Linux and other distros with GCC 15.x may hit
+> `error: relocation R_X86_64_PC64 in .sframe section is unsupported`. This is an upstream Zig
+> limitation, not a padctl bug. Use `Dockerfile.wave5` (Debian bookworm + Zig 0.15.2 tarball) or
+> install Zig 0.15.2 from the [official tarball](https://ziglang.org/download/) on a system with
+> GCC ≤ 14. Upstream fix: [ziglang/zig#22453](https://github.com/ziglang/zig/issues/22453).
+
 ## Install
 
 ```sh

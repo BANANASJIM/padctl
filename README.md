@@ -165,6 +165,22 @@ zig build check-all    # all checks (test + safe + fmt)
 | `-Dlibusb=false` | `true` | Disable libusb linkage (hidraw-only) |
 | `-Dwasm=false` | `true` | Disable WASM plugin runtime |
 
+### Known build issues
+
+**GCC 15 — `R_X86_64_PC64 in .sframe` linker error (issue #147)**
+
+Arch Linux, Artix, and other cutting-edge distros ship GCC 15.x, which emits `.sframe` sections in `crt1.o` and related startup objects. Zig 0.15.x's linker does not yet handle the `R_X86_64_PC64` relocation type used there, producing:
+
+```
+error: relocation R_X86_64_PC64 in .sframe section is unsupported
+```
+
+This is an upstream Zig limitation, not a padctl bug. Workarounds:
+
+1. **Use the Debian bookworm Docker container (recommended)** — `Dockerfile.wave5` in the repo root builds with Zig 0.15.2 from the official tarball against Debian's GCC 12, which is the supported CI build environment.
+2. **Install Zig 0.15.2 from the official tarball** (`https://ziglang.org/download/`) on a system with GCC ≤ 14 (Debian 12 / Ubuntu 22.04 or 24.04 work fine).
+3. Track upstream fix progress at [ziglang/zig#22453](https://github.com/ziglang/zig/issues/22453).
+
 ## Bazzite / Immutable Distros
 
 On immutable distributions (Bazzite, Fedora Atomic, etc.) where `/usr` is read-only, use the bootstrap script for a complete one-command setup:
