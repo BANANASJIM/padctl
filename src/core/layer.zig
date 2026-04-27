@@ -63,6 +63,15 @@ pub const LayerState = struct {
         return null;
     }
 
+    /// Returns the index of the active layer in configs, or null.
+    pub fn getActiveIndex(
+        self: *const LayerState,
+        configs: []const LayerConfig,
+    ) ?usize {
+        const ptr = self.getActive(configs) orelse return null;
+        return @divExact(@intFromPtr(ptr) - @intFromPtr(configs.ptr), @sizeOf(LayerConfig));
+    }
+
     /// Per-frame dispatch: converts button edges into layer activation/deactivation.
     /// Implements ADR-004 mutual exclusion: while any layer is ACTIVE or PENDING,
     /// new Hold presses are silently ignored; new Toggle-on is blocked until getActive() == null.

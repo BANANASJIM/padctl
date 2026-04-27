@@ -41,6 +41,13 @@ pub const OutputEvents = struct {
     timer_request: ?TimerRequest = null,
 };
 
+const BUTTON_COUNT = @typeInfo(ButtonId).@"enum".fields.len;
+
+const ResolvedRemap = struct {
+    inject: [BUTTON_COUNT]?RemapTargetResolved,
+    suppress: u64,
+};
+
 pub const Mapper = struct {
     config: *const MappingConfig,
     layer: LayerState,
@@ -57,9 +64,24 @@ pub const Mapper = struct {
     active_macros: std.ArrayList(MacroPlayer),
     timer_queue: TimerQueue,
     next_token: u32,
-    warned_unknown_remap: bool,
+    resolved_base: ResolvedRemap,
+    resolved_layers: []ResolvedRemap,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
+        const base = if (config.remap) |m| precomputeRemap(m) else ResolvedRemap{
+            .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
+            .suppress = 0,
+        };
+
+        const layers = config.layer orelse &.{};
+        const resolved_layers = try allocator.alloc(ResolvedRemap, layers.len);
+        for (layers, 0..) |*lc, i| {
+            resolved_layers[i] = if (lc.remap) |m| precomputeRemap(m) else ResolvedRemap{
+                .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
+                .suppress = 0,
+            };
+        }
+
         return .{
             .config = config,
             .layer = LayerState.init(allocator),
@@ -76,7 +98,8 @@ pub const Mapper = struct {
             .active_macros = .{},
             .timer_queue = TimerQueue.init(allocator, timer_fd),
             .next_token = 1,
-            .warned_unknown_remap = false,
+            .resolved_base = base,
+            .resolved_layers = resolved_layers,
         };
     }
 
@@ -84,6 +107,7 @@ pub const Mapper = struct {
         self.layer.deinit();
         self.active_macros.deinit(self.allocator);
         self.timer_queue.deinit();
+        self.allocator.free(self.resolved_layers);
     }
 
     // `now_ns` is the ppoll-wakeup CLOCK_MONOTONIC snapshot from the caller;
@@ -151,7 +175,6 @@ pub const Mapper = struct {
         }
 
         // per-source inject map: null = not mapped, Some = last-write target
-        const BUTTON_COUNT = @typeInfo(ButtonId).@"enum".fields.len;
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
 
         // [3] mode processing
@@ -226,15 +249,18 @@ pub const Mapper = struct {
             );
         }
 
-        // [4] base remap: collect suppress mask + per-source inject targets
-        if (self.config.remap) |remap_map| {
-            collectRemapMap(remap_map, &self.suppressed_buttons, &per_src_inject, &self.warned_unknown_remap);
+        // [4] base remap: copy precomputed suppress mask + inject targets
+        self.suppressed_buttons |= self.resolved_base.suppress;
+        for (self.resolved_base.inject, 0..) |t, i| {
+            if (t) |target| per_src_inject[i] = target;
         }
 
         // [5] layer remap: OR-accumulate suppress, last-write-wins for inject
-        if (self.layer.getActive(configs)) |active| {
-            if (active.remap) |layer_remap| {
-                collectRemapMap(layer_remap, &self.suppressed_buttons, &per_src_inject, &self.warned_unknown_remap);
+        if (self.layer.getActiveIndex(configs)) |idx| {
+            const lr = &self.resolved_layers[idx];
+            self.suppressed_buttons |= lr.suppress;
+            for (lr.inject, 0..) |t, i| {
+                if (t) |target| per_src_inject[i] = target;
             }
         }
 
@@ -468,32 +494,26 @@ fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {
     };
 }
 
-fn collectRemapMap(
-    remap_map: toml.HashMap([]const u8),
-    suppressed: *u64,
-    per_src_inject: []?RemapTargetResolved,
-    warned: *bool,
-) void {
+fn precomputeRemap(remap_map: toml.HashMap([]const u8)) ResolvedRemap {
+    var result = ResolvedRemap{
+        .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
+        .suppress = 0,
+    };
     var it = remap_map.map.iterator();
     while (it.next()) |entry| {
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse {
-            if (!warned.*) {
-                std.log.warn("unknown remap source: {s}", .{entry.key_ptr.*});
-                warned.* = true;
-            }
+            std.log.warn("unknown remap source: {s}", .{entry.key_ptr.*});
             continue;
         };
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
         const target = resolveTarget(entry.value_ptr.*) catch {
-            if (!warned.*) {
-                std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
-                warned.* = true;
-            }
+            std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
             continue;
         };
-        suppressed.* |= @as(u64, 1) << src_idx;
-        per_src_inject[@intCast(src_idx)] = target;
+        result.suppress |= @as(u64, 1) << src_idx;
+        result.inject[@intCast(src_idx)] = target;
     }
+    return result;
 }
 
 fn emitTapEvent(
@@ -1009,8 +1029,8 @@ test "mapper: Mapper.apply toggle OOM is silently swallowed" {
         \\activation = "toggle"
     , allocator);
     defer parsed.deinit();
-    // Failing allocator: Mapper.init succeeds (no heap alloc), first alloc fails on toggled.put.
-    var fa = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    // Failing allocator: Mapper.init needs 1 alloc (resolved_layers); second alloc fails on toggled.put.
+    var fa = testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
     var m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, fa.allocator());
     defer m.deinit();
     const sel_idx: u6 = @intCast(@intFromEnum(ButtonId.Select));
@@ -1504,6 +1524,79 @@ test "mapper: trigger_threshold: release clears button bit" {
 
     const e2 = try m.apply(.{ .lt = 50 }, 16, 0);
     try testing.expect((e2.gamepad.buttons & lt_bit) == 0);
+}
+
+test "mapper: precomputed remap table has correct values after init" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = "B"
+        \\M1 = "KEY_F13"
+        \\
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.remap]
+        \\X = "disabled"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_idx: usize = @intFromEnum(ButtonId.A);
+    const m1_idx: usize = @intFromEnum(ButtonId.M1);
+    const x_idx: usize = @intFromEnum(ButtonId.X);
+
+    // base remap: A -> B (gamepad_button), M1 -> KEY_F13 (key)
+    const a_mask: u64 = @as(u64, 1) << @as(u6, @intCast(a_idx));
+    try testing.expect(m.resolved_base.suppress & a_mask != 0);
+    try testing.expect(m.resolved_base.inject[a_idx] != null);
+    switch (m.resolved_base.inject[a_idx].?) {
+        .gamepad_button => |dst| try testing.expectEqual(ButtonId.B, dst),
+        else => return error.WrongTargetType,
+    }
+    const m1_mask: u64 = @as(u64, 1) << @as(u6, @intCast(m1_idx));
+    try testing.expect(m.resolved_base.suppress & m1_mask != 0);
+    switch (m.resolved_base.inject[m1_idx].?) {
+        .key => |code| try testing.expectEqual(@as(u16, 183), code), // KEY_F13
+        else => return error.WrongTargetType,
+    }
+
+    // layer remap: X -> disabled
+    try testing.expectEqual(@as(usize, 1), m.resolved_layers.len);
+    const x_mask: u64 = @as(u64, 1) << @as(u6, @intCast(x_idx));
+    try testing.expect(m.resolved_layers[0].suppress & x_mask != 0);
+    switch (m.resolved_layers[0].inject[x_idx].?) {
+        .disabled => {},
+        else => return error.WrongTargetType,
+    }
+}
+
+test "mapper: 1000 apply frames with remap produce stable output (no per-frame string work)" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = "B"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
+    const b_mask: u64 = @as(u64, 1) << b_idx;
+
+    // Run 1000 frames; each must produce A suppressed and B injected.
+    for (0..1000) |frame| {
+        const ev = try m.apply(.{ .buttons = a_mask }, 16, @intCast(frame));
+        try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & a_mask);
+        try testing.expect(ev.gamepad.buttons & b_mask != 0);
+    }
 }
 
 test "mapper: #79 dual-ready ppoll — apply uses caller now_ns, tap fires at press+195ms" {
