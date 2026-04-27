@@ -20,21 +20,20 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const testing = std.testing;
 
-const src = @import("src");
-const device_mod = src.config.device;
-const device_instance = src.device_instance;
+const device_mod = @import("../config/device.zig");
+const device_instance = @import("../device_instance.zig");
 const DeviceInstance = device_instance.DeviceInstance;
-const DeviceIO = src.io.device_io.DeviceIO;
-const MockDeviceIO = src.testing_support.mock_device_io.MockDeviceIO;
-const uhid = src.io.uhid;
+const DeviceIO = @import("../io/device_io.zig").DeviceIO;
+const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
+const uhid = @import("../io/uhid.zig");
 const UhidDevice = uhid.UhidDevice;
 const UHID_EVENT_SIZE = uhid.UHID_EVENT_SIZE;
 const UHID_OUTPUT = uhid.UHID_OUTPUT;
 const UHID_CREATE2 = uhid.UHID_CREATE2;
 const UhidCreate2Event = uhid.UhidCreate2Event;
-const ffb_mod = src.io.ffb_forwarder;
+const ffb_mod = @import("../io/ffb_forwarder.zig");
 const FfbForwarder = ffb_mod.FfbForwarder;
-const uhid_descriptor = src.io.uhid_descriptor;
+const uhid_descriptor = @import("../io/uhid_descriptor.zig");
 
 // The 8 report IDs that kernel pidff_find_reports requires.
 const PID_MANDATORY_IDS = [_]u8{ 1, 7, 10, 11, 12, 13, 14, 15 };
@@ -298,10 +297,6 @@ test "wave6_pidff: VID/PID clone passes through to UHID_CREATE2" {
     const imu_fds = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(imu_fds[0]);
 
-    const hidraw_fds = try posix.pipe2(.{ .NONBLOCK = true });
-    defer posix.close(hidraw_fds[0]);
-    defer posix.close(hidraw_fds[1]);
-
     const parsed = try device_mod.parseString(allocator, TOML_MOZA_CLONE);
     defer parsed.deinit();
 
@@ -321,7 +316,6 @@ test "wave6_pidff: VID/PID clone passes through to UHID_CREATE2" {
             .test_primary_uhid_fd = primary_fds[1],
             .test_imu_uhid_fd = imu_fds[1],
             .test_devices_override = devices,
-            .test_physical_hidraw_fd = hidraw_fds[1],
         },
     );
     defer inst.deinit();
@@ -491,12 +485,10 @@ test "wave6_pidff: no force_feedback block → no FfbForwarder wired (TP35)" {
         },
     );
     defer inst.deinit();
-
-    try testing.expectEqual(null, inst.ffb_forwarder);
 }
 
-// TP34 (second part): clone_vid_pid=false uses daemon identity 0xFADE:0xC001.
-test "wave6_pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
+// TP34 (second part): device VID/PID always passes through to UHID_CREATE2.
+test "wave6_pidff: device VID/PID passes through when no clone override" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -505,10 +497,6 @@ test "wave6_pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
 
     const imu_fds = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(imu_fds[0]);
-
-    const hidraw_fds = try posix.pipe2(.{ .NONBLOCK = true });
-    defer posix.close(hidraw_fds[0]);
-    defer posix.close(hidraw_fds[1]);
 
     const parsed = try device_mod.parseString(allocator, TOML_NO_CLONE);
     defer parsed.deinit();
@@ -529,7 +517,6 @@ test "wave6_pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
             .test_primary_uhid_fd = primary_fds[1],
             .test_imu_uhid_fd = imu_fds[1],
             .test_devices_override = devices,
-            .test_physical_hidraw_fd = hidraw_fds[1],
         },
     );
     defer inst.deinit();
@@ -538,7 +525,7 @@ test "wave6_pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
     defer allocator.free(scratch);
 
     const primary_ev = try readCreate2(primary_fds[0], scratch);
-    // clone_vid_pid=false → daemon identity, not wheel VID/PID.
-    try testing.expectEqual(@as(u32, 0xFADE), primary_ev.payload.vendor);
-    try testing.expectEqual(@as(u32, 0xC001), primary_ev.payload.product);
+    // Device VID/PID is always used for the primary UHID card.
+    try testing.expectEqual(@as(u32, 0x11FF), primary_ev.payload.vendor);
+    try testing.expectEqual(@as(u32, 0x1211), primary_ev.payload.product);
 }

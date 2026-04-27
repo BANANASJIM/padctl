@@ -632,6 +632,7 @@ pub const EventLoop = struct {
                             if (uhid_dev.output_cb) |cb| {
                                 cb(uhid_dev.output_ctx.?, r);
                             }
+                            // TODO(T4): wire FfbForwarder hidraw write
                         }
                     }
                 }

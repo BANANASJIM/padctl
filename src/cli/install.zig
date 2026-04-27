@@ -1865,7 +1865,6 @@ const UdevEntry = struct {
     vid: u16,
     pid: u16,
     block_kernel_drivers: []const []const u8 = &.{},
-    clone_vid_pid: bool = false,
 };
 
 /// Scan all device TOML files in dirs, extract VID/PID/name/block_kernel_drivers,
@@ -1913,16 +1912,10 @@ fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) 
             j += 1;
         }
         if (dup) {
-            // Merge richer data from the duplicate into the kept entry.
+            // Prefer the entry with richer data (block_kernel_drivers populated)
             if (entries.items[i].block_kernel_drivers.len == 0 and entries.items[j].block_kernel_drivers.len > 0) {
                 entries.items[i].block_kernel_drivers = entries.items[j].block_kernel_drivers;
                 entries.items[j].block_kernel_drivers = &.{};
-            }
-            // clone_vid_pid is a boolean OR: if either duplicate has it set,
-            // the merged result must also have it (one TOML may carry the flag
-            // and the other may not, e.g. when two reports share a VID:PID).
-            if (entries.items[j].clone_vid_pid) {
-                entries.items[i].clone_vid_pid = true;
             }
             const removed = entries.items[j];
             allocator.free(removed.name);
@@ -1975,20 +1968,6 @@ fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []const U
     // uaccess: graphical login ACL; GROUP+MODE: headless/SSH/test fallback via 'input' group
     try buf.appendSlice(allocator, "\nSUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
     try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uhid\",   TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
-
-    // Per-VID/PID udev rules for cloned UHID cards (clone_vid_pid=true).
-    // hid-universal-pidff binds by modalias on the cloned VID/PID; uaccess must
-    // follow so the user session retains access to the resulting hidraw node.
-    for (entries) |e| {
-        if (!e.clone_vid_pid) continue;
-        const rule = try std.fmt.allocPrint(
-            allocator,
-            "KERNELS==\"uhid\", SUBSYSTEM==\"input\", ATTRS{{id/vendor}}==\"{x:0>4}\", ATTRS{{id/product}}==\"{x:0>4}\", TAG+=\"uaccess\"\n",
-            .{ e.vid, e.pid },
-        );
-        defer allocator.free(rule);
-        try buf.appendSlice(allocator, rule);
-    }
 
     var f = try std.fs.createFileAbsolute(rules_path, .{ .truncate = true });
     defer f.close();
@@ -2445,49 +2424,40 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
     var vid: ?u16 = null;
     var pid: ?u16 = null;
     var block_drivers: []const []const u8 = &.{};
-    var clone_vid_pid: bool = false;
     var in_device_section = false;
-    var in_ffb_section = false;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
 
+        // Track TOML sections — only extract from [device]
         if (trimmed.len > 0 and trimmed[0] == '[') {
             in_device_section = std.mem.startsWith(u8, trimmed, "[device]");
-            in_ffb_section = std.mem.startsWith(u8, trimmed, "[output.force_feedback]");
             continue;
         }
 
-        if (in_device_section) {
-            if (isFieldKey(trimmed, "name")) {
-                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
-                    const n = @min(val.len, name_buf.len - 1);
-                    @memcpy(name_buf[0..n], val[0..n]);
-                    name = name_buf[0..n];
-                }
-            } else if (isFieldKey(trimmed, "vid")) {
-                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
-                    vid = parseHexOrDec(u16, val) catch continue;
-                }
-            } else if (isFieldKey(trimmed, "pid")) {
-                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
-                    pid = parseHexOrDec(u16, val) catch continue;
-                }
-            } else if (isFieldKey(trimmed, "block_kernel_drivers")) {
-                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                    block_drivers = parseStringArray(allocator, trimmed[eq + 1 ..]) catch &.{};
-                }
+        if (!in_device_section) continue;
+
+        if (isFieldKey(trimmed, "name")) {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
+                const n = @min(val.len, name_buf.len - 1);
+                @memcpy(name_buf[0..n], val[0..n]);
+                name = name_buf[0..n];
             }
-        } else if (in_ffb_section) {
-            if (isFieldKey(trimmed, "clone_vid_pid")) {
-                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
-                    clone_vid_pid = std.mem.eql(u8, val, "true");
-                }
+        } else if (isFieldKey(trimmed, "vid")) {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
+                vid = parseHexOrDec(u16, val) catch continue;
+            }
+        } else if (isFieldKey(trimmed, "pid")) {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
+                pid = parseHexOrDec(u16, val) catch continue;
+            }
+        } else if (isFieldKey(trimmed, "block_kernel_drivers")) {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                block_drivers = parseStringArray(allocator, trimmed[eq + 1 ..]) catch &.{};
             }
         }
     }
@@ -2498,7 +2468,6 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
             .vid = vid.?,
             .pid = pid.?,
             .block_kernel_drivers = block_drivers,
-            .clone_vid_pid = clone_vid_pid,
         });
     } else {
         // Clean up block_drivers if we didn't create an entry
@@ -4801,90 +4770,6 @@ test "install: udev rule grants input group and uaccess tag to uhid and uinput" 
 
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\",   TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
-}
-
-test "install: clone_vid_pid=true emits per-VID/PID udev rule" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(tmp_path);
-
-    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
-    defer allocator.free(devices_dir);
-    try std.fs.makeDirAbsolute(devices_dir);
-
-    const toml_path = try std.fmt.allocPrint(allocator, "{s}/moza-r5.toml", .{devices_dir});
-    defer allocator.free(toml_path);
-    {
-        var f = try std.fs.createFileAbsolute(toml_path, .{});
-        defer f.close();
-        try f.writeAll(
-            \\[device]
-            \\name = "Moza R5"
-            \\vid = 0x11FF
-            \\pid = 0x1211
-            \\[output.force_feedback]
-            \\clone_vid_pid = true
-        );
-    }
-
-    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
-    defer allocator.free(rules_path);
-    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
-
-    var file = try std.fs.openFileAbsolute(rules_path, .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 8192);
-    defer allocator.free(content);
-
-    // Per-VID/PID rule must be present for the cloned identity
-    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{id/vendor}==\"11ff\", ATTRS{id/product}==\"1211\", TAG+=\"uaccess\"") != null);
-    // Generic UHID wildcard rule must also still be present
-    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\"") != null);
-}
-
-test "install: clone_vid_pid=false produces no per-VID/PID rule" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(tmp_path);
-
-    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
-    defer allocator.free(devices_dir);
-    try std.fs.makeDirAbsolute(devices_dir);
-
-    const toml_path = try std.fmt.allocPrint(allocator, "{s}/vader5.toml", .{devices_dir});
-    defer allocator.free(toml_path);
-    {
-        var f = try std.fs.createFileAbsolute(toml_path, .{});
-        defer f.close();
-        try f.writeAll(
-            \\[device]
-            \\name = "Vader 5"
-            \\vid = 0x37d7
-            \\pid = 0x2401
-            \\[output.force_feedback]
-            \\clone_vid_pid = false
-        );
-    }
-
-    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
-    defer allocator.free(rules_path);
-    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
-
-    var file = try std.fs.openFileAbsolute(rules_path, .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 8192);
-    defer allocator.free(content);
-
-    // No per-VID/PID ENV rule should be present
-    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{id/vendor}") == null);
 }
 
 test "install: modules-load.d content includes uhid and uinput" {
