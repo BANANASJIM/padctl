@@ -6,6 +6,8 @@ const hidraw = @import("../io/hidraw.zig");
 const Supervisor = @import("../supervisor.zig").Supervisor;
 const EventLoop = @import("../event_loop.zig").EventLoop;
 const armTimer = @import("../event_loop.zig").armTimer;
+const helpers = @import("helpers.zig");
+const layer_mod = @import("../core/layer.zig");
 
 // -- Test 1: renderFrame with empty raw slice --
 
@@ -127,4 +129,108 @@ test "issue #72: macro_timer_fd and timer_fd are independent — layer arm does 
     var pfd = [1]posix.pollfd{.{ .fd = loop.macro_timer_fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 200);
     try testing.expectEqual(@as(usize, 1), ready);
+}
+
+// -- Test 7 (PR #171 follow-up): timer expiry handlers must be split per slot --
+// Regression: Mapper.onTimerExpired ran self.layer.onTimerExpired() unconditionally,
+// promoting any PENDING layer to ACTIVE regardless of which timerfd fired. PR #171
+// only separated the arm path; the expiry handlers still routed through one entry,
+// so a macro `delay` shorter than hold_timeout collapsed the layer hold timing to
+// the macro deadline.
+
+test "macro timer expiry must NOT promote PENDING layer (PR #171 follow-up)" {
+    const allocator = testing.allocator;
+
+    var ctx = try helpers.makeMapper(
+        \\[[layer]]
+        \\name = "fps"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\hold_timeout = 200
+        \\
+        \\[[macro]]
+        \\name = "tap_b"
+        \\steps = [
+        \\  { delay = 50 },
+        \\  { tap = "KEY_B" },
+        \\]
+        \\
+        \\[remap]
+        \\A = "macro:tap_b"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    // t=0: press A → macro arms TimerQueue for t+50ms via macro_timer_fd.
+    const press_a_ns: i128 = 0;
+    const a_mask = helpers.btnMask(.A);
+    _ = try m.apply(.{ .buttons = a_mask }, 16, press_a_ns);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    // t=20ms: press LT → layer goes PENDING; layer hold deadline at t=220ms.
+    const press_lt_ns: i128 = 20 * std.time.ns_per_ms;
+    const lt_mask = helpers.btnMask(.LT);
+    _ = try m.apply(.{ .buttons = a_mask | lt_mask }, 16, press_lt_ns);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqual(layer_mod.TapHoldPhase.pending, m.layer.tap_hold.?.phase);
+    try testing.expect(!m.layer.tap_hold.?.layer_activated);
+
+    // t=50ms: macro_timer_fd fires (slot 4). Calling the macro-only handler
+    // must NOT touch the layer state.
+    const macro_expiry_ns: i128 = 50 * std.time.ns_per_ms;
+    _ = m.onMacroTimerExpired(macro_expiry_ns);
+
+    // Layer must still be PENDING — premature promotion is the regression.
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqual(layer_mod.TapHoldPhase.pending, m.layer.tap_hold.?.phase);
+    try testing.expect(!m.layer.tap_hold.?.layer_activated);
+
+    // Layer timer_fd fires (slot 2). Layer-only handler promotes PENDING → ACTIVE.
+    _ = m.onLayerTimerExpired();
+    try testing.expectEqual(layer_mod.TapHoldPhase.active, m.layer.tap_hold.?.phase);
+    try testing.expect(m.layer.tap_hold.?.layer_activated);
+}
+
+test "layer timer expiry must NOT drain macro queue (PR #171 follow-up)" {
+    const allocator = testing.allocator;
+
+    var ctx = try helpers.makeMapper(
+        \\[[layer]]
+        \\name = "fps"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\hold_timeout = 100
+        \\
+        \\[[macro]]
+        \\name = "delayed_b"
+        \\steps = [
+        \\  { delay = 500 },
+        \\  { tap = "KEY_B" },
+        \\]
+        \\
+        \\[remap]
+        \\A = "macro:delayed_b"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    // t=0: press A → macro arms TimerQueue for t+500ms.
+    const a_mask = helpers.btnMask(.A);
+    _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+    const initial_step_index = m.active_macros.items[0].step_index;
+
+    // t=10ms: press LT → layer PENDING; hold deadline at t=110ms.
+    const press_lt_ns: i128 = 10 * std.time.ns_per_ms;
+    const lt_mask = helpers.btnMask(.LT);
+    _ = try m.apply(.{ .buttons = a_mask | lt_mask }, 16, press_lt_ns);
+
+    // Layer-only handler must NOT advance the macro player (whose deadline is
+    // far in the future at t=510ms). The macro must still be at the same step.
+    _ = m.onLayerTimerExpired();
+
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqual(layer_mod.TapHoldPhase.active, m.layer.tap_hold.?.phase);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+    try testing.expectEqual(initial_step_index, m.active_macros.items[0].step_index);
 }

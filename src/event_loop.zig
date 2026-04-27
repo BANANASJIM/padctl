@@ -712,13 +712,14 @@ pub const EventLoop = struct {
 
             // Layer timerfd (slot 2): drained after device fds so an
             // on-wakeup tap release reaches apply() before PENDING is
-            // promoted to ACTIVE (issue #79). Both handlers share the
-            // `now` snapshot taken right after ppoll.
+            // promoted to ACTIVE (issue #79). Routes to the layer-only
+            // expiry handler so a concurrent macro fd expiry on slot 4
+            // does not cause the layer half to run twice.
             if (self.pollfds[2].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
                 if (ctx.mapper) |m| {
-                    const aux = m.onTimerExpired(now);
+                    const aux = m.onLayerTimerExpired();
                     if (aux.len > 0) {
                         if (ctx.aux_output) |ao| ao.emitAux(aux.slice()) catch {};
                     }
@@ -726,12 +727,14 @@ pub const EventLoop = struct {
             }
 
             // Macro timerfd (slot 4): separate fd so macro delays cannot be
-            // clobbered by layer-hold arm/disarm (issue #72).
+            // clobbered by layer-hold arm/disarm (issue #72). Routes to the
+            // macro-only expiry handler — must not promote a PENDING layer
+            // when a macro `delay` shorter than hold_timeout fires.
             if (self.pollfds[4].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.macro_timer_fd, &expiry) catch {};
                 if (ctx.mapper) |m| {
-                    const macro_aux = m.onTimerExpired(now);
+                    const macro_aux = m.onMacroTimerExpired(now);
                     if (macro_aux.len > 0) {
                         if (ctx.aux_output) |ao| ao.emitAux(macro_aux.slice()) catch {};
                     }
