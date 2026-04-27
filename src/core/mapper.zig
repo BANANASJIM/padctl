@@ -378,14 +378,23 @@ pub const Mapper = struct {
         return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux, .timer_request = timer_request };
     }
 
-    // `now_ns` is the same ppoll-wakeup snapshot passed to apply().
-    pub fn onTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
+    // Layer-hold timerfd (slot 2) expiry: promote PENDING -> ACTIVE only.
+    // Must NOT drain the macro timer_queue — a macro fd expiry on slot 4
+    // arriving in the same wakeup is handled by onMacroTimerExpired().
+    pub fn onLayerTimerExpired(self: *Mapper) AuxEventList {
         const th_res = self.layer.onTimerExpired();
         if (th_res.layer_activated) {
             self.prev.dpad_x = 0;
             self.prev.dpad_y = 0;
         }
+        return AuxEventList{};
+    }
 
+    // Macro timerfd (slot 4) expiry: drain TimerQueue and step active macros.
+    // Must NOT call layer.onTimerExpired() — a macro `delay` shorter than the
+    // layer hold_timeout would otherwise prematurely promote a PENDING layer.
+    // `now_ns` is the same ppoll-wakeup CLOCK_MONOTONIC snapshot passed to apply().
+    pub fn onMacroTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
         var aux = AuxEventList{};
         var macro_tap_release: u64 = 0;
         var buf: [16]timer_queue_mod.Deadline = undefined;
@@ -419,6 +428,14 @@ pub const Mapper = struct {
             self.pending_tap_release = existing | macro_tap_release;
         }
         return aux;
+    }
+
+    // DEPRECATED: split per slot. Retained for tests / external callers that
+    // want both halves; production event_loop dispatches each half from its
+    // own pollfd slot. `now_ns` is the ppoll-wakeup snapshot.
+    pub fn onTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
+        _ = self.onLayerTimerExpired();
+        return self.onMacroTimerExpired(now_ns);
     }
 
     fn findMacro(self: *const Mapper, name: []const u8) ?*const mapping.Macro {
