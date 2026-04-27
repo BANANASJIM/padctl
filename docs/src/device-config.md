@@ -10,6 +10,7 @@ Device configs are TOML files in `devices/<vendor>/<model>.toml`.
 | `vid` | integer | yes | USB vendor ID (hex literal ok: `0x054c`) |
 | `pid` | integer | yes | USB product ID |
 | `mode` | string | no | Device mode identifier |
+| `block_kernel_drivers` | string[] | no | Kernel driver names to unbind via udev at install time, e.g. `block_kernel_drivers = ["xpad"]`. When `padctl install` runs as root, it also walks `/sys/bus/usb/drivers/<driver>/unbind` for matching VID:PID pairs immediately. |
 
 ### `[[device.interface]]`
 

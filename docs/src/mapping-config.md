@@ -12,7 +12,18 @@ trigger_threshold = 100
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | — | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
-| `trigger_threshold` | integer (0–255) | null | Threshold for synthesizing digital `LT` / `RT` button events from the analog trigger axes. See below. |
+| `trigger_threshold` | integer (0–255) | null | Threshold for synthesizing digital `LT` / `RT` button events from the analog trigger axes. **Top-level only** — placing this inside `[[layer]]` is silently ignored. See below. |
+
+## Validation behaviour
+
+`padctl daemon` runs a post-parse linter on every mapping TOML file at startup. Unknown keys produce warnings to stderr with line numbers and section context:
+
+```
+config: unknown key 'trigger_threshold' inside [layer] (line 42) — typo or misplaced field?
+config: unknown key 'typo_field' at top-level (line 7) — typo or misplaced field?
+```
+
+The linter is fail-open: warnings only, the daemon still starts. This surfaces common mistakes such as placing `trigger_threshold` inside a `[[layer]]` block instead of at the top level (also surfaces preceding silent rewrites — see [Diagnostic logging](diagnostic-logging.md#schema-rewrite)).
 
 <a id="trigger_threshold"></a>
 ### trigger_threshold — analog triggers as digital buttons

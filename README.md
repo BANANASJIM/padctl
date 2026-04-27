@@ -100,8 +100,8 @@ yay -S padctl-git   # build from source
 ### Debian / Ubuntu
 
 ```sh
-curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_0.1.0_amd64.deb
-sudo dpkg -i padctl_0.1.0_amd64.deb
+curl -fLO https://github.com/BANANASJIM/padctl/releases/download/v0.1.2/padctl_0.1.2_amd64.deb
+sudo dpkg -i padctl_0.1.2_amd64.deb
 ```
 
 For arm64, replace `amd64` with `arm64`.

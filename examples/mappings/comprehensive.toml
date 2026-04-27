@@ -1,0 +1,107 @@
+# comprehensive.toml — padctl mapping reference example
+#
+# Copy this file to ~/.config/padctl/mappings/my-mapping.toml and adapt it.
+# Every major feature is shown here with a one-line explanation.
+# Remove or comment out any section your device does not need.
+#
+# Button names: A B X Y  LB RB LT RT  Start Select  LS RS  M1 M2 M3 M4  LM RM  C Z
+
+name = "comprehensive-example"
+
+# REQUIRED to use LT / RT as [remap] source keys or layer triggers.
+# LT and RT are analog axes by default; this threshold synthesizes digital
+# button events so they behave like face buttons in remap and layer rules.
+# Placing trigger_threshold inside [[layer]] is silently ignored —
+# it MUST appear at the top level of the mapping file (here).
+trigger_threshold = 128   # 0–255; axis value above this → button press
+
+# --- Top-level remapping (always active, no layer needed) ---
+
+[remap]
+Select  = "Start"           # swap Select and Start
+Y       = "KEY_F1"          # face button → keyboard key
+RB      = "mouse_left"      # shoulder button → mouse left click
+LT      = "KEY_LEFTSHIFT"   # trigger → Shift (needs trigger_threshold above)
+M1      = "macro:dodge_roll" # back paddle → named macro
+
+# --- Stick configuration ---
+
+[stick.left]
+mode      = "gamepad"   # "gamepad" | "mouse" | "scroll"
+deadzone  = 128
+sensitivity = 1.0
+
+[stick.right]
+mode             = "gamepad"
+deadzone         = 100
+sensitivity      = 1.5
+suppress_gamepad = true   # suppress raw axis when mode is mouse/scroll
+
+# --- Gyroscope (off by default) ---
+
+[gyro]
+mode = "off"   # set to "mouse" to enable gyro-to-mouse
+
+# --- Macros (referenced by "macro:<name>" in remap values) ---
+
+[[macro]]
+name  = "dodge_roll"
+steps = [
+    { tap   = "B"  },       # tap B (dodge)
+    { delay = 50   },       # wait 50 ms
+    { tap   = "A"  },       # tap A (roll)
+]
+
+[[macro]]
+name  = "shift_click"
+steps = [
+    { down = "KEY_LEFTSHIFT" },
+    "pause_for_release",      # hold until trigger button is released
+    { up   = "KEY_LEFTSHIFT" },
+]
+
+# --- Layer 1: hold LM to enable gyro + mouse aim (hold activation) ---
+#
+# While LM is held, the overrides below replace the base remap/stick/gyro.
+# A short press (< hold_timeout ms) fires `tap` instead of activating the layer.
+
+[[layer]]
+name         = "aim"
+trigger      = "LM"
+activation   = "hold"
+hold_timeout = 200        # ms; short press fires the tap action
+tap          = "mouse_side"
+
+[layer.remap]
+RB = "mouse_left"
+RT = "mouse_right"        # RT works here because trigger_threshold is set above
+
+[layer.gyro]
+mode        = "mouse"
+sensitivity = 2.0
+deadzone    = 300
+smoothing   = 0.3
+invert_y    = true
+
+[layer.stick_right]
+mode             = "mouse"
+sensitivity      = 1.0
+suppress_gamepad = true
+
+[layer.stick_left]
+mode = "scroll"
+
+# --- Layer 2: toggle fn-key row on Select (toggle activation) ---
+#
+# Press Select once to enter; press Select again to exit.
+
+[[layer]]
+name       = "fn"
+trigger    = "Select"
+activation = "toggle"
+
+[layer.remap]
+A = "KEY_F1"
+B = "KEY_F2"
+X = "KEY_F3"
+Y = "KEY_F4"

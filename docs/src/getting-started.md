@@ -13,8 +13,8 @@ A prebuilt binary package (`padctl-bin`) is also available in the AUR.
 ### Debian / Ubuntu
 
 ```sh
-curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_0.1.0_amd64.deb
-sudo dpkg -i padctl_0.1.0_amd64.deb
+curl -fLO https://github.com/BANANASJIM/padctl/releases/download/v0.1.2/padctl_0.1.2_amd64.deb
+sudo dpkg -i padctl_0.1.2_amd64.deb
 ```
 
 ## Prerequisites
@@ -65,7 +65,7 @@ sudo ./zig-out/bin/padctl install --prefix /usr --destdir "$DESTDIR"
 `padctl install` also sets up the following on all systems:
 
 - **`padctl-reconnect`** — A hotplug script triggered by udev when a controller is plugged in. It starts the daemon if not running, restarts it if failed, and re-applies the active mapping. After suspend/resume the kernel re-emits udev events for re-enumerated devices, so the same hook handles post-wake reconnect — no separate resume unit is needed.
-- **Driver conflict rules** — Auto-generated udev rules that unbind conflicting kernel drivers (e.g., `xpad`) from devices that padctl manages. Configured per-device via `block_kernel_drivers` in device TOML configs.
+- **Driver conflict rules** — Auto-generated udev rules that unbind conflicting kernel drivers (e.g., `xpad`) from devices that padctl manages. Configured per-device via `block_kernel_drivers` in device TOML configs. When run as root, `padctl install` also walks `/sys/bus/usb/drivers/<driver>/unbind` for matching VID:PID pairs immediately, so already-bound devices are evicted without waiting for replug (issue #162).
 
 ### Install a Mapping
 
@@ -96,11 +96,13 @@ If you built from source, run the installer first — `zig build` alone does **n
 ```sh
 zig build
 sudo ./zig-out/bin/padctl install    # installs binary, service, device configs, and udev rules
-sudo systemctl enable --now padctl
+systemctl --user enable --now padctl.service
 ```
 
+To auto-start at boot without an active login session (headless setups, Steam Deck game mode):
+
 ```sh
-systemctl --user enable --now padctl.service
+sudo loginctl enable-linger $USER
 ```
 
 The service runs padctl in daemon mode, scanning all config directories (user, system, and builtin) with automatic hotplug support. udev rules grant access via `uaccess` — no `sudo` needed for the logged-in user.
@@ -160,12 +162,12 @@ default_mapping = "fps"
 
 On daemon start, padctl matches the connected device name (case-insensitive) and loads the named mapping profile automatically. The system path is the fallback for environments where `HOME` is not set (e.g. systemd services).
 
-`padctl switch <name>` automatically updates the user config, so the choice is remembered for bare `padctl switch` (re-apply without a name). To make the choice survive reboots, use `padctl switch <name> --persist` which copies the mapping and config to `/etc/padctl/` via sudo.
+`padctl switch <name>` automatically updates the user config, so the choice is remembered for bare `padctl switch` (re-apply without a name). Bare `padctl switch` (no argument) reads `default_mapping` from the connected device's entry in `config.toml`; if no entry exists, it prints `error: no default_mapping in config.toml for device "<name>"` and exits. To make the choice survive reboots, use `padctl switch <name> --persist` which copies the mapping and config to `/etc/padctl/` via sudo.
 
 ## CLI Reference
 
 ```sh
-padctl switch [name] [--device <id>]       # switch mapping (omit name to re-apply from user config)
+padctl switch [name] [--device <id>]       # switch mapping; omit name to fall back to default_mapping from config.toml
 padctl switch <name> --persist             # switch + copy to /etc/padctl/ for reboot persistence (sudo)
 padctl status [--socket <path>]            # show daemon status
 padctl devices [--socket <path>]           # list connected devices
