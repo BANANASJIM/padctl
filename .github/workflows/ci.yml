@@ -36,7 +36,8 @@ jobs:
         if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
       - name: Run all checks
-        run: zig build ${{ matrix.zig_args }} check-all
+        run: |
+          timeout 600 zig build ${{ matrix.zig_args }} check-all --summary all
 
   check:
     name: check
@@ -67,7 +68,7 @@ jobs:
           set -o pipefail
           rm -rf .zig-cache
           export TSAN_OPTIONS="halt_on_error=1:verbosity=1:history_size=7:log_path=$PWD/tsan"
-          zig build test-tsan 2>&1 | tee tsan-build.log
+          timeout 600 zig build test-tsan --summary all 2>&1 | tee tsan-build.log
       - name: TSAN diagnostics
         if: failure()
         run: |
@@ -132,5 +133,5 @@ jobs:
               ${DISTRO_SETUP}
               curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
               tar -xJf /tmp/zig.tar.xz -C /tmp
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all --summary all
             "
