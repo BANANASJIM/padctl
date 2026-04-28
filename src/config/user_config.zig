@@ -204,24 +204,19 @@ pub fn emitToml(writer: anytype, cfg: *const UserConfig) !void {
 }
 
 /// Escape a TOML basic-string payload (between the enclosing `"`).
-/// Covers backslash, double-quote, and all control bytes per the spec —
-/// otherwise a name containing `"` or a path with `\` produces malformed
-/// TOML that the next load rejects, silently dropping every binding.
+///
+/// Control characters are REJECTED with error.InvalidDeviceName — per PR #168
+/// (audit V1) the project's defensive-boundary policy is: control bytes in
+/// device names indicate input corruption (broken sysfs, malicious udev rule,
+/// hand-edited bad TOML) — surface loudly, don't silent-normalize.
+/// Tab (0x09) is the only control byte TOML basic strings permit; it passes through.
 pub fn escapeTomlString(writer: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '\\' => try writer.writeAll("\\\\"),
             '"' => try writer.writeAll("\\\""),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x08 => try writer.writeAll("\\b"),
-            0x0C => try writer.writeAll("\\f"),
-            0...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
-                var esc_buf: [6]u8 = undefined;
-                const escaped = std.fmt.bufPrint(&esc_buf, "\\u{X:0>4}", .{c}) catch unreachable;
-                try writer.writeAll(escaped);
-            },
+            '\t' => try writer.writeByte('\t'),
+            0...0x08, 0x0A...0x1F, 0x7F => return error.InvalidDeviceName,
             else => try writer.writeByte(c),
         }
     }
@@ -660,4 +655,34 @@ test "writeAtomic escapes TOML special characters in device names" {
     var result = (try loadFromDir(allocator, dir_path)).?;
     defer result.deinit();
     try std.testing.expectEqualStrings("m1", findDefaultMapping(&result, "Quote\"Backslash\\Pad").?);
+}
+
+test "escapeTomlString rejects newline (PR #168 regression)" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try std.testing.expectError(error.InvalidDeviceName, escapeTomlString(buf.writer(a), "Bad\nName"));
+}
+
+test "escapeTomlString rejects control byte 0x07 (PR #168 regression)" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try std.testing.expectError(error.InvalidDeviceName, escapeTomlString(buf.writer(a), "Bad\x07Name"));
+}
+
+test "escapeTomlString allows tab (TOML-spec-allowed)" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try escapeTomlString(buf.writer(a), "Foo\tBar");
+    try std.testing.expectEqualStrings("Foo\tBar", buf.items);
+}
+
+test "escapeTomlString escapes backslash and double-quote" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try escapeTomlString(buf.writer(a), "a\\b\"c");
+    try std.testing.expectEqualStrings("a\\\\b\\\"c", buf.items);
 }

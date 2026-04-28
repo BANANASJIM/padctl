@@ -2224,26 +2224,6 @@ pub fn stdinPrompt(
 ///   - Same `default_mapping` → no-op (idempotent).
 ///   - `conflict_mode == .force` → backup + overwrite.
 ///   - `conflict_mode == .interactive` → prompt user at stdin (keep/overwrite/abort).
-/// Escape a TOML basic-string value: backslash and double-quote.
-fn tomlEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
-    errdefer out.deinit(allocator);
-    for (s) |c| {
-        switch (c) {
-            '"', '\\' => {
-                try out.append(allocator, '\\');
-                try out.append(allocator, c);
-            },
-            '\n', '\r' => return error.InvalidDeviceName,
-            else => {
-                if ((c < 0x20 and c != '\t') or c == 0x7f) return error.InvalidDeviceName;
-                try out.append(allocator, c);
-            },
-        }
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 ///   - `conflict_mode == .skip` → log warning, keep existing (non-destructive default).
 ///
 /// Other `[[device]]` entries in the file are preserved. The version field is
@@ -4941,48 +4921,63 @@ test "install: on-disk udev/90-padctl.rules mirrors embedded content" {
 }
 
 test "tomlEscape: plain ASCII passes through" {
-    const allocator = std.testing.allocator;
-    const out = try tomlEscape(allocator, "Hello");
-    defer allocator.free(out);
-    try std.testing.expectEqualStrings("Hello", out);
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try user_config_mod.escapeTomlString(buf.writer(a), "Hello");
+    try std.testing.expectEqualStrings("Hello", buf.items);
 }
 
 test "tomlEscape: double quote is escaped" {
-    const allocator = std.testing.allocator;
-    const out = try tomlEscape(allocator, "Sony \"DualSense\"");
-    defer allocator.free(out);
-    try std.testing.expectEqualStrings("Sony \\\"DualSense\\\"", out);
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try user_config_mod.escapeTomlString(buf.writer(a), "Sony \"DualSense\"");
+    try std.testing.expectEqualStrings("Sony \\\"DualSense\\\"", buf.items);
 }
 
 test "tomlEscape: backslash is escaped" {
-    const allocator = std.testing.allocator;
-    const out = try tomlEscape(allocator, "path\\to");
-    defer allocator.free(out);
-    try std.testing.expectEqualStrings("path\\\\to", out);
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try user_config_mod.escapeTomlString(buf.writer(a), "path\\to");
+    try std.testing.expectEqualStrings("path\\\\to", buf.items);
 }
 
 test "tomlEscape: newline rejected with error.InvalidDeviceName" {
-    const allocator = std.testing.allocator;
-    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(allocator, "bad\nname"));
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try std.testing.expectError(error.InvalidDeviceName, user_config_mod.escapeTomlString(buf.writer(a), "bad\nname"));
 }
 
 test "tomlEscape: carriage return rejected with error.InvalidDeviceName" {
-    const allocator = std.testing.allocator;
-    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(allocator, "bad\rname"));
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try std.testing.expectError(error.InvalidDeviceName, user_config_mod.escapeTomlString(buf.writer(a), "bad\rname"));
 }
 
 test "tomlEscape rejects NUL byte (0x00)" {
-    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(std.testing.allocator, "bad\x00name"));
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try std.testing.expectError(error.InvalidDeviceName, user_config_mod.escapeTomlString(buf.writer(a), "bad\x00name"));
 }
 
 test "tomlEscape rejects DEL byte (0x7f)" {
-    try std.testing.expectError(error.InvalidDeviceName, tomlEscape(std.testing.allocator, "bad\x7fname"));
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try std.testing.expectError(error.InvalidDeviceName, user_config_mod.escapeTomlString(buf.writer(a), "bad\x7fname"));
 }
 
 test "tomlEscape passes \\t (0x09) through unchanged" {
-    const out = try tomlEscape(std.testing.allocator, "col1\tcol2");
-    defer std.testing.allocator.free(out);
-    try std.testing.expectEqualStrings("col1\tcol2", out);
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(a);
+    try user_config_mod.escapeTomlString(buf.writer(a), "col1\tcol2");
+    try std.testing.expectEqualStrings("col1\tcol2", buf.items);
 }
 
 test "tomlEscape: round-trip via real TOML parser" {
@@ -4995,9 +4990,10 @@ test "tomlEscape: round-trip via real TOML parser" {
         "plain name",
     };
     for (inputs) |input| {
-        const escaped = try tomlEscape(allocator, input);
-        defer allocator.free(escaped);
-        const toml_text = try std.fmt.allocPrint(allocator, "name = \"{s}\"\n", .{escaped});
+        var buf: std.ArrayList(u8) = .{};
+        defer buf.deinit(allocator);
+        try user_config_mod.escapeTomlString(buf.writer(allocator), input);
+        const toml_text = try std.fmt.allocPrint(allocator, "name = \"{s}\"\n", .{buf.items});
         defer allocator.free(toml_text);
 
         var parser = toml.Parser(struct { name: []const u8 }).init(allocator);
