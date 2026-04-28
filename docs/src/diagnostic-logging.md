@@ -74,7 +74,7 @@ max_log_size_mb = 100 # rotation threshold (default 100 MB)
 |-------|------|---------|-------------|
 | `suspend_grace_sec` | i64 | 15 | Seconds to keep a suspended device alive before transactional rebind, allowing transient disconnects to recover without re-grabbing |
 
-Hand-edits to `[supervisor]` are preserved across `padctl dump enable/disable` and `padctl switch`.
+The `suspend_grace_sec` value is preserved across `padctl dump enable/disable` and `padctl switch`; comments and unknown keys inside `[supervisor]` follow the same rewrite caveat as the rest of `config.toml`.
 
 ## Rotation
 

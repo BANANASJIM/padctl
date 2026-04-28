@@ -229,16 +229,16 @@ IMU (accelerometer + gyroscope) output via a separate UHID node. When declared, 
 
 > **Distinction from `[output.aux]`:** `[output.imu]` is the gamepad's accelerometer/gyroscope UHID node; `[output.aux]` is a secondary uinput device for mouse/keyboard remapping. They serve different purposes and can coexist.
 
-See [ADR-015](https://bananasjim.github.io/padctl/decisions/) for the design rationale. This section enables SDL3-visible sensor pairing on Steam games.
+See ADR-015 for the design rationale. This section enables SDL3-visible sensor pairing on Steam games.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `backend` | string | yes | — | Must be `"uhid"`; only legal value |
+| `backend` | string | no | `"uhid"` | Must be `"uhid"`; only legal value (validator rejects `"uinput"`) |
 | `name` | string | no | — | UHID device name shown to userspace |
-| `vid` | integer | no | `0xfade` | Emulated vendor ID |
-| `pid` | integer | no | `0xc001` | Emulated product ID |
-| `accel_range` | integer | no | `4` | Accelerometer range in ±g |
-| `gyro_range` | integer | no | `2000` | Gyroscope range in °/s |
+| `vid` | integer | no | inherits from `[device].vid` | Emulated vendor ID |
+| `pid` | integer | no | inherits from `[device].pid` | Emulated product ID |
+| `accel_range` | int[2] | no | `[-32768, 32767]` | Accelerometer output range `[min, max]` |
+| `gyro_range` | int[2] | no | `[-32768, 32767]` | Gyroscope output range `[min, max]` |
 
 Example:
 
@@ -248,8 +248,8 @@ backend = "uhid"
 name = "vader5_imu"
 vid = 0x11ff
 pid = 0x1211
-accel_range = 8
-gyro_range = 2000
+accel_range = [-16384, 16384]
+gyro_range = [-32768, 32767]
 ```
 
 ## `[wasm]`
