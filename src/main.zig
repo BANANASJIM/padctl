@@ -1294,8 +1294,11 @@ fn escapeTomlString(writer: anytype, s: []const u8) !void {
     }
 }
 
-/// Write a config.toml with a single device binding. Reads existing file
-/// to preserve other device entries.
+/// Write a config.toml with a single device binding. Reads the existing
+/// file so every section ([diagnostics], [supervisor], unrelated [[device]]
+/// entries) survives the round-trip; only the target device's mapping is
+/// updated. Delegates to `user_config.writeAtomic` for atomic .tmp+rename
+/// so a crash mid-write never truncates the live config.
 fn writeConfigToml(
     allocator: std.mem.Allocator,
     dir: []const u8,
@@ -1311,49 +1314,48 @@ fn writeConfigToml(
     };
     defer if (existing) |*e| e.deinit();
 
-    const version: i64 = if (existing) |e| e.value.version orelse user_config_mod.CURRENT_VERSION else user_config_mod.CURRENT_VERSION;
-    const devices = if (existing) |e| e.value.device else null;
+    const old_devices = if (existing) |e| e.value.device else null;
+    const old_count = if (old_devices) |d| d.len else 0;
 
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.print("version = {d}\n", .{version});
-
-    var wrote_target = false;
-    if (devices) |devs| {
+    var has_target = false;
+    if (old_devices) |devs| {
         for (devs) |d| {
             if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
-                try w.writeAll("\n[[device]]\nname = \"");
-                try escapeTomlString(w, device_name);
-                try w.writeAll("\"\ndefault_mapping = \"");
-                try escapeTomlString(w, mapping_name);
-                try w.writeAll("\"\n");
-                wrote_target = true;
-            } else {
-                try w.writeAll("\n[[device]]\nname = \"");
-                try escapeTomlString(w, d.name);
-                try w.writeAll("\"\n");
-                if (d.default_mapping) |m| {
-                    try w.writeAll("default_mapping = \"");
-                    try escapeTomlString(w, m);
-                    try w.writeAll("\"\n");
-                }
+                has_target = true;
+                break;
             }
         }
     }
-    if (!wrote_target) {
-        try w.writeAll("\n[[device]]\nname = \"");
-        try escapeTomlString(w, device_name);
-        try w.writeAll("\"\ndefault_mapping = \"");
-        try escapeTomlString(w, mapping_name);
-        try w.writeAll("\"\n");
+
+    const new_count = if (has_target) old_count else old_count + 1;
+    var new_devices = try allocator.alloc(user_config_mod.DeviceEntry, new_count);
+    defer allocator.free(new_devices);
+
+    var idx: usize = 0;
+    if (old_devices) |devs| {
+        for (devs) |d| {
+            if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
+                new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name };
+            } else {
+                new_devices[idx] = d;
+            }
+            idx += 1;
+        }
     }
+    if (!has_target) {
+        new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name };
+    }
+
+    const cfg = user_config_mod.UserConfig{
+        .version = if (existing) |e| e.value.version else null,
+        .device = new_devices,
+        .diagnostics = if (existing) |e| e.value.diagnostics else .{},
+        .supervisor = if (existing) |e| e.value.supervisor else .{},
+    };
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
     defer allocator.free(config_path);
-    var f = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(buf.items);
+    try user_config_mod.writeAtomic(allocator, config_path, &cfg);
 }
 
 fn parseDeviceFromStatus(resp: []const u8) ?[]const u8 {
