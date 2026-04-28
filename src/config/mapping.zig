@@ -551,7 +551,6 @@ pub fn validate(cfg: *const MappingConfig) !void {
 
         if (layer.tap) |tap| {
             if (std.mem.startsWith(u8, tap, "macro:")) {
-                std.log.err("config: layer '{s}' tap = \"{s}\" — macro targets are not supported as layer tap actions; use a gamepad button or key instead", .{ layer.name, tap });
                 return error.LayerTapCannotBeMacro;
             }
         }
