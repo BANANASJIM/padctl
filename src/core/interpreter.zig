@@ -393,6 +393,10 @@ fn compileReport(report: *const ReportConfig) CompiledReport {
     }
 
     if (report.button_group) |bg| {
+        if (bg.source.size > 8) {
+            std.log.warn("button_group source.size={d} exceeds u64 (max 8); skipping", .{bg.source.size});
+            return cr;
+        }
         var cbg = CompiledButtonGroup{
             .src_off = @intCast(bg.source.offset),
             .src_size = @intCast(bg.source.size),
@@ -534,9 +538,9 @@ fn extractAndFillCompiled(cr: *const CompiledReport, raw: []const u8, delta: *Ga
 }
 
 fn readUintBytes(raw: []const u8, off: usize, size: usize) u64 {
+    const n = @min(size, 8);
     var val: u64 = 0;
-    var i: usize = 0;
-    while (i < size) : (i += 1) {
+    for (0..n) |i| {
         val |= @as(u64, raw[off + i]) << @intCast(i * 8);
     }
     return val;
@@ -1926,4 +1930,38 @@ test "interpreter: FieldTag.dpad: value 8 (released) and >8 treated as neutral" 
     applyFieldTag(&delta2, .dpad, 15);
     try std.testing.expectEqual(@as(i8, 0), delta2.dpad_x.?);
     try std.testing.expectEqual(@as(i8, 0), delta2.dpad_y.?);
+}
+
+test "compileReport: rejects button_group source.size > 8" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0xAA]
+        \\[report.button_group]
+        \\source = { offset = 0, size = 12 }
+        \\map = { A = 0, B = 1 }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const cr = &interp.compiled[0];
+    try testing.expect(cr.button_group == null);
+}
+
+test "readUintBytes: clamps size to 8" {
+    const buf = [_]u8{0x01} ** 16;
+    const result = readUintBytes(&buf, 0, 12);
+    try testing.expectEqual(@as(u64, 0x0101010101010101), result);
 }
