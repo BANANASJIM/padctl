@@ -1066,11 +1066,8 @@ pub fn validateMandatoryReports(descriptor: []const u8) BuildError!void {
         i += 1 + size;
     }
 
-    for (seen, 0..) |s, idx| {
-        if (!s) {
-            std.log.err("PID descriptor missing mandatory Usage 0x{x:0>2}", .{PID_MANDATORY_USAGES[idx]});
-            return error.MissingMandatoryPidUsage;
-        }
+    for (seen) |s| {
+        if (!s) return error.MissingMandatoryPidUsage;
     }
 }
 
