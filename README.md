@@ -116,7 +116,7 @@ See [Quick Start](#quick-start) below. For other distros, see [CONTRIBUTING.md](
 zig build                                             # build from source
 sudo zig-out/bin/padctl install                       # install binary, udev rules; writes user service unit
 systemctl --user enable --now padctl.service          # start the user service
-padctl config init                                    # create ~/.config/padctl/config.toml interactively
+padctl config init                                    # create a mapping in ~/.config/padctl/mappings/ interactively
 padctl status                                         # check daemon and detected devices
 padctl switch <name>                                  # switch mapping profile without restart
 ```
@@ -141,9 +141,9 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | `padctl devices` | List detected HID/USB devices |
 | `padctl list-mappings` | Show available mapping profiles |
 | `padctl switch <name>` | Switch to a named mapping profile |
-| `padctl config init` | Create user config interactively |
-| `padctl config edit` | Open user config in `$EDITOR` |
-| `padctl config test` | Validate config without applying |
+| `padctl config init` | Interactively create a new mapping file in `~/.config/padctl/mappings/` |
+| `padctl config edit <mapping>` | Open mapping in `$VISUAL` or `$EDITOR` |
+| `padctl config test <mapping>` | Live input preview against the mapping (no apply) |
 | `padctl scan` | Re-scan for connected devices |
 | `padctl dump enable\|disable` | Toggle opt-in diagnostic logging (persists across reboots) |
 | `padctl dump status` | Show logging state, log path, size, and time span |
