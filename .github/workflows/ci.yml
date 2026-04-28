@@ -45,9 +45,9 @@ jobs:
       - name: Run all checks (serial via separate processes)
         run: |
           set -e
-          zig build ${{ matrix.zig_args }} test
-          zig build ${{ matrix.zig_args }} test-safe
-          zig build ${{ matrix.zig_args }} check-fmt
+          timeout 600 zig build ${{ matrix.zig_args }} test --summary all
+          timeout 600 zig build ${{ matrix.zig_args }} test-safe --summary all
+          timeout 600 zig build ${{ matrix.zig_args }} check-fmt
 
   check:
     name: check
@@ -78,7 +78,7 @@ jobs:
           set -o pipefail
           rm -rf .zig-cache
           export TSAN_OPTIONS="halt_on_error=1:verbosity=1:history_size=7:log_path=$PWD/tsan"
-          zig build test-tsan 2>&1 | tee tsan-build.log
+          timeout 600 zig build test-tsan --summary all 2>&1 | tee tsan-build.log
       - name: TSAN diagnostics
         if: failure()
         run: |
@@ -143,7 +143,7 @@ jobs:
               ${DISTRO_SETUP}
               curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
               tar -xJf /tmp/zig.tar.xz -C /tmp
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test-safe
-              /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-fmt
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test --summary all
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test-safe --summary all
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-fmt
             "
