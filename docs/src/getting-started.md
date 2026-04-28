@@ -96,8 +96,9 @@ If you built from source, run the installer first — `zig build` alone does **n
 ```sh
 zig build
 sudo ./zig-out/bin/padctl install    # installs binary, service, device configs, and udev rules
-systemctl --user enable --now padctl.service
 ```
+
+`padctl install` automatically runs `daemon-reload`, enables, and starts `padctl.service` via `sudo -u $SUDO_USER systemctl --user`. The `systemctl --user enable --now padctl.service` line is only needed if you used `--no-enable` or `--no-start`.
 
 To auto-start at boot without an active login session (headless setups, Steam Deck game mode):
 
@@ -187,7 +188,9 @@ See the [Diagnostic Logging guide](diagnostic-logging.md) for the full `padctl d
 
 ## udev Permissions
 
-padctl needs access to `/dev/hidraw*` and `/dev/uinput`. The `padctl install` command generates and installs udev rules automatically from device configs.
+padctl needs access to `/dev/hidraw*`, `/dev/uinput`, and `/dev/uhid`. The first two are standard for HID gamepad daemons; `/dev/uhid` is required for the SDL3-visible IMU pairing path (per ADR-015) — `padctl install` writes the necessary udev rule (`60-padctl.rules`) and a `DeviceAllow=/dev/uhid rw` entry in the systemd unit automatically.
+
+The `padctl install` command generates and installs udev rules automatically from device configs.
 
 If you need to regenerate rules after adding custom device configs:
 

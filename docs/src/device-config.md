@@ -221,6 +221,37 @@ Touchpad output device.
 | `y_min` / `y_max` | integer | Y axis range |
 | `max_slots` | integer | Maximum multitouch slots |
 
+### `[output.imu]`
+
+IMU (accelerometer + gyroscope) output via a separate UHID node. When declared, padctl creates a second UHID device that shares the same `uniq` as the primary gamepad output, enabling SDL3 to pair the IMU sensor with the controller automatically (ADR-015 UHID IMU migration; see PR #159).
+
+> **Validation rule:** when `[output.imu]` is present, `backend` must be `"uhid"`. The validator rejects `"uinput"` per ADR-015 — UHID is the only supported backend for IMU output. Omitting `[output.imu]` entirely keeps the legacy uinput-primary path.
+
+> **Distinction from `[output.aux]`:** `[output.imu]` is the gamepad's accelerometer/gyroscope UHID node; `[output.aux]` is a secondary uinput device for mouse/keyboard remapping. They serve different purposes and can coexist.
+
+See [ADR-015](https://bananasjim.github.io/padctl/decisions/) for the design rationale. This section enables SDL3-visible sensor pairing on Steam games.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `backend` | string | yes | — | Must be `"uhid"`; only legal value |
+| `name` | string | no | — | UHID device name shown to userspace |
+| `vid` | integer | no | `0xfade` | Emulated vendor ID |
+| `pid` | integer | no | `0xc001` | Emulated product ID |
+| `accel_range` | integer | no | `4` | Accelerometer range in ±g |
+| `gyro_range` | integer | no | `2000` | Gyroscope range in °/s |
+
+Example:
+
+```toml
+[output.imu]
+backend = "uhid"
+name = "vader5_imu"
+vid = 0x11ff
+pid = 0x1211
+accel_range = 8
+gyro_range = 2000
+```
+
 ## `[wasm]`
 
 WASM plugin for stateful/custom protocols (Phase 4+).

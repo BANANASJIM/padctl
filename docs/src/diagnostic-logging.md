@@ -64,7 +64,17 @@ max_log_size_mb = 100 # rotation threshold (default 100 MB)
 
 <a id="schema-rewrite"></a>
 
-> ⚠️ **Rewrite behavior.** `padctl dump enable/disable` parses `config.toml`, rewrites it from the known schema, and atomically renames the result into place. Anything outside the documented schema — unknown sections, undocumented keys, hand-written comments — is **not preserved**. If you hand-edit `config.toml` with content that matters (e.g. a forward-looking `[experimental]` block, inline comments documenting a choice), keep it in a sibling file, or drive padctl via `SIGHUP` after the edit instead of using the `dump` subcommand. The current known schema is `version`, `[diagnostics]` (`dump`, `max_log_size_mb`), and `[[device]]` entries (`name`, `default_mapping`).
+> ⚠️ **Rewrite behavior.** `padctl dump enable/disable` parses `config.toml`, rewrites it from the known schema, and atomically renames the result into place. Anything outside the documented schema — unknown sections, undocumented keys, hand-written comments — is **not preserved**. If you hand-edit `config.toml` with content that matters (e.g. a forward-looking `[experimental]` block, inline comments documenting a choice), keep it in a sibling file, or drive padctl via `SIGHUP` after the edit instead of using the `dump` subcommand. The current known schema is `version`, `[diagnostics]` (`dump`, `max_log_size_mb`), `[supervisor]` (`suspend_grace_sec`), and `[[device]]` entries (`name`, `default_mapping`).
+
+## Supervisor tunables
+
+`config.toml` may also include a `[supervisor]` section to tune hot-plug suspend behavior:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `suspend_grace_sec` | i64 | 15 | Seconds to keep a suspended device alive before transactional rebind, allowing transient disconnects to recover without re-grabbing |
+
+Hand-edits to `[supervisor]` are preserved across `padctl dump enable/disable` and `padctl switch`.
 
 ## Rotation
 
