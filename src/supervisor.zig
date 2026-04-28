@@ -1586,6 +1586,15 @@ pub const Supervisor = struct {
         }
     }
 
+    /// Test-only seam: like startFromDirs but uses caller-provided dev_root
+    /// instead of /dev. Allows tests to bypass real /dev/hidraw* enumeration
+    /// (which can hang on leaked virtual UHID devices on dev machines).
+    pub fn startFromDirsWithRoot(self: *Supervisor, dirs: []const []const u8, dev_root: []const u8) !void {
+        for (dirs) |dir| {
+            try self.startFromDirWithRoot(dir, dev_root);
+        }
+    }
+
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
         if (self.user_cfg) |*uc| uc.deinit();
         self.user_cfg = user_config_mod.load(self.allocator);
@@ -3002,10 +3011,10 @@ test "supervisor: startFromDirs loads configs from two dirs" {
     // No real hidraw devices — both dirs scanned, zero instances spawned,
     // but configs from both dirs must have been attempted (no error, no panic).
     const dirs = &[_][]const u8{ path_a, path_b };
-    sup.startFromDirs(dirs);
+    try sup.startFromDirsWithRoot(dirs, "/nonexistent_dev_root_xyz");
 
     // With a non-existent dev root neither device will be found, so managed is empty.
-    // The key assertion: startFromDirs did not error out after scanning the first dir.
+    // The key assertion: startFromDirsWithRoot scanned both dirs without hanging.
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
