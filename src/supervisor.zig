@@ -799,15 +799,38 @@ pub const Supervisor = struct {
         tx.committed = true;
     }
 
+    fn reloadUserConfig(self: *Supervisor) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
+        self.applyUserConfigRuntime();
+    }
+
+    fn clearDevnameMap(self: *Supervisor) void {
+        var it = self.devname_map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.devname_map.clearRetainingCapacity();
+    }
+
+    fn clearAllManagedAndConfigs(self: *Supervisor) void {
+        self.stopAll();
+        for (self.configs.items) |c| {
+            c.deinit();
+            self.allocator.destroy(c);
+        }
+        self.configs.clearRetainingCapacity();
+        self.clearDevnameMap();
+    }
+
     fn doReload(
         self: *Supervisor,
         reloadFn: *const fn (allocator: std.mem.Allocator) anyerror![]ConfigEntry,
         reload_allocator: std.mem.Allocator,
         initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
     ) void {
-        if (self.user_cfg) |*uc| uc.deinit();
-        self.user_cfg = user_config_mod.load(self.allocator);
-        self.applyUserConfigRuntime();
+        self.reloadUserConfig();
 
         const new_configs = reloadFn(reload_allocator) catch |err| {
             std.log.err("reload failed: {}", .{err});
@@ -1008,71 +1031,100 @@ pub const Supervisor = struct {
         self.armDebounce();
     }
 
-    pub fn run(
-        self: *Supervisor,
-        initial_configs: []const ConfigEntry,
-        initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
-        reloadFn: *const fn (allocator: std.mem.Allocator) anyerror![]ConfigEntry,
-        reload_allocator: std.mem.Allocator,
-    ) !void {
-        for (initial_configs) |nc| {
-            const instance = try initFn(self.allocator, nc);
-            try self.spawnInstance(nc.phys_key, instance, null);
+    /// Slot indices into the pollfd array. `null` means the corresponding fd
+    /// is unavailable (e.g. `initForTest` skips netlink/inotify/grace_timer).
+    /// Stop and hup always occupy slots 0/1; the rest are assigned in the
+    /// fixed order netlink → inotify → debounce → hotplug_retry → grace_timer
+    /// → listen, packed contiguously starting at slot 2.
+    const SupervisorPollSet = struct {
+        base_nfds: usize,
+        netlink_slot: ?usize,
+        inotify_slot: ?usize,
+        debounce_slot: ?usize,
+        hotplug_retry_slot: ?usize,
+        grace_timer_slot: ?usize,
+        listen_slot: ?usize,
+
+        fn init(self: *const Supervisor, pollfds: *[SUPERVISOR_MAX_FDS]posix.pollfd) SupervisorPollSet {
+            pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
+            pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
+            var base_nfds: usize = 2;
+            const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
+            const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
+            const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
+            const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
+            const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
+            const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
+                pollfds[base_nfds] = cs.pollfd();
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
+
+            return .{
+                .base_nfds = base_nfds,
+                .netlink_slot = netlink_slot,
+                .inotify_slot = inotify_slot,
+                .debounce_slot = debounce_slot,
+                .hotplug_retry_slot = hotplug_retry_slot,
+                .grace_timer_slot = grace_timer_slot,
+                .listen_slot = listen_slot,
+            };
         }
+    };
+
+    /// Consolidated supervisor poll loop. `dispatch` is any value with a
+    /// `reload(self: *Supervisor) void` method bound to the caller's reload
+    /// strategy (test-driven reload diff, single-dir rescan, or multi-dir
+    /// rescan). `ppoll_propagate_err` controls whether non-EINTR ppoll errors
+    /// surface to the caller (`run`) or are silently swallowed (`serve`/
+    /// `serveMulti`, which match the daemon's prior void-returning behavior).
+    fn serveLoop(
+        self: *Supervisor,
+        dispatch: anytype,
+        comptime ppoll_propagate_err: bool,
+    ) !void {
         defer self.stopAll();
 
         // 7 base fds + 1 listen + 4 clients = 12
         var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
-        pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
-        pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
-        var base_nfds: usize = 2;
-        const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
-            pollfds[base_nfds] = cs.pollfd();
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
+        const set = SupervisorPollSet.init(self, &pollfds);
 
         while (true) {
             // Rebuild client fds each iteration (clients may come and go)
-            var nfds = base_nfds;
+            var nfds = set.base_nfds;
             if (self.ctrl_sock) |*cs| {
-                nfds += cs.clientPollfds(pollfds[base_nfds..]);
+                nfds += cs.clientPollfds(pollfds[set.base_nfds..]);
             }
 
             _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
-                else => return err,
+                else => if (ppoll_propagate_err) return err else return,
             };
 
             if (pollfds[0].revents & posix.POLL.IN != 0) {
@@ -1084,57 +1136,56 @@ pub const Supervisor = struct {
             if (pollfds[1].revents & posix.POLL.IN != 0) {
                 var buf: [128]u8 = undefined;
                 _ = posix.read(self.hup_fd, &buf) catch {};
-                self.doReload(reloadFn, reload_allocator, initFn);
+                dispatch.reload(self);
                 pollfds[1].revents = 0;
             }
 
-            if (netlink_slot) |slot| {
+            if (set.netlink_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainNetlink();
                     pollfds[slot].revents = 0;
                 }
             }
 
-            if (inotify_slot) |slot| {
+            if (set.inotify_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainInotify();
                     pollfds[slot].revents = 0;
                 }
             }
 
-            if (debounce_slot) |slot| {
+            if (set.debounce_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     var tbuf: [8]u8 = undefined;
                     _ = posix.read(self.debounce_fd, &tbuf) catch {};
-                    self.doReload(reloadFn, reload_allocator, initFn);
+                    dispatch.reload(self);
                     pollfds[slot].revents = 0;
                 }
             }
 
-            if (hotplug_retry_slot) |slot| {
+            if (set.hotplug_retry_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainHotplugRetry();
                     pollfds[slot].revents = 0;
                 }
             }
 
-            if (grace_timer_slot) |slot| {
+            if (set.grace_timer_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainGraceTimer();
                     pollfds[slot].revents = 0;
                 }
             }
 
-            if (listen_slot) |slot| {
+            if (set.listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
                     pollfds[slot].revents = 0;
                 }
             }
 
-            // Handle client fds
             if (self.ctrl_sock != null) {
-                for (pollfds[base_nfds..nfds]) |*pfd| {
+                for (pollfds[set.base_nfds..nfds]) |*pfd| {
                     if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
                         self.ctrl_sock.?.removeClient(pfd.fd);
                     } else if (pfd.revents & posix.POLL.IN != 0) {
@@ -1143,6 +1194,34 @@ pub const Supervisor = struct {
                 }
             }
         }
+    }
+
+    pub fn run(
+        self: *Supervisor,
+        initial_configs: []const ConfigEntry,
+        initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
+        reloadFn: *const fn (allocator: std.mem.Allocator) anyerror![]ConfigEntry,
+        reload_allocator: std.mem.Allocator,
+    ) !void {
+        for (initial_configs) |nc| {
+            const instance = try initFn(self.allocator, nc);
+            try self.spawnInstance(nc.phys_key, instance, null);
+        }
+
+        const Dispatch = struct {
+            initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
+            reloadFn: *const fn (allocator: std.mem.Allocator) anyerror![]ConfigEntry,
+            reload_allocator: std.mem.Allocator,
+
+            fn reload(d: @This(), sup: *Supervisor) void {
+                sup.doReload(d.reloadFn, d.reload_allocator, d.initFn);
+            }
+        };
+        try self.serveLoop(Dispatch{
+            .initFn = initFn,
+            .reloadFn = reloadFn,
+            .reload_allocator = reload_allocator,
+        }, true);
     }
 
     fn handleClientCommand(self: *Supervisor, fd: posix.fd_t) void {
@@ -1598,43 +1677,21 @@ pub const Supervisor = struct {
         }
     }
 
+    /// Drops suspended instances; suspended-preservation is the per-phys-key
+    /// SIGHUP path via `reload`, not the rescan path.
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
-        if (self.user_cfg) |*uc| uc.deinit();
-        self.user_cfg = user_config_mod.load(self.allocator);
-        self.applyUserConfigRuntime();
-        self.stopAll();
-        for (self.configs.items) |c| {
-            c.deinit();
-            self.allocator.destroy(c);
-        }
-        self.configs.clearRetainingCapacity();
-        var it = self.devname_map.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
-        self.devname_map.clearRetainingCapacity();
+        self.reloadUserConfig();
+        self.clearAllManagedAndConfigs();
         self.startFromDir(dir_path) catch |err| {
             std.log.err("reload from dir failed: {}", .{err});
         };
     }
 
+    /// Drops suspended instances; suspended-preservation is the per-phys-key
+    /// SIGHUP path via `reload`, not the rescan path.
     fn doReloadFromDirs(self: *Supervisor, dirs: []const []const u8) void {
-        if (self.user_cfg) |*uc| uc.deinit();
-        self.user_cfg = user_config_mod.load(self.allocator);
-        self.applyUserConfigRuntime();
-        self.stopAll();
-        for (self.configs.items) |c| {
-            c.deinit();
-            self.allocator.destroy(c);
-        }
-        self.configs.clearRetainingCapacity();
-        var it = self.devname_map.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
-        self.devname_map.clearRetainingCapacity();
+        self.reloadUserConfig();
+        self.clearAllManagedAndConfigs();
         self.startFromDirs(dirs);
     }
 
@@ -1642,254 +1699,28 @@ pub const Supervisor = struct {
     /// Uses dirs[0] for inotify hot-file-change watch (user config dir).
     /// SIGHUP and inotify debounce reload all dirs.
     pub fn serveMulti(self: *Supervisor, dirs: []const []const u8) void {
-        defer self.stopAll();
+        const Dispatch = struct {
+            dirs: []const []const u8,
 
-        var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
-        pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
-        pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
-        var base_nfds: usize = 2;
-        const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
-            pollfds[base_nfds] = cs.pollfd();
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-
-        while (true) {
-            var nfds = base_nfds;
-            if (self.ctrl_sock) |*cs| {
-                nfds += cs.clientPollfds(pollfds[base_nfds..]);
+            fn reload(d: @This(), sup: *Supervisor) void {
+                sup.doReloadFromDirs(d.dirs);
             }
-
-            _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
-                error.SignalInterrupt => continue,
-                else => return,
-            };
-
-            if (pollfds[0].revents & posix.POLL.IN != 0) {
-                var buf: [128]u8 = undefined;
-                _ = posix.read(self.stop_fd, &buf) catch {};
-                break;
-            }
-
-            if (pollfds[1].revents & posix.POLL.IN != 0) {
-                var buf: [128]u8 = undefined;
-                _ = posix.read(self.hup_fd, &buf) catch {};
-                self.doReloadFromDirs(dirs);
-                pollfds[1].revents = 0;
-            }
-
-            if (netlink_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainNetlink();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (inotify_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainInotify();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (debounce_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    var tbuf: [8]u8 = undefined;
-                    _ = posix.read(self.debounce_fd, &tbuf) catch {};
-                    self.doReloadFromDirs(dirs);
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (hotplug_retry_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainHotplugRetry();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (grace_timer_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainGraceTimer();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (listen_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.ctrl_sock.?.acceptClient();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (self.ctrl_sock != null) {
-                for (pollfds[base_nfds..nfds]) |*pfd| {
-                    if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                        self.ctrl_sock.?.removeClient(pfd.fd);
-                    } else if (pfd.revents & posix.POLL.IN != 0) {
-                        self.handleClientCommand(pfd.fd);
-                    }
-                }
-            }
-        }
+        };
+        self.serveLoop(Dispatch{ .dirs = dirs }, false) catch {};
     }
 
     /// Enter the supervisor event loop: poll for signals, netlink hot-plug,
     /// inotify config changes, and control-socket commands. Blocks until
     /// SIGTERM/SIGINT. When the loop exits, all managed instances are stopped.
     pub fn serve(self: *Supervisor, dir_path: []const u8) void {
-        defer self.stopAll();
+        const Dispatch = struct {
+            dir_path: []const u8,
 
-        var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
-        pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
-        pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
-        var base_nfds: usize = 2;
-        const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const grace_timer_slot: ?usize = if (self.grace_timer_fd >= 0) blk: {
-            pollfds[base_nfds] = .{ .fd = self.grace_timer_fd, .events = posix.POLL.IN, .revents = 0 };
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-        const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
-            pollfds[base_nfds] = cs.pollfd();
-            const s = base_nfds;
-            base_nfds += 1;
-            break :blk s;
-        } else null;
-
-        while (true) {
-            var nfds = base_nfds;
-            if (self.ctrl_sock) |*cs| {
-                nfds += cs.clientPollfds(pollfds[base_nfds..]);
+            fn reload(d: @This(), sup: *Supervisor) void {
+                sup.doReloadFromDir(d.dir_path);
             }
-
-            _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
-                error.SignalInterrupt => continue,
-                else => return,
-            };
-
-            if (pollfds[0].revents & posix.POLL.IN != 0) {
-                var buf: [128]u8 = undefined;
-                _ = posix.read(self.stop_fd, &buf) catch {};
-                break;
-            }
-
-            if (pollfds[1].revents & posix.POLL.IN != 0) {
-                var buf: [128]u8 = undefined;
-                _ = posix.read(self.hup_fd, &buf) catch {};
-                self.doReloadFromDir(dir_path);
-                pollfds[1].revents = 0;
-            }
-
-            if (netlink_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainNetlink();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (inotify_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainInotify();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (debounce_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    var tbuf: [8]u8 = undefined;
-                    _ = posix.read(self.debounce_fd, &tbuf) catch {};
-                    self.doReloadFromDir(dir_path);
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (hotplug_retry_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainHotplugRetry();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (grace_timer_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.drainGraceTimer();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (listen_slot) |slot| {
-                if (pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.ctrl_sock.?.acceptClient();
-                    pollfds[slot].revents = 0;
-                }
-            }
-
-            if (self.ctrl_sock != null) {
-                for (pollfds[base_nfds..nfds]) |*pfd| {
-                    if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                        self.ctrl_sock.?.removeClient(pfd.fd);
-                    } else if (pfd.revents & posix.POLL.IN != 0) {
-                        self.handleClientCommand(pfd.fd);
-                    }
-                }
-            }
-        }
+        };
+        self.serveLoop(Dispatch{ .dir_path = dir_path }, false) catch {};
     }
 
     pub fn attach(self: *Supervisor, devname: []const u8) !void {
