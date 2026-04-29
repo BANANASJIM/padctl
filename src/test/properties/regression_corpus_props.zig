@@ -102,8 +102,7 @@ test "regression targeted: issue #79 — tap-on-layer at hold_timeout-5ms emits 
     const press_ns: i128 = 1_000_000_000;
     _ = try ctx.mapper.apply(.{ .buttons = lt_mask }, 16, press_ns);
 
-    const timer_ns: i128 = press_ns + 200_000_000;
-    _ = ctx.mapper.onTimerExpired(timer_ns);
+    _ = ctx.mapper.onLayerTimerExpired();
 
     const release_ns: i128 = press_ns + 195_000_000;
     const ev = try ctx.mapper.apply(.{ .buttons = 0 }, 16, release_ns);

@@ -1,8 +1,8 @@
 // Phase 2a end-to-end integration tests (L1 — mock timer/vtable, always CI).
 //
 // All tests drive the Mapper directly; no EventLoop thread is needed.
-// Timer events are injected by calling m.layer.onTriggerPress() / m.layer.onTimerExpired()
-// instead of using a real timerfd.
+// Timer events are injected by calling m.layer.onTriggerPress() / m.layer.onTimerExpired() (LayerState)
+// or m.onLayerTimerExpired() (Mapper) instead of using a real timerfd.
 
 const std = @import("std");
 const testing = std.testing;
