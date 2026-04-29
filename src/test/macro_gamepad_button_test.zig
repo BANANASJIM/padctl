@@ -93,7 +93,9 @@ test "macro #99: down A with delay holds A bit between frames" {
     try testing.expectEqual(btnBit(.A), injected & btnBit(.A));
 
     aux = .{};
-    const done2 = try player.step(&aux, &q, &injected, &tap_release, 0);
+    // issue #72: now_ns must clear the 10ms delay deadline before step advances.
+    const after_delay: i128 = 10 * std.time.ns_per_ms + 1;
+    const done2 = try player.step(&aux, &q, &injected, &tap_release, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.A));
 }

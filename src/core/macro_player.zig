@@ -17,6 +17,10 @@ pub const MacroPlayer = struct {
     timer_token: u32,
     trigger_src_idx: u6,
     held_gamepad_buttons: u64,
+    // issue #72: deadline at which the next step becomes eligible. While now_ns
+    // is below this, step() must yield the frame so per-poll Mapper.apply calls
+    // do not race past delay= boundaries.
+    next_step_eligible_at_ns: i128,
 
     pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
         return .{
@@ -26,6 +30,7 @@ pub const MacroPlayer = struct {
             .timer_token = token,
             .trigger_src_idx = src_idx,
             .held_gamepad_buttons = 0,
+            .next_step_eligible_at_ns = 0,
         };
     }
 
@@ -45,6 +50,9 @@ pub const MacroPlayer = struct {
         now_ns: i128,
     ) !bool {
         if (self.waiting_for_release) return false;
+        // issue #72: prevent same-frame double-emit — only the macro timerfd
+        // expiry advances state past a delay boundary.
+        if (now_ns < self.next_step_eligible_at_ns) return false;
 
         while (self.step_index < self.macro.steps.len) {
             const s = self.macro.steps[self.step_index];
@@ -65,6 +73,7 @@ pub const MacroPlayer = struct {
                 .delay => |ms| {
                     const deadline = now_ns + @as(i128, ms) * std.time.ns_per_ms;
                     try queue.arm(deadline, self.timer_token, now_ns);
+                    self.next_step_eligible_at_ns = deadline;
                     return false;
                 },
                 .pause_for_release => {
@@ -220,7 +229,9 @@ test "macro_player: delay arms timer queue returns not-done" {
     try testing.expectEqual(@as(usize, 1), ctx.queue.heap.count());
 
     ctx.aux = .{};
-    const done2 = try ctx.step(&player);
+    // issue #72: must advance now_ns past the delay deadline before step resumes.
+    const after_delay: i128 = 50 * std.time.ns_per_ms + 1;
+    const done2 = try player.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len);
 }

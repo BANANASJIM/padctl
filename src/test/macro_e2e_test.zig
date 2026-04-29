@@ -191,7 +191,9 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
     var aux2 = AuxEventList{};
     var injected2: u64 = 0;
     var tap_rel2: u64 = 0;
-    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, 0);
+    // issue #72: advance now_ns past the 50ms delay deadline.
+    const after_delay: i128 = 50 * std.time.ns_per_ms + 1;
+    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(usize, 2), aux2.len);
     switch (aux2.get(0)) {
@@ -294,12 +296,10 @@ test "macro: layer switch while macro active — held keys released, macros clea
     _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
-    // Now activate layer (LT hold) — active_changed fires → macros cleared, releases emitted.
-    const configs = ctx.parsed.value.layer.?;
-    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
-    _ = m.layer.onTimerExpired();
-
-    const ev = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+    // Press LT — processLayerTriggers fires action.active_changed on the rising
+    // edge of a hold trigger, which clears active_macros and emits releases.
+    const lt_mask = btnMask(.LT);
+    const ev = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, 0);
 
     // active_macros must be empty after layer switch.
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
@@ -365,6 +365,9 @@ test "macro: hot-reload — updateMapping swaps config; next apply uses new mapp
         .primary_output = null,
         .imu_output = null,
         .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
         .device_cfg = &parsed_dev.value,
         .pending_mapping = null,
         .stopped = false,
@@ -472,5 +475,81 @@ test "macro: mapper macro trigger — no second player on held button (no re-tri
 
     // Frame 2: still held → no new player (no rising edge).
     _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+}
+
+// --- Issue #72 regression: delay must yield frame ---
+//
+// Reporter @xl666: with steps [down=Home, delay=100, tap=A, delay=100, up=Home]
+// every poll-frame `Mapper.apply` resumes the player, so subsequent steps fire
+// in the same frame as the delay-arming step. This produces a same-frame race
+// where Home-down and A-down emit together and only one is observed downstream.
+test "macro #72: delay must gate subsequent steps until timer expiry" {
+    const allocator = testing.allocator;
+
+    var ctx = try makeMapper(
+        \\[[macro]]
+        \\name = "menu"
+        \\steps = [
+        \\  { down = "Home" },
+        \\  { delay = 100 },
+        \\  { tap = "A" },
+        \\  { delay = 100 },
+        \\  { up = "Home" },
+        \\]
+        \\
+        \\[remap]
+        \\C = "macro:menu"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const c_mask = btnMask(.C);
+    const home_bit = btnMask(.Home);
+    const a_bit = btnMask(.A);
+
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000_000_000;
+
+    // Frame 0 (rising edge): only Home should be held.
+    const ev0 = try m.apply(.{ .buttons = c_mask }, 16, t0);
+    try testing.expectEqual(home_bit, ev0.gamepad.buttons & home_bit);
+    try testing.expectEqual(@as(u64, 0), ev0.gamepad.buttons & a_bit);
+
+    // Mid-delay frames (USB poll cadence ~4ms): macro must not advance, so
+    // Home stays held and A stays clear. Reporter's bug: A fires here.
+    var t: i128 = t0 + 4 * ns_per_ms;
+    while (t < t0 + 100 * ns_per_ms) : (t += 4 * ns_per_ms) {
+        const evN = try m.apply(.{ .buttons = c_mask }, 4, t);
+        try testing.expectEqual(home_bit, evN.gamepad.buttons & home_bit);
+        try testing.expectEqual(@as(u64, 0), evN.gamepad.buttons & a_bit);
+    }
+
+    // Timer expiry: tap=A staged. Next apply emits press; the apply after that
+    // releases via pending_tap_release. Home stays held throughout.
+    const t_expire1: i128 = t0 + 100 * ns_per_ms;
+    _ = m.onMacroTimerExpired(t_expire1);
+
+    const ev_press = try m.apply(.{ .buttons = c_mask }, 4, t_expire1 + ns_per_ms);
+    try testing.expectEqual(home_bit, ev_press.gamepad.buttons & home_bit);
+    try testing.expectEqual(a_bit, ev_press.gamepad.buttons & a_bit);
+
+    const ev_release = try m.apply(.{ .buttons = c_mask }, 4, t_expire1 + 2 * ns_per_ms);
+    try testing.expectEqual(home_bit, ev_release.gamepad.buttons & home_bit);
+    try testing.expectEqual(@as(u64, 0), ev_release.gamepad.buttons & a_bit);
+
+    // Mid second-delay: still no premature up=Home.
+    var t2: i128 = t_expire1 + 4 * ns_per_ms;
+    while (t2 < t_expire1 + 100 * ns_per_ms) : (t2 += 4 * ns_per_ms) {
+        const evN = try m.apply(.{ .buttons = c_mask }, 4, t2);
+        try testing.expectEqual(home_bit, evN.gamepad.buttons & home_bit);
+        try testing.expectEqual(@as(u64, 0), evN.gamepad.buttons & a_bit);
+    }
+
+    // Second timer expiry: Home released.
+    const t_expire2: i128 = t_expire1 + 100 * ns_per_ms;
+    _ = m.onMacroTimerExpired(t_expire2);
+    const ev_after2 = try m.apply(.{ .buttons = c_mask }, 4, t_expire2 + ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev_after2.gamepad.buttons & home_bit);
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
