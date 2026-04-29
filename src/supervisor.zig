@@ -1421,7 +1421,16 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| {
             const name = m.instance.device_cfg.device.name;
             const state_str: []const u8 = if (m.suspended) "suspended" else "active";
-            w.print(" device={s} state={s}", .{ name, state_str }) catch break;
+            const mapping_name: []const u8 = blk: {
+                if (m.switch_mapping) |sm| {
+                    if (sm.value.name) |n| break :blk n;
+                }
+                if (m.default_mapping_pr) |dm| {
+                    if (dm.value.name) |n| break :blk n;
+                }
+                break :blk "(none)";
+            };
+            w.print(" device={s} state={s} mapping={s}", .{ name, state_str, mapping_name }) catch break;
         }
         w.writeByte('\n') catch return;
         cs.sendResponse(fd, stream.getWritten());
@@ -2604,6 +2613,82 @@ test "supervisor: Supervisor: status shows suspended state" {
     sup.handleStatus(resp_fds[0]);
     n = try posix.read(resp_fds[1], &resp_buf);
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "state=suspended") != null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+}
+
+test "supervisor: Supervisor: status includes mapping name" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    // Heap-allocate a mapping ParseResult with a known name; supervisor owns and frees it.
+    const map_pr = try allocator.create(mapping_mod.ParseResult);
+    map_pr.* = try mapping_mod.parseString(allocator, "name = \"xbox-elite2\"");
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, map_pr);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=xbox-elite2") != null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+}
+
+test "supervisor: Supervisor: status shows (none) when no mapping loaded" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") != null);
 
     defer {
         sup.stopAll();
