@@ -28,8 +28,20 @@ const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
 
-// signalfd(0) + stop_pipe(1) + layer timerfd(2) + rumble_stop_fd(3) + macro timerfd(4) + per-interface fds + uinput FF fd
-pub const MAX_FDS = 12;
+// Fixed poll slots for the event loop.
+pub const Slots = struct {
+    pub const signal: usize = 0;
+    pub const stop: usize = 1;
+    pub const layer_timer: usize = 2;
+    pub const rumble_stop: usize = 3;
+    pub const macro_timer: usize = 4;
+    pub const device_base: usize = 5;
+};
+
+// signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces + 1 FF/uinput slot.
+pub const FIXED_SLOT_COUNT: usize = 5;
+pub const MAX_DEVICE_INTERFACES: usize = 6;
+pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 1;
 
 const signalfd_siginfo_size = 128;
 
@@ -390,15 +402,13 @@ pub const EventLoop = struct {
             .last_rumble_ns = 0,
         };
 
-        // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = layer timerfd,
-        // slot 3 = rumble-stop timerfd, slot 4 = macro timerfd
-        loop.pollfds[0] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
-        loop.pollfds[1] = .{ .fd = stop_r, .events = posix.POLL.IN, .revents = 0 };
-        loop.pollfds[2] = .{ .fd = timer_fd, .events = posix.POLL.IN, .revents = 0 };
-        loop.pollfds[3] = .{ .fd = rumble_stop_fd, .events = posix.POLL.IN, .revents = 0 };
-        loop.pollfds[4] = .{ .fd = macro_timer_fd, .events = posix.POLL.IN, .revents = 0 };
-        loop.fd_count = 5;
-        loop.device_base = 5;
+        loop.pollfds[Slots.signal] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.pollfds[Slots.stop] = .{ .fd = stop_r, .events = posix.POLL.IN, .revents = 0 };
+        loop.pollfds[Slots.layer_timer] = .{ .fd = timer_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.pollfds[Slots.rumble_stop] = .{ .fd = rumble_stop_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.pollfds[Slots.macro_timer] = .{ .fd = macro_timer_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.fd_count = FIXED_SLOT_COUNT;
+        loop.device_base = Slots.device_base;
 
         return loop;
     }
@@ -472,14 +482,14 @@ pub const EventLoop = struct {
             }
 
             // Check signalfd (slot 0)
-            if (self.pollfds[0].revents & posix.POLL.IN != 0) {
+            if (self.pollfds[Slots.signal].revents & posix.POLL.IN != 0) {
                 var siginfo: [signalfd_siginfo_size]u8 = undefined;
                 _ = posix.read(self.signal_fd, &siginfo) catch {};
                 break;
             }
 
             // Check stop pipe (slot 1) — drain byte and return to caller
-            if (self.pollfds[1].revents & posix.POLL.IN != 0) {
+            if (self.pollfds[Slots.stop].revents & posix.POLL.IN != 0) {
                 var drain: [1]u8 = undefined;
                 _ = posix.read(self.stop_r, &drain) catch {};
                 break;
@@ -489,7 +499,7 @@ pub const EventLoop = struct {
             // drained after the device fd loop below — see issue #79.
 
             // Check rumble auto-stop timerfd (slot 3).
-            if (self.pollfds[3].revents & posix.POLL.IN != 0) {
+            if (self.pollfds[Slots.rumble_stop].revents & posix.POLL.IN != 0) {
                 var rs_expiry: [8]u8 = undefined;
                 _ = posix.read(self.rumble_stop_fd, &rs_expiry) catch {};
                 const now_ns = monotonicNs();
@@ -715,7 +725,7 @@ pub const EventLoop = struct {
             // promoted to ACTIVE (issue #79). Routes to the layer-only
             // expiry handler so a concurrent macro fd expiry on slot 4
             // does not cause the layer half to run twice.
-            if (self.pollfds[2].revents & posix.POLL.IN != 0) {
+            if (self.pollfds[Slots.layer_timer].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
                 if (ctx.mapper) |m| {
@@ -730,7 +740,7 @@ pub const EventLoop = struct {
             // clobbered by layer-hold arm/disarm (issue #72). Routes to the
             // macro-only expiry handler — must not promote a PENDING layer
             // when a macro `delay` shorter than hold_timeout fires.
-            if (self.pollfds[4].revents & posix.POLL.IN != 0) {
+            if (self.pollfds[Slots.macro_timer].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.macro_timer_fd, &expiry) catch {};
                 if (ctx.mapper) |m| {
@@ -803,7 +813,7 @@ test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     // fd_count goes 5 → 6.
     try testing.expectEqual(@as(usize, 6), loop.fd_count);
     try testing.expectEqual(@as(?usize, 5), loop.uinput_ff_slot);
-    try testing.expectEqual(pfds[0], loop.pollfds[5].fd);
+    try testing.expectEqual(pfds[0], loop.pollfds[Slots.device_base].fd);
 }
 
 test "event_loop: EventLoop: Disconnected device causes loop to exit without panic" {
@@ -897,7 +907,7 @@ test "event_loop: EventLoop.addDevice registers fd" {
     // 3=rumble_stop_fd, 4=macro timerfd. First device lands at slot 5,
     // fd_count goes 5 → 6.
     try testing.expectEqual(@as(usize, 6), loop.fd_count);
-    try testing.expectEqual(mock.pipe_r, loop.pollfds[5].fd);
+    try testing.expectEqual(mock.pipe_r, loop.pollfds[Slots.device_base].fd);
 }
 
 test "event_loop: EventLoop.addDevice rejects overflow" {
@@ -907,13 +917,13 @@ test "event_loop: EventLoop.addDevice rejects overflow" {
 
     // Fill remaining slots (already have 5: signalfd + stop_pipe +
     // layer timer_fd + rumble-stop timerfd + macro timerfd).
-    var mocks: [MAX_FDS - 5]MockDeviceIO = undefined;
-    for (0..MAX_FDS - 5) |i| {
+    var mocks: [MAX_FDS - FIXED_SLOT_COUNT]MockDeviceIO = undefined;
+    for (0..MAX_FDS - FIXED_SLOT_COUNT) |i| {
         mocks[i] = try MockDeviceIO.init(allocator, &.{});
     }
-    defer for (0..MAX_FDS - 5) |i| mocks[i].deinit();
+    defer for (0..MAX_FDS - FIXED_SLOT_COUNT) |i| mocks[i].deinit();
 
-    for (0..MAX_FDS - 5) |i| {
+    for (0..MAX_FDS - FIXED_SLOT_COUNT) |i| {
         const dev = mocks[i].deviceIO();
         try loop.addDevice(dev);
     }
