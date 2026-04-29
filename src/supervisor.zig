@@ -363,6 +363,11 @@ pub const Supervisor = struct {
             std.log.info("hotplug: stale entry for phys \"{s}\" has dead fds; force-detaching {s} (race-guard:#93)", .{ phys_key, dn });
             self.detachFull(dn);
         }
+        // All fallible bookkeeping must run BEFORE spawnInstance commits
+        // the managed item — once spawnInstance succeeds, returning an error
+        // would leave a dangling instance in self.managed for the caller's
+        // catch-and-destroy path to UAF on. m.devname must also be a separate
+        // allocation from the map key — teardownManaged frees both independently.
         const dev_copy = try self.allocator.dupe(u8, devname);
         errdefer self.allocator.free(dev_copy);
         const phys_copy = try self.allocator.dupe(u8, phys_key);
@@ -803,6 +808,21 @@ pub const Supervisor = struct {
         if (self.user_cfg) |*uc| uc.deinit();
         self.user_cfg = user_config_mod.load(self.allocator);
         self.applyUserConfigRuntime();
+    }
+
+    // m.devname must be a separate allocation from the map key — teardownManaged
+    // frees both independently after fetchRemove. Used by startFromDirWithRoot,
+    // which calls with `catch {}` (best-effort OOM swallow). NOT safe to call
+    // in attachWithInstance flow where bookkeeping must happen before spawn.
+    fn bindManagedDevname(self: *Supervisor, m: *ManagedInstance, devname: []const u8, phys: []const u8) !void {
+        const map_key_dup = try self.allocator.dupe(u8, devname);
+        errdefer self.allocator.free(map_key_dup);
+        const phys_dup = try self.allocator.dupe(u8, phys);
+        errdefer self.allocator.free(phys_dup);
+        const m_devname_dup = try self.allocator.dupe(u8, devname);
+        errdefer self.allocator.free(m_devname_dup);
+        try self.devname_map.put(map_key_dup, phys_dup);
+        m.devname = m_devname_dup;
     }
 
     fn clearDevnameMap(self: *Supervisor) void {
@@ -1618,26 +1638,9 @@ pub const Supervisor = struct {
                     self.allocator.free(phys);
                     continue;
                 };
-                // Register devname → phys in devname_map so detach() can find this instance.
-                // m.devname must be a separate allocation from the map key because
-                // teardownManaged frees both independently.
-                {
-                    const devname = std.fs.path.basename(hidraw_path);
-                    const dev_copy = self.allocator.dupe(u8, devname) catch null;
-                    const phys_copy = if (dev_copy != null) self.allocator.dupe(u8, phys) catch null else null;
-                    if (dev_copy != null and phys_copy != null) {
-                        if (self.devname_map.put(dev_copy.?, phys_copy.?)) {
-                            const dn_copy = self.allocator.dupe(u8, devname) catch null;
-                            self.managed.items[self.managed.items.len - 1].devname = dn_copy;
-                        } else |_| {
-                            self.allocator.free(dev_copy.?);
-                            self.allocator.free(phys_copy.?);
-                        }
-                    } else {
-                        if (dev_copy) |d| self.allocator.free(d);
-                        if (phys_copy) |p| self.allocator.free(p);
-                    }
-                }
+                // Register devname → phys so detach() can find this instance.
+                const devname = std.fs.path.basename(hidraw_path);
+                self.bindManagedDevname(&self.managed.items[self.managed.items.len - 1], devname, phys) catch {};
                 // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
                 spawned += 1;
             }
