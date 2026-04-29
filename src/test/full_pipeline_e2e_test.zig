@@ -11,6 +11,7 @@ const HidrawDevice = src.io.hidraw.HidrawDevice;
 const Interpreter = src.core.interpreter.Interpreter;
 const DeviceIO = src.io.device_io.DeviceIO;
 const ioctl_mod = src.io.ioctl_constants;
+const cleanup = src.testing_support.uhid_test_cleanup;
 
 // --- UHID kernel protocol (minimal, reused from uhid_integration_test) ---
 
@@ -316,8 +317,11 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
     const allocator = testing.allocator;
 
     try checkUinput();
+    cleanup.ensureSignalHandlersInstalled();
     const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
     defer {
+        cleanup.unregisterUhidFd(uhid_fd);
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
@@ -389,8 +393,11 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     const allocator = testing.allocator;
 
     try checkUinput();
+    cleanup.ensureSignalHandlersInstalled();
     const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
     defer {
+        cleanup.unregisterUhidFd(uhid_fd);
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
@@ -476,8 +483,11 @@ test "T-E2E-3: report with bad match byte produces no output event" {
     const allocator = testing.allocator;
 
     try checkUinput();
+    cleanup.ensureSignalHandlersInstalled();
     const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
     defer {
+        cleanup.unregisterUhidFd(uhid_fd);
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }

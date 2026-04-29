@@ -29,6 +29,7 @@ const posix = std.posix;
 // module-import edge.
 const uhid = @import("../../io/uhid.zig");
 const ioctl_constants = @import("../../io/ioctl_constants.zig");
+const cleanup = @import("../uhid_test_cleanup.zig");
 
 pub const SimulatorError = error{
     SkipZigTest,
@@ -77,10 +78,12 @@ pub const UhidSimulator = struct {
         if (opts.descriptor.len == 0) return error.SkipZigTest;
         if (opts.descriptor.len > uhid.HID_MAX_DESCRIPTOR_SIZE) return error.SkipZigTest;
 
+        cleanup.ensureSignalHandlersInstalled();
         const fd = uhid.openUhid() catch |err| switch (err) {
             error.SkipZigTest => return error.SkipZigTest,
             else => |e| return e,
         };
+        cleanup.registerUhidFd(fd);
         errdefer posix.close(fd);
 
         sendCreate(fd, opts) catch |err| switch (err) {
@@ -146,6 +149,7 @@ pub const UhidSimulator = struct {
     /// call is a no-op).
     pub fn destroy(self: *UhidSimulator) void {
         if (self.fd < 0) return;
+        cleanup.unregisterUhidFd(self.fd);
         uhid.uhidDestroy(self.fd);
         posix.close(self.fd);
         self.fd = -1;

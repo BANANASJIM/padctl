@@ -19,6 +19,7 @@ const FieldTag = interp_mod.FieldTag;
 const GamepadStateDelta = src.core.state.GamepadStateDelta;
 const ref = src.testing_support.reference_interp;
 const helpers = src.testing_support.helpers;
+const cleanup = src.testing_support.uhid_test_cleanup;
 
 // --- UHID kernel protocol ---
 
@@ -413,8 +414,11 @@ fn injectAndVerify(
     const vid: u16 = 0xFA00 | @as(u16, @intCast(iface));
     const pid: u16 = 0xCA00 | @as(u16, @truncate(std.hash.Adler32.hash(config_path) & 0xFF));
 
+    cleanup.ensureSignalHandlersInstalled();
     const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
     defer {
+        cleanup.unregisterUhidFd(uhid_fd);
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }

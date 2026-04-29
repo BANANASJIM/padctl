@@ -118,6 +118,7 @@ pub const testing_support = struct {
     // (`zig build test-integration` → steam_deck_uhid_e2e_test).
     pub const steam_deck_fixture = @import("test/fixtures/steam_deck_reports.zig");
     pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
+    pub const uhid_test_cleanup = @import("test/uhid_test_cleanup.zig");
 };
 
 pub const config = struct {

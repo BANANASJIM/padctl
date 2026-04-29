@@ -17,6 +17,7 @@ const uhidCreate = uhid.uhidCreate;
 const uhidInput = uhid.uhidInput;
 const uhidDestroy = uhid.uhidDestroy;
 const UHID_EVENT_SIZE = uhid.UHID_EVENT_SIZE;
+const cleanup = src.testing_support.uhid_test_cleanup;
 
 // Minimal HID report descriptor: 2 axes (X, Y), 4-byte report
 const test_rd = [_]u8{
@@ -62,8 +63,11 @@ fn findHidraw(vid: u16, pid: u16) !?[64]u8 {
 // --- Test 1: UHID virtual device appears as hidraw ---
 
 test "uhid: virtual device appears as hidraw" {
+    cleanup.ensureSignalHandlersInstalled();
     const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
     defer {
+        cleanup.unregisterUhidFd(uhid_fd);
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
@@ -123,8 +127,11 @@ const simple_toml =
 test "uhid: full pipeline hidraw read through interpreter" {
     const allocator = testing.allocator;
 
+    cleanup.ensureSignalHandlersInstalled();
     const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
     defer {
+        cleanup.unregisterUhidFd(uhid_fd);
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
