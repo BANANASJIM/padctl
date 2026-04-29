@@ -36,6 +36,7 @@ const uhid = @import("../io/uhid.zig");
 const uhid_descriptor = @import("../io/uhid_descriptor.zig");
 const device_cfg = @import("../config/device.zig");
 const ioctl_constants = @import("../io/ioctl_constants.zig");
+const cleanup = @import("uhid_test_cleanup.zig");
 
 const SHARED_UNIQ = "padctl/uniq-pair-test-0";
 
@@ -283,15 +284,20 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
     defer testing.allocator.free(imu_desc);
 
     // Create two UHID devices sharing the same uniq.
+    cleanup.ensureSignalHandlersInstalled();
     const main_fd = try uhid.openUhid();
+    cleanup.registerUhidFd(main_fd);
     defer {
+        cleanup.unregisterUhidFd(main_fd);
         uhid.uhidDestroy(main_fd);
         posix.close(main_fd);
     }
     try sendCreateWithUniq(main_fd, MAIN_VID, MAIN_PID, "padctl-main", SHARED_UNIQ, &MAIN_DESCRIPTOR);
 
     const imu_fd = try uhid.openUhid();
+    cleanup.registerUhidFd(imu_fd);
     defer {
+        cleanup.unregisterUhidFd(imu_fd);
         uhid.uhidDestroy(imu_fd);
         posix.close(imu_fd);
     }

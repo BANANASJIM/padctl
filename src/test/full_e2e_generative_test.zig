@@ -39,6 +39,7 @@ const helpers = src.testing_support.helpers;
 const config_gen = src.testing_support.gen.config_gen;
 const sequence_gen = src.testing_support.gen.sequence_gen;
 const oracle_mod = src.testing_support.gen.mapper_oracle;
+const cleanup = src.testing_support.uhid_test_cleanup;
 
 // --- UHID kernel protocol ---
 
@@ -674,6 +675,7 @@ fn getAbsValue(events: []const InputEvent, code: u16) ?i32 {
 test "l3_e2e: generative full pipeline for all device configs with mapping" {
     const allocator = testing.allocator;
 
+    cleanup.ensureSignalHandlersInstalled();
     try checkUinput();
     setupTestUdev();
 
@@ -754,7 +756,9 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
             if (err == error.SkipZigTest) return error.SkipZigTest;
             return err;
         };
+        cleanup.registerUhidFd(uhid_fd);
         defer {
+            cleanup.unregisterUhidFd(uhid_fd);
             uhidDestroy(uhid_fd);
             posix.close(uhid_fd);
         }
@@ -1101,6 +1105,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
 test "l3_e2e: fully generated random device config + random mapping — DRT" {
     const allocator = testing.allocator;
 
+    cleanup.ensureSignalHandlersInstalled();
     try checkUinput();
     setupTestUdev();
 
@@ -1188,7 +1193,9 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             if (err == error.SkipZigTest) return error.SkipZigTest;
             return err;
         };
+        cleanup.registerUhidFd(uhid_fd);
         defer {
+            cleanup.unregisterUhidFd(uhid_fd);
             uhidDestroy(uhid_fd);
             posix.close(uhid_fd);
         }
