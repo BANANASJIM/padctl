@@ -326,8 +326,6 @@ pub const EventLoop = struct {
     timer_fd: posix.fd_t,
     /// Dedicated timerfd for userspace rumble auto-stop (slot 3).
     rumble_stop_fd: posix.fd_t,
-    /// pollfds slot where `rumble_stop_fd` is registered.
-    rumble_stop_slot: usize,
     /// Dedicated timerfd for macro delay / TimerQueue (slot 4).
     /// Passed to `Mapper.init` so `TimerQueue` arms only this fd, keeping
     /// it independent from the layer-hold `timer_fd`.
@@ -391,7 +389,6 @@ pub const EventLoop = struct {
             .device_base = 0,
             .timer_fd = timer_fd,
             .rumble_stop_fd = rumble_stop_fd,
-            .rumble_stop_slot = 3,
             .rumble_scheduler = .{},
             .macro_timer_fd = macro_timer_fd,
             .uinput_ff_slot = null,
