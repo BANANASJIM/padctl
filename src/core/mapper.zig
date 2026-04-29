@@ -111,7 +111,7 @@ pub const Mapper = struct {
     }
 
     // `now_ns` is the ppoll-wakeup CLOCK_MONOTONIC snapshot from the caller;
-    // must match the value passed to onTimerExpired() in the same wakeup so
+    // must match the value passed to onMacroTimerExpired() in the same wakeup so
     // tap/hold boundary decisions see a single timeline (issue #79).
     pub fn apply(self: *Mapper, delta: GamepadStateDelta, dt_ms: u32, now_ns: i128) !OutputEvents {
         // flush pending tap release from previous frame
@@ -378,9 +378,7 @@ pub const Mapper = struct {
         return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux, .timer_request = timer_request };
     }
 
-    // Layer-hold timerfd (slot 2) expiry: promote PENDING -> ACTIVE only.
-    // Must NOT drain the macro timer_queue — a macro fd expiry on slot 4
-    // arriving in the same wakeup is handled by onMacroTimerExpired().
+    // Layer-hold timerfd (slot 2) expiry only — macro timerfd (slot 4) is a separate fd.
     pub fn onLayerTimerExpired(self: *Mapper) AuxEventList {
         const th_res = self.layer.onTimerExpired();
         if (th_res.layer_activated) {
@@ -390,10 +388,7 @@ pub const Mapper = struct {
         return AuxEventList{};
     }
 
-    // Macro timerfd (slot 4) expiry: drain TimerQueue and step active macros.
-    // Must NOT call layer.onTimerExpired() — a macro `delay` shorter than the
-    // layer hold_timeout would otherwise prematurely promote a PENDING layer.
-    // `now_ns` is the same ppoll-wakeup CLOCK_MONOTONIC snapshot passed to apply().
+    // Macro timerfd (slot 4) expiry only — must NOT call onLayerTimerExpired().
     pub fn onMacroTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
         var aux = AuxEventList{};
         var macro_tap_release: u64 = 0;
@@ -428,14 +423,6 @@ pub const Mapper = struct {
             self.pending_tap_release = existing | macro_tap_release;
         }
         return aux;
-    }
-
-    // DEPRECATED: split per slot. Retained for tests / external callers that
-    // want both halves; production event_loop dispatches each half from its
-    // own pollfd slot. `now_ns` is the ppoll-wakeup snapshot.
-    pub fn onTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
-        _ = self.onLayerTimerExpired();
-        return self.onMacroTimerExpired(now_ns);
     }
 
     fn findMacro(self: *const Mapper, name: []const u8) ?*const mapping.Macro {
@@ -777,7 +764,7 @@ test "mapper: prev frame masking: suppress produces correct diff" {
     try testing.expectEqual(@as(u64, 0), ev2.prev.buttons & a_mask);
 }
 
-test "mapper: onTimerExpired: PENDING -> ACTIVE activates layer" {
+test "mapper: onLayerTimerExpired: PENDING -> ACTIVE activates layer" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]
@@ -800,7 +787,7 @@ test "mapper: onTimerExpired: PENDING -> ACTIVE activates layer" {
     try testing.expect(!m.layer.tap_hold.?.layer_activated);
 
     // Timer fires — goes ACTIVE
-    _ = m.onTimerExpired(0);
+    _ = m.onLayerTimerExpired();
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 
     // Now layer remap should be active
@@ -897,7 +884,7 @@ test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
     _ = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16, 0);
 
     // Timer fires: PENDING → ACTIVE
-    _ = m.onTimerExpired(0);
+    _ = m.onLayerTimerExpired();
 
     // Frame 2: still holding LT + dpad-up, but now layer is ACTIVE (active_changed=true)
     // prev.dpad_y should be reset to 0 so edge triggers KEY_UP press
@@ -1264,9 +1251,9 @@ test "mapper: layer switch resets gyro EMA and accumulators" {
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
     _ = try m.apply(.{ .buttons = lt_mask }, 16, 0);
 
-    // Timer fires → ACTIVE (active_changed = true inside onTimerExpired, but processLayerTriggers
+    // Timer fires → ACTIVE (active_changed = true inside onLayerTimerExpired, but processLayerTriggers
     // sets active_changed on press too — here we drive it through the full path)
-    _ = m.onTimerExpired(0);
+    _ = m.onLayerTimerExpired();
     // Manually trigger a frame that will see active_changed via release
     // Instead: drive through processLayerTriggers which sets active_changed on ACTIVE→IDLE release
     // For simplicity: re-dirty the processor and then release LT to deactivate
@@ -1647,8 +1634,7 @@ test "mapper: #79 dual-ready ppoll — apply uses caller now_ns, tap fires at pr
     _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
 
     // Timer fires at t=200ms → ACTIVE
-    const timer_ns: i128 = press_ns + 200_000_000;
-    _ = m.onTimerExpired(timer_ns);
+    _ = m.onLayerTimerExpired();
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 
     // Frame 2: release observed on the same ppoll wakeup as the timer,

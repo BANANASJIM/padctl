@@ -953,7 +953,7 @@ test "event_loop: armTimer: fires after timeout" {
     try testing.expectEqual(@as(usize, 8), n);
 }
 
-test "event_loop: EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
+test "event_loop: EventLoop timerfd: mapper.onLayerTimerExpired invoked on timer expiry" {
     const allocator = testing.allocator;
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
