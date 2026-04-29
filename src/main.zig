@@ -120,6 +120,7 @@ pub const testing_support = struct {
     pub const steam_deck_fixture = @import("test/fixtures/steam_deck_reports.zig");
     pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
     pub const uhid_test_cleanup = @import("test/uhid_test_cleanup.zig");
+    pub const device_instance_imu_ownership_test = @import("test/device_instance_imu_ownership_test.zig");
 };
 
 pub const config = struct {
