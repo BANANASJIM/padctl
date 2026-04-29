@@ -143,6 +143,9 @@ const HotplugPending = struct {
     retries: u8,
 };
 
+// 7 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace) + 1 listen + 4 clients.
+pub const SUPERVISOR_MAX_FDS: usize = 7 + 1 + 4;
+
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     managed: std.ArrayList(ManagedInstance),
@@ -1019,7 +1022,7 @@ pub const Supervisor = struct {
         defer self.stopAll();
 
         // 7 base fds + 1 listen + 4 clients = 12
-        var pollfds: [12]posix.pollfd = undefined;
+        var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1641,7 +1644,7 @@ pub const Supervisor = struct {
     pub fn serveMulti(self: *Supervisor, dirs: []const []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [12]posix.pollfd = undefined;
+        var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1768,7 +1771,7 @@ pub const Supervisor = struct {
     pub fn serve(self: *Supervisor, dir_path: []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [12]posix.pollfd = undefined;
+        var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
