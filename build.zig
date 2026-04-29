@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     const use_libusb = b.option(bool, "libusb", "Link libusb-1.0 (default: true)") orelse true;
     const use_wasm = b.option(bool, "wasm", "Link wasm3 runtime (default: true)") orelse true;
     const coverage = b.option(bool, "test-coverage", "Run tests with kcov coverage") orelse false;
+    const test_filter = b.option([]const u8, "test-filter", "Substring filter passed to addTest.filters (local dev)");
 
     const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0" };
 
@@ -100,7 +101,8 @@ pub fn build(b: *std.Build) void {
     unit_mod.addImport("toml_gen", capture_toml_gen_mod);
     unit_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, unit_mod, wasm3_c_flags);
-    const unit_tests = b.addTest(.{ .root_module = unit_mod });
+    const unit_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
+    const unit_tests = b.addTest(.{ .root_module = unit_mod, .filters = unit_filters });
     if (use_libusb) {
         unit_tests.linkSystemLibrary("usb-1.0");
     } else {

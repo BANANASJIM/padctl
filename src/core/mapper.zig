@@ -59,6 +59,10 @@ pub const Mapper = struct {
     suppressed_buttons: u64,
     injected_buttons: u64,
     pending_tap_release: ?u64,
+    // issue #72: gamepad-button taps emitted by macro timer expiry need one
+    // apply() cycle to reach output before pending_tap_release fires; staged
+    // here, promoted to injected+pending_tap_release at the next apply.
+    macro_timer_tap_pending: u64,
     timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
     active_macros: std.ArrayList(MacroPlayer),
@@ -93,6 +97,7 @@ pub const Mapper = struct {
             .suppressed_buttons = 0,
             .injected_buttons = 0,
             .pending_tap_release = null,
+            .macro_timer_tap_pending = 0,
             .timer_fd = timer_fd,
             .allocator = allocator,
             .active_macros = .{},
@@ -160,11 +165,22 @@ pub const Mapper = struct {
             // Cancel in-flight macros; emit releases for any held keys/buttons.
             for (self.active_macros.items) |*p| p.emitPendingReleases(&aux, &self.injected_buttons);
             self.active_macros.clearRetainingCapacity();
+            // issue #72: discard tap bits staged from a cancelled macro's timer expiry.
+            self.macro_timer_tap_pending = 0;
         }
 
         // reset accumulators
         self.suppressed_buttons = 0;
         self.injected_buttons = 0;
+
+        // issue #72: promote macro-timer tap bits staged at last expiry — emit
+        // press this frame, schedule release for the next apply.
+        if (self.macro_timer_tap_pending != 0) {
+            self.injected_buttons |= self.macro_timer_tap_pending;
+            const existing = self.pending_tap_release orelse 0;
+            self.pending_tap_release = existing | self.macro_timer_tap_pending;
+            self.macro_timer_tap_pending = 0;
+        }
 
         // Suppress layer trigger buttons so they don't leak to uinput output.
         // Trigger buttons are consumed by the layer system regardless of
@@ -312,6 +328,10 @@ pub const Mapper = struct {
         var macro_tap_release: u64 = 0;
         var i: usize = 0;
         while (i < self.active_macros.items.len) {
+            // issue #72: re-assert macro-held gamepad bits each frame; injected_buttons
+            // is reset above, but held_gamepad_buttons (set by past `down=`) must persist
+            // across the delay window and outlive same-frame step advancement.
+            self.injected_buttons |= self.active_macros.items[i].held_gamepad_buttons;
             const done = self.active_macros.items[i].step(
                 &aux,
                 &self.timer_queue,
@@ -419,8 +439,11 @@ pub const Mapper = struct {
             }
         }
         if (macro_tap_release != 0) {
-            const existing = self.pending_tap_release orelse 0;
-            self.pending_tap_release = existing | macro_tap_release;
+            // issue #72: stage tap bits for the next apply rather than promoting
+            // to pending_tap_release here — apply() resets injected_buttons on
+            // entry, so a same-cycle pending_tap_release would clear the bit
+            // before the gamepad output is ever emitted.
+            self.macro_timer_tap_pending |= macro_tap_release;
         }
         return aux;
     }

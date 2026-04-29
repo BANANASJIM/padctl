@@ -1042,6 +1042,7 @@ test {
     _ = @import("test/bugfix_regression_test.zig");
     _ = @import("test/uhid_uniq_pairing_test.zig");
     _ = @import("test/macro_gamepad_button_test.zig");
+    _ = @import("test/macro_e2e_test.zig");
     _ = @import("test/properties/config_props.zig");
     _ = @import("test/properties/contract_props.zig");
     _ = @import("test/properties/device_specific_props.zig");
