@@ -102,7 +102,7 @@ pub fn runInitSequence(
         const n = @min(fr.len, buf.len);
         for (fr[0..n], 0..) |b, i| buf[i] = @intCast(b);
         device.featureReport(buf[0..n]) catch |err| {
-            std.log.debug("feature_report ioctl failed: {}, continuing", .{err});
+            std.log.warn("feature_report ioctl failed: {}, continuing", .{err});
         };
         total += 1;
     }

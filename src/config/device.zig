@@ -334,6 +334,13 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
+    // feature_report byte-range validation
+    if (cfg.device.init) |init_cfg| {
+        if (init_cfg.feature_report) |fr| {
+            for (fr) |b| if (b < 0 or b > 255) return error.InvalidConfig;
+        }
+    }
+
     // IMU backend validation (Phase 13 Wave 3 T1c).
     // ADR-015 §Alternatives forbids "uinput primary + [output.imu] present":
     // uinput's EVIOCGUNIQ always returns -ENOENT, so SDL's strcmp pairing
@@ -1129,6 +1136,46 @@ test "device: generic mode: ABS event missing range returns error" {
         \\wheel = { event = "ABS_WHEEL" }
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "device: feature_report rejects byte > 255" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\feature_report = [256]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: feature_report rejects byte < 0" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\feature_report = [-1]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
 test "device: fuzz parseString: no panic on arbitrary input" {
