@@ -553,3 +553,94 @@ test "macro #72: delay must gate subsequent steps until timer expiry" {
     try testing.expectEqual(@as(u64, 0), ev_after2.gamepad.buttons & home_bit);
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
+
+// --- Issue #119: repeat_delay_ms — turbo / combo while-held ---
+//
+// Reporter @VaisVaisov: bind a macro to RM, enable repeat. While the trigger is
+// held the macro restarts after repeat_delay_ms; releasing the trigger lets the
+// in-flight iteration finish naturally and stops further restarts.
+test "macro #119: repeat_delay_ms emits gamepad-button taps repeatedly while held" {
+    const allocator = testing.allocator;
+
+    var ctx = try makeMapper(
+        \\[[macro]]
+        \\name = "spam_a"
+        \\repeat_delay_ms = 50
+        \\steps = [
+        \\  { tap = "A" },
+        \\]
+        \\
+        \\[remap]
+        \\C = "macro:spam_a"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const c_mask = btnMask(.C);
+    const a_bit = btnMask(.A);
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000_000_000;
+
+    // Frame 0 (rising edge of C): macro spawns; first tap stages A press.
+    const ev0 = try m.apply(.{ .buttons = c_mask }, 16, t0);
+    try testing.expectEqual(a_bit, ev0.gamepad.buttons & a_bit);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    // Frame 1: A release fires (pending_tap_release), restart still pending.
+    const ev1 = try m.apply(.{ .buttons = c_mask }, 4, t0 + 4 * ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev1.gamepad.buttons & a_bit);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    // Mid restart-window: A stays clear.
+    var t: i128 = t0 + 8 * ns_per_ms;
+    while (t < t0 + 50 * ns_per_ms) : (t += 4 * ns_per_ms) {
+        const evN = try m.apply(.{ .buttons = c_mask }, 4, t);
+        try testing.expectEqual(@as(u64, 0), evN.gamepad.buttons & a_bit);
+    }
+
+    // Restart timer fires: second tap staged via macro_timer_tap_pending,
+    // then promoted on the next apply().
+    const t_restart1: i128 = t0 + 50 * ns_per_ms;
+    _ = m.onMacroTimerExpired(t_restart1);
+    const ev_press = try m.apply(.{ .buttons = c_mask }, 4, t_restart1 + ns_per_ms);
+    try testing.expectEqual(a_bit, ev_press.gamepad.buttons & a_bit);
+
+    // Release trigger between iterations: in-flight tap-release flushes; no further taps.
+    const ev_release = try m.apply(.{ .buttons = 0 }, 4, t_restart1 + 2 * ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev_release.gamepad.buttons & a_bit);
+
+    // Second restart timer expires after release: player completes, no tap emitted.
+    const t_restart2: i128 = t_restart1 + 50 * ns_per_ms;
+    _ = m.onMacroTimerExpired(t_restart2);
+    const ev_done = try m.apply(.{ .buttons = 0 }, 4, t_restart2 + ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev_done.gamepad.buttons & a_bit);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+}
+
+test "macro #119: non-repeat macro unaffected (single-shot completion)" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[[macro]]
+        \\name = "once"
+        \\steps = [
+        \\  { tap = "A" },
+        \\]
+        \\
+        \\[remap]
+        \\C = "macro:once"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const c_mask = btnMask(.C);
+    const a_bit = btnMask(.A);
+    const t0: i128 = 1_000_000_000;
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+
+    const ev0 = try m.apply(.{ .buttons = c_mask }, 16, t0);
+    try testing.expectEqual(a_bit, ev0.gamepad.buttons & a_bit);
+
+    // After tap_release frame, player should be removed (no repeat).
+    _ = try m.apply(.{ .buttons = c_mask }, 4, t0 + 4 * ns_per_ms);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+}
