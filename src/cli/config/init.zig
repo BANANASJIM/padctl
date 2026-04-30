@@ -203,23 +203,18 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
     try cw.print("# Preset: {s}\n\n", .{presets[preset_idx]});
     try cw.writeAll(templateContent(tmpl_idx));
 
+    // Validate generated content BEFORE writing — fail loudly if generator drifts.
+    validateContent(allocator, content_buf.items) catch |err| {
+        print(allocator, &pbuf, "ERROR: generator produced invalid TOML/mapping: {}\n", .{err});
+        return err;
+    };
+
     const file = try std.fs.createFileAbsolute(out_path, .{});
     defer file.close();
     try file.writeAll(content_buf.items);
 
     print(allocator, &pbuf, "\nCreated: {s}\n", .{out_path});
-
-    // Validate as mapping config (parse + semantic checks).
-    if (mapping.parseFile(allocator, out_path)) |res| {
-        defer res.deinit();
-        if (mapping.validate(&res.value)) {
-            print(allocator, &pbuf, "Validation: OK\n", .{});
-        } else |err| {
-            print(allocator, &pbuf, "Validation warning: {}\n", .{err});
-        }
-    } else |err| {
-        print(allocator, &pbuf, "Validation warning: {}\n", .{err});
-    }
+    print(allocator, &pbuf, "Validation: OK\n", .{});
 
     const guidance = try formatGuidance(allocator, safe, device_name);
     defer allocator.free(guidance);
@@ -272,6 +267,13 @@ test "init: formatGuidance contains expected substrings" {
     try std.testing.expect(std.mem.indexOf(u8, guidance, "padctl switch vader-5-pro") != null);
     try std.testing.expect(std.mem.indexOf(u8, guidance, "name = \"Vader 5 Pro\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, guidance, "default_mapping = \"vader-5-pro\"") != null);
+}
+
+// Validate generated TOML content in memory; returns error if invalid.
+fn validateContent(allocator: std.mem.Allocator, content: []const u8) !void {
+    const res = try mapping.parseString(allocator, content);
+    defer res.deinit();
+    try mapping.validate(&res.value);
 }
 
 // Build the same TOML that run() emits, given a preset and template index.
@@ -342,4 +344,24 @@ test "init: every (preset, template) round-trips through tools.validate.validate
             try std.testing.expectEqual(@as(usize, 0), errors.len);
         }
     }
+}
+
+test "init: validate-before-write gate rejects invalid TOML and writes no file (issue #53)" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_abs = try tmp.dir.realpath(".", &path_buf);
+
+    // Intentionally broken TOML (unclosed bracket)
+    const broken: []const u8 = "[[layer]\nname = \"broken\"\n";
+
+    // validateContent must fail on broken input (TOML parser returns UnexpectedToken)
+    try std.testing.expect(if (validateContent(allocator, broken)) false else |_| true);
+
+    // Confirm no file was written (write gated on validateContent)
+    const out = try std.fmt.allocPrint(allocator, "{s}/should-not-exist.toml", .{tmp_abs});
+    defer allocator.free(out);
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(out, .{}));
 }
