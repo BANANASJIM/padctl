@@ -199,6 +199,7 @@ pub const HidrawDevice = struct {
     const vtable = DeviceIO.VTable{
         .read = read,
         .write = write,
+        .feature_report = featureReport,
         .pollfd = pollfd,
         .close = close,
     };
@@ -220,6 +221,18 @@ pub const HidrawDevice = struct {
             error.BrokenPipe, error.ConnectionResetByPeer => return DeviceIO.WriteError.Disconnected,
             else => return DeviceIO.WriteError.Io,
         };
+    }
+
+    fn featureReport(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
+        const self: *HidrawDevice = @ptrCast(@alignCast(ptr));
+        const len: u14 = @intCast(@min(data.len, 0x3fff));
+        const req = ioctl.HIDIOCSFEATURE(len);
+        const rc = linux.ioctl(self.fd, req, @intFromPtr(data.ptr));
+        if (rc < 0) {
+            const errno = posix.errno(rc);
+            if (errno == .NODEV or errno == .PIPE) return DeviceIO.WriteError.Disconnected;
+            return DeviceIO.WriteError.Io;
+        }
     }
 
     fn pollfd(ptr: *anyopaque) posix.pollfd {

@@ -175,6 +175,7 @@ pub const UsbrawDevice = struct {
     const vtable = DeviceIO.VTable{
         .read = read,
         .write = write,
+        .feature_report = featureReportUnsupported,
         .pollfd = pollfd,
         .close = close,
     };
@@ -187,6 +188,10 @@ pub const UsbrawDevice = struct {
         const n = self.ring.pop(buf);
         if (n == 0) return DeviceIO.ReadError.Again;
         return n;
+    }
+
+    fn featureReportUnsupported(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+        return DeviceIO.WriteError.Io;
     }
 
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
