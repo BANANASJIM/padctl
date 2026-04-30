@@ -44,6 +44,7 @@ pub const UdevEntry = struct {
     vid: u16,
     pid: u16,
     block_kernel_drivers: []const []const u8 = &.{},
+    clone_vid_pid: bool = false,
 };
 
 pub fn writeImuUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
@@ -275,6 +276,11 @@ fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) 
                 entries.items[i].block_kernel_drivers = entries.items[j].block_kernel_drivers;
                 entries.items[j].block_kernel_drivers = &.{};
             }
+            // clone_vid_pid is a boolean OR: a VID:PID is "cloned" if any
+            // contributing TOML carries the flag.
+            if (entries.items[j].clone_vid_pid) {
+                entries.items[i].clone_vid_pid = true;
+            }
             const removed = entries.items[j];
             allocator.free(removed.name);
             for (removed.block_kernel_drivers) |d| allocator.free(d);
@@ -325,6 +331,20 @@ pub fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []con
     // uaccess: graphical login ACL; GROUP+MODE: headless/SSH/test fallback via 'input' group
     try buf.appendSlice(allocator, "\nSUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
     try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uhid\",   TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
+
+    // Per-VID/PID udev rules for cloned UHID cards (clone_vid_pid=true, Wave 6 PID FFB).
+    // hid-universal-pidff binds by modalias on the cloned VID/PID; uaccess must
+    // follow so the user session retains access to the resulting hidraw node.
+    for (entries) |e| {
+        if (!e.clone_vid_pid) continue;
+        const rule = try std.fmt.allocPrint(
+            allocator,
+            "KERNELS==\"uhid\", SUBSYSTEM==\"input\", ATTRS{{id/vendor}}==\"{x:0>4}\", ATTRS{{id/product}}==\"{x:0>4}\", TAG+=\"uaccess\"\n",
+            .{ e.vid, e.pid },
+        );
+        defer allocator.free(rule);
+        try buf.appendSlice(allocator, rule);
+    }
 
     var f = try std.fs.createFileAbsolute(rules_path, .{ .truncate = true });
     defer f.close();
@@ -520,22 +540,33 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
 
     var name_buf: [256]u8 = undefined;
     var name: []const u8 = std.fs.path.stem(path);
+    var clone_vid_pid: bool = false;
     var in_device_section = false;
+    var in_ffb_section = false;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len > 0 and trimmed[0] == '[') {
             in_device_section = std.mem.startsWith(u8, trimmed, "[device]");
+            in_ffb_section = std.mem.startsWith(u8, trimmed, "[output.force_feedback]");
             continue;
         }
-        if (!in_device_section) continue;
-        if (isFieldKey(trimmed, "name")) {
-            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
-                const n = @min(val.len, name_buf.len - 1);
-                @memcpy(name_buf[0..n], val[0..n]);
-                name = name_buf[0..n];
+        if (in_device_section) {
+            if (isFieldKey(trimmed, "name")) {
+                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
+                    const n = @min(val.len, name_buf.len - 1);
+                    @memcpy(name_buf[0..n], val[0..n]);
+                    name = name_buf[0..n];
+                }
+            }
+        } else if (in_ffb_section) {
+            if (isFieldKey(trimmed, "clone_vid_pid")) {
+                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+                    clone_vid_pid = std.mem.eql(u8, val, "true");
+                }
             }
         }
     }
@@ -545,6 +576,7 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
         .vid = dev.vid,
         .pid = dev.pid,
         .block_kernel_drivers = dev.block_kernel_drivers,
+        .clone_vid_pid = clone_vid_pid,
     });
 }
 

@@ -163,7 +163,8 @@ pub fn build(b: *std.Build) void {
     const fmt = b.addFmt(.{ .paths = &.{ "src/", "tools/" }, .check = true });
     fmt_step.dependOn(&fmt.step);
 
-    // check-all: single CI gate (test + safe + fmt; tsan excluded — crashes on some CI runners)
+    // check-all: local convenience target (runs test + safe + fmt in one invocation).
+    // CI uses three separate `zig build` processes instead — see ci.yml.
     const check_all = b.step("check-all", "Run all checks (test + safe + fmt)");
     check_all.dependOn(test_step);
     check_all.dependOn(safe_step);
@@ -274,6 +275,11 @@ pub fn build(b: *std.Build) void {
     }
     routing_tests.linkLibC();
     test_step.dependOn(&b.addRunArtifact(routing_tests).step);
+
+    // Wave 6 T3 + T6: uhid_output_dispatch_test and wave6_pidff_e2e_test are
+    // imported into src/main.zig's test namespace and compiled into the main
+    // test artifact. Separate b.addTest artifacts triggered Zig flock deadlock
+    // (issue #22453) on the cache manifest.
 
     // test-e2e: Layer 3 (UHID+uinput full pipeline, requires privilege)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (UHID+uinput, local)");

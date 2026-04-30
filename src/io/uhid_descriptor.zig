@@ -54,6 +54,42 @@ const state_mod = @import("../core/state.zig");
 pub const BuildError = std.mem.Allocator.Error || error{
     DescriptorTooLarge,
     InvalidOutputConfig,
+    IncompletePidDescriptor,
+};
+
+// PID report-ID assignment per spec/openspec/changes/phase-13-wave-6-pidff/
+// design.md §T1. Report IDs themselves are not normative in HID PID 1.01 —
+// kernel `pidff_find_reports` looks up reports by Usage, not by ID — but a
+// fixed assignment keeps the golden test stable and the wire format
+// debuggable.
+pub const PID_SET_EFFECT_REPORT_ID: u8 = 1;
+pub const PID_SET_ENVELOPE_REPORT_ID: u8 = 2;
+pub const PID_SET_CONDITION_REPORT_ID: u8 = 3;
+pub const PID_SET_PERIODIC_REPORT_ID: u8 = 4;
+pub const PID_SET_CONSTANT_FORCE_REPORT_ID: u8 = 5;
+pub const PID_SET_RAMP_FORCE_REPORT_ID: u8 = 6;
+pub const PID_BLOCK_FREE_REPORT_ID: u8 = 7;
+pub const PID_EFFECT_OPERATION_REPORT_ID: u8 = 10;
+pub const PID_DEVICE_CONTROL_REPORT_ID: u8 = 11;
+pub const PID_DEVICE_GAIN_REPORT_ID: u8 = 12;
+pub const PID_CREATE_NEW_EFFECT_REPORT_ID: u8 = 13;
+pub const PID_BLOCK_LOAD_REPORT_ID: u8 = 14;
+pub const PID_POOL_REPORT_ID: u8 = 15;
+
+// Per drivers/hid/usbhid/hid-pidff.c::pidff_reports[0..PID_REQUIRED_REPORTS]
+// (8 mandatory usages: 0x21, 0x77, 0x7d, 0x7f, 0x89, 0x90, 0x96, 0xab).
+// Set Envelope/Condition/Periodic/Constant/Ramp are emitted but kernel-optional
+// (not validated here). Kernel pidff_find_reports rejects with -ENODEV if any
+// of these 8 are absent — see probe Run 2 in tools/wave6-probe/RESEARCH-REPORT.md.
+const PID_MANDATORY_REPORT_IDS = [_]u8{
+    PID_SET_EFFECT_REPORT_ID, // 1,  usage 0x21
+    PID_BLOCK_FREE_REPORT_ID, // 7,  usage 0x90
+    PID_EFFECT_OPERATION_REPORT_ID, // 10, usage 0x77
+    PID_DEVICE_CONTROL_REPORT_ID, // 11, usage 0x96
+    PID_DEVICE_GAIN_REPORT_ID, // 12, usage 0x7d
+    PID_CREATE_NEW_EFFECT_REPORT_ID, // 13, usage 0xab
+    PID_BLOCK_LOAD_REPORT_ID, // 14, usage 0x89
+    PID_POOL_REPORT_ID, // 15, usage 0x7f
 };
 
 /// Input report ID used for the main gamepad report. Kept `1` so a simple
@@ -445,7 +481,540 @@ pub const UhidDescriptorBuilder = struct {
         if (buf.items.len > uhid.HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
         return buf.toOwnedSlice(allocator);
     }
+
+    /// Build a HID report descriptor for a primary UHID card that exposes a
+    /// USB HID Physical Interface Device (PID) force-feedback collection.
+    /// Used when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`
+    /// (T5 schema). The descriptor contains a Joystick application
+    /// preamble (one X axis is enough for the kernel to attach) followed by
+    /// 10 output reports (Set Effect / Set Envelope / Set Condition / Set
+    /// Periodic / Set Constant Force / Set Ramp Force / Block Free / Effect
+    /// Operation / Device Control / Device Gain) and 3 feature reports (Create
+    /// New Effect / Block Load / PID Pool). Emits all 8 kernel-mandatory reports
+    /// (pidff_reports[0..PID_REQUIRED_REPORTS]) plus the 5 optional waveform
+    /// parameter reports.
+    ///
+    /// `validateMandatoryReports` runs at the end and returns
+    /// `error.IncompletePidDescriptor` if any of the 8 mandatory IDs is missing,
+    /// fail-closing the daemon before kernel `pidff_find_reports` would
+    /// crash on a malformed device.
+    ///
+    /// The `cfg` parameter is currently unused — full axis/button passthrough
+    /// (sticks, hat, buttons) is deferred to a follow-up pass; the kernel
+    /// pidff binding only requires the PID collection to be present, so the
+    /// minimal joystick preamble here is sufficient for Wave 6 stage 1. The
+    /// parameter is kept on the signature so call-sites that already plumb
+    /// `OutputConfig` don't change shape.
+    pub fn buildForPid(
+        allocator: std.mem.Allocator,
+        cfg: device.OutputConfig,
+        ffb_cfg: device.ForceFeedbackConfig,
+    ) BuildError![]u8 {
+        _ = cfg;
+        _ = ffb_cfg;
+
+        var buf = std.ArrayList(u8){};
+        errdefer buf.deinit(allocator);
+
+        // --- Joystick application preamble ---
+        try writeItem1(&buf, allocator, 0x05, 0x01); // Usage Page (Generic Desktop)
+        try writeItem1(&buf, allocator, 0x09, 0x04); // Usage (Joystick)
+        try writeItem1(&buf, allocator, 0xA1, 0x01); // Collection (Application)
+
+        // Single X axis input — minimum the kernel needs to bring up an
+        // evdev node alongside the PID collection.
+        try writeItem1(&buf, allocator, 0x85, INPUT_REPORT_ID);
+        try writeItem1(&buf, allocator, 0xA1, 0x00); // Collection (Physical)
+        try writeItem1(&buf, allocator, 0x09, 0x30); // Usage (X)
+        try writeItem1(&buf, allocator, 0x15, 0x81); // Logical Minimum (-127)
+        try writeItem1(&buf, allocator, 0x25, 0x7F); // Logical Maximum (127)
+        try writeItem1(&buf, allocator, 0x75, 0x08); // Report Size (8)
+        try writeItem1(&buf, allocator, 0x95, 0x01); // Report Count (1)
+        try writeItem1(&buf, allocator, 0x81, 0x02); // Input (Data, Var, Abs)
+        try writeByte(&buf, allocator, 0xC0); // End Collection (Physical)
+
+        // --- PID output collection ---
+        try writeItem1(&buf, allocator, 0x05, 0x0F); // Usage Page (Physical Interface Device)
+
+        try emitPidSetEffectReport(&buf, allocator);
+        try emitPidSetEnvelopeReport(&buf, allocator);
+        try emitPidSetConditionReport(&buf, allocator);
+        try emitPidSetPeriodicReport(&buf, allocator);
+        try emitPidSetConstantForceReport(&buf, allocator);
+        try emitPidSetRampForceReport(&buf, allocator);
+        try emitPidBlockFreeReport(&buf, allocator);
+        try emitPidEffectOperationReport(&buf, allocator);
+        try emitPidDeviceControlReport(&buf, allocator);
+        try emitPidDeviceGainReport(&buf, allocator);
+        try emitPidCreateNewEffectReport(&buf, allocator);
+        try emitPidBlockLoadReport(&buf, allocator);
+        try emitPidPoolReport(&buf, allocator);
+
+        // --- End Application Collection ---
+        try writeByte(&buf, allocator, 0xC0);
+
+        if (buf.items.len > uhid.HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
+        try validateMandatoryReports(buf.items);
+        return buf.toOwnedSlice(allocator);
+    }
 };
+
+// --- PID descriptor helpers --------------------------------------------------
+
+fn emitPidSetEffectReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x21); // Usage (Set Effect Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02); // Collection (Logical)
+    try writeItem1(buf, allocator, 0x85, PID_SET_EFFECT_REPORT_ID);
+    // Effect Block Index — u8 1..40
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02); // Output (Data, Var, Abs)
+    // Effect Type — array of 11 effect type usages
+    try writeItem1(buf, allocator, 0x09, 0x25);
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x05, 0x0F);
+    try writeItem1(buf, allocator, 0x09, 0x26); // Constant Force
+    try writeItem1(buf, allocator, 0x09, 0x27); // Ramp
+    try writeItem1(buf, allocator, 0x09, 0x30); // Square
+    try writeItem1(buf, allocator, 0x09, 0x31); // Sine
+    try writeItem1(buf, allocator, 0x09, 0x32); // Triangle
+    try writeItem1(buf, allocator, 0x09, 0x33); // Sawtooth Up
+    try writeItem1(buf, allocator, 0x09, 0x34); // Sawtooth Down
+    try writeItem1(buf, allocator, 0x09, 0x40); // Spring
+    try writeItem1(buf, allocator, 0x09, 0x41); // Damper
+    try writeItem1(buf, allocator, 0x09, 0x42); // Inertia
+    try writeItem1(buf, allocator, 0x09, 0x43); // Friction
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x0B);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x00); // Output (Data, Ary, Abs)
+    try writeByte(buf, allocator, 0xC0);
+    // Duration — u16 ms
+    try writeItem1(buf, allocator, 0x05, 0x0F);
+    try writeItem1(buf, allocator, 0x09, 0x50);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0x7FFF);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Trigger Button — u8
+    try writeItem1(buf, allocator, 0x09, 0x53);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0x00FF);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Gain — u8 0..255 (mapped to 0..100%)
+    try writeItem1(buf, allocator, 0x09, 0x52);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Direction — X / Y as two u8
+    try writeItem1(buf, allocator, 0x09, 0x55); // Axes Enable
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x05, 0x01); // Generic Desktop
+    try writeItem1(buf, allocator, 0x09, 0x30); // X
+    try writeItem1(buf, allocator, 0x09, 0x31); // Y
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem1(buf, allocator, 0x25, 0x01);
+    try writeItem1(buf, allocator, 0x75, 0x01);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeItem1(buf, allocator, 0x75, 0x06); // 6-bit padding
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x03);
+    try writeByte(buf, allocator, 0xC0);
+    try writeItem1(buf, allocator, 0x05, 0x0F);
+    try writeByte(buf, allocator, 0xC0); // End Collection (Set Effect)
+}
+
+fn emitPidSetEnvelopeReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x5A); // Usage (Set Envelope Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_SET_ENVELOPE_REPORT_ID);
+    // Effect Block Index
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Attack Level (0x5B), Fade Level (0x5E) — two u8
+    try writeItem1(buf, allocator, 0x09, 0x5B);
+    try writeItem1(buf, allocator, 0x09, 0x5E);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0x00FF);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Attack Time (0x5C), Fade Time (0x5D) — two u16 ms
+    try writeItem1(buf, allocator, 0x09, 0x5C);
+    try writeItem1(buf, allocator, 0x09, 0x5D);
+    try writeItem2(buf, allocator, 0x26, 0x7FFF);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidSetConditionReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x5F); // Usage (Set Condition Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_SET_CONDITION_REPORT_ID);
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Parameter Block Offset — u8
+    try writeItem1(buf, allocator, 0x09, 0x23);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem1(buf, allocator, 0x25, 0x01);
+    try writeItem1(buf, allocator, 0x75, 0x04);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeItem1(buf, allocator, 0x75, 0x04); // 4-bit padding
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x03);
+    // Center Point Offset (0x60) — i16 -10000..10000
+    try writeItem1(buf, allocator, 0x09, 0x60);
+    try writeItem2(buf, allocator, 0x16, @bitCast(@as(i16, -10000)));
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Positive (0x61) + Negative (0x62) Coefficients — i16 each
+    try writeItem1(buf, allocator, 0x09, 0x61);
+    try writeItem1(buf, allocator, 0x09, 0x62);
+    try writeItem2(buf, allocator, 0x16, @bitCast(@as(i16, -10000)));
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Positive (0x63) + Negative (0x64) Saturation — u16 each
+    try writeItem1(buf, allocator, 0x09, 0x63);
+    try writeItem1(buf, allocator, 0x09, 0x64);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Dead Band (0x65) — u16
+    try writeItem1(buf, allocator, 0x09, 0x65);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidSetPeriodicReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x6E); // Usage (Set Periodic Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_SET_PERIODIC_REPORT_ID);
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Magnitude (0x70) — u16
+    try writeItem1(buf, allocator, 0x09, 0x70);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Offset (0x71) — i16
+    try writeItem1(buf, allocator, 0x09, 0x71);
+    try writeItem2(buf, allocator, 0x16, @bitCast(@as(i16, -10000)));
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Phase (0x72) — u16 deg*100
+    try writeItem1(buf, allocator, 0x09, 0x72);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 35999);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Period (0x73) — u16 ms
+    try writeItem1(buf, allocator, 0x09, 0x73);
+    try writeItem2(buf, allocator, 0x26, 0x7FFF);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidSetConstantForceReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x73); // Usage (Set Constant Force Report) — same usage code 0x73 as Period inside its own collection scope
+    // NOTE: HID PID 1.01 §4.2.5 Set Constant Force usage = 0x73. The same
+    // code 0x73 is reused for Period inside Set Periodic; HID spec scopes
+    // usages by their containing logical collection so this is not a clash.
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_SET_CONSTANT_FORCE_REPORT_ID);
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Magnitude (0x70) — i16 -10000..10000
+    try writeItem1(buf, allocator, 0x09, 0x70);
+    try writeItem2(buf, allocator, 0x16, @bitCast(@as(i16, -10000)));
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidSetRampForceReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x74); // Usage (Set Ramp Force Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_SET_RAMP_FORCE_REPORT_ID);
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Ramp Start (0x75) + Ramp End (0x76) — i16 each
+    try writeItem1(buf, allocator, 0x09, 0x75);
+    try writeItem1(buf, allocator, 0x09, 0x76);
+    try writeItem2(buf, allocator, 0x16, @bitCast(@as(i16, -10000)));
+    try writeItem2(buf, allocator, 0x26, 10000);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidBlockFreeReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x90); // Usage (Block Free Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02); // Collection (Logical)
+    try writeItem1(buf, allocator, 0x85, PID_BLOCK_FREE_REPORT_ID);
+    // Effect Block Index — u8 1..40
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02); // Output (Data, Var, Abs)
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidEffectOperationReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x77); // Usage (Effect Operation Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_EFFECT_OPERATION_REPORT_ID);
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    // Operation array: Start (0x79), Start Solo (0x7A), Stop (0x7B)
+    try writeItem1(buf, allocator, 0x09, 0x78);
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x09, 0x79);
+    try writeItem1(buf, allocator, 0x09, 0x7A);
+    try writeItem1(buf, allocator, 0x09, 0x7B);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x03);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x00);
+    try writeByte(buf, allocator, 0xC0);
+    // Loop Count (0x7C) — u8
+    try writeItem1(buf, allocator, 0x09, 0x7C);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0x00FF);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidDeviceControlReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    // Outer usage = 0x96 (PID Device Control Report container) per kernel
+    // `drivers/hid/usbhid/hid-pidff.c::pidff_reports`. The probe descriptor
+    // (tools/wave6-probe/pidff_probe.py) used 0x95 (PID Device Control
+    // field) — that is the cause of probe Run 2's `pidff_find_reports
+    // -ENODEV` failure. We use 0x96 here so the kernel can locate the
+    // report.
+    try writeItem1(buf, allocator, 0x09, 0x96);
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_DEVICE_CONTROL_REPORT_ID);
+    // DC array: Reset (0x97), Pause (0x98), Continue (0x99), Stop All (0x9A),
+    // Enable (0x9B), Disable (0x9C)
+    try writeItem1(buf, allocator, 0x09, 0x97);
+    try writeItem1(buf, allocator, 0x09, 0x98);
+    try writeItem1(buf, allocator, 0x09, 0x99);
+    try writeItem1(buf, allocator, 0x09, 0x9A);
+    try writeItem1(buf, allocator, 0x09, 0x9B);
+    try writeItem1(buf, allocator, 0x09, 0x9C);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x06);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x00);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidDeviceGainReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    // Container usage = 0x7D (Device Gain Report) per kernel `pidff_reports`;
+    // the field inside is 0x7E (Device Gain) per `pidff_device_gain`.
+    try writeItem1(buf, allocator, 0x09, 0x7D);
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_DEVICE_GAIN_REPORT_ID);
+    try writeItem1(buf, allocator, 0x09, 0x7E);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0x00FF);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0x91, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidCreateNewEffectReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0xAB); // Usage (Create New Effect Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_CREATE_NEW_EFFECT_REPORT_ID);
+    // Effect Type — array
+    try writeItem1(buf, allocator, 0x09, 0x25);
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x09, 0x26);
+    try writeItem1(buf, allocator, 0x09, 0x27);
+    try writeItem1(buf, allocator, 0x09, 0x30);
+    try writeItem1(buf, allocator, 0x09, 0x31);
+    try writeItem1(buf, allocator, 0x09, 0x32);
+    try writeItem1(buf, allocator, 0x09, 0x33);
+    try writeItem1(buf, allocator, 0x09, 0x34);
+    try writeItem1(buf, allocator, 0x09, 0x40);
+    try writeItem1(buf, allocator, 0x09, 0x41);
+    try writeItem1(buf, allocator, 0x09, 0x42);
+    try writeItem1(buf, allocator, 0x09, 0x43);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x0B);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x00); // Feature (Data, Ary, Abs)
+    try writeByte(buf, allocator, 0xC0);
+    // Byte Count of Data (0xAC) — u16 — emitted under Create New Effect per spec
+    try writeItem1(buf, allocator, 0x09, 0xAC);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0x00FF);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidBlockLoadReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x89); // Usage (Block Load Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_BLOCK_LOAD_REPORT_ID);
+    // Effect Block Index — u8 1..40
+    try writeItem1(buf, allocator, 0x09, 0x22);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x28);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x02);
+    // Block Load Status array — Success (0x8C), Full (0x8D), Error (0x8E)
+    try writeItem1(buf, allocator, 0x09, 0x8B);
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x09, 0x8C);
+    try writeItem1(buf, allocator, 0x09, 0x8D);
+    try writeItem1(buf, allocator, 0x09, 0x8E);
+    try writeItem1(buf, allocator, 0x15, 0x01);
+    try writeItem1(buf, allocator, 0x25, 0x03);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x00);
+    try writeByte(buf, allocator, 0xC0);
+    // RAM Pool Available (0xAC) — u16
+    try writeItem1(buf, allocator, 0x09, 0xAC);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem2(buf, allocator, 0x26, 0xFFFF);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x02);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+fn emitPidPoolReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try writeItem1(buf, allocator, 0x09, 0x7F); // Usage (PID Pool Report)
+    try writeItem1(buf, allocator, 0xA1, 0x02);
+    try writeItem1(buf, allocator, 0x85, PID_POOL_REPORT_ID);
+    // RAM Pool Size (0x80) — u32
+    try writeItem1(buf, allocator, 0x09, 0x80);
+    try writeItem1(buf, allocator, 0x15, 0x00);
+    try writeItem4(buf, allocator, 0x27, 0xFFFF);
+    try writeItem1(buf, allocator, 0x75, 0x10);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x02);
+    // Simultaneous Effects Max (0x83) — u8
+    try writeItem1(buf, allocator, 0x09, 0x83);
+    try writeItem2(buf, allocator, 0x26, 0x00FF);
+    try writeItem1(buf, allocator, 0x75, 0x08);
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x02);
+    // Device Managed Pool (0xA9) + Shared Parameter Blocks (0xAA) — 2 bits
+    try writeItem1(buf, allocator, 0x09, 0xA9);
+    try writeItem1(buf, allocator, 0x09, 0xAA);
+    try writeItem1(buf, allocator, 0x25, 0x01);
+    try writeItem1(buf, allocator, 0x75, 0x01);
+    try writeItem1(buf, allocator, 0x95, 0x02);
+    try writeItem1(buf, allocator, 0xB1, 0x02);
+    try writeItem1(buf, allocator, 0x75, 0x06); // 6-bit padding
+    try writeItem1(buf, allocator, 0x95, 0x01);
+    try writeItem1(buf, allocator, 0xB1, 0x03);
+    try writeByte(buf, allocator, 0xC0);
+}
+
+/// Walk a HID descriptor as a stream of HID 1.11 short items, recording every
+/// `0x85 NN` (Report ID, global) prefix encountered. After the walk, assert
+/// every required PID report ID has been seen. Long-form items (HID 1.11
+/// §6.2.2.3, prefix `0xFE`) are accepted by skipping `payload[0]` data bytes;
+/// none of the current PID emit helpers use long form.
+fn validateMandatoryReports(descriptor: []const u8) BuildError!void {
+    var seen: [16]bool = .{false} ** 16;
+    var i: usize = 0;
+    while (i < descriptor.len) {
+        const prefix = descriptor[i];
+        if (prefix == 0xFE) {
+            // Long-form item — bytes: 0xFE bDataSize bLongItemTag <data>
+            if (i + 2 >= descriptor.len) return error.IncompletePidDescriptor;
+            const data_size = descriptor[i + 1];
+            i += 3 + data_size;
+            continue;
+        }
+        const size: u8 = switch (prefix & 0b11) {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            else => unreachable,
+        };
+        if (i + 1 + size > descriptor.len) return error.IncompletePidDescriptor;
+        if (prefix == 0x85 and size == 1) {
+            const id = descriptor[i + 1];
+            if (id < seen.len) seen[id] = true;
+        }
+        i += 1 + size;
+    }
+    for (PID_MANDATORY_REPORT_IDS) |id| {
+        if (!seen[id]) return error.IncompletePidDescriptor;
+    }
+}
 
 /// Report ID used for IMU input reports. Distinct from the primary gamepad
 /// card's `INPUT_REPORT_ID` — the two cards live on separate UHID fds so the
@@ -1176,6 +1745,121 @@ test "buildForImu: primary pad descriptor DOES emit Usage Page Button (control s
         }
     }
     try testing.expect(found);
+}
+
+// --- buildForPid tests (Phase 13 Wave 6 T1) --------------------------------
+
+test "buildForPid: 8 mandatory PID reports present per kernel pidff_find_reports" {
+    const out = device.OutputConfig{ .name = "moza-r5-fixture", .vid = 0x11FF, .pid = 0x1211 };
+    const ffb = device.ForceFeedbackConfig{
+        .backend = "uhid",
+        .kind = "pid",
+        .clone_vid_pid = true,
+    };
+    const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
+    defer testing.allocator.free(desc);
+
+    // The builder runs validateMandatoryReports internally; running it again
+    // here pins the contract at the test boundary.
+    try validateMandatoryReports(desc);
+
+    // Sanity: descriptor begins with the joystick application preamble and
+    // ends with End Collection.
+    try testing.expect(desc.len > 32);
+    try testing.expectEqual(@as(u8, 0x05), desc[0]);
+    try testing.expectEqual(@as(u8, 0x01), desc[1]);
+    try testing.expectEqual(@as(u8, 0x09), desc[2]);
+    try testing.expectEqual(@as(u8, 0x04), desc[3]);
+    try testing.expectEqual(@as(u8, 0xC0), desc[desc.len - 1]);
+    try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
+}
+
+test "buildForPid: every required report ID surfaces during a manual byte-walk" {
+    const out = device.OutputConfig{ .name = "manual-walk", .vid = 0x11FF, .pid = 0x1211 };
+    const ffb = device.ForceFeedbackConfig{ .backend = "uhid", .kind = "pid" };
+    const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
+    defer testing.allocator.free(desc);
+
+    var seen: [16]bool = .{false} ** 16;
+    var i: usize = 0;
+    while (i < desc.len) {
+        const prefix = desc[i];
+        const size = hidItemSize(prefix);
+        if (prefix == 0x85 and size == 1) seen[desc[i + 1]] = true;
+        i += 1 + size;
+    }
+    for (PID_MANDATORY_REPORT_IDS) |id| {
+        if (!seen[id]) {
+            std.debug.print("missing PID report ID {d}\n", .{id});
+            try testing.expect(false);
+        }
+    }
+}
+
+test "buildForPid: validateMandatoryReports rejects truncated descriptor" {
+    // Hand-crafted partial: only Report IDs 1, 2, 3 declared. Eight are
+    // missing — must fail closed.
+    const partial = [_]u8{
+        0x05, 0x0F, // Usage Page (PID)
+        0x85, 1, // Report ID 1
+        0x85, 2, // Report ID 2
+        0x85, 3, // Report ID 3
+        0xC0,
+    };
+    try testing.expectError(error.IncompletePidDescriptor, validateMandatoryReports(&partial));
+}
+
+test "buildForPid: validateMandatoryReports accepts all 8 IDs in any order" {
+    // Synthetic descriptor that simply lists every required Report ID.
+    var bytes: [PID_MANDATORY_REPORT_IDS.len * 2]u8 = undefined;
+    var idx: usize = 0;
+    for (PID_MANDATORY_REPORT_IDS) |id| {
+        bytes[idx] = 0x85;
+        bytes[idx + 1] = id;
+        idx += 2;
+    }
+    try validateMandatoryReports(&bytes);
+}
+
+test "buildForPid: descriptor includes Block Free report (kernel-required)" {
+    const out = device.OutputConfig{ .name = "block-free-check", .vid = 0x11FF, .pid = 0x1211 };
+    const ffb = device.ForceFeedbackConfig{ .backend = "uhid", .kind = "pid" };
+    const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
+    defer testing.allocator.free(desc);
+
+    // Walk the byte stream looking for Usage (0x09) 0x90 (Block Free Report).
+    var found_usage_90 = false;
+    var i: usize = 0;
+    while (i < desc.len) {
+        const prefix = desc[i];
+        const size = hidItemSize(prefix);
+        if (prefix == 0x09 and size == 1 and i + 1 < desc.len and desc[i + 1] == 0x90) {
+            found_usage_90 = true;
+            break;
+        }
+        i += 1 + size;
+    }
+    try testing.expect(found_usage_90);
+}
+
+test "buildForPid: stays within HID_MAX_DESCRIPTOR_SIZE" {
+    const out = device.OutputConfig{ .name = "size-stress", .vid = 0x11FF, .pid = 0x1211 };
+    const ffb = device.ForceFeedbackConfig{ .backend = "uhid", .kind = "pid" };
+    const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
+    defer testing.allocator.free(desc);
+    try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
+}
+
+// TODO(T1d): pin the byte sequence emitted by buildForPid against a known-good
+// reference once the first real-hardware run shows kernel `hid-universal-pidff`
+// FFB init success (no `Error initialising force feedback`, no
+// `pidff_find_reports -ENODEV`, no kernel OOPS in `hid_hw_open+0x71`). Probe
+// Run 2's 7-of-12 descriptor (tools/wave6-probe/pidff_probe.py) cannot be used
+// as a reference — it caused FFB init failure. See
+// openspec/changes/phase-13-wave-6-pidff/tasks.md §T1d for the gating
+// procedure. Until then this test is intentionally skipped.
+test "buildForPid: matches reference PID descriptor (Moza R5)" {
+    return error.SkipZigTest;
 }
 
 test "encodeImuReport: round-trips 6 axes into 13-byte wire report" {

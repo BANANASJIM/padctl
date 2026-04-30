@@ -28,6 +28,9 @@ const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
 const socket_client = @import("cli/socket_client.zig");
+const uhid_mod = @import("io/uhid.zig");
+pub const UhidDevice = uhid_mod.UhidDevice;
+const OutputReport = uhid_mod.OutputReport;
 
 // Fixed poll slots for the event loop.
 pub const Slots = struct {
@@ -39,10 +42,11 @@ pub const Slots = struct {
     pub const device_base: usize = 5;
 };
 
-// signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces + 1 FF/uinput slot.
+// signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces;
+// plus 1 uinput FF slot and 1 UHID output slot (Wave 6 PID FFB) appended after device fds.
 pub const FIXED_SLOT_COUNT: usize = 5;
 pub const MAX_DEVICE_INTERFACES: usize = 6;
-pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 1;
+pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 2;
 
 const signalfd_siginfo_size = 128;
 
@@ -261,6 +265,9 @@ pub const EventLoopContext = struct {
     generic_output: ?GenericOutputDevice = null,
     /// Device name for log correlation (set from device_config.device.name).
     device_tag: []const u8 = "unknown",
+    /// Wave 6 T3: primary UHID device to drain for UHID_OUTPUT events.
+    /// Set when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
+    uhid_primary: ?*UhidDevice = null,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {
@@ -351,6 +358,8 @@ pub const EventLoop = struct {
     /// to fire a stop frame. See src/core/rumble_scheduler.zig.
     rumble_scheduler: RumbleScheduler,
     uinput_ff_slot: ?usize,
+    /// Slot for the primary UHID fd polled for UHID_OUTPUT events (Wave 6 FFB).
+    uhid_output_slot: ?usize,
     disconnected: bool,
     running: bool,
     gamepad_state: state.GamepadState,
@@ -409,6 +418,7 @@ pub const EventLoop = struct {
             .rumble_scheduler = .{},
             .macro_timer_fd = macro_timer_fd,
             .uinput_ff_slot = null,
+            .uhid_output_slot = null,
             .disconnected = false,
             .running = false,
             .gamepad_state = .{},
@@ -447,6 +457,16 @@ pub const EventLoop = struct {
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
         self.uinput_ff_slot = slot;
+        self.fd_count += 1;
+    }
+
+    /// Register the primary UHID fd for `UHID_OUTPUT` polling (Wave 6 PID FFB).
+    /// Only called when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
+    pub fn addUhidOutput(self: *EventLoop, fd: posix.fd_t) !void {
+        const slot = self.fd_count;
+        if (slot >= MAX_FDS) return error.TooManyFds;
+        self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+        self.uhid_output_slot = slot;
         self.fd_count += 1;
     }
 
@@ -619,6 +639,23 @@ pub const EventLoop = struct {
                                     });
                                 }
                                 armRumbleStopFd(self.rumble_stop_fd, next_dl);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Drain UHID_OUTPUT events (Wave 6 PID FFB passthrough).
+            // Only active when uhid_output_slot is set (backend=uhid, kind=pid).
+            if (self.uhid_output_slot) |slot| {
+                if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
+                    if (ctx.uhid_primary) |uhid_dev| {
+                        var uhid_buf: [uhid_mod.UHID_EVENT_SIZE]u8 = undefined;
+                        while (true) {
+                            const report = uhid_dev.pollOutputReport(&uhid_buf) catch break;
+                            const r = report orelse break;
+                            if (uhid_dev.output_cb) |cb| {
+                                cb(uhid_dev.output_ctx.?, r);
                             }
                         }
                     }

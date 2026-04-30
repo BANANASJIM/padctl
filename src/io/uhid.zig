@@ -153,6 +153,29 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
     _ = posix.write(fd, &buf) catch {};
 }
 
+// --- Wave 6 T3: UHID_OUTPUT types -------------------------------------------
+
+/// Kernel sends `UHID_OUTPUT` when the HID driver writes an output report.
+pub const UHID_OUTPUT: u32 = 6;
+
+/// Mirror of `struct uhid_output_req` from the kernel UAPI.
+/// The kernel struct is __packed__ (4099 bytes); Zig extern struct is 4100 bytes
+/// due to u16 alignment padding after rtype. The trailing pad is harmless because
+/// pollOutputReport reads via pointer cast into a full UHID_EVENT_SIZE buffer.
+/// data[0] is the HID report ID; data[1..size-1] is the payload.
+pub const UhidOutputReq = extern struct {
+    data: [UHID_DATA_MAX]u8,
+    size: u16,
+    rtype: u8,
+};
+
+/// A parsed output report extracted from a `UHID_OUTPUT` event.
+/// Borrows the caller's read buffer — do not retain past the current frame.
+pub const OutputReport = struct {
+    report_id: u8,
+    data: []const u8,
+};
+
 // --- High-level UhidDevice (T2 + T3) ---------------------------------------
 
 /// Precise error set for `UhidDevice.init` / `UhidDevice.initWithFd`. Keeps
@@ -231,6 +254,10 @@ pub const UhidDevice = struct {
     /// Optional `ImuConfig` — when set AND `output` is null, `emit()`
     /// dispatches to `encodeImuReport` (6 × i16 accel + gyro axes).
     imu: ?device_cfg.ImuConfig,
+    /// Wave 6 T3: optional callback invoked for each `UHID_OUTPUT` report
+    /// received from the kernel (FFB effect data → physical hidraw, T4).
+    output_cb: ?*const fn (ctx: *anyopaque, report: OutputReport) void = null,
+    output_ctx: ?*anyopaque = null,
 
     /// Construct a `UhidDevice` against a real `/dev/uhid` fd. Opens the
     /// kernel node, populates a `UhidCreate2Req`, and writes it.
@@ -406,6 +433,49 @@ pub const UhidDevice = struct {
         uhidInput(self.fd, payload) catch |err| switch (err) {
             error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
             else => return error.WriteFailed,
+        };
+    }
+
+    pub fn setOutputCallback(
+        self: *UhidDevice,
+        cb: *const fn (ctx: *anyopaque, report: OutputReport) void,
+        ctx: *anyopaque,
+    ) void {
+        self.output_cb = cb;
+        self.output_ctx = ctx;
+    }
+
+    pub fn clearOutputCallback(self: *UhidDevice) void {
+        self.output_cb = null;
+        self.output_ctx = null;
+    }
+
+    /// Read one event from the UHID fd. Returns a parsed `OutputReport` if the
+    /// event type is `UHID_OUTPUT`, otherwise null. The returned slice borrows
+    /// `buf`; the caller must not retain it past the next call.
+    ///
+    /// Returns null on `WouldBlock` (no event ready) or a non-OUTPUT event type.
+    /// The caller should loop until null to drain all pending events.
+    pub fn pollOutputReport(self: *UhidDevice, buf: []u8) !?OutputReport {
+        if (buf.len < UHID_EVENT_SIZE) return null;
+        const n = posix.read(self.fd, buf[0..UHID_EVENT_SIZE]) catch |err| switch (err) {
+            error.WouldBlock => return null,
+            else => return err,
+        };
+        // A short read leaves buf[n..UHID_EVENT_SIZE] uninitialised; the req.size
+        // field lives past offset 4100, so even a read of 4095 bytes would let us
+        // parse a garbage size and walk off the end of data[].
+        if (n < UHID_EVENT_SIZE) return error.IncompleteUhidEvent;
+        if (n < 4) return null;
+        const ev_type = std.mem.readInt(u32, buf[0..4], .little);
+        if (ev_type != UHID_OUTPUT) return null;
+        // kernel struct uhid_event: { u32 type; union payload; }
+        // uhid_output_req at offset 4: { u8 data[4096]; u16 size; u8 rtype; }
+        const req: *const UhidOutputReq = @ptrCast(@alignCast(&buf[4]));
+        const sz = @min(@as(usize, req.size), UHID_DATA_MAX);
+        return OutputReport{
+            .report_id = if (sz > 0) req.data[0] else 0,
+            .data = req.data[0..sz],
         };
     }
 
@@ -596,8 +666,8 @@ test "uhid_device_vtable_match: emit + close frame UHID_INPUT2 / UHID_DESTROY" {
     try testing.expectEqual(UHID_INPUT2, event_type);
 
     // UhidInput2Event = { u32 type, UhidInput2Req payload }. The payload is
-    // `extern struct { u16 size; [4096]u8 data }` and inherits a 2-byte
-    // alignment, so it sits at offset 4.
+    // `extern struct { u16 size; [4096]u8 data }` (2-byte aligned), so it sits
+    // at offset 4.
     const size = std.mem.readInt(u16, buf[4..6], .little);
     try testing.expectEqual(@as(u16, 4), size);
 
@@ -850,4 +920,104 @@ test "uhid: sendCreate truncates uniq at 63 bytes (64-byte field, NUL reserved)"
         try testing.expectEqualSlices(u8, "C" ** 63, buf[uniq_off..][0..63]);
         try testing.expectEqual(@as(u8, 0), buf[uniq_off + 63]);
     }
+}
+
+test "uhid: UHID_OUTPUT constant is 6" {
+    try testing.expectEqual(@as(u32, 6), UHID_OUTPUT);
+}
+
+test "uhid: UhidOutputReq layout matches kernel UAPI" {
+    // data[4096] + size(u16) + rtype(u8) = 4099 kernel packed bytes;
+    // extern struct rounds to 4100 due to u16 alignment (1-byte trailing pad).
+    try testing.expectEqual(@as(usize, 4100), @sizeOf(UhidOutputReq));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(UhidOutputReq, "data"));
+    try testing.expectEqual(@as(usize, 4096), @offsetOf(UhidOutputReq, "size"));
+    try testing.expectEqual(@as(usize, 4098), @offsetOf(UhidOutputReq, "rtype"));
+}
+
+test "uhid: pollOutputReport parses UHID_OUTPUT bytes" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(fds[0]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-output-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[0], cfg);
+    defer alloc.destroy(dev);
+
+    // Hand-craft a UHID_OUTPUT event: u32 type=6, then uhid_output_req.
+    // uhid_output_req layout: data[4096], size u16, rtype u8.
+    var ev_buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+    std.mem.writeInt(u32, ev_buf[0..4], UHID_OUTPUT, .little);
+    // data starts at offset 4: data[0]=0x0A (report_id), data[1..4]=payload
+    ev_buf[4] = 0x0A;
+    ev_buf[5] = 0x01;
+    ev_buf[6] = 0x02;
+    ev_buf[7] = 0x03;
+    // size field is at offset 4 + 4096 = 4100
+    std.mem.writeInt(u16, ev_buf[4100..4102], 4, .little);
+
+    _ = try posix.write(fds[1], &ev_buf);
+    defer posix.close(fds[1]);
+
+    var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const report = try dev.pollOutputReport(&read_buf);
+    try testing.expect(report != null);
+    try testing.expectEqual(@as(u8, 0x0A), report.?.report_id);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x0A, 0x01, 0x02, 0x03 }, report.?.data);
+}
+
+test "uhid: pollOutputReport returns null for non-UHID_OUTPUT event" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-output-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[0], cfg);
+    defer alloc.destroy(dev);
+
+    // Write a UHID_INPUT2 event (type=12) — not a UHID_OUTPUT.
+    var ev_buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+    std.mem.writeInt(u32, ev_buf[0..4], UHID_INPUT2, .little);
+    _ = try posix.write(fds[1], &ev_buf);
+
+    var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const report = try dev.pollOutputReport(&read_buf);
+    try testing.expectEqual(@as(?OutputReport, null), report);
+}
+
+test "uhid: pollOutputReport returns null on WouldBlock (empty pipe)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-output-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[0], cfg);
+    defer alloc.destroy(dev);
+
+    var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const report = try dev.pollOutputReport(&read_buf);
+    try testing.expectEqual(@as(?OutputReport, null), report);
 }
