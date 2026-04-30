@@ -35,10 +35,19 @@ jobs:
       - name: Install system dependencies
         if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
-      - name: Run all checks
+      # Three separate `zig build` processes (Option C from PR #166 fc4937b)
+      # to avoid Zig issue #22453 inter-step flock contention. Each process
+      # has its own .zig-cache lock space.
+      # NOTE: -j1 was tried (commits 9892e14 + 0e330b9) but caused a separate
+      # Zig scheduler deadlock — empirically reproduced in container. The real
+      # CI hang was a test-level blocking-pipe issue (TP33), fixed in edf7224.
+      # Removing -j1 here.
+      - name: Run all checks (serial via separate processes)
         run: |
           set -eo pipefail
-          timeout 600 zig build ${{ matrix.zig_args }} check-all --summary all 2>&1 | tee check-all.log
+          timeout 600 zig build ${{ matrix.zig_args }} test --summary all 2>&1 | tee test.log
+          timeout 600 zig build ${{ matrix.zig_args }} test-safe --summary all 2>&1 | tee test-safe.log
+          timeout 600 zig build ${{ matrix.zig_args }} check-fmt 2>&1 | tee check-fmt.log
 
   check:
     name: check
@@ -134,5 +143,7 @@ jobs:
               ${DISTRO_SETUP}
               curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
               tar -xJf /tmp/zig.tar.xz -C /tmp
-              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-all --summary all
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test --summary all
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test-safe --summary all
+              timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-fmt
             " 2>&1 | tee distro-check.log

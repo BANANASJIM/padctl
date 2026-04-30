@@ -17,6 +17,8 @@ const GenericOutputDevice = uinput.GenericOutputDevice;
 const uhid_mod = @import("io/uhid.zig");
 const uhid_descriptor = @import("io/uhid_descriptor.zig");
 const uniq_mod = @import("io/uniq.zig");
+const ffb_mod = @import("io/ffb_forwarder.zig");
+const FfbForwarder = ffb_mod.FfbForwarder;
 const device_cfg = @import("config/device.zig");
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
@@ -102,6 +104,9 @@ pub const InitOptions = struct {
     test_primary_uhid_fd: ?posix.fd_t = null,
     test_imu_uhid_fd: ?posix.fd_t = null,
     test_devices_override: ?[]DeviceIO = null,
+    /// Test-only: substitute for the physical hidraw write-end used by FfbForwarder.
+    /// When non-null, FfbForwarder.init receives this fd instead of the real device fd.
+    test_physical_hidraw_fd: ?posix.fd_t = null,
 };
 
 /// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
@@ -164,6 +169,8 @@ pub const DeviceInstance = struct {
     pending_mapping: ?*MappingConfig,
     stopped: bool,
     poll_timeout_ms: ?u32 = null,
+    /// Wave 6 T4: active only when force_feedback.backend="uhid" + kind="pid".
+    ffb_forwarder: ?FfbForwarder = null,
     // Test-only observability hook for issue #142 regression: counts
     // rebuildAuxIfChanged invocations so tests can verify the switch path
     // actually rebuilds aux caps without relying on /dev/uinput.
@@ -228,6 +235,7 @@ pub const DeviceInstance = struct {
         var primary_output: ?OutputDevice = null;
         var imu_output: ?OutputDevice = null;
         var imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
+        var ffb_fwd: ?FfbForwarder = null;
         var imu_name_ptr: ?[]const u8 = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
@@ -241,10 +249,17 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
-            const use_uhid = if (imu_cfg_opt) |imu_cfg|
-                std.mem.eql(u8, imu_cfg.backend, "uhid")
-            else
-                false;
+            // Enter UHID path when IMU backend=uhid (ADR-015 gamepad+IMU) OR
+            // when force_feedback.backend=uhid (Wave 6 racing wheel PID FFB).
+            const use_uhid = blk: {
+                if (imu_cfg_opt) |imu_cfg| {
+                    if (std.mem.eql(u8, imu_cfg.backend, "uhid")) break :blk true;
+                }
+                if (out_cfg.force_feedback) |ffb| {
+                    if (std.mem.eql(u8, ffb.backend, "uhid")) break :blk true;
+                }
+                break :blk false;
+            };
 
             if (use_uhid) {
                 // ADR-015 Stage 1: primary + IMU cards share a byte-identical
@@ -255,14 +270,35 @@ pub const DeviceInstance = struct {
                 defer allocator.free(uniq_z);
                 if (phys_key == null) uniq_counter.* += 1;
 
-                const primary_descriptor = try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
+                // PID devices need the HID PID descriptor so that kernel
+                // hid-universal-pidff's pidff_find_reports finds all 8 mandatory
+                // usages; buildFromOutput emits only a gamepad descriptor.
+                const primary_descriptor = if (out_cfg.force_feedback) |ffb|
+                    if (std.mem.eql(u8, ffb.backend, "uhid") and std.mem.eql(u8, ffb.kind, "pid"))
+                        try uhid_descriptor.UhidDescriptorBuilder.buildForPid(allocator, out_cfg.*, ffb)
+                    else
+                        try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*)
+                else
+                    try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
                 defer allocator.free(primary_descriptor);
+
+                const ffb_cfg = out_cfg.force_feedback orelse device_cfg.ForceFeedbackConfig{};
+                // clone_vid_pid=true: wheel's real VID/PID (hid-universal-pidff modalias binding).
+                // clone_vid_pid=false (default): daemon identity so non-PID devices stay as FADE:C001.
+                const effective_vid: u16 = if (ffb_cfg.clone_vid_pid)
+                    @intCast(cfg.device.vid)
+                else
+                    0xFADE;
+                const effective_pid: u16 = if (ffb_cfg.clone_vid_pid)
+                    @intCast(cfg.device.pid)
+                else
+                    0xC001;
 
                 const primary_cfg = uhid_mod.Config{
                     .name = cfg.device.name,
                     .uniq = std.mem.sliceTo(uniq_z, 0),
-                    .vid = @intCast(cfg.device.vid),
-                    .pid = @intCast(cfg.device.pid),
+                    .vid = effective_vid,
+                    .pid = effective_pid,
                     .descriptor = primary_descriptor,
                     .output = out_cfg.*,
                 };
@@ -270,10 +306,6 @@ pub const DeviceInstance = struct {
                 errdefer {
                     primary_uhid.close();
                     allocator.destroy(primary_uhid);
-                }
-
-                if (out_cfg.force_feedback != null) {
-                    std.log.warn("rumble not supported in uhid backend until Wave 6", .{});
                 }
 
                 owner = .{ .uhid = primary_uhid };
@@ -306,6 +338,32 @@ pub const DeviceInstance = struct {
                     imu_dev_ptr = imu_uhid;
                     imu_name_ptr = imu_name_alloc;
                     imu_output = imu_uhid.outputDevice();
+                }
+
+                // Wire FfbForwarder when backend=uhid + kind=pid (Wave 6 PID FFB).
+                // Callback registration is deferred to run() so the pointer
+                // to ffb_forwarder is stable (DeviceInstance is heap-allocated
+                // by the Supervisor before run() is called).
+                if (out_cfg.force_feedback) |pid_ffb| {
+                    if (std.mem.eql(u8, pid_ffb.backend, "uhid") and
+                        std.mem.eql(u8, pid_ffb.kind, "pid"))
+                    {
+                        // TODO(wave6-T7): devices[0] is a heuristic — it is correct
+                        // for single-interface wheels but may select the wrong
+                        // interface on multi-interface devices (e.g. wheels with a
+                        // separate HID++ control interface at index 0 and the FFB
+                        // interface at index 1). T7 will surface real cases; for
+                        // now, warn at startup when >1 interface is present.
+                        if (devices.len > 1) {
+                            std.log.warn("wave6 PID FFB: {d} interfaces found; using devices[0] as hidraw fd — may be wrong for multi-interface wheels (T7 follow-up)", .{devices.len});
+                        }
+                        const phys_fd = opts.test_physical_hidraw_fd orelse
+                            if (devices.len > 0) devices[0].pollfd().fd else -1;
+                        if (phys_fd >= 0) {
+                            ffb_fwd = FfbForwarder.init(phys_fd);
+                            try loop.addUhidOutput(primary_uhid.fd);
+                        }
+                    }
                 }
             } else {
                 const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
@@ -391,6 +449,7 @@ pub const DeviceInstance = struct {
             .device_cfg = cfg,
             .pending_mapping = null,
             .stopped = false,
+            .ffb_forwarder = ffb_fwd,
         };
     }
 
@@ -414,10 +473,14 @@ pub const DeviceInstance = struct {
                 self.allocator.destroy(p);
             },
             .uhid => |p| {
+                // Clear callback before closing so no in-flight report reaches
+                // a stale FfbForwarder pointer after the device is gone.
+                p.clearOutputCallback();
                 p.close();
                 self.allocator.destroy(p);
             },
         }
+        if (self.ffb_forwarder) |*fwd| fwd.deinit();
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
@@ -429,6 +492,12 @@ pub const DeviceInstance = struct {
     /// Thread entry point. Runs the event loop; applies pending mapping swaps
     /// between iterations (woken via stop_pipe by updateMapping).
     pub fn run(self: *DeviceInstance) !void {
+        // Register FfbForwarder callback now that self is stable on the heap.
+        if (self.ffb_forwarder != null) {
+            if (self.owner == .uhid) {
+                self.owner.uhid.setOutputCallback(ffb_mod.forwarderCallback, &self.ffb_forwarder.?);
+            }
+        }
         while (!@atomicLoad(bool, &self.stopped, .acquire)) {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
@@ -469,6 +538,10 @@ pub const DeviceInstance = struct {
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
                 .device_tag = self.device_cfg.device.name,
+                .uhid_primary = switch (self.owner) {
+                    .uhid => |p| p,
+                    else => null,
+                },
             }) catch |err| {
                 std.log.err("event loop failed: {}", .{err});
                 break;

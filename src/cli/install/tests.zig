@@ -810,6 +810,90 @@ test "install: generateUdevRules includes hotplug reconnect rules" {
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null);
 }
 
+test "install: clone_vid_pid=true emits per-VID/PID udev rule" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(devices_dir);
+    try std.fs.makeDirAbsolute(devices_dir);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/moza-r5.toml", .{devices_dir});
+    defer allocator.free(toml_path);
+    {
+        var f = try std.fs.createFileAbsolute(toml_path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[device]
+            \\name = "Moza R5"
+            \\vid = 0x11FF
+            \\pid = 0x1211
+            \\[output.force_feedback]
+            \\clone_vid_pid = true
+        );
+    }
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
+
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 8192);
+    defer allocator.free(content);
+
+    // Per-VID/PID rule must be present for the cloned identity
+    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{id/vendor}==\"11ff\", ATTRS{id/product}==\"1211\", TAG+=\"uaccess\"") != null);
+    // Generic UHID wildcard rule must also still be present
+    try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\"") != null);
+}
+
+test "install: clone_vid_pid=false produces no per-VID/PID rule" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(devices_dir);
+    try std.fs.makeDirAbsolute(devices_dir);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/vader5.toml", .{devices_dir});
+    defer allocator.free(toml_path);
+    {
+        var f = try std.fs.createFileAbsolute(toml_path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[device]
+            \\name = "Vader 5"
+            \\vid = 0x37d7
+            \\pid = 0x2401
+            \\[output.force_feedback]
+            \\clone_vid_pid = false
+        );
+    }
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
+
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 8192);
+    defer allocator.free(content);
+
+    // No per-VID/PID ENV rule should be present
+    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{id/vendor}") == null);
+}
+
 // --- Phase 4: kernel driver blocking ---
 
 test "install: parseStringArray parses TOML inline array" {

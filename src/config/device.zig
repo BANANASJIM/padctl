@@ -108,12 +108,6 @@ pub const DpadOutputConfig = struct {
 pub const FfConfig = struct {
     type: []const u8, // "rumble"
     max_effects: ?i64 = null,
-    /// When true (default), padctl runs a userspace rumble auto-stop
-    /// scheduler that emits a stop frame after each effect's replay.length
-    /// elapses. Set to false to delegate stopping to the client (e.g. Steam)
-    /// for devices whose firmware auto-stops internally. Most uinput-backed
-    /// devices need this enabled because the kernel's ff-memless auto-stop
-    /// helper is not used by uinput.
     auto_stop: bool = true,
 };
 
@@ -134,6 +128,22 @@ pub const ImuConfig = struct {
     pid: ?i64 = null,
     accel_range: ?[2]i64 = null,
     gyro_range: ?[2]i64 = null,
+};
+
+// Full Wave 6 force_feedback schema. Extends the legacy FfConfig fields
+// (type, max_effects, auto_stop) so existing callers compile unchanged, and
+// adds backend/kind/clone_vid_pid for UHID PID passthrough (T5).
+pub const ForceFeedbackConfig = struct {
+    // Legacy rumble fields — used by uinput path callers.
+    type: []const u8 = "rumble",
+    max_effects: ?i64 = null,
+    // When true padctl runs a userspace rumble auto-stop scheduler.
+    // Set false for firmware that auto-stops internally.
+    auto_stop: bool = true,
+    // Wave 6 fields — UHID PID passthrough.
+    backend: []const u8 = "uinput", // "uinput" | "uhid"
+    kind: []const u8 = "rumble", // "rumble" | "pid"
+    clone_vid_pid: bool = false,
 };
 
 pub const TouchpadConfig = struct {
@@ -161,7 +171,7 @@ pub const OutputConfig = struct {
     axes: ?toml.HashMap(AxisConfig) = null,
     buttons: ?toml.HashMap([]const u8) = null,
     dpad: ?DpadOutputConfig = null,
-    force_feedback: ?FfConfig = null,
+    force_feedback: ?ForceFeedbackConfig = null,
     aux: ?AuxConfig = null,
     touchpad: ?TouchpadConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
@@ -354,6 +364,34 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                 return error.InvalidConfig;
             } else {
                 return error.InvalidConfig;
+            }
+        }
+    }
+
+    // Force feedback validate matrix (Phase 13 Wave 6 T5c).
+    // Absent force_feedback is always legal (legacy rumble via UinputDevice).
+    if (cfg.output) |out| {
+        if (out.force_feedback) |ffb| {
+            const is_uinput = std.mem.eql(u8, ffb.backend, "uinput");
+            const is_uhid = std.mem.eql(u8, ffb.backend, "uhid");
+            const is_rumble = std.mem.eql(u8, ffb.kind, "rumble");
+            const is_pid = std.mem.eql(u8, ffb.kind, "pid");
+
+            if (!is_uinput and !is_uhid) return error.InvalidConfig;
+            if (!is_rumble and !is_pid) return error.InvalidConfig;
+
+            if (is_uinput and is_pid) return error.InvalidConfig;
+            if (is_uhid and is_rumble) return error.InvalidConfig;
+
+            // uhid+pid requires [output.imu] as the UHID routing gate (Wave 3).
+            if (is_uhid and is_pid) {
+                const imu_present = if (out.imu) |_| true else false;
+                if (!imu_present) return error.InvalidConfig;
+            }
+
+            // clone_vid_pid=true is meaningless without a real VID/PID to clone.
+            if (ffb.clone_vid_pid) {
+                if (cfg.device.vid == 0 or cfg.device.pid == 0) return error.InvalidConfig;
             }
         }
     }
@@ -1334,4 +1372,193 @@ test "validate: [output.imu] without explicit backend defaults to uhid and passe
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectEqualStrings("uhid", result.value.output.?.imu.?.backend);
+}
+
+// Phase 13 Wave 6 T5d/T5e: [output.force_feedback] schema validate matrix.
+
+const ffb_base_toml =
+    \\[device]
+    \\name = "Wheel"
+    \\vid = 0x11FF
+    \\pid = 0x1211
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 4
+;
+
+test "validate: force_feedback absent (default) is legal" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?ForceFeedbackConfig, null), result.value.output.?.force_feedback);
+}
+
+test "validate: backend=uinput + kind=rumble is legal" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.force_feedback]
+        \\backend = "uinput"
+        \\kind = "rumble"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const ffb = result.value.output.?.force_feedback.?;
+    try std.testing.expectEqualStrings("uinput", ffb.backend);
+    try std.testing.expectEqualStrings("rumble", ffb.kind);
+}
+
+test "validate: backend=uinput + kind=pid is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.force_feedback]
+        \\backend = "uinput"
+        \\kind = "pid"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: backend=uhid + kind=rumble is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.force_feedback]
+        \\backend = "uhid"
+        \\kind = "rumble"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: backend=uhid + kind=pid + [output.imu] absent is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.force_feedback]
+        \\backend = "uhid"
+        \\kind = "pid"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: backend=uhid + kind=pid + [output.imu] present is legal" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\[output.force_feedback]
+        \\backend = "uhid"
+        \\kind = "pid"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const ffb = result.value.output.?.force_feedback.?;
+    try std.testing.expectEqualStrings("uhid", ffb.backend);
+    try std.testing.expectEqualStrings("pid", ffb.kind);
+}
+
+test "validate: force_feedback unknown backend is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.force_feedback]
+        \\backend = "foo"
+        \\kind = "rumble"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "force_feedback: TOML round-trip" {
+    const allocator = std.testing.allocator;
+    const toml_str = ffb_base_toml ++
+        \\
+        \\[output]
+        \\name = "Wheel"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\[output.force_feedback]
+        \\backend       = "uhid"
+        \\kind          = "pid"
+        \\clone_vid_pid = true
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const ffb = result.value.output.?.force_feedback.?;
+    try std.testing.expectEqualStrings("uhid", ffb.backend);
+    try std.testing.expectEqualStrings("pid", ffb.kind);
+    try std.testing.expect(ffb.clone_vid_pid);
+}
+
+// Phase 13 Wave 6 T2d: clone_vid_pid validate tests.
+
+const ffb_zero_vid_toml =
+    \\[device]
+    \\name = "Zero VID Wheel"
+    \\vid = 0x0000
+    \\pid = 0x1211
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 4
+;
+
+test "validate: clone_vid_pid=true requires non-zero device.vid/pid" {
+    const allocator = std.testing.allocator;
+    // Zero vid — must reject
+    const toml_zero_vid = ffb_zero_vid_toml ++
+        \\
+        \\[output]
+        \\name = "Zero VID Wheel"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\[output.force_feedback]
+        \\backend       = "uhid"
+        \\kind          = "pid"
+        \\clone_vid_pid = true
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_zero_vid));
+}
+
+test "validate: clone_vid_pid=false with zero device.vid is legal" {
+    const allocator = std.testing.allocator;
+    // clone_vid_pid=false (default) — zero vid is fine, no clonable identity needed
+    const toml_zero_vid_no_clone = ffb_zero_vid_toml ++
+        \\
+        \\[output]
+        \\name = "Zero VID Wheel"
+        \\[output.imu]
+        \\backend = "uhid"
+        \\[output.force_feedback]
+        \\backend       = "uhid"
+        \\kind          = "pid"
+        \\clone_vid_pid = false
+    ;
+    const result = try parseString(allocator, toml_zero_vid_no_clone);
+    defer result.deinit();
+    try std.testing.expect(!result.value.output.?.force_feedback.?.clone_vid_pid);
 }
