@@ -332,6 +332,10 @@ pub const Mapper = struct {
             // is reset above, but held_gamepad_buttons (set by past `down=`) must persist
             // across the delay window and outlive same-frame step advancement.
             self.injected_buttons |= self.active_macros.items[i].held_gamepad_buttons;
+            // issue #119: refresh trigger-held flag so repeat-mode macros stop
+            // scheduling restarts once the source button is released.
+            const src_bit: u64 = @as(u64, 1) << self.active_macros.items[i].trigger_src_idx;
+            self.active_macros.items[i].setTriggerHeld((self.state.buttons & src_bit) != 0);
             const done = self.active_macros.items[i].step(
                 &aux,
                 &self.timer_queue,

@@ -280,6 +280,24 @@ steps = [
 
 Bind in remap: `M1 = "macro:dodge_roll"`
 
+#### Repeat-while-held — turbo / combo (`repeat_delay_ms`)
+
+Add `repeat_delay_ms = N` to a `[[macro]]` block to make the macro restart while
+the trigger button is held. Releasing the trigger lets the current iteration
+finish naturally and stops further restarts. Omit the field for legacy
+single-shot behaviour.
+
+```toml
+# Spam A while RM held: tap, wait 50 ms, tap again, ...
+[[macro]]
+name = "spam_a"
+repeat_delay_ms = 50
+steps = [{ tap = "A" }]
+
+[remap]
+RM = "macro:spam_a"
+```
+
 ### Trigger Threshold — analog LT / RT as digital buttons {#trigger-threshold}
 
 > **Warning:** `trigger_threshold` must be at the top level of the mapping file.
