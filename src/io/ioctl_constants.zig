@@ -20,6 +20,13 @@ pub fn HIDIOCGRAWUNIQ(len: u14) u32 {
     return @bitCast(req);
 }
 
+/// HIDIOCSFEATURE(len): send a HID feature report (report ID byte + payload).
+/// dir = _IOC_WRITE|_IOC_READ = 3, nr = 0x06.
+pub fn HIDIOCSFEATURE(len: u14) u32 {
+    const req = IOCTL.Request{ .dir = 3, .io_type = 'H', .nr = 0x06, .size = len };
+    return @bitCast(req);
+}
+
 // evdev
 pub const EVIOCGRAB = IOCTL.IOW('E', 0x90, c_int);
 

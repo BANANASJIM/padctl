@@ -7,6 +7,14 @@ pid = 0x1205
 id = 2
 class = "hid"
 
+# Send 0x81 ID_CLEAR_DIGITAL_MAPPINGS feature report on attach to exit lizard
+# mode (Steam Deck ships in lizard mode when Steam client has not run since boot;
+# bytes 8-15 of 0x09 reports are all zero until this report is sent).
+# Reference: Linux kernel drivers/hid/hid-steam.c steam_clear_mappings()
+[device.init]
+interface = 2
+feature_report = [0x81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
 # --- Input report (Report type 0x09, 64 bytes) ---
 # Reference: Linux kernel drivers/hid/hid-steam.c :1748-1766 (envelope),
 #            :1597 steam_do_deck_input_event (bit mapping)

@@ -12,6 +12,7 @@ pub const MockDeviceIO = struct {
     frame_idx: usize,
     allocator: std.mem.Allocator,
     write_log: std.ArrayList(u8),
+    feature_report_log: std.ArrayList(u8),
     pipe_r: posix.fd_t,
     pipe_w: posix.fd_t,
     disconnected: bool,
@@ -31,6 +32,7 @@ pub const MockDeviceIO = struct {
             .frame_idx = 0,
             .allocator = allocator,
             .write_log = .{},
+            .feature_report_log = .{},
             .pipe_r = fds[0],
             .pipe_w = fds[1],
             .disconnected = false,
@@ -39,6 +41,7 @@ pub const MockDeviceIO = struct {
 
     pub fn deinit(self: *MockDeviceIO) void {
         self.write_log.deinit(self.allocator);
+        self.feature_report_log.deinit(self.allocator);
         posix.close(self.pipe_r);
         self.closeWriteEnd();
     }
@@ -73,6 +76,7 @@ pub const MockDeviceIO = struct {
     const vtable = DeviceIO.VTable{
         .read = read,
         .write = write,
+        .feature_report = featureReport,
         .pollfd = pollfd,
         .close = close,
     };
@@ -98,6 +102,11 @@ pub const MockDeviceIO = struct {
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *MockDeviceIO = @ptrCast(@alignCast(ptr));
         self.write_log.appendSlice(self.allocator, data) catch return DeviceIO.WriteError.Io;
+    }
+
+    fn featureReport(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
+        const self: *MockDeviceIO = @ptrCast(@alignCast(ptr));
+        self.feature_report_log.appendSlice(self.allocator, data) catch return DeviceIO.WriteError.Io;
     }
 
     fn pollfd(ptr: *anyopaque) posix.pollfd {
