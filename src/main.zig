@@ -506,7 +506,7 @@ fn printHelp() void {
         \\  --config <path>     Device config TOML file (required to run)
         \\  --config-dir <dir>  Glob *.toml in dir; discover all matching devices
         \\  --mapping <path>    Mapping config TOML file (optional)
-        \\  --validate <path>   Validate device config and exit (returns 0/1)
+        \\  --validate <path>   Validate device or mapping config and exit (returns 0/1)
         \\  --pid-file <path>   Write PID to file on start, remove on exit
         \\  --doc-gen           Generate Markdown device reference from --config path(s)
         \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
