@@ -269,4 +269,32 @@ Step types:
 | `{ delay = N }` | Wait N milliseconds |
 | `"pause_for_release"` | Wait until the trigger button is released |
 
+Macro fields:
+
+| Field | Description |
+|-------|-------------|
+| `name` | Identifier referenced from remap as `macro:<name>` |
+| `steps` | Ordered step list |
+| `repeat_delay_ms` | Optional. While the trigger button is held, restart the macro `N` ms after the previous run finishes. Releasing the trigger lets the current iteration finish naturally and stops further restarts. Omit for single-shot (legacy) behaviour. |
+
+```toml
+# Turbo: spam A while RM is held, 50 ms between presses.
+[[macro]]
+name = "spam_a"
+repeat_delay_ms = 50
+steps = [{ tap = "A" }]
+
+# Combo: XYX every 100 ms while held.
+[[macro]]
+name = "xyx_combo"
+repeat_delay_ms = 100
+steps = [
+    { tap = "X" },
+    { delay = 30 },
+    { tap = "Y" },
+    { delay = 30 },
+    { tap = "X" },
+]
+```
+
 Bind a macro in remap: `M1 = "macro:dodge_roll"`

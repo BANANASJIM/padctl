@@ -41,18 +41,20 @@ const freeArgv = services_mod.freeArgv;
 
 // udev.zig
 const UdevEntry = udev_mod.UdevEntry;
-const extractVidPid = udev_mod.extractVidPid;
-const isFieldKey = udev_mod.isFieldKey;
 const isValidIdentifier = udev_mod.isValidIdentifier;
-const parseStringArray = udev_mod.parseStringArray;
-const generateUdevRules = udev_mod.generateUdevRules;
-const generateDriverBlockRules = udev_mod.generateDriverBlockRules;
 const probeAndUnbindDrivers = udev_mod.probeAndUnbindDrivers;
 const readSysHex = udev_mod.readSysHex;
 const findDevicesSourceDir = udev_mod.findDevicesSourceDir;
 const imu_udev_rules_content = udev_mod.imu_udev_rules_content;
 const modules_load_content = udev_mod.modules_load_content;
-const parseHexOrDec = udev_mod.parseHexOrDec;
+// private helpers exposed via _internals_for_tests
+const _udev = udev_mod._internals_for_tests;
+const extractVidPid = _udev.extractVidPid;
+const isFieldKey = _udev.isFieldKey;
+const parseStringArray = _udev.parseStringArray;
+const parseHexOrDec = _udev.parseHexOrDec;
+const generateUdevRules = _udev.generateUdevRules;
+const generateDriverBlockRules = _udev.generateDriverBlockRules;
 
 // migration.zig
 const ensureUserXdgDirs = migration_mod.ensureUserXdgDirs;

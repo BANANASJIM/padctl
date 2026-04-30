@@ -1745,7 +1745,8 @@ pub const Supervisor = struct {
                 };
                 // Register devname → phys so detach() can find this instance.
                 const devname = std.fs.path.basename(hidraw_path);
-                self.bindManagedDevname(&self.managed.items[self.managed.items.len - 1], devname, phys) catch {};
+                self.bindManagedDevname(&self.managed.items[self.managed.items.len - 1], devname, phys) catch |err|
+                    std.log.warn("bindManagedDevname failed for {s}: {s}", .{ phys, @errorName(err) });
                 // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
                 spawned += 1;
             }

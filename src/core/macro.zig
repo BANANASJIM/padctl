@@ -11,6 +11,11 @@ pub const MacroStep = union(enum) {
 pub const Macro = struct {
     name: []const u8,
     steps: []const MacroStep,
+    // issue #119: when set, after the steps array finishes the player schedules a
+    // restart this many ms later — provided the trigger source button is still
+    // held. Releasing the trigger lets the current iteration finish naturally
+    // and stops further restarts. Absent / null = legacy single-shot behaviour.
+    repeat_delay_ms: ?u32 = null,
 };
 
 // --- tests ---

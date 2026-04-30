@@ -869,6 +869,32 @@ test "mapping: [[macro]] multi-entry parse: all step primitives correct" {
     try validate(&cfg);
 }
 
+test "mapping: [[macro]] repeat_delay_ms parses; absent stays null (issue #119)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[macro]]
+        \\name = "spam_a"
+        \\repeat_delay_ms = 50
+        \\steps = [{ tap = "A" }]
+        \\
+        \\[[macro]]
+        \\name = "once"
+        \\steps = [{ tap = "B" }]
+        \\
+        \\[remap]
+        \\C = "macro:spam_a"
+        \\D = "macro:once"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+
+    const macros = result.value.macro.?;
+    try std.testing.expectEqual(@as(usize, 2), macros.len);
+    try std.testing.expectEqual(@as(?u32, 50), macros[0].repeat_delay_ms);
+    try std.testing.expectEqual(@as(?u32, null), macros[1].repeat_delay_ms);
+    try validate(&result.value);
+}
+
 test "mapping: validate: macro:name remap target references unknown macro returns error" {
     const allocator = std.testing.allocator;
     const toml_str =

@@ -21,6 +21,14 @@ pub const MacroPlayer = struct {
     // is below this, step() must yield the frame so per-poll Mapper.apply calls
     // do not race past delay= boundaries.
     next_step_eligible_at_ns: i128,
+    // issue #119: repeat-macro trigger-held flag, refreshed by Mapper each frame
+    // before invoking step(). step() consults this when reaching end-of-steps to
+    // decide whether to schedule a restart. A falling edge stops further repeats.
+    trigger_held: bool,
+    // issue #119: when non-null, the macro has finished its current iteration and
+    // is waiting for now_ns to reach this deadline before restarting from
+    // step_index = 0. Same gating mechanism as next_step_eligible_at_ns.
+    awaiting_restart_at_ns: ?i128,
 
     pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
         return .{
@@ -31,6 +39,8 @@ pub const MacroPlayer = struct {
             .trigger_src_idx = src_idx,
             .held_gamepad_buttons = 0,
             .next_step_eligible_at_ns = 0,
+            .trigger_held = true,
+            .awaiting_restart_at_ns = null,
         };
     }
 
@@ -53,6 +63,15 @@ pub const MacroPlayer = struct {
         // issue #72: prevent same-frame double-emit — only the macro timerfd
         // expiry advances state past a delay boundary.
         if (now_ns < self.next_step_eligible_at_ns) return false;
+
+        // issue #119: gate restart on trigger_held — released triggers stop
+        // further iterations even after the restart timer fires.
+        if (self.awaiting_restart_at_ns) |deadline| {
+            if (now_ns < deadline) return false;
+            self.awaiting_restart_at_ns = null;
+            if (!self.trigger_held) return true;
+            self.step_index = 0;
+        }
 
         while (self.step_index < self.macro.steps.len) {
             const s = self.macro.steps[self.step_index];
@@ -82,7 +101,24 @@ pub const MacroPlayer = struct {
                 },
             }
         }
+
+        // issue #119: end of steps. Schedule restart if repeat_delay_ms set and
+        // trigger still held; otherwise legacy single-shot completion.
+        if (self.macro.repeat_delay_ms) |delay_ms| {
+            if (self.trigger_held) {
+                const deadline = now_ns + @as(i128, delay_ms) * std.time.ns_per_ms;
+                try queue.arm(deadline, self.timer_token, now_ns);
+                self.awaiting_restart_at_ns = deadline;
+                return false;
+            }
+        }
         return true;
+    }
+
+    // issue #119: refreshed each Mapper.apply frame for repeat-mode macros so
+    // step() can decide at end-of-steps whether to schedule another iteration.
+    pub fn setTriggerHeld(self: *MacroPlayer, held: bool) void {
+        self.trigger_held = held;
     }
 
     pub fn notifyTriggerReleased(self: *MacroPlayer) void {
@@ -321,4 +357,92 @@ test "macro_player: two players advance step_index independently" {
     try testing.expect(done_b);
     try testing.expectEqual(@as(usize, 4), ctx_a.aux.len);
     try testing.expectEqual(@as(usize, 2), ctx_b.aux.len);
+}
+
+// --- issue #119: repeat_delay_ms ---
+
+test "macro_player: repeat_delay_ms — held trigger reschedules; release stops" {
+    const allocator = testing.allocator;
+    const steps = [_]MacroStep{.{ .tap = "KEY_A" }};
+    const m = Macro{ .name = "spam", .steps = &steps, .repeat_delay_ms = 50 };
+    var p = makePlayer(&m);
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
+
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 0;
+
+    // First iteration: tap fires (press+release events), player not done, restart armed.
+    const done0 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0);
+    try testing.expect(!done0);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
+    try testing.expectEqual(@as(usize, 1), ctx.queue.heap.count());
+    try testing.expect(p.awaiting_restart_at_ns != null);
+
+    // Mid-restart-window: must not advance.
+    ctx.aux = .{};
+    const done_mid = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0 + 20 * ns_per_ms);
+    try testing.expect(!done_mid);
+    try testing.expectEqual(@as(usize, 0), ctx.aux.len);
+
+    // Restart deadline reached, trigger still held: second iteration fires.
+    ctx.aux = .{};
+    p.setTriggerHeld(true);
+    const done1 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0 + 50 * ns_per_ms);
+    try testing.expect(!done1);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len); // press + release of KEY_A again
+
+    // Release trigger; reach next restart deadline → player completes (returns true).
+    ctx.aux = .{};
+    p.setTriggerHeld(false);
+    const done2 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0 + 100 * ns_per_ms + 1);
+    try testing.expect(done2);
+    try testing.expectEqual(@as(usize, 0), ctx.aux.len); // no further taps after release
+}
+
+test "macro_player: repeat_delay_ms — release mid-iteration completes current pass then stops" {
+    const allocator = testing.allocator;
+    // XYX combo: two taps separated by a delay.
+    const steps = [_]MacroStep{
+        .{ .tap = "KEY_A" },
+        .{ .delay = 10 },
+        .{ .tap = "KEY_B" },
+    };
+    const m = Macro{ .name = "combo", .steps = &steps, .repeat_delay_ms = 100 };
+    var p = makePlayer(&m);
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
+
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+
+    // Frame 0: trigger held, first tap fires, then delay arms.
+    const done0 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, 0);
+    try testing.expect(!done0);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len); // KEY_A press+release
+
+    // User releases trigger BEFORE delay expiry. The current iteration must
+    // still finish naturally (KEY_B tap), but no restart should be scheduled.
+    p.setTriggerHeld(false);
+
+    // Delay expires: second tap fires AND end-of-steps reached. trigger_held=false
+    // means the macro completes (returns true) — no restart armed.
+    ctx.aux = .{};
+    const done1 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, 10 * ns_per_ms + 1);
+    try testing.expect(done1);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len); // KEY_B press+release
+    try testing.expect(p.awaiting_restart_at_ns == null);
+}
+
+test "macro_player: repeat_delay_ms absent — legacy single-shot completion" {
+    const allocator = testing.allocator;
+    const steps = [_]MacroStep{.{ .tap = "KEY_A" }};
+    const m = Macro{ .name = "once", .steps = &steps };
+    var p = makePlayer(&m);
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
+
+    const done = try ctx.step(&p);
+    try testing.expect(done);
+    try testing.expectEqual(@as(usize, 2), ctx.aux.len);
+    try testing.expect(p.awaiting_restart_at_ns == null);
 }
