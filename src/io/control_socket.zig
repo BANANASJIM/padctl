@@ -143,6 +143,7 @@ pub const ControlSocket = struct {
 pub const CommandTag = enum {
     switch_mapping,
     switch_device,
+    chord_switch,
     status,
     list,
     devices,
@@ -158,6 +159,8 @@ pub const Command = struct {
     tag: CommandTag,
     name: []const u8 = "",
     device_id: []const u8 = "",
+    /// Issue #183: chord index for CHORD_SWITCH command (1..255). 0 = unset.
+    chord_index: u8 = 0,
 };
 
 pub fn parseCommand(raw: []const u8) Command {
@@ -179,6 +182,11 @@ pub fn parseCommand(raw: []const u8) Command {
             }
         }
         return .{ .tag = .switch_mapping, .name = name };
+    } else if (std.ascii.eqlIgnoreCase(verb, "CHORD_SWITCH")) {
+        const idx_str = it.next() orelse return .{ .tag = .unknown };
+        const idx = std.fmt.parseInt(u8, idx_str, 10) catch return .{ .tag = .unknown };
+        if (idx == 0) return .{ .tag = .unknown };
+        return .{ .tag = .chord_switch, .chord_index = idx };
     } else if (std.ascii.eqlIgnoreCase(verb, "STATUS")) {
         return .{ .tag = .status };
     } else if (std.ascii.eqlIgnoreCase(verb, "LIST")) {
@@ -235,6 +243,27 @@ test "control_socket: parseCommand: LIST" {
 test "control_socket: parseCommand: DEVICES" {
     const cmd = parseCommand("DEVICES\n");
     try testing.expectEqual(CommandTag.devices, cmd.tag);
+}
+
+test "control_socket: parseCommand: CHORD_SWITCH valid index (issue #183)" {
+    const cmd = parseCommand("CHORD_SWITCH 3\n");
+    try testing.expectEqual(CommandTag.chord_switch, cmd.tag);
+    try testing.expectEqual(@as(u8, 3), cmd.chord_index);
+}
+
+test "control_socket: parseCommand: CHORD_SWITCH zero index rejected (issue #183)" {
+    const cmd = parseCommand("CHORD_SWITCH 0\n");
+    try testing.expectEqual(CommandTag.unknown, cmd.tag);
+}
+
+test "control_socket: parseCommand: CHORD_SWITCH non-numeric rejected (issue #183)" {
+    const cmd = parseCommand("CHORD_SWITCH foo\n");
+    try testing.expectEqual(CommandTag.unknown, cmd.tag);
+}
+
+test "control_socket: parseCommand: CHORD_SWITCH missing arg rejected (issue #183)" {
+    const cmd = parseCommand("CHORD_SWITCH\n");
+    try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
 test "control_socket: parseCommand: unknown" {

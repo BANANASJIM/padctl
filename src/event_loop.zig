@@ -27,6 +27,7 @@ const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
 const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
+const socket_client = @import("cli/socket_client.zig");
 
 // Fixed poll slots for the event loop.
 pub const Slots = struct {
@@ -220,6 +221,22 @@ pub fn disarmTimer(fd: posix.fd_t) void {
     if (rc != 0) {
         rumble_log.debug("TIMERFD: disarm FAILED rc={d}", .{rc});
     }
+}
+
+/// Issue #183: fire a CHORD_SWITCH command at the daemon's own control socket.
+/// Best-effort, fire-and-forget — runs on the device thread, the supervisor
+/// performs the actual mapping switch on its own thread. Failure to connect
+/// or send is logged at debug only; chord state is reset every modifier
+/// release so a missed dispatch is recoverable by the user.
+fn dispatchChordSwitch(chord_index: u8) void {
+    var path_buf: [256]u8 = undefined;
+    const sock_path = socket_client.resolveSocketPath(&path_buf);
+    const fd = socket_client.connectToSocket(sock_path) catch return;
+    defer posix.close(fd);
+
+    var cmd_buf: [64]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "CHORD_SWITCH {d}\n", .{chord_index}) catch return;
+    _ = posix.write(fd, cmd) catch return;
 }
 
 pub const EventLoopContext = struct {
@@ -686,6 +703,7 @@ pub const EventLoop = struct {
                                     .arm => |ms| armTimer(self.timer_fd, ms),
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
+                                if (events.chord_switch_request) |idx| dispatchChordSwitch(idx);
                                 ctx.output.emit(events.gamepad) catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;

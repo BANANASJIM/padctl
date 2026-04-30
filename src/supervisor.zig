@@ -20,6 +20,7 @@ const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
 const mapping_discovery = @import("config/mapping_discovery.zig");
 const user_config_mod = @import("config/user_config.zig");
+const chord_detector_mod = @import("core/chord_detector.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
@@ -63,6 +64,29 @@ const SwitchTx = struct {
     old_switch_mapping: ?*mapping_cfg.ParseResult = null,
     committed: bool = false,
 };
+
+fn parseChordSwitchConfig(maybe_cfg: ?user_config_mod.ChordSwitchConfig) ?chord_detector_mod.Config {
+    const cfg = maybe_cfg orelse return null;
+    const modifier_names = cfg.modifier orelse return null;
+    const selector_names = cfg.selectors orelse return null;
+    const mod_mask = chord_detector_mod.buildModifierMask(modifier_names) orelse {
+        std.log.warn("[chord_switch] modifier contains unknown button name; feature disabled", .{});
+        return null;
+    };
+    var selectors: [chord_detector_mod.MAX_SELECTORS]u64 = [_]u64{0} ** chord_detector_mod.MAX_SELECTORS;
+    const count = chord_detector_mod.buildSelectors(selector_names, &selectors) orelse {
+        std.log.warn("[chord_switch] selectors invalid (empty, too many, or unknown name); feature disabled", .{});
+        return null;
+    };
+    const hold_ms_raw = cfg.hold_ms;
+    const hold_ms: u64 = if (hold_ms_raw <= 0) 0 else @intCast(hold_ms_raw);
+    return .{
+        .modifier_mask = mod_mask,
+        .selectors = selectors,
+        .selector_count = count,
+        .hold_ns = hold_ms * std.time.ns_per_ms,
+    };
+}
 
 fn shouldInjectSwitchFailure(self: *const Supervisor, commit_index: usize) bool {
     if (!builtin.is_test) return false;
@@ -191,6 +215,10 @@ pub const Supervisor = struct {
     /// phys). Passed by pointer into every `DeviceInstance.init` call site;
     /// see `src/io/uniq.zig`.
     daemon_uniq_counter: u16 = 1,
+    /// Issue #183: parsed `[chord_switch]` from user_cfg, derived once at
+    /// init/reload. null = feature disabled. Installed onto every newly
+    /// initialised Mapper via `installChordDetector`.
+    chord_detector_cfg: ?chord_detector_mod.Config = null,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -263,6 +291,7 @@ pub const Supervisor = struct {
     /// `init()` loads the config and again from `doReload()` so live
     /// `padctl reload` picks up edits. No-op when `user_cfg` is null.
     fn applyUserConfigRuntime(self: *Supervisor) void {
+        self.chord_detector_cfg = null;
         const uc = (self.user_cfg orelse return).value;
         const raw = uc.supervisor.suspend_grace_sec;
         self.suspend_grace_sec = if (raw <= 0)
@@ -271,6 +300,12 @@ pub const Supervisor = struct {
             std.math.maxInt(u32)
         else
             @intCast(raw);
+        self.chord_detector_cfg = parseChordSwitchConfig(uc.chord_switch);
+    }
+
+    fn installChordDetector(self: *Supervisor, m: *ManagedInstance) void {
+        const cfg = self.chord_detector_cfg orelse return;
+        if (m.instance.mapper) |*mp| mp.setChordDetector(cfg);
     }
 
     pub fn initForTest(allocator: std.mem.Allocator) !Supervisor {
@@ -563,6 +598,11 @@ pub const Supervisor = struct {
     }
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
+        // Install chord detector before spawning the thread so the mapper sees
+        // the cfg from the very first frame (issue #183).
+        if (self.chord_detector_cfg) |cfg| {
+            if (instance.mapper) |*mp| mp.setChordDetector(cfg);
+        }
         const thread = try std.Thread.spawn(.{}, threadEntry, .{instance});
         errdefer {
             instance.stop();
@@ -773,6 +813,7 @@ pub const Supervisor = struct {
         m.instance.mapper = tx.new_mapper.?;
         tx.new_mapper = null;
         m.instance.mapping_cfg = &tx.parsed_ptr.?.value;
+        self.installChordDetector(m);
         // issue #142: rebuild AuxDevice when switching mappings so newly
         // required KEY_* or REL_* capabilities become available. Warn rather
         // than propagate on failure, matching the reload path (~line 676).
@@ -934,6 +975,7 @@ pub const Supervisor = struct {
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.macro_timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
+                self.installChordDetector(m);
                 m.instance.rebuildAuxIfChanged(map_copy, old_mapping_cfg) catch |err| {
                     std.log.warn("rebuildAuxIfChanged: {}", .{err});
                 };
@@ -1206,10 +1248,11 @@ pub const Supervisor = struct {
 
             if (self.ctrl_sock != null) {
                 for (pollfds[set.base_nfds..nfds]) |*pfd| {
+                    if (pfd.revents & posix.POLL.IN != 0) {
+                        self.handleClientCommand(pfd.fd);
+                    }
                     if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
                         self.ctrl_sock.?.removeClient(pfd.fd);
-                    } else if (pfd.revents & posix.POLL.IN != 0) {
-                        self.handleClientCommand(pfd.fd);
                     }
                 }
             }
@@ -1250,6 +1293,7 @@ pub const Supervisor = struct {
         switch (cmd.tag) {
             .switch_mapping => self.handleSwitch(fd, cmd.name, null),
             .switch_device => self.handleSwitch(fd, cmd.name, cmd.device_id),
+            .chord_switch => self.handleChordSwitch(fd, cmd.chord_index),
             .status => self.handleStatus(fd),
             .list => self.handleList(fd),
             .devices => self.handleDevices(fd),
@@ -1258,6 +1302,57 @@ pub const Supervisor = struct {
             .dump_status => self.handleDumpStatus(fd),
             .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
         }
+    }
+
+    fn handleChordSwitch(self: *Supervisor, fd: posix.fd_t, chord_index: u8) void {
+        var cs = &self.ctrl_sock.?;
+        if (chord_index == 0) {
+            cs.sendResponse(fd, "ERR chord-index-invalid\n");
+            return;
+        }
+        const name = self.lookupChordMappingName(chord_index) catch {
+            cs.sendResponse(fd, "ERR chord-lookup-failed\n");
+            return;
+        };
+        if (name == null) {
+            std.log.warn("chord_switch: no mapping has chord_index = {d}", .{chord_index});
+            cs.sendResponse(fd, "ERR chord-mapping-not-found\n");
+            return;
+        }
+        defer self.allocator.free(name.?);
+        self.handleSwitch(fd, name.?, null);
+    }
+
+    fn lookupChordMappingName(self: *Supervisor, chord_index: u8) !?[]const u8 {
+        const profiles = mapping_discovery.discoverMappings(self.allocator) catch |err| {
+            std.log.warn("chord_switch: discoverMappings failed: {}", .{err});
+            return err;
+        };
+        defer mapping_discovery.freeProfiles(self.allocator, profiles);
+
+        // Sort by name ascending for deterministic resolution across filesystems.
+        std.sort.pdq(mapping_discovery.MappingProfile, profiles, {}, struct {
+            fn lessThan(_: void, a: mapping_discovery.MappingProfile, b: mapping_discovery.MappingProfile) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+
+        var found: ?[]const u8 = null;
+        var dup = false;
+        for (profiles) |p| {
+            const parsed = mapping_cfg.parseFile(self.allocator, p.path) catch continue;
+            defer parsed.deinit();
+            const ci = parsed.value.chord_index orelse continue;
+            if (ci != chord_index) continue;
+            if (found != null) {
+                dup = true;
+                continue;
+            }
+            found = try self.allocator.dupe(u8, p.name);
+        }
+        if (dup and found != null)
+            std.log.warn("chord_switch: chord_index={d} matches multiple mappings; using '{s}' (first by name)", .{ chord_index, found.? });
+        return found;
     }
 
     fn applySwitchMapping(self: *Supervisor, m: *ManagedInstance, parsed_ptr: *mapping_cfg.ParseResult) !void {
@@ -1269,6 +1364,7 @@ pub const Supervisor = struct {
         if (m.instance.mapper) |*old| old.deinit();
         m.instance.mapper = new_mapper;
         m.instance.mapping_cfg = &parsed_ptr.value;
+        self.installChordDetector(m);
         m.instance.rebuildAuxIfChanged(&parsed_ptr.value, old_mcfg) catch |err| {
             std.log.warn("rebuildAuxIfChanged: {}", .{err});
         };
@@ -3029,4 +3125,102 @@ test "supervisor: issue #136: STATUS -> default_mapping lookup -> handleSwitch s
     var resp_buf: [64]u8 = undefined;
     const n = try posix.read(resp_fds[1], &resp_buf);
     try testing.expectEqualStrings("OK foo\n", resp_buf[0..n]);
+}
+
+// Issue #183 — parseChordSwitchConfig tests.
+
+test "supervisor: parseChordSwitchConfig: full schema produces detector cfg" {
+    const cs: user_config_mod.ChordSwitchConfig = .{
+        .modifier = &.{ "LM", "RM" },
+        .selectors = &.{ "A", "B", "X", "Y" },
+        .hold_ms = 120,
+    };
+    const out = parseChordSwitchConfig(cs).?;
+    const lm_bit = @as(u64, 1) << @intFromEnum(@import("core/state.zig").ButtonId.LM);
+    const rm_bit = @as(u64, 1) << @intFromEnum(@import("core/state.zig").ButtonId.RM);
+    try testing.expectEqual(lm_bit | rm_bit, out.modifier_mask);
+    try testing.expectEqual(@as(u8, 4), out.selector_count);
+    try testing.expectEqual(@as(u64, 120) * std.time.ns_per_ms, out.hold_ns);
+}
+
+test "supervisor: parseChordSwitchConfig: null cfg disables feature" {
+    try testing.expectEqual(@as(?chord_detector_mod.Config, null), parseChordSwitchConfig(null));
+}
+
+test "supervisor: parseChordSwitchConfig: missing modifier disables feature" {
+    const cs: user_config_mod.ChordSwitchConfig = .{
+        .selectors = &.{ "A", "B" },
+    };
+    try testing.expectEqual(@as(?chord_detector_mod.Config, null), parseChordSwitchConfig(cs));
+}
+
+test "supervisor: parseChordSwitchConfig: unknown button name disables feature" {
+    const cs: user_config_mod.ChordSwitchConfig = .{
+        .modifier = &.{ "LM", "ZZZ" },
+        .selectors = &.{"A"},
+    };
+    try testing.expectEqual(@as(?chord_detector_mod.Config, null), parseChordSwitchConfig(cs));
+}
+
+test "supervisor: parseChordSwitchConfig: negative hold_ms clamped to zero" {
+    const cs: user_config_mod.ChordSwitchConfig = .{
+        .modifier = &.{"LM"},
+        .selectors = &.{"A"},
+        .hold_ms = -50,
+    };
+    const out = parseChordSwitchConfig(cs).?;
+    try testing.expectEqual(@as(u64, 0), out.hold_ns);
+}
+
+test "supervisor: lookupChordMappingName: deterministic order when two profiles share chord_index" {
+    // Write two mapping files with chord_index = 1; names chosen so that
+    // lexicographic order ("alpha" < "zebra") differs from filesystem
+    // enumeration order (we write "zebra" first).
+    const allocator = testing.allocator;
+
+    const base = "/tmp/padctl_test_chord_lookup_order";
+    const map_dir = base ++ "/mappings";
+    std.fs.deleteTreeAbsolute(base) catch {};
+    try std.fs.makeDirAbsolute(base);
+    try std.fs.makeDirAbsolute(map_dir);
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    // Write "zebra" first (would win under raw enumerate order).
+    const zebra_path = map_dir ++ "/zebra.toml";
+    const alpha_path = map_dir ++ "/alpha.toml";
+    {
+        const f = try std.fs.createFileAbsolute(zebra_path, .{});
+        defer f.close();
+        try f.writeAll("chord_index = 1\n");
+    }
+    {
+        const f = try std.fs.createFileAbsolute(alpha_path, .{});
+        defer f.close();
+        try f.writeAll("chord_index = 1\n");
+    }
+
+    // Build a profiles slice that mirrors what discoverMappings would return
+    // (without depending on real XDG dirs) and apply the same sort logic.
+    var profiles = [_]mapping_discovery.MappingProfile{
+        .{ .name = "zebra", .path = zebra_path, .source = .user },
+        .{ .name = "alpha", .path = alpha_path, .source = .user },
+    };
+    std.sort.pdq(mapping_discovery.MappingProfile, &profiles, {}, struct {
+        fn lessThan(_: void, a: mapping_discovery.MappingProfile, b: mapping_discovery.MappingProfile) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+
+    // After sort: "alpha" must come before "zebra".
+    try testing.expectEqualStrings("alpha", profiles[0].name);
+    try testing.expectEqualStrings("zebra", profiles[1].name);
+
+    // Verify both files actually parse chord_index = 1 correctly.
+    const pa = try mapping_cfg.parseFile(allocator, alpha_path);
+    defer pa.deinit();
+    try testing.expectEqual(@as(?u8, 1), pa.value.chord_index);
+
+    const pz = try mapping_cfg.parseFile(allocator, zebra_path);
+    defer pz.deinit();
+    try testing.expectEqual(@as(?u8, 1), pz.value.chord_index);
 }

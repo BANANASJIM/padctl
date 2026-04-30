@@ -76,6 +76,28 @@ max_log_size_mb = 100 # rotation threshold (default 100 MB)
 
 The `suspend_grace_sec` value is preserved across `padctl dump enable/disable` and `padctl switch`; comments and unknown keys inside `[supervisor]` follow the same rewrite caveat as the rest of `config.toml`.
 
+## Chord switch (issue #183)
+
+Set up an in-controller mapping switch so you can change profiles without leaving Big Picture mode. Add a `[chord_switch]` section to `~/.config/padctl/config.toml` and a `chord_index` to each mapping you want to be selectable:
+
+```toml
+# ~/.config/padctl/config.toml
+[chord_switch]
+modifier  = ["LM", "RM"]      # held simultaneously to arm the chord
+selectors = ["A", "B", "X", "Y"]  # each maps to chord_index 1..N by position
+hold_ms   = 80                # debounce window — selector edges in this window are ignored
+
+# ~/.config/padctl/mappings/fps.toml
+name = "fps"
+chord_index = 1   # press A while holding modifier → switch to this mapping
+
+# ~/.config/padctl/mappings/racing.toml
+name = "racing"
+chord_index = 2   # press B while holding modifier → switch to this mapping
+```
+
+While the modifier is held, selector buttons are suppressed from the virtual gamepad output so the in-game UI does not see them. If no mapping declares a matching `chord_index`, the daemon logs a warning and does nothing. The standard `padctl switch <name>` CLI still works alongside the chord. Currently this section is not preserved by `padctl dump enable/disable`'s rewrite — edit `config.toml` directly and run `padctl reload` to pick up changes.
+
 ## Rotation
 
 On every daemon startup and on every fresh file-open, padctl stats the existing log. If it exceeds `max_log_size_mb`, the file is renamed to `padctl.log.1` (overwriting any previous backup) and a new empty `padctl.log` is created. There is only ever one rotated backup.

@@ -18,11 +18,14 @@ const REL_WHEEL: u16 = c.REL_WHEEL;
 const REL_HWHEEL: u16 = c.REL_HWHEEL;
 
 const remap_mod = @import("remap.zig");
+const chord_detector_mod = @import("chord_detector.zig");
 pub const RemapTargetResolved = remap_mod.RemapTargetResolved;
 pub const resolveTarget = remap_mod.resolveTarget;
 pub const AuxEvent = aux_event_mod.AuxEvent;
 pub const AuxEventList = aux_event_mod.AuxEventList;
 pub const TimerRequest = @import("timer_request.zig").TimerRequest;
+pub const ChordDetector = chord_detector_mod.Detector;
+pub const ChordDetectorConfig = chord_detector_mod.Config;
 
 const MacroPlayer = macro_player_mod.MacroPlayer;
 const TimerQueue = timer_queue_mod.TimerQueue;
@@ -39,6 +42,7 @@ pub const OutputEvents = struct {
     prev: GamepadState,
     aux: AuxEventList,
     timer_request: ?TimerRequest = null,
+    chord_switch_request: ?u8 = null,
 };
 
 const BUTTON_COUNT = @typeInfo(ButtonId).@"enum".fields.len;
@@ -70,6 +74,8 @@ pub const Mapper = struct {
     next_token: u32,
     resolved_base: ResolvedRemap,
     resolved_layers: []ResolvedRemap,
+    // issue #183: in-controller mapping switch. null disables the feature.
+    chord_detector: ?ChordDetector = null,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
         const base = if (config.remap) |m| precomputeRemap(m) else ResolvedRemap{
@@ -113,6 +119,10 @@ pub const Mapper = struct {
         self.active_macros.deinit(self.allocator);
         self.timer_queue.deinit();
         self.allocator.free(self.resolved_layers);
+    }
+
+    pub fn setChordDetector(self: *Mapper, cfg: ChordDetectorConfig) void {
+        self.chord_detector = ChordDetector.init(cfg);
     }
 
     // `now_ns` is the ppoll-wakeup CLOCK_MONOTONIC snapshot from the caller;
@@ -188,6 +198,17 @@ pub const Mapper = struct {
         for (configs) |*cfg| {
             const trigger_id = std.meta.stringToEnum(ButtonId, cfg.trigger) orelse continue;
             self.suppressed_buttons |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(trigger_id)));
+        }
+
+        // issue #183: chord switch detection. The selector buttons must not
+        // leak to uinput output while the modifier is held; the supervisor
+        // performs the actual mapping switch in response to chord_switch_request.
+        var chord_switch_request: ?u8 = null;
+        if (self.chord_detector) |*cd| {
+            const cd_now: u64 = @intCast(@max(now_ns, 0));
+            const cr = cd.step(self.state.buttons, self.prev.buttons, cd_now);
+            self.suppressed_buttons |= cr.suppress_mask;
+            chord_switch_request = cr.chord_index;
         }
 
         // per-source inject map: null = not mapped, Some = last-write target
@@ -399,7 +420,13 @@ pub const Mapper = struct {
 
         self.prev = self.state;
 
-        return .{ .gamepad = emit_state, .prev = masked_prev, .aux = aux, .timer_request = timer_request };
+        return .{
+            .gamepad = emit_state,
+            .prev = masked_prev,
+            .aux = aux,
+            .timer_request = timer_request,
+            .chord_switch_request = chord_switch_request,
+        };
     }
 
     // Layer-hold timerfd (slot 2) expiry only — macro timerfd (slot 4) is a separate fd.
