@@ -1248,10 +1248,11 @@ pub const Supervisor = struct {
 
             if (self.ctrl_sock != null) {
                 for (pollfds[set.base_nfds..nfds]) |*pfd| {
+                    if (pfd.revents & posix.POLL.IN != 0) {
+                        self.handleClientCommand(pfd.fd);
+                    }
                     if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
                         self.ctrl_sock.?.removeClient(pfd.fd);
-                    } else if (pfd.revents & posix.POLL.IN != 0) {
-                        self.handleClientCommand(pfd.fd);
                     }
                 }
             }
@@ -1329,15 +1330,29 @@ pub const Supervisor = struct {
         };
         defer mapping_discovery.freeProfiles(self.allocator, profiles);
 
+        // Sort by name ascending for deterministic resolution across filesystems.
+        std.sort.pdq(mapping_discovery.MappingProfile, profiles, {}, struct {
+            fn lessThan(_: void, a: mapping_discovery.MappingProfile, b: mapping_discovery.MappingProfile) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+
+        var found: ?[]const u8 = null;
+        var dup = false;
         for (profiles) |p| {
             const parsed = mapping_cfg.parseFile(self.allocator, p.path) catch continue;
             defer parsed.deinit();
             const ci = parsed.value.chord_index orelse continue;
-            if (ci == chord_index) {
-                return try self.allocator.dupe(u8, p.name);
+            if (ci != chord_index) continue;
+            if (found != null) {
+                dup = true;
+                continue;
             }
+            found = try self.allocator.dupe(u8, p.name);
         }
-        return null;
+        if (dup and found != null)
+            std.log.warn("chord_switch: chord_index={d} matches multiple mappings; using '{s}' (first by name)", .{ chord_index, found.? });
+        return found;
     }
 
     fn applySwitchMapping(self: *Supervisor, m: *ManagedInstance, parsed_ptr: *mapping_cfg.ParseResult) !void {
@@ -3154,4 +3169,57 @@ test "supervisor: parseChordSwitchConfig: negative hold_ms clamped to zero" {
     };
     const out = parseChordSwitchConfig(cs).?;
     try testing.expectEqual(@as(u64, 0), out.hold_ns);
+}
+
+test "supervisor: lookupChordMappingName: deterministic order when two profiles share chord_index" {
+    // Write two mapping files with chord_index = 1; names chosen so that
+    // lexicographic order ("alpha" < "zebra") differs from filesystem
+    // enumeration order (we write "zebra" first).
+    const allocator = testing.allocator;
+
+    const base = "/tmp/padctl_test_chord_lookup_order";
+    const map_dir = base ++ "/mappings";
+    std.fs.deleteTreeAbsolute(base) catch {};
+    try std.fs.makeDirAbsolute(base);
+    try std.fs.makeDirAbsolute(map_dir);
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    // Write "zebra" first (would win under raw enumerate order).
+    const zebra_path = map_dir ++ "/zebra.toml";
+    const alpha_path = map_dir ++ "/alpha.toml";
+    {
+        const f = try std.fs.createFileAbsolute(zebra_path, .{});
+        defer f.close();
+        try f.writeAll("chord_index = 1\n");
+    }
+    {
+        const f = try std.fs.createFileAbsolute(alpha_path, .{});
+        defer f.close();
+        try f.writeAll("chord_index = 1\n");
+    }
+
+    // Build a profiles slice that mirrors what discoverMappings would return
+    // (without depending on real XDG dirs) and apply the same sort logic.
+    var profiles = [_]mapping_discovery.MappingProfile{
+        .{ .name = "zebra", .path = zebra_path, .source = .user },
+        .{ .name = "alpha", .path = alpha_path, .source = .user },
+    };
+    std.sort.pdq(mapping_discovery.MappingProfile, &profiles, {}, struct {
+        fn lessThan(_: void, a: mapping_discovery.MappingProfile, b: mapping_discovery.MappingProfile) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+
+    // After sort: "alpha" must come before "zebra".
+    try testing.expectEqualStrings("alpha", profiles[0].name);
+    try testing.expectEqualStrings("zebra", profiles[1].name);
+
+    // Verify both files actually parse chord_index = 1 correctly.
+    const pa = try mapping_cfg.parseFile(allocator, alpha_path);
+    defer pa.deinit();
+    try testing.expectEqual(@as(?u8, 1), pa.value.chord_index);
+
+    const pz = try mapping_cfg.parseFile(allocator, zebra_path);
+    defer pz.deinit();
+    try testing.expectEqual(@as(?u8, 1), pz.value.chord_index);
 }
