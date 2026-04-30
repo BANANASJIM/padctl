@@ -79,7 +79,7 @@ test "FfbForwarder: forwards report bytes byte-faithfully" {
 test "FfbForwarder: counts writes_total" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
 
-    const fds = try posix.pipe2(.{});
+    const fds = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(fds[0]);
     defer posix.close(fds[1]);
 
