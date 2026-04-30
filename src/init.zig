@@ -54,34 +54,37 @@ fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, re
 }
 
 /// Run device init handshake for a single DeviceIO.
-/// For each command hex string: write bytes, then retry up to 10 times (5ms apart)
-/// waiting for a response whose prefix matches response_prefix.
+/// For each command hex string: write bytes, then retry waiting for response_prefix.
+/// If feature_report is set, send it via HIDIOCSFEATURE after all commands.
 pub fn runInitSequence(
     allocator: std.mem.Allocator,
     device: DeviceIO,
     init_config: device_mod.InitConfig,
 ) !void {
     const prefix: []const u8 = blk: {
-        const raw = init_config.response_prefix;
+        const raw = init_config.response_prefix orelse break :blk &[_]u8{};
         var buf = try allocator.alloc(u8, raw.len);
         for (raw, 0..) |b, j| buf[j] = @intCast(b);
         break :blk buf;
     };
-    defer allocator.free(prefix);
+    defer if (init_config.response_prefix != null) allocator.free(prefix);
 
     const report_size: usize = if (init_config.report_size) |rs| @intCast(rs) else 0;
 
-    for (init_config.commands) |cmd| {
-        const bytes = try parseHexBytes(allocator, cmd);
-        defer allocator.free(bytes);
-        sendAndWaitPrefix(device, bytes, prefix, 50, report_size) catch |err| {
-            if (err == error.InitFailed) {
-                std.log.debug("init command got no ack, continuing", .{});
-            } else return err;
-        };
-    }
+    var total: usize = 0;
 
-    var total: usize = init_config.commands.len;
+    if (init_config.commands) |cmds| {
+        for (cmds) |cmd| {
+            const bytes = try parseHexBytes(allocator, cmd);
+            defer allocator.free(bytes);
+            sendAndWaitPrefix(device, bytes, prefix, 50, report_size) catch |err| {
+                if (err == error.InitFailed) {
+                    std.log.debug("init command got no ack, continuing", .{});
+                } else return err;
+            };
+        }
+        total += cmds.len;
+    }
 
     if (init_config.enable) |enable_cmd| {
         const bytes = try parseHexBytes(allocator, enable_cmd);
@@ -90,6 +93,16 @@ pub fn runInitSequence(
             if (err == error.InitFailed) {
                 std.log.debug("enable command got no ack, continuing", .{});
             } else return err;
+        };
+        total += 1;
+    }
+
+    if (init_config.feature_report) |fr| {
+        var buf: [64]u8 = .{0} ** 64;
+        const n = @min(fr.len, buf.len);
+        for (fr[0..n], 0..) |b, i| buf[i] = @intCast(b);
+        device.featureReport(buf[0..n]) catch |err| {
+            std.log.debug("feature_report ioctl failed: {}, continuing", .{err});
         };
         total += 1;
     }
@@ -210,4 +223,50 @@ test "init: runInitSequence: wrong prefix after retries logs warning and continu
     };
 
     try runInitSequence(allocator, dev, init_cfg);
+}
+
+test "init: runInitSequence: feature_report sent via featureReport path (no commands)" {
+    const allocator = std.testing.allocator;
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+
+    // Steam Deck lizard-mode unlock: 0x81 + 63 zero bytes
+    const init_cfg = device_mod.InitConfig{
+        .feature_report = &[_]i64{ 0x81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+
+    try runInitSequence(allocator, dev, init_cfg);
+
+    // Nothing written via output report path
+    try std.testing.expectEqual(@as(usize, 0), mock.write_log.items.len);
+    // 64 bytes sent via featureReport path; first byte is report ID 0x81
+    try std.testing.expectEqual(@as(usize, 64), mock.feature_report_log.items.len);
+    try std.testing.expectEqual(@as(u8, 0x81), mock.feature_report_log.items[0]);
+    // remaining 63 bytes must be zero
+    for (mock.feature_report_log.items[1..]) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "init: runInitSequence: feature_report after commands" {
+    const allocator = std.testing.allocator;
+
+    const resp = [_]u8{ 0x5a, 0xa5 };
+    var mock = try MockDeviceIO.init(allocator, &.{&resp});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+
+    const init_cfg = device_mod.InitConfig{
+        .commands = &[_][]const u8{"aa"},
+        .response_prefix = &[_]i64{ 0x5a, 0xa5 },
+        .feature_report = &[_]i64{ 0x81, 0, 0 },
+    };
+
+    try runInitSequence(allocator, dev, init_cfg);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xaa}, mock.write_log.items);
+    try std.testing.expectEqual(@as(usize, 3), mock.feature_report_log.items.len);
+    try std.testing.expectEqual(@as(u8, 0x81), mock.feature_report_log.items[0]);
 }

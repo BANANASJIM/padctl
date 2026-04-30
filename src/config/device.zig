@@ -14,12 +14,15 @@ pub const InterfaceConfig = struct {
 };
 
 pub const InitConfig = struct {
-    commands: []const []const u8,
-    response_prefix: []const i64,
+    commands: ?[]const []const u8 = null,
+    response_prefix: ?[]const i64 = null,
     enable: ?[]const u8 = null,
     disable: ?[]const u8 = null,
     interface: ?i64 = null,
     report_size: ?i64 = null,
+    /// HID feature report to send via HIDIOCSFEATURE immediately after commands.
+    /// Encoded as a list of byte values (0–255); report ID is byte[0].
+    feature_report: ?[]const i64 = null,
 };
 
 pub const DeviceInfo = struct {
@@ -456,6 +459,20 @@ const test_toml =
     \\type = "rumble"
     \\max_effects = 16
 ;
+
+test "device: load devices/valve/steam-deck.toml has feature_report init" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/valve/steam-deck.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqualStrings("Valve Steam Deck", cfg.device.name);
+    const init_cfg = cfg.device.init orelse return error.MissingInit;
+    const fr = init_cfg.feature_report orelse return error.MissingFeatureReport;
+    try std.testing.expectEqual(@as(usize, 64), fr.len);
+    try std.testing.expectEqual(@as(i64, 0x81), fr[0]);
+    for (fr[1..]) |b| try std.testing.expectEqual(@as(i64, 0), b);
+}
 
 test "device: load flydigi/vader5.toml succeeds" {
     const allocator = std.testing.allocator;
