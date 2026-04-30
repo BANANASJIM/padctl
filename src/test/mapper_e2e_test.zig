@@ -628,3 +628,62 @@ test "e2e: layer active — dpad mode switches to arrows" {
     }
     try testing.expect(found_key_down);
 }
+
+// --- 10. issue #183: chord switch detector wired into Mapper ---
+
+const chord_detector_mod = @import("../core/chord_detector.zig");
+
+fn chordCfg() chord_detector_mod.Config {
+    var sels: [chord_detector_mod.MAX_SELECTORS]u64 = [_]u64{0} ** chord_detector_mod.MAX_SELECTORS;
+    sels[0] = btnMask(.A);
+    sels[1] = btnMask(.B);
+    sels[2] = btnMask(.X);
+    sels[3] = btnMask(.Y);
+    return .{
+        .modifier_mask = btnMask(.LM) | btnMask(.RM),
+        .selectors = sels,
+        .selector_count = 4,
+        .hold_ns = 80 * std.time.ns_per_ms,
+    };
+}
+
+test "e2e issue #183: chord match — modifier+selector after debounce fires chord_index" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper("", allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+    m.setChordDetector(chordCfg());
+
+    const t0: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = btnMask(.LM) | btnMask(.RM) }, 16, t0);
+    const ev = try m.apply(.{ .buttons = btnMask(.LM) | btnMask(.RM) | btnMask(.A) }, 16, t0 + 100 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?u8, 1), ev.chord_switch_request);
+    // Selector A must be suppressed in emit state.
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
+}
+
+test "e2e issue #183: no chord detector — feature inert, selector passes through" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper("", allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+    // Deliberately do not call setChordDetector.
+
+    const ev = try m.apply(.{ .buttons = btnMask(.LM) | btnMask(.RM) | btnMask(.A) }, 16, 0);
+    try testing.expectEqual(@as(?u8, null), ev.chord_switch_request);
+    try testing.expect((ev.gamepad.buttons & btnMask(.A)) != 0);
+}
+
+test "e2e issue #183: partial modifier — only LM held, selector fires as normal input" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper("", allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+    m.setChordDetector(chordCfg());
+
+    const t0: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = btnMask(.LM) }, 16, t0);
+    const ev = try m.apply(.{ .buttons = btnMask(.LM) | btnMask(.A) }, 16, t0 + 100 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?u8, null), ev.chord_switch_request);
+    try testing.expect((ev.gamepad.buttons & btnMask(.A)) != 0);
+}

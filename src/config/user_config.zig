@@ -26,6 +26,17 @@ pub const SupervisorConfig = struct {
     suspend_grace_sec: i64 = 15,
 };
 
+/// Issue #183: in-controller mapping switch. When `modifier` is held and
+/// any `selectors[i]` is pressed, the daemon switches to whichever mapping
+/// declares `chord_index = i+1`. `hold_ms` is a debounce window — selector
+/// edges within this window after the modifier first becomes fully held
+/// are ignored. A missing or empty section disables the feature.
+pub const ChordSwitchConfig = struct {
+    modifier: ?[]const []const u8 = null,
+    selectors: ?[]const []const u8 = null,
+    hold_ms: i64 = 80,
+};
+
 pub const UserConfig = struct {
     /// Schema version for forward/backward compatibility. Missing = legacy
     /// v0 (pre-versioned). Current version is 1. The loader accepts any
@@ -34,6 +45,7 @@ pub const UserConfig = struct {
     device: ?[]DeviceEntry = null,
     diagnostics: DiagnosticsConfig = .{},
     supervisor: SupervisorConfig = .{},
+    chord_switch: ?ChordSwitchConfig = null,
 };
 
 pub const ParseResult = toml.Parsed(UserConfig);
@@ -685,4 +697,43 @@ test "escapeTomlString escapes backslash and double-quote" {
     defer buf.deinit(a);
     try escapeTomlString(buf.writer(a), "a\\b\"c");
     try std.testing.expectEqualStrings("a\\\\b\\\"c", buf.items);
+}
+
+test "user_config: [chord_switch] section parses modifier + selectors + hold_ms (issue #183)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\version = 1
+        \\[chord_switch]
+        \\modifier = ["LM", "RM"]
+        \\selectors = ["A", "B", "X", "Y"]
+        \\hold_ms = 120
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    const cs = result.value.chord_switch orelse return error.TestUnexpectedResult;
+    const mod = cs.modifier orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), mod.len);
+    try std.testing.expectEqualStrings("LM", mod[0]);
+    try std.testing.expectEqualStrings("RM", mod[1]);
+    const sels = cs.selectors orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 4), sels.len);
+    try std.testing.expectEqualStrings("A", sels[0]);
+    try std.testing.expectEqualStrings("Y", sels[3]);
+    try std.testing.expectEqual(@as(i64, 120), cs.hold_ms);
+}
+
+test "user_config: missing [chord_switch] leaves field null (issue #183)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\version = 1
+    ;
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(?ChordSwitchConfig, null), result.value.chord_switch);
 }

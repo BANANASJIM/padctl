@@ -8,6 +8,13 @@
 
 name = "comprehensive-example"
 
+# Optional: in-controller chord switch (issue #183).
+# When the user holds the modifier defined in `~/.config/padctl/config.toml`
+# (`[chord_switch]`) and presses a selector, the daemon switches to whichever
+# mapping declares a matching `chord_index`. Range 1..255. Omit to leave this
+# mapping non-selectable via chord.
+# chord_index = 1
+
 # REQUIRED to use LT / RT as [remap] source keys or layer triggers.
 # LT and RT are analog axes by default; this threshold synthesizes digital
 # button events so they behave like face buttons in remap and layer rules.

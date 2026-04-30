@@ -199,6 +199,7 @@ pub const LayerConfig = struct {
 
 pub const MappingConfig = struct {
     name: ?[]const u8 = null,
+    chord_index: ?u8 = null,
     remap: ?toml.HashMap([]const u8) = null,
     gyro: ?GyroConfig = null,
     stick: ?StickPairConfig = null,
@@ -591,6 +592,17 @@ test "mapping: MappingConfig: empty config" {
     try std.testing.expect(result.value.name == null);
     try std.testing.expect(result.value.remap == null);
     try std.testing.expect(result.value.layer == null);
+    try std.testing.expect(result.value.chord_index == null);
+}
+
+test "mapping: MappingConfig: chord_index parses (issue #183)" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\name = "fps"
+        \\chord_index = 1
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?u8, 1), result.value.chord_index);
 }
 
 const test_toml_full =

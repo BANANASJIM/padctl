@@ -55,6 +55,7 @@ pub const core = struct {
     pub const remap = @import("core/remap.zig");
     pub const layer = @import("core/layer.zig");
     pub const mapper = @import("core/mapper.zig");
+    pub const chord_detector = @import("core/chord_detector.zig");
     pub const stick = @import("core/stick.zig");
     pub const dpad = @import("core/dpad.zig");
     pub const command = @import("core/command.zig");
