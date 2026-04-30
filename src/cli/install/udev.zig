@@ -228,7 +228,7 @@ pub fn cleanupLegacyUdevFiles(allocator: std.mem.Allocator, plan: *const Install
 /// Scan all device TOML files in dirs, extract VID/PID/name/block_kernel_drivers,
 /// and deduplicate by VID:PID (preferring entries with richer data).
 /// Caller owns the returned entries and must call freeDeviceEntries when done.
-pub fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) !std.ArrayList(UdevEntry) {
+fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) !std.ArrayList(UdevEntry) {
     var entries = std.ArrayList(UdevEntry){};
     errdefer {
         for (entries.items) |e| {
@@ -331,8 +331,8 @@ pub fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []con
     try f.writeAll(buf.items);
 }
 
-/// Kept for test compatibility — collects entries then generates rules.
-pub fn generateUdevRulesFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, rules_path: []const u8, prefix: []const u8) !void {
+/// Collects entries then generates rules.
+fn generateUdevRulesFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, rules_path: []const u8, prefix: []const u8) !void {
     var entries = try collectDeviceEntries(allocator, dirs);
     defer freeDeviceEntries(allocator, &entries);
     try generateUdevRulesFromEntries(allocator, entries.items, rules_path, prefix);
@@ -373,8 +373,8 @@ pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries
     try f.writeAll(buf.items);
 }
 
-/// Convenience wrapper for tests — collects entries then generates driver block rules.
-pub fn generateDriverBlockRules(allocator: std.mem.Allocator, dirs: []const []const u8, rules_path: []const u8) !void {
+/// Collects entries then generates driver block rules.
+fn generateDriverBlockRules(allocator: std.mem.Allocator, dirs: []const []const u8, rules_path: []const u8) !void {
     var entries = try collectDeviceEntries(allocator, dirs);
     defer freeDeviceEntries(allocator, &entries);
     try generateDriverBlockRulesFromEntries(allocator, entries.items, rules_path);
@@ -459,12 +459,12 @@ pub fn readSysHex(path: []const u8) !u16 {
     return std.fmt.parseInt(u16, trimmed, 16);
 }
 
-pub fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rules_path: []const u8, prefix: []const u8) !void {
+fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rules_path: []const u8, prefix: []const u8) !void {
     const dirs = [_][]const u8{devices_dir};
     return generateUdevRulesFromDirs(allocator, &dirs, rules_path, prefix);
 }
 
-pub fn isFieldKey(line: []const u8, key: []const u8) bool {
+fn isFieldKey(line: []const u8, key: []const u8) bool {
     if (!std.mem.startsWith(u8, line, key)) return false;
     if (line.len == key.len) return true;
     const next = line[key.len];
@@ -482,7 +482,7 @@ pub fn isValidIdentifier(s: []const u8) bool {
 }
 
 /// Parse a TOML inline array of strings, e.g. `["xpad", "hid_generic"]`.
-pub fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
+fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return &.{};
     const inner = trimmed[1 .. trimmed.len - 1];
@@ -509,7 +509,7 @@ pub fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]cons
     return result;
 }
 
-pub fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.ArrayList(UdevEntry)) !void {
+fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.ArrayList(UdevEntry)) !void {
     var f = try std.fs.openFileAbsolute(path, .{});
     defer f.close();
     const content = try f.readToEndAlloc(allocator, 1 << 20);
@@ -548,13 +548,25 @@ pub fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *s
     });
 }
 
-pub fn parseHexOrDec(comptime T: type, s: []const u8) !T {
+fn parseHexOrDec(comptime T: type, s: []const u8) !T {
     const trimmed = std.mem.trim(u8, s, " \t\r");
     if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X")) {
         return std.fmt.parseInt(T, trimmed[2..], 16);
     }
     return std.fmt.parseInt(T, trimmed, 10);
 }
+
+/// Private helpers exposed to tests. Production code must use collectAllDeviceEntries
+/// + generateUdevRulesFromEntries instead of reaching through this namespace.
+pub const _internals_for_tests = struct {
+    pub const isFieldKey = @import("udev.zig").isFieldKey;
+    pub const parseStringArray = @import("udev.zig").parseStringArray;
+    pub const extractVidPid = @import("udev.zig").extractVidPid;
+    pub const parseHexOrDec = @import("udev.zig").parseHexOrDec;
+    pub const collectDeviceEntries = @import("udev.zig").collectDeviceEntries;
+    pub const generateUdevRules = @import("udev.zig").generateUdevRules;
+    pub const generateDriverBlockRules = @import("udev.zig").generateDriverBlockRules;
+};
 
 // setupTestUdev writes a udev rule that grants world-read access to UHID virtual
 // hidraw nodes and reloads udevd. Run once before test-e2e via:

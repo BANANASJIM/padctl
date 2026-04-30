@@ -76,6 +76,10 @@ pub const io = struct {
     pub const netlink = @import("io/netlink.zig");
 };
 
+// Every new src/test/*.zig file MUST be added to this namespace.
+// The test block near the bottom of this file calls refAllDecls(@This()), which
+// pulls in every declaration here as a test artifact. A file omitted from this
+// namespace will compile but its tests will silently never run under `zig build test`.
 pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
     pub const mock_output = @import("test/mock_output.zig");
