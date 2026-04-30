@@ -1,5 +1,6 @@
 const std = @import("std");
 const device = @import("../config/device.zig");
+const mapping = @import("../config/mapping.zig");
 const DeviceConfig = device.DeviceConfig;
 
 pub const ValidationError = struct {
@@ -11,6 +12,25 @@ pub const ValidationError = struct {
         allocator.free(self.message);
     }
 };
+
+pub const FileKind = enum { device, mapping };
+
+// Heuristic: a device config has a `[device]` section header. Mapping configs
+// never declare `[device]` (their schema starts with top-level `name`/`remap`/
+// `[[layer]]`/etc.), so the presence of a `[device]` line is a reliable
+// discriminator that does not require fully parsing the file first.
+pub fn detectFileKind(content: []const u8) FileKind {
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (std.mem.eql(u8, line, "[device]") or
+            std.mem.startsWith(u8, line, "[device.") or
+            std.mem.startsWith(u8, line, "[[device."))
+            return .device;
+    }
+    return .mapping;
+}
 
 const valid_checksum_algos = [_][]const u8{ "crc32", "xor", "sum8" };
 
@@ -105,8 +125,9 @@ fn validateExtended(
     }
 }
 
-/// Validate a single TOML file. Returns a slice of errors (caller owns, call freeErrors).
-/// Exit semantics: 0 errors = valid, >0 = invalid, null return = parse/IO failure.
+/// Validate a single TOML file. Auto-detects device vs mapping schema by
+/// scanning for a `[device]` header. Returns a slice of errors (caller owns,
+/// call freeErrors). Exit semantics: 0 errors = valid, >0 = invalid.
 pub fn validateFile(
     path: []const u8,
     allocator: std.mem.Allocator,
@@ -117,16 +138,40 @@ pub fn validateFile(
         errors.deinit(allocator);
     }
 
-    const parsed = device.parseFile(allocator, path) catch |err| {
-        // Passes 1-4 failed; report as a single error entry
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "parse/schema error: {}", .{err});
         const file_copy = try allocator.dupe(u8, path);
         try errors.append(allocator, .{ .file = file_copy, .message = msg });
         return errors.toOwnedSlice(allocator);
     };
-    defer parsed.deinit();
+    defer allocator.free(content);
 
-    try validateExtended(&parsed.value, path, &errors, allocator);
+    switch (detectFileKind(content)) {
+        .device => {
+            const parsed = device.parseString(allocator, content) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "parse/schema error: {}", .{err});
+                const file_copy = try allocator.dupe(u8, path);
+                try errors.append(allocator, .{ .file = file_copy, .message = msg });
+                return errors.toOwnedSlice(allocator);
+            };
+            defer parsed.deinit();
+            try validateExtended(&parsed.value, path, &errors, allocator);
+        },
+        .mapping => {
+            const parsed = mapping.parseString(allocator, content) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "parse/schema error: {}", .{err});
+                const file_copy = try allocator.dupe(u8, path);
+                try errors.append(allocator, .{ .file = file_copy, .message = msg });
+                return errors.toOwnedSlice(allocator);
+            };
+            defer parsed.deinit();
+            mapping.validate(&parsed.value) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "mapping validation error: {}", .{err});
+                const file_copy = try allocator.dupe(u8, path);
+                try errors.append(allocator, .{ .file = file_copy, .message = msg });
+            };
+        },
+    }
     return errors.toOwnedSlice(allocator);
 }
 
@@ -393,4 +438,109 @@ test "validate: validate devices/flydigi/vader5.toml: 0 errors" {
         for (errors) |e| std.debug.print("  error: {s}\n", .{e.message});
     }
     try testing.expectEqual(@as(usize, 0), errors.len);
+}
+
+// --- file-kind detection ---
+
+test "validate: detectFileKind: explicit [device] header is device" {
+    try testing.expectEqual(FileKind.device, detectFileKind("[device]\nname = \"T\"\n"));
+}
+
+test "validate: detectFileKind: dotted [device.interface] header is device" {
+    try testing.expectEqual(FileKind.device, detectFileKind("[[device.interface]]\nid = 0\n"));
+}
+
+test "validate: detectFileKind: comment-only header is mapping" {
+    try testing.expectEqual(FileKind.mapping, detectFileKind("# [device] in a comment\nname = \"x\"\n"));
+}
+
+test "validate: detectFileKind: mapping with [[layer]] is mapping" {
+    try testing.expectEqual(
+        FileKind.mapping,
+        detectFileKind("[[layer]]\nname = \"aim\"\ntrigger = \"RB\"\n"),
+    );
+}
+
+test "validate: detectFileKind: empty content defaults to mapping" {
+    try testing.expectEqual(FileKind.mapping, detectFileKind(""));
+}
+
+// --- mapping config validation (issue #53) ---
+
+test "validate: mapping config with [[layer]] passes (issue #53)" {
+    const allocator = testing.allocator;
+    const fps_template =
+        \\# Generated by padctl config init
+        \\# Device: Flydigi Vader 5 Pro
+        \\# Preset: xbox-elite2
+        \\
+        \\# Preset: fps — hold RB to activate gyro mouse
+        \\
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "RB"
+        \\activation = "hold"
+        \\
+        \\[layer.stick_right]
+        \\mode = "mouse"
+        \\sensitivity = 1.5
+        \\
+    ;
+    const errors = try validateString(allocator, fps_template);
+    defer freeErrors(errors, allocator);
+    if (errors.len > 0) {
+        for (errors) |e| std.debug.print("  error: {s}\n", .{e.message});
+    }
+    try testing.expectEqual(@as(usize, 0), errors.len);
+}
+
+test "validate: minimal mapping (header comments only) passes" {
+    const allocator = testing.allocator;
+    const minimal =
+        \\# Generated by padctl config init
+        \\# Device: Test
+        \\# Preset: xbox-360
+        \\
+    ;
+    const errors = try validateString(allocator, minimal);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 0), errors.len);
+}
+
+test "validate: mapping with [dpad] arrows passes (fighting template)" {
+    const allocator = testing.allocator;
+    const fighting =
+        \\[dpad]
+        \\mode = "arrows"
+        \\
+    ;
+    const errors = try validateString(allocator, fighting);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 0), errors.len);
+}
+
+test "validate: mapping with macro reference but no macro defined fails" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[remap]
+        \\M1 = "macro:undefined_macro"
+        \\
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expect(errors.len > 0);
+}
+
+test "validate: mapping with bad layer activation fails" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "RB"
+        \\activation = "bogus"
+        \\
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expect(errors.len > 0);
 }
