@@ -1,0 +1,10 @@
+# Example mapping selectable via chord_switch.
+# Pair with examples/configs/chord-switch.toml (selector A → chord_index=1).
+
+name = "desktop"
+
+# In-controller chord switch: tap A while holding LM+RM to switch HERE.
+chord_index = 1
+
+# Replace [device] / [output] / [remap] with your real config.
+# This file shows ONLY the chord_switch fields for clarity.

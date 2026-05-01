@@ -336,6 +336,25 @@ steps = [
 
 Configures the resistance profile of the DualSense L2/R2 triggers. See [Mapping Config Reference](mapping-config.md#adaptive_trigger) for full field tables.
 
+### In-controller Chord Switch (`[chord_switch]`)
+
+Hold a set of modifier buttons, then tap a selector button to switch the active mapping without touching a CLI. This is configured in `~/.config/padctl/config.toml` (not in a mapping file), and each selectable mapping file declares `chord_index = N`:
+
+```toml
+# ~/.config/padctl/config.toml
+[chord_switch]
+modifier  = ["LM", "RM"]
+selectors = ["A", "B", "X", "Y"]
+hold_ms   = 120
+```
+
+```toml
+# ~/.config/padctl/mappings/desktop.toml
+chord_index = 1   # LM+RM → tap A → switch to this mapping
+```
+
+See [Mapping Config Reference — chord_switch](mapping-config.md#chord_switch--in-controller-mapping-switch) for full field tables and a runnable example.
+
 ## Full Example
 
 A copy-paste-ready example covering every major feature is included in the repository at [`examples/mappings/comprehensive.toml`](https://github.com/BANANASJIM/padctl/blob/main/examples/mappings/comprehensive.toml). It covers base remaps, two layers (hold + toggle), macros, stick modes, and gyro.

@@ -66,26 +66,7 @@ const SwitchTx = struct {
 };
 
 fn parseChordSwitchConfig(maybe_cfg: ?user_config_mod.ChordSwitchConfig) ?chord_detector_mod.Config {
-    const cfg = maybe_cfg orelse return null;
-    const modifier_names = cfg.modifier orelse return null;
-    const selector_names = cfg.selectors orelse return null;
-    const mod_mask = chord_detector_mod.buildModifierMask(modifier_names) orelse {
-        std.log.warn("[chord_switch] modifier contains unknown button name; feature disabled", .{});
-        return null;
-    };
-    var selectors: [chord_detector_mod.MAX_SELECTORS]u64 = [_]u64{0} ** chord_detector_mod.MAX_SELECTORS;
-    const count = chord_detector_mod.buildSelectors(selector_names, &selectors) orelse {
-        std.log.warn("[chord_switch] selectors invalid (empty, too many, or unknown name); feature disabled", .{});
-        return null;
-    };
-    const hold_ms_raw = cfg.hold_ms;
-    const hold_ms: u64 = if (hold_ms_raw <= 0) 0 else @intCast(hold_ms_raw);
-    return .{
-        .modifier_mask = mod_mask,
-        .selectors = selectors,
-        .selector_count = count,
-        .hold_ns = hold_ms * std.time.ns_per_ms,
-    };
+    return chord_detector_mod.fromUserConfig(maybe_cfg);
 }
 
 fn shouldInjectSwitchFailure(self: *const Supervisor, commit_index: usize) bool {

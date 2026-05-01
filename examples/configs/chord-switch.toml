@@ -1,0 +1,32 @@
+# Example ~/.config/padctl/config.toml — in-controller chord switch (issue #183)
+#
+# Hold the modifier(s), then tap a selector to switch mapping.
+# selectors[i] activates the mapping that declares chord_index = i+1.
+#
+# Without conflict with [[layer]] triggers: pick modifier buttons that you
+# do NOT use as layer triggers in any mapping you want to chord-switch from.
+
+version = 1
+
+[chord_switch]
+# Hold ALL of these simultaneously to arm chord switch mode:
+modifier = ["LM", "RM"]
+
+# Tap one of these (while modifier held) to switch:
+#   A → chord_index = 1
+#   B → chord_index = 2
+#   X → chord_index = 3
+#   Y → chord_index = 4
+selectors = ["A", "B", "X", "Y"]
+
+# Debounce window after modifier becomes fully held — selector edges
+# within this window are ignored. Default 80; raise if you get stray
+# switches when you press the modifier and selector almost simultaneously.
+hold_ms = 120
+
+# In each mapping file you want to be selectable, declare chord_index:
+#   ~/.config/padctl/mappings/desktop.toml  →  chord_index = 1
+#   ~/.config/padctl/mappings/gaming.toml   →  chord_index = 2
+#   ~/.config/padctl/mappings/web.toml      →  chord_index = 3
+#   ~/.config/padctl/mappings/music.toml    →  chord_index = 4
+# Mappings that do not declare chord_index are not selectable via chord.

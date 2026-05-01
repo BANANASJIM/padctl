@@ -1,6 +1,7 @@
 const std = @import("std");
 const state = @import("state.zig");
 const ButtonId = state.ButtonId;
+const user_config = @import("../config/user_config.zig");
 
 pub const MAX_SELECTORS = 16;
 
@@ -92,6 +93,28 @@ pub fn buildSelectors(names: []const []const u8, out: *[MAX_SELECTORS]u64) ?u8 {
         out[i] = b;
     }
     return @intCast(names.len);
+}
+
+pub fn fromUserConfig(maybe_cfg: ?user_config.ChordSwitchConfig) ?Config {
+    const cfg = maybe_cfg orelse return null;
+    const modifier_names = cfg.modifier orelse return null;
+    const selector_names = cfg.selectors orelse return null;
+    const mod_mask = buildModifierMask(modifier_names) orelse {
+        std.log.warn("[chord_switch] modifier contains unknown button name; feature disabled", .{});
+        return null;
+    };
+    var selectors: [MAX_SELECTORS]u64 = [_]u64{0} ** MAX_SELECTORS;
+    const count = buildSelectors(selector_names, &selectors) orelse {
+        std.log.warn("[chord_switch] selectors invalid (empty, too many, or unknown name); feature disabled", .{});
+        return null;
+    };
+    const hold_ms: u64 = if (cfg.hold_ms <= 0) 0 else @intCast(cfg.hold_ms);
+    return .{
+        .modifier_mask = mod_mask,
+        .selectors = selectors,
+        .selector_count = count,
+        .hold_ns = hold_ms * std.time.ns_per_ms,
+    };
 }
 
 const testing = std.testing;

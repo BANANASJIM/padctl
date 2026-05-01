@@ -103,6 +103,7 @@ pub const testing_support = struct {
     pub const uhid_output_dispatch_test = @import("test/uhid_output_dispatch_test.zig");
     pub const wave6_pidff_e2e_test = @import("test/wave6_pidff_e2e_test.zig");
     pub const chord_output_e2e_test = @import("test/chord_output_e2e_test.zig");
+    pub const chord_switch_e2e_test = @import("test/chord_switch_e2e_test.zig");
     pub const interpreter_props = @import("test/properties/interpreter_props.zig");
     pub const render_props = @import("test/properties/render_props.zig");
     pub const config_props = @import("test/properties/config_props.zig");
