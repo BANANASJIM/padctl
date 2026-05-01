@@ -2162,6 +2162,22 @@ test "install: InstallPlan service_dir routes by user_service + immutable" {
     try testing.expect(std.mem.endsWith(u8, plan.service_dir, "/.config/systemd/user"));
 }
 
+test "install: InstallPlan staging non-root uses system service path" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+    const opts = InstallOptions{ .destdir = tmp_path, .prefix = "/usr", .user_service = null };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/builder", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try testing.expect(plan.staging_mode);
+    try testing.expect(!plan.effective_user_service);
+    try testing.expect(std.mem.endsWith(u8, plan.service_dir, "/usr/lib/systemd/user"));
+}
+
 test "install: ensureUserXdgDirs chown path opens dir with iterate flag (no BADF)" {
     // Zig std.posix.fchown panics with BADF on a Dir fd opened without
     // .iterate = true. Verify ensureUserXdgDirs creates dirs that can be
