@@ -2,7 +2,7 @@
 //
 // Covers the gap between the per-unit chord_detector tests and the
 // supervisor-level lookupChordMappingName tests: verifies that the full
-// pipeline from TOML text → parsed ChordSwitchConfig → parseChordSwitchConfig
+// pipeline from TOML text → parsed ChordSwitchConfig → fromUserConfig
 // → Detector.step() produces the correct chord_index signal, and that
 // mapping files with chord_index parse correctly through mapping.parseString.
 
@@ -19,25 +19,6 @@ const ButtonId = state.ButtonId;
 
 fn bit(id: ButtonId) u64 {
     return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
-}
-
-// parseChordSwitchConfig is private to supervisor.zig; replicate the logic
-// here so we can test the full TOML → Config path without depending on
-// supervisor internals. This is intentionally kept in sync with the
-// supervisor implementation.
-fn buildDetectorConfig(cs: user_config.ChordSwitchConfig) ?chord_detector.Config {
-    const modifier_names = cs.modifier orelse return null;
-    const selector_names = cs.selectors orelse return null;
-    const mod_mask = chord_detector.buildModifierMask(modifier_names) orelse return null;
-    var selectors: [chord_detector.MAX_SELECTORS]u64 = [_]u64{0} ** chord_detector.MAX_SELECTORS;
-    const count = chord_detector.buildSelectors(selector_names, &selectors) orelse return null;
-    const hold_ns = if (cs.hold_ms <= 0) 0 else @as(u64, @intCast(cs.hold_ms)) * std.time.ns_per_ms;
-    return .{
-        .modifier_mask = mod_mask,
-        .selectors = selectors,
-        .selector_count = count,
-        .hold_ns = hold_ns,
-    };
 }
 
 // --- TOML parse → ChordSwitchConfig ---
@@ -81,7 +62,7 @@ test "chord_switch_e2e: modifier alone does not fire" {
         .selectors = &.{ "A", "B" },
         .hold_ms = 80,
     };
-    const cfg = buildDetectorConfig(cs).?;
+    const cfg = chord_detector.fromUserConfig(cs).?;
     var det = chord_detector.Detector.init(cfg);
 
     const lm = bit(.LM);
@@ -96,7 +77,7 @@ test "chord_switch_e2e: hold LM then tap A after debounce → chord_index=1" {
         .selectors = &.{ "A", "B" },
         .hold_ms = 80,
     };
-    const cfg = buildDetectorConfig(cs).?;
+    const cfg = chord_detector.fromUserConfig(cs).?;
     var det = chord_detector.Detector.init(cfg);
 
     const lm = bit(.LM);
@@ -116,7 +97,7 @@ test "chord_switch_e2e: hold LM then tap B after debounce → chord_index=2" {
         .selectors = &.{ "A", "B" },
         .hold_ms = 80,
     };
-    const cfg = buildDetectorConfig(cs).?;
+    const cfg = chord_detector.fromUserConfig(cs).?;
     var det = chord_detector.Detector.init(cfg);
 
     const lm = bit(.LM);
@@ -134,7 +115,7 @@ test "chord_switch_e2e: A alone (no modifier) does not fire" {
         .selectors = &.{ "A", "B" },
         .hold_ms = 80,
     };
-    const cfg = buildDetectorConfig(cs).?;
+    const cfg = chord_detector.fromUserConfig(cs).?;
     var det = chord_detector.Detector.init(cfg);
 
     const a = bit(.A);
@@ -148,7 +129,7 @@ test "chord_switch_e2e: selector edge within hold_ms window is suppressed but no
         .selectors = &.{"A"},
         .hold_ms = 80,
     };
-    const cfg = buildDetectorConfig(cs).?;
+    const cfg = chord_detector.fromUserConfig(cs).?;
     var det = chord_detector.Detector.init(cfg);
 
     const lm = bit(.LM);

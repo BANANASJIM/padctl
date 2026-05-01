@@ -9,7 +9,7 @@
 version = 1
 
 [chord_switch]
-# Hold ALL of these to arm chord switch mode (any combination):
+# Hold ALL of these simultaneously to arm chord switch mode:
 modifier = ["LM", "RM"]
 
 # Tap one of these (while modifier held) to switch:
