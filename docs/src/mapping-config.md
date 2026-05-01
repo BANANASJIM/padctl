@@ -299,3 +299,36 @@ steps = [
 ```
 
 Bind a macro in remap: `M1 = "macro:dodge_roll"`
+
+## `[chord_switch]` — in-controller mapping switch
+
+`[chord_switch]` lives in **`~/.config/padctl/config.toml`** (the user config), **not** in a mapping file. It lets you switch the active mapping without touching a CLI: hold a modifier combination, then tap a selector button.
+
+```toml
+# ~/.config/padctl/config.toml
+version = 1
+
+[chord_switch]
+modifier  = ["LM", "RM"]        # hold ALL of these to arm
+selectors = ["A", "B", "X", "Y"] # tap one (while modifier held) to switch
+hold_ms   = 120                  # debounce window in ms (default 80)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `modifier` | array of ButtonId | — | All listed buttons must be held simultaneously to arm chord-switch mode. Missing or empty disables the feature. |
+| `selectors` | array of ButtonId | — | Selector at index `i` (0-based) activates the mapping that declares `chord_index = i+1`. Missing or empty disables the feature. |
+| `hold_ms` | integer | `80` | Debounce window in milliseconds. Selector edges received within this window after the modifier first becomes fully held are ignored. Raise if you get accidental switches when pressing modifier and selector nearly simultaneously. |
+
+**`chord_index`** is declared per mapping file (not in `config.toml`):
+
+```toml
+# ~/.config/padctl/mappings/desktop.toml
+chord_index = 1   # tap A (selectors[0]) while holding LM+RM → switch here
+```
+
+Selector `selectors[i]` maps to `chord_index = i+1`. Mappings that do not declare `chord_index` are not reachable via chord. Range is 1–255; duplicate `chord_index` values across files are resolved by lexicographic mapping name order (first match wins).
+
+While the modifier is held, all selector buttons are suppressed from the output device so they do not fire their remapped actions.
+
+A runnable example is at [`examples/configs/chord-switch.toml`](https://github.com/BANANASJIM/padctl/blob/main/examples/configs/chord-switch.toml).

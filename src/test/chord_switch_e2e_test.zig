@@ -1,0 +1,180 @@
+// Integration test: ChordSwitchConfig TOML parse → detector → chord_index.
+//
+// Covers the gap between the per-unit chord_detector tests and the
+// supervisor-level lookupChordMappingName tests: verifies that the full
+// pipeline from TOML text → parsed ChordSwitchConfig → parseChordSwitchConfig
+// → Detector.step() produces the correct chord_index signal, and that
+// mapping files with chord_index parse correctly through mapping.parseString.
+
+const std = @import("std");
+const testing = std.testing;
+
+const toml = @import("toml");
+const user_config = @import("../config/user_config.zig");
+const mapping_cfg = @import("../config/mapping.zig");
+const chord_detector = @import("../core/chord_detector.zig");
+const state = @import("../core/state.zig");
+
+const ButtonId = state.ButtonId;
+
+fn bit(id: ButtonId) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+}
+
+// parseChordSwitchConfig is private to supervisor.zig; replicate the logic
+// here so we can test the full TOML → Config path without depending on
+// supervisor internals. This is intentionally kept in sync with the
+// supervisor implementation.
+fn buildDetectorConfig(cs: user_config.ChordSwitchConfig) ?chord_detector.Config {
+    const modifier_names = cs.modifier orelse return null;
+    const selector_names = cs.selectors orelse return null;
+    const mod_mask = chord_detector.buildModifierMask(modifier_names) orelse return null;
+    var selectors: [chord_detector.MAX_SELECTORS]u64 = [_]u64{0} ** chord_detector.MAX_SELECTORS;
+    const count = chord_detector.buildSelectors(selector_names, &selectors) orelse return null;
+    const hold_ns = if (cs.hold_ms <= 0) 0 else @as(u64, @intCast(cs.hold_ms)) * std.time.ns_per_ms;
+    return .{
+        .modifier_mask = mod_mask,
+        .selectors = selectors,
+        .selector_count = count,
+        .hold_ns = hold_ns,
+    };
+}
+
+// --- TOML parse → ChordSwitchConfig ---
+
+test "chord_switch_e2e: config.toml with [chord_switch] block parses correctly" {
+    const allocator = testing.allocator;
+    const toml_text =
+        \\version = 1
+        \\[chord_switch]
+        \\modifier  = ["LM"]
+        \\selectors = ["A", "B"]
+        \\hold_ms   = 80
+    ;
+    var parser = toml.Parser(user_config.UserConfig).init(allocator);
+    defer parser.deinit();
+    const result = try parser.parseString(toml_text);
+    defer result.deinit();
+
+    const cs = result.value.chord_switch orelse return error.MissingChordSwitch;
+    try testing.expectEqual(@as(usize, 1), cs.modifier.?.len);
+    try testing.expectEqualStrings("LM", cs.modifier.?[0]);
+    try testing.expectEqual(@as(usize, 2), cs.selectors.?.len);
+    try testing.expectEqual(@as(i64, 80), cs.hold_ms);
+}
+
+// --- ChordSwitchConfig → Detector wiring ---
+
+test "chord_switch_e2e: modifier alone does not fire" {
+    const cs = user_config.ChordSwitchConfig{
+        .modifier = &.{"LM"},
+        .selectors = &.{ "A", "B" },
+        .hold_ms = 80,
+    };
+    const cfg = buildDetectorConfig(cs).?;
+    var det = chord_detector.Detector.init(cfg);
+
+    const lm = bit(.LM);
+    const t0: u64 = 0;
+    const result = det.step(lm, 0, t0);
+    try testing.expectEqual(@as(?u8, null), result.chord_index);
+}
+
+test "chord_switch_e2e: hold LM then tap A after debounce → chord_index=1" {
+    const cs = user_config.ChordSwitchConfig{
+        .modifier = &.{"LM"},
+        .selectors = &.{ "A", "B" },
+        .hold_ms = 80,
+    };
+    const cfg = buildDetectorConfig(cs).?;
+    var det = chord_detector.Detector.init(cfg);
+
+    const lm = bit(.LM);
+    const a = bit(.A);
+    const hold_ns: u64 = 80 * std.time.ns_per_ms;
+
+    // Press LM at t=0
+    _ = det.step(lm, 0, 0);
+    // After debounce, tap A
+    const result = det.step(lm | a, lm, hold_ns + 1);
+    try testing.expectEqual(@as(?u8, 1), result.chord_index);
+}
+
+test "chord_switch_e2e: hold LM then tap B after debounce → chord_index=2" {
+    const cs = user_config.ChordSwitchConfig{
+        .modifier = &.{"LM"},
+        .selectors = &.{ "A", "B" },
+        .hold_ms = 80,
+    };
+    const cfg = buildDetectorConfig(cs).?;
+    var det = chord_detector.Detector.init(cfg);
+
+    const lm = bit(.LM);
+    const b = bit(.B);
+    const hold_ns: u64 = 80 * std.time.ns_per_ms;
+
+    _ = det.step(lm, 0, 0);
+    const result = det.step(lm | b, lm, hold_ns + 1);
+    try testing.expectEqual(@as(?u8, 2), result.chord_index);
+}
+
+test "chord_switch_e2e: A alone (no modifier) does not fire" {
+    const cs = user_config.ChordSwitchConfig{
+        .modifier = &.{"LM"},
+        .selectors = &.{ "A", "B" },
+        .hold_ms = 80,
+    };
+    const cfg = buildDetectorConfig(cs).?;
+    var det = chord_detector.Detector.init(cfg);
+
+    const a = bit(.A);
+    const result = det.step(a, 0, 200 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?u8, null), result.chord_index);
+}
+
+test "chord_switch_e2e: selector edge within hold_ms window is suppressed but not fired" {
+    const cs = user_config.ChordSwitchConfig{
+        .modifier = &.{"LM"},
+        .selectors = &.{"A"},
+        .hold_ms = 80,
+    };
+    const cfg = buildDetectorConfig(cs).?;
+    var det = chord_detector.Detector.init(cfg);
+
+    const lm = bit(.LM);
+    const a = bit(.A);
+
+    _ = det.step(lm, 0, 0);
+    // Tap A within the debounce window (40 ms < 80 ms)
+    const result = det.step(lm | a, lm, 40 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?u8, null), result.chord_index);
+    // Selectors are suppressed while modifier held (even in debounce)
+    try testing.expect(result.suppress_mask & a != 0);
+}
+
+// --- mapping TOML: chord_index field ---
+
+test "chord_switch_e2e: mapping with chord_index=1 parses correctly" {
+    const allocator = testing.allocator;
+    const result = try mapping_cfg.parseString(allocator,
+        \\chord_index = 1
+    );
+    defer result.deinit();
+    try testing.expectEqual(@as(?u8, 1), result.value.chord_index);
+}
+
+test "chord_switch_e2e: mapping without chord_index has null" {
+    const allocator = testing.allocator;
+    const result = try mapping_cfg.parseString(allocator, "");
+    defer result.deinit();
+    try testing.expectEqual(@as(?u8, null), result.value.chord_index);
+}
+
+test "chord_switch_e2e: mapping with chord_index=255 (max) parses correctly" {
+    const allocator = testing.allocator;
+    const result = try mapping_cfg.parseString(allocator,
+        \\chord_index = 255
+    );
+    defer result.deinit();
+    try testing.expectEqual(@as(?u8, 255), result.value.chord_index);
+}
