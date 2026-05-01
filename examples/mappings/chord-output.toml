@@ -1,0 +1,20 @@
+# Example mapping demonstrating chord output remap (issue #206).
+# A single button press emits a multi-key chord (modifier+key combo).
+# On press: down events emitted in declaration order.
+# On release: up events emitted in reverse order.
+
+[meta]
+name = "chord-output-demo"
+
+# Chord output: array of KEY_* strings (length 2..=4, no duplicates).
+[remap]
+# Single key — existing form, still works:
+M1 = "KEY_F13"
+# 2-key chord — Super+1 (workspace switch on tile WMs):
+A = ["KEY_LEFTMETA", "KEY_1"]
+# 2-key chord — Ctrl+C (copy):
+B = ["KEY_LEFTCTRL", "KEY_C"]
+# 3-key chord — Ctrl+Shift+S (save as):
+X = ["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_S"]
+# 4-key chord — Meta+Ctrl+Shift+T (custom WM action):
+Y = ["KEY_LEFTMETA", "KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_T"]
