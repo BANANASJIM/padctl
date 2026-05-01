@@ -148,6 +148,10 @@ pub fn applyWithLayer(
             },
             .disabled => {},
             .macro => {},
+            // Chord dispatch lands in PR B-2; oracle treats it as a no-op for
+            // now (matches applyTarget) — generators won't produce chord
+            // remaps until B-2 lands.
+            .chord => {},
         }
     }
 
@@ -231,7 +235,7 @@ fn processLayers(os: *OracleState, layers: []const LayerConfig, buttons: u64, dt
 }
 
 fn collectRemap(
-    remap_map: toml.HashMap([]const u8),
+    remap_map: mapping.RemapMap,
     suppressed: *u64,
     per_src: []?RemapTarget,
 ) void {
@@ -239,9 +243,14 @@ fn collectRemap(
     while (it.next()) |entry| {
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse continue;
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
-        suppressed.* |= @as(u64, 1) << src_idx;
         // Unknown targets skipped — matches production mapper.zig behaviour.
-        const target = remap_mod.resolveTarget(entry.value_ptr.*) catch continue;
+        // Chord arrays are also skipped here: the oracle has no allocator and
+        // dispatch lands in B-2, so chord doesn't affect oracle output.
+        const target = switch (entry.value_ptr.*) {
+            .string => |s| remap_mod.resolveTarget(s) catch continue,
+            .chord_names => continue,
+        };
+        suppressed.* |= @as(u64, 1) << src_idx;
         per_src[@intCast(src_idx)] = target;
     }
 }

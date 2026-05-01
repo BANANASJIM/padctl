@@ -191,8 +191,13 @@ pub fn classify(
         if (cfg.remap) |remap_map| {
             var it = remap_map.map.iterator();
             while (it.next()) |entry| {
-                if (std.mem.startsWith(u8, entry.value_ptr.*, "macro:"))
-                    tracker.mark(.macro_cancelled_by_layer);
+                switch (entry.value_ptr.*) {
+                    .string => |s| {
+                        if (std.mem.startsWith(u8, s, "macro:"))
+                            tracker.mark(.macro_cancelled_by_layer);
+                    },
+                    .chord_names => {},
+                }
             }
         }
     }
@@ -229,16 +234,21 @@ fn classifyRemapTargets(tracker: *CoverageTracker, cfg: *const mapping.MappingCo
     const remap = cfg.remap orelse return;
     var it = remap.map.iterator();
     while (it.next()) |entry| {
-        const val = entry.value_ptr.*;
-        if (std.mem.startsWith(u8, val, "KEY_"))
-            tracker.mark(.remap_inject_key)
-        else if (std.mem.startsWith(u8, val, "mouse_"))
-            tracker.mark(.remap_inject_mouse)
-        else if (std.mem.eql(u8, val, "disabled")) {} // suppress only
-        else if (std.mem.startsWith(u8, val, "macro:"))
-            tracker.mark(.macro_triggered)
-        else
-            tracker.mark(.remap_inject_gamepad);
+        switch (entry.value_ptr.*) {
+            .string => |val| {
+                if (std.mem.startsWith(u8, val, "KEY_"))
+                    tracker.mark(.remap_inject_key)
+                else if (std.mem.startsWith(u8, val, "mouse_"))
+                    tracker.mark(.remap_inject_mouse)
+                else if (std.mem.eql(u8, val, "disabled")) {} // suppress only
+                else if (std.mem.startsWith(u8, val, "macro:"))
+                    tracker.mark(.macro_triggered)
+                else
+                    tracker.mark(.remap_inject_gamepad);
+            },
+            // Chord arrays count as keyboard injection (every element is KEY_*).
+            .chord_names => tracker.mark(.remap_inject_key),
+        }
     }
 }
 

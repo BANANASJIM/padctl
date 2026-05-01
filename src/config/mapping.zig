@@ -1,8 +1,51 @@
 const std = @import("std");
 const toml = @import("toml");
 const input_codes = @import("input_codes.zig");
+const remap_mod = @import("../core/remap.zig");
 pub const MacroStep = @import("../core/macro.zig").MacroStep;
 pub const Macro = @import("../core/macro.zig").Macro;
+
+// `[remap]` value is either a single string ("KEY_F13", "macro:dodge_roll",
+// "BTN_LEFT", gamepad-button name) or an array of KEY_* strings (chord output,
+// issue #206). RemapMap below has a `tomlIntoStruct` hook that inspects the
+// raw toml.Value per entry to choose between the two forms.
+pub const RemapValue = union(enum) {
+    string: []const u8,
+    chord_names: []const []const u8,
+};
+
+pub const RemapMap = struct {
+    map: std.StringHashMap(RemapValue),
+
+    pub fn tomlIntoStruct(ctx: anytype, table: anytype) !RemapMap {
+        var map = std.StringHashMap(RemapValue).init(ctx.alloc);
+        errdefer map.deinit();
+
+        var it = table.iterator();
+        while (it.next()) |entry| {
+            const value = entry.value_ptr.*;
+            const remap_value: RemapValue = switch (value) {
+                .string => |s| .{ .string = s },
+                .array => |arr| blk: {
+                    const names = try ctx.alloc.alloc([]const u8, arr.items.len);
+                    for (arr.items, 0..) |elem, i| {
+                        switch (elem) {
+                            .string => |s| names[i] = s,
+                            else => return error.InvalidValueType,
+                        }
+                    }
+                    break :blk .{ .chord_names = names };
+                },
+                else => return error.InvalidValueType,
+            };
+
+            const key: []u8 = try ctx.alloc.alloc(u8, entry.key_ptr.len);
+            @memcpy(key, entry.key_ptr.*);
+            try map.put(key, remap_value);
+        }
+        return .{ .map = map };
+    }
+};
 
 pub const DerivedAuxCaps = struct {
     needs_rel: bool = false, // REL_X/Y/WHEEL/HWHEEL (gyro mouse, stick mouse/scroll)
@@ -76,27 +119,35 @@ fn scanTarget(caps: *DerivedAuxCaps, target: []const u8) void {
     }
 }
 
-fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *const toml.HashMap([]const u8)) void {
+fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *const RemapMap) void {
     var it = remap.map.iterator();
     while (it.next()) |entry| {
-        const target = entry.value_ptr.*;
-        if (std.mem.startsWith(u8, target, "macro:")) {
-            const macro_name = target["macro:".len..];
-            const macros = cfg.macro orelse continue;
-            for (macros) |*m| {
-                if (!std.mem.eql(u8, m.name, macro_name)) continue;
-                for (m.steps) |s| {
-                    switch (s) {
-                        .tap => |name| scanTarget(caps, name),
-                        .down => |name| scanTarget(caps, name),
-                        .up => |name| scanTarget(caps, name),
-                        .delay, .pause_for_release => {},
+        switch (entry.value_ptr.*) {
+            .string => |target| {
+                if (std.mem.startsWith(u8, target, "macro:")) {
+                    const macro_name = target["macro:".len..];
+                    const macros = cfg.macro orelse continue;
+                    for (macros) |*m| {
+                        if (!std.mem.eql(u8, m.name, macro_name)) continue;
+                        for (m.steps) |s| {
+                            switch (s) {
+                                .tap => |name| scanTarget(caps, name),
+                                .down => |name| scanTarget(caps, name),
+                                .up => |name| scanTarget(caps, name),
+                                .delay, .pause_for_release => {},
+                            }
+                        }
+                        break;
                     }
+                } else {
+                    scanTarget(caps, target);
                 }
-                break;
-            }
-        } else {
-            scanTarget(caps, target);
+            },
+            .chord_names => |names| {
+                // Chord output: every element is a KEY_* code (validated at
+                // validate() time). Capability is keyboard regardless of count.
+                for (names) |name| scanTarget(caps, name);
+            },
         }
     }
 }
@@ -189,7 +240,7 @@ pub const LayerConfig = struct {
     activation: []const u8 = "hold",
     tap: ?[]const u8 = null,
     hold_timeout: ?i64 = null,
-    remap: ?toml.HashMap([]const u8) = null,
+    remap: ?RemapMap = null,
     gyro: ?GyroConfig = null,
     stick_left: ?StickConfig = null,
     stick_right: ?StickConfig = null,
@@ -200,7 +251,7 @@ pub const LayerConfig = struct {
 pub const MappingConfig = struct {
     name: ?[]const u8 = null,
     chord_index: ?u8 = null,
-    remap: ?toml.HashMap([]const u8) = null,
+    remap: ?RemapMap = null,
     gyro: ?GyroConfig = null,
     stick: ?StickPairConfig = null,
     dpad: ?DpadConfig = null,
@@ -240,13 +291,52 @@ fn macroExists(cfg: *const MappingConfig, name: []const u8) bool {
     return false;
 }
 
-fn checkRemapMacros(cfg: *const MappingConfig, map: *const toml.HashMap([]const u8)) !void {
+fn checkRemapMacros(cfg: *const MappingConfig, map: *const RemapMap) !void {
     var it = map.map.iterator();
     while (it.next()) |entry| {
-        const val = entry.value_ptr.*;
-        if (std.mem.startsWith(u8, val, "macro:")) {
-            const macro_name = val["macro:".len..];
-            if (!macroExists(cfg, macro_name)) return error.UnknownMacro;
+        switch (entry.value_ptr.*) {
+            .string => |s| {
+                if (std.mem.startsWith(u8, s, "macro:")) {
+                    const macro_name = s["macro:".len..];
+                    if (!macroExists(cfg, macro_name)) return error.UnknownMacro;
+                }
+            },
+            // Chord arrays cannot reference macros — validated separately.
+            .chord_names => {},
+        }
+    }
+}
+
+// Chord-array validation matching core/remap.zig::resolveChordTarget. Done at
+// validate() time so users see length/duplicate/unknown-key failures before
+// runtime; production precomputeRemap silently warns and skips.
+pub const ChordValidateError = error{
+    ChordTooShort,
+    ChordTooLong,
+    DuplicateChordKey,
+    InvalidChordElement,
+    UnknownKeyCode,
+};
+
+fn checkRemapChords(map: *const RemapMap) ChordValidateError!void {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        const names = switch (entry.value_ptr.*) {
+            .chord_names => |n| n,
+            else => continue,
+        };
+        if (names.len < remap_mod.CHORD_MIN_KEYS) return error.ChordTooShort;
+        if (names.len > remap_mod.CHORD_MAX_KEYS) return error.ChordTooLong;
+
+        var seen: [remap_mod.CHORD_MAX_KEYS]u16 = undefined;
+        var seen_len: usize = 0;
+        for (names) |name| {
+            const code = input_codes.resolveKeyCode(name) catch return error.UnknownKeyCode;
+            for (seen[0..seen_len]) |c| {
+                if (c == code) return error.DuplicateChordKey;
+            }
+            seen[seen_len] = code;
+            seen_len += 1;
         }
     }
 }
@@ -260,7 +350,7 @@ fn validateAdaptiveTrigger(at: *const AdaptiveTriggerConfig) !void {
     return error.InvalidConfig;
 }
 
-fn remapHasTriggerKey(map: *const toml.HashMap([]const u8)) bool {
+fn remapHasTriggerKey(map: *const RemapMap) bool {
     var it = map.map.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -522,7 +612,10 @@ fn warnLintFindings(findings: []const LintFinding) void {
 }
 
 pub fn validate(cfg: *const MappingConfig) !void {
-    if (cfg.remap) |*m| try checkRemapMacros(cfg, m);
+    if (cfg.remap) |*m| {
+        try checkRemapMacros(cfg, m);
+        try checkRemapChords(m);
+    }
     if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
 
     if (needsTriggerThresholdWarn(cfg)) {
@@ -556,7 +649,10 @@ pub fn validate(cfg: *const MappingConfig) !void {
             }
         }
 
-        if (layer.remap) |*m| try checkRemapMacros(cfg, m);
+        if (layer.remap) |*m| {
+            try checkRemapMacros(cfg, m);
+            try checkRemapChords(m);
+        }
         if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
     }
 }
@@ -580,9 +676,9 @@ test "mapping: MappingConfig parses name and remap" {
     const cfg = result.value;
     try std.testing.expectEqualStrings("test", cfg.name.?);
     try std.testing.expect(cfg.remap != null);
-    try std.testing.expectEqualStrings("KEY_F13", cfg.remap.?.map.get("M1").?);
-    try std.testing.expectEqualStrings("disabled", cfg.remap.?.map.get("M2").?);
-    try std.testing.expectEqualStrings("B", cfg.remap.?.map.get("A").?);
+    try std.testing.expectEqualStrings("KEY_F13", cfg.remap.?.map.get("M1").?.string);
+    try std.testing.expectEqualStrings("disabled", cfg.remap.?.map.get("M2").?.string);
+    try std.testing.expectEqualStrings("B", cfg.remap.?.map.get("A").?.string);
 }
 
 test "mapping: MappingConfig: empty config" {
@@ -711,7 +807,7 @@ test "mapping: MappingConfig: full config with layers, gyro, stick, dpad" {
     try std.testing.expectEqualStrings("mouse_side", aim.tap.?);
     try std.testing.expectEqual(@as(?i64, 200), aim.hold_timeout);
     try std.testing.expect(aim.remap != null);
-    try std.testing.expectEqualStrings("mouse_left", aim.remap.?.map.get("RB").?);
+    try std.testing.expectEqualStrings("mouse_left", aim.remap.?.map.get("RB").?.string);
 
     // layer[0] gyro override
     try std.testing.expect(aim.gyro != null);
@@ -733,7 +829,7 @@ test "mapping: MappingConfig: full config with layers, gyro, stick, dpad" {
     const fn_layer = cfg.layer.?[1];
     try std.testing.expectEqualStrings("toggle", fn_layer.activation);
     try std.testing.expect(fn_layer.remap != null);
-    try std.testing.expectEqualStrings("KEY_F1", fn_layer.remap.?.map.get("A").?);
+    try std.testing.expectEqualStrings("KEY_F1", fn_layer.remap.?.map.get("A").?.string);
 
     try validate(&cfg);
 }
@@ -865,7 +961,7 @@ test "mapping: [[macro]] multi-entry parse: all step primitives correct" {
     try std.testing.expectEqualStrings("noop", noop.name);
     try std.testing.expectEqual(@as(usize, 0), noop.steps.len);
 
-    try std.testing.expectEqualStrings("macro:dodge_roll", cfg.remap.?.map.get("M1").?);
+    try std.testing.expectEqualStrings("macro:dodge_roll", cfg.remap.?.map.get("M1").?.string);
     try validate(&cfg);
 }
 
@@ -1392,4 +1488,139 @@ test "validate: layer tap to gamepad button works (regression)" {
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try validate(&result.value);
+}
+
+// --- chord remap (issue #206) ---
+
+test "chord remap: 2-key array parses into chord_names" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_LEFTMETA", "KEY_1"]
+    );
+    defer result.deinit();
+    const entry = result.value.remap.?.map.get("C").?;
+    try std.testing.expectEqual(@as(usize, 2), entry.chord_names.len);
+    try std.testing.expectEqualStrings("KEY_LEFTMETA", entry.chord_names[0]);
+    try std.testing.expectEqualStrings("KEY_1", entry.chord_names[1]);
+    try validate(&result.value);
+}
+
+test "chord remap: 3-key array parses and validates" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\D = ["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_S"]
+    );
+    defer result.deinit();
+    const entry = result.value.remap.?.map.get("D").?;
+    try std.testing.expectEqual(@as(usize, 3), entry.chord_names.len);
+    try validate(&result.value);
+}
+
+test "chord remap: single-key string remap still parses (regression)" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M1 = "KEY_F13"
+    );
+    defer result.deinit();
+    try std.testing.expectEqualStrings("KEY_F13", result.value.remap.?.map.get("M1").?.string);
+    try validate(&result.value);
+}
+
+test "chord remap: 1-element array -> ChordTooShort" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_A"]
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.ChordTooShort, validate(&result.value));
+}
+
+test "chord remap: 5-element array -> ChordTooLong" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_A", "KEY_B", "KEY_C", "KEY_D", "KEY_E"]
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.ChordTooLong, validate(&result.value));
+}
+
+test "chord remap: duplicate keys -> DuplicateChordKey" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_A", "KEY_A"]
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.DuplicateChordKey, validate(&result.value));
+}
+
+test "chord remap: unknown keycode -> UnknownKeyCode" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_NOT_REAL", "KEY_1"]
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.UnknownKeyCode, validate(&result.value));
+}
+
+test "chord remap: non-string array element rejected at parse time" {
+    const allocator = std.testing.allocator;
+    // Integer elements inside a `[remap]` array must surface as a parse-time
+    // InvalidValueType (RemapMap.tomlIntoStruct refuses non-string elements).
+    const r = parseString(allocator,
+        \\[remap]
+        \\C = [1, 2]
+    );
+    try std.testing.expectError(error.InvalidValueType, r);
+}
+
+test "chord remap: layer remap supports array form" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\A = ["KEY_LEFTCTRL", "KEY_C"]
+    );
+    defer result.deinit();
+    const layer_remap = result.value.layer.?[0].remap.?;
+    const entry = layer_remap.map.get("A").?;
+    try std.testing.expectEqual(@as(usize, 2), entry.chord_names.len);
+    try std.testing.expectEqualStrings("KEY_LEFTCTRL", entry.chord_names[0]);
+    try std.testing.expectEqualStrings("KEY_C", entry.chord_names[1]);
+    try validate(&result.value);
+}
+
+test "chord remap: deriveAuxFromMapping flags needs_keyboard for chord array" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_LEFTMETA", "KEY_1"]
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.needs_keyboard);
+    try std.testing.expect(caps.needsAux());
+}
+
+test "chord remap: layer-level chord too long is rejected by validate" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\A = ["KEY_A", "KEY_B", "KEY_C", "KEY_D", "KEY_E"]
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.ChordTooLong, validate(&result.value));
 }

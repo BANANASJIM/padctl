@@ -12,6 +12,10 @@ pub const RemapTargetResolved = union(enum) {
     gamepad_button: ButtonId,
     disabled: void,
     macro: []const u8,
+    // Chord output: 2..=4 evdev key codes (issue #206). Codes are owned by the
+    // Mapper allocator (allocated in precomputeRemap, freed in Mapper.deinit).
+    // Dispatch implementation lands in PR B-2.
+    chord: []const u16,
 };
 
 pub const TargetAction = enum { press, release, tap };
@@ -63,8 +67,31 @@ pub fn applyTarget(
                 },
             }
         },
-        .disabled, .macro => {},
+        // chord dispatch lands in PR B-2 (issue #206)
+        .disabled, .macro, .chord => {},
     }
+}
+
+pub const CHORD_MIN_KEYS: usize = 2;
+pub const CHORD_MAX_KEYS: usize = 4;
+
+/// Resolve an array remap target like `["KEY_LEFTMETA", "KEY_1"]` into a
+/// `.chord` variant. Caller owns the returned `chord` slice.
+pub fn resolveChordTarget(allocator: std.mem.Allocator, names: []const []const u8) !RemapTargetResolved {
+    if (names.len < CHORD_MIN_KEYS) return error.ChordTooShort;
+    if (names.len > CHORD_MAX_KEYS) return error.ChordTooLong;
+
+    const codes = try allocator.alloc(u16, names.len);
+    errdefer allocator.free(codes);
+
+    for (names, 0..) |name, i| {
+        const code = try input_codes.resolveKeyCode(name);
+        for (codes[0..i]) |prior| {
+            if (prior == code) return error.DuplicateChordKey;
+        }
+        codes[i] = code;
+    }
+    return .{ .chord = codes };
 }
 
 pub fn resolveTarget(raw: []const u8) !RemapTargetResolved {
@@ -139,4 +166,49 @@ test "remap: resolveTarget: disabled -> .disabled" {
 
 test "remap: resolveTarget: unknown string -> error.UnknownRemapTarget" {
     try std.testing.expectError(error.UnknownRemapTarget, resolveTarget("unknown_garbage"));
+}
+
+test "remap: resolveChordTarget: 2-key chord resolves" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "KEY_LEFTMETA", "KEY_1" };
+    const target = try resolveChordTarget(allocator, &names);
+    defer allocator.free(target.chord);
+    try std.testing.expectEqual(@as(usize, 2), target.chord.len);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_LEFTMETA"), target.chord[0]);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_1"), target.chord[1]);
+}
+
+test "remap: resolveChordTarget: 3-key chord preserves declaration order" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_S" };
+    const target = try resolveChordTarget(allocator, &names);
+    defer allocator.free(target.chord);
+    try std.testing.expectEqual(@as(usize, 3), target.chord.len);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_LEFTCTRL"), target.chord[0]);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_LEFTSHIFT"), target.chord[1]);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_S"), target.chord[2]);
+}
+
+test "remap: resolveChordTarget: 1-key array -> ChordTooShort" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{"KEY_A"};
+    try std.testing.expectError(error.ChordTooShort, resolveChordTarget(allocator, &names));
+}
+
+test "remap: resolveChordTarget: 5-key array -> ChordTooLong" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "KEY_A", "KEY_B", "KEY_C", "KEY_D", "KEY_E" };
+    try std.testing.expectError(error.ChordTooLong, resolveChordTarget(allocator, &names));
+}
+
+test "remap: resolveChordTarget: duplicate keys -> DuplicateChordKey" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "KEY_A", "KEY_A" };
+    try std.testing.expectError(error.DuplicateChordKey, resolveChordTarget(allocator, &names));
+}
+
+test "remap: resolveChordTarget: unknown key code propagates resolveKeyCode error" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "KEY_NOT_REAL", "KEY_1" };
+    try std.testing.expectError(error.UnknownKeyCode, resolveChordTarget(allocator, &names));
 }

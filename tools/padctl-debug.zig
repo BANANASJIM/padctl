@@ -223,7 +223,14 @@ pub fn main() !void {
                     // Apply remap override if mapping is loaded
                     if (mapping_parsed) |mp| {
                         if (mp.value.remap) |remap| {
-                            if (remap.map.get(entry.key_ptr.*)) |target| {
+                            if (remap.map.get(entry.key_ptr.*)) |target_v| {
+                                // Chord remap is rendered as the source button
+                                // name unchanged here; the debug TUI doesn't yet
+                                // visualize chords (PR B-2 follow-up).
+                                const target = switch (target_v) {
+                                    .string => |s| s,
+                                    .chord_names => continue,
+                                };
                                 if (std.mem.eql(u8, target, "disabled")) {
                                     continue; // skip disabled buttons
                                 }
@@ -262,7 +269,11 @@ pub fn main() !void {
                 var it = remap.map.iterator();
                 while (it.next()) |entry| {
                     if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
-                        const target = entry.value_ptr.*;
+                        const target = switch (entry.value_ptr.*) {
+                            .string => |s| s,
+                            // Chord remap not yet rendered in debug TUI.
+                            .chord_names => continue,
+                        };
                         if (std.mem.eql(u8, target, "disabled")) continue;
 
                         // Skip if already added from output.buttons

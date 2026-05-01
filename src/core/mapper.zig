@@ -78,18 +78,25 @@ pub const Mapper = struct {
     chord_detector: ?ChordDetector = null,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
-        const base = if (config.remap) |m| precomputeRemap(m) else ResolvedRemap{
+        const base = if (config.remap) |m| try precomputeRemap(allocator, m) else ResolvedRemap{
             .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
             .suppress = 0,
         };
+        errdefer freeResolvedRemap(allocator, base);
 
         const layers = config.layer orelse &.{};
         const resolved_layers = try allocator.alloc(ResolvedRemap, layers.len);
+        errdefer allocator.free(resolved_layers);
+
+        var initialized: usize = 0;
+        errdefer for (resolved_layers[0..initialized]) |r| freeResolvedRemap(allocator, r);
+
         for (layers, 0..) |*lc, i| {
-            resolved_layers[i] = if (lc.remap) |m| precomputeRemap(m) else ResolvedRemap{
+            resolved_layers[i] = if (lc.remap) |m| try precomputeRemap(allocator, m) else ResolvedRemap{
                 .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
                 .suppress = 0,
             };
+            initialized = i + 1;
         }
 
         return .{
@@ -118,6 +125,8 @@ pub const Mapper = struct {
         self.layer.deinit();
         self.active_macros.deinit(self.allocator);
         self.timer_queue.deinit();
+        freeResolvedRemap(self.allocator, self.resolved_base);
+        for (self.resolved_layers) |r| freeResolvedRemap(self.allocator, r);
         self.allocator.free(self.resolved_layers);
     }
 
@@ -337,6 +346,10 @@ pub const Mapper = struct {
                         remap_mod.applyTarget(target, .release, &aux, &self.injected_buttons, null, null);
                 },
                 .disabled => {},
+                // Chord dispatch lands in PR B-2; B-1 keeps the source button
+                // suppressed (via `precomputeRemap`'s `result.suppress |= ...`)
+                // but emits no chord events yet.
+                .chord => {},
             }
         }
 
@@ -552,11 +565,23 @@ fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {
     };
 }
 
-fn precomputeRemap(remap_map: toml.HashMap([]const u8)) ResolvedRemap {
+fn freeResolvedRemap(allocator: std.mem.Allocator, r: ResolvedRemap) void {
+    for (r.inject) |maybe_target| {
+        const t = maybe_target orelse continue;
+        switch (t) {
+            .chord => |codes| allocator.free(codes),
+            else => {},
+        }
+    }
+}
+
+fn precomputeRemap(allocator: std.mem.Allocator, remap_map: mapping.RemapMap) !ResolvedRemap {
     var result = ResolvedRemap{
         .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
         .suppress = 0,
     };
+    errdefer freeResolvedRemap(allocator, result);
+
     var it = remap_map.map.iterator();
     while (it.next()) |entry| {
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse {
@@ -564,9 +589,18 @@ fn precomputeRemap(remap_map: toml.HashMap([]const u8)) ResolvedRemap {
             continue;
         };
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
-        const target = resolveTarget(entry.value_ptr.*) catch {
-            std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
-            continue;
+        const target: RemapTargetResolved = switch (entry.value_ptr.*) {
+            .string => |s| resolveTarget(s) catch {
+                std.log.warn("unknown remap target: {s}", .{s});
+                continue;
+            },
+            .chord_names => |names| remap_mod.resolveChordTarget(allocator, names) catch |e| switch (e) {
+                error.OutOfMemory => return e,
+                error.ChordTooShort, error.ChordTooLong, error.DuplicateChordKey, error.UnknownKeyCode => {
+                    std.log.warn("chord remap on {s} rejected: {s}", .{ entry.key_ptr.*, @errorName(e) });
+                    continue;
+                },
+            },
         };
         result.suppress |= @as(u64, 1) << src_idx;
         result.inject[@intCast(src_idx)] = target;
