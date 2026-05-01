@@ -79,9 +79,21 @@ pub const io = struct {
 };
 
 // Every new src/test/*.zig file MUST be added to this namespace.
-// The test block near the bottom of this file calls refAllDecls(@This()), which
-// pulls in every declaration here as a test artifact. A file omitted from this
-// namespace will compile but its tests will silently never run under `zig build test`.
+// The test block near the bottom of this file calls refAllDeclsRecursive(@This()),
+// which walks nested namespaces and pulls in every declaration as a test artifact.
+// A file omitted from this namespace will compile but its tests will silently
+// never run under `zig build test`.
+//
+// HISTORICAL NOTE: prior to PR #213, the test block used refAllDecls (non-recursive),
+// which only refs top-level decls of main.zig. It refs the `testing_support` struct
+// as a type but does NOT recurse into its imported test files. As a result, every
+// test file registered ONLY here (without a duplicate explicit `_ = @import(...)`
+// in the test block) was silently dropped from `zig build test`. PR #212 confirmed
+// this by adding a deliberately-failing test inside a registered file and observing
+// CI still report SUCCESS with an unchanged test count.
+//
+// If you change the discovery mechanism, verify it by adding a deliberately-failing
+// test in `src/test/_meta_wiring_check_test.zig` and confirm CI catches it.
 pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
     pub const mock_output = @import("test/mock_output.zig");
@@ -131,6 +143,10 @@ pub const testing_support = struct {
     pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
     pub const uhid_test_cleanup = @import("test/uhid_test_cleanup.zig");
     pub const device_instance_imu_ownership_test = @import("test/device_instance_imu_ownership_test.zig");
+    // Permanent canary — proves test discovery walks into testing_support.
+    // If the discovery mechanism breaks again, this test stops running and
+    // we can prove the regression with a deliberate failure.
+    pub const _meta_wiring_check_test = @import("test/_meta_wiring_check_test.zig");
 };
 
 pub const config = struct {
@@ -1046,7 +1062,13 @@ pub fn main() !void {
 }
 
 test {
-    std.testing.refAllDecls(@This());
+    // refAllDeclsRecursive walks nested namespaces (notably `testing_support`)
+    // so any `pub const x = @import("test/...")` inside is picked up. Without
+    // the `Recursive` variant, files registered ONLY under testing_support are
+    // silently dropped from `zig build test`. See HISTORICAL NOTE on the
+    // testing_support struct above.
+    @setEvalBranchQuota(20000);
+    std.testing.refAllDeclsRecursive(@This());
     _ = @import("core/rumble_scheduler.zig");
     _ = @import("io/uniq.zig");
     _ = @import("test/bugfix_regression_test.zig");
