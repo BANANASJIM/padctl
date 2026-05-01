@@ -42,25 +42,35 @@ fn buildDetectorConfig(cs: user_config.ChordSwitchConfig) ?chord_detector.Config
 
 // --- TOML parse → ChordSwitchConfig ---
 
-test "chord_switch_e2e: config.toml with [chord_switch] block parses correctly" {
+// SSOT: consume the canonical example file so any drift is caught at build time.
+test "chord_switch_e2e: examples/configs/chord-switch.toml parses correctly" {
     const allocator = testing.allocator;
-    const toml_text =
-        \\version = 1
-        \\[chord_switch]
-        \\modifier  = ["LM"]
-        \\selectors = ["A", "B"]
-        \\hold_ms   = 80
-    ;
+    const toml_text = @embedFile("../../examples/configs/chord-switch.toml");
     var parser = toml.Parser(user_config.UserConfig).init(allocator);
     defer parser.deinit();
     const result = try parser.parseString(toml_text);
     defer result.deinit();
 
     const cs = result.value.chord_switch orelse return error.MissingChordSwitch;
-    try testing.expectEqual(@as(usize, 1), cs.modifier.?.len);
+    // modifier = ["LM", "RM"]
+    try testing.expectEqual(@as(usize, 2), cs.modifier.?.len);
     try testing.expectEqualStrings("LM", cs.modifier.?[0]);
-    try testing.expectEqual(@as(usize, 2), cs.selectors.?.len);
-    try testing.expectEqual(@as(i64, 80), cs.hold_ms);
+    try testing.expectEqualStrings("RM", cs.modifier.?[1]);
+    // selectors = ["A", "B", "X", "Y"]
+    try testing.expectEqual(@as(usize, 4), cs.selectors.?.len);
+    try testing.expectEqualStrings("A", cs.selectors.?[0]);
+    // hold_ms = 120
+    try testing.expectEqual(@as(i64, 120), cs.hold_ms);
+}
+
+// SSOT: mapping example file pins chord_index field round-trip.
+test "chord_switch_e2e: examples/mappings/chord-switch-mapping-a.toml parses correctly" {
+    const allocator = testing.allocator;
+    const toml_text = @embedFile("../../examples/mappings/chord-switch-mapping-a.toml");
+    const result = try mapping_cfg.parseString(allocator, toml_text);
+    defer result.deinit();
+    // chord_index = 1 per file
+    try testing.expectEqual(@as(?u8, 1), result.value.chord_index);
 }
 
 // --- ChordSwitchConfig → Detector wiring ---
