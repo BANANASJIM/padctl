@@ -594,9 +594,12 @@ fn precomputeRemap(allocator: std.mem.Allocator, remap_map: mapping.RemapMap) !R
                 std.log.warn("unknown remap target: {s}", .{s});
                 continue;
             },
-            .chord_names => |names| remap_mod.resolveChordTarget(allocator, names) catch |e| {
-                std.log.warn("chord remap on {s} rejected: {s}", .{ entry.key_ptr.*, @errorName(e) });
-                continue;
+            .chord_names => |names| remap_mod.resolveChordTarget(allocator, names) catch |e| switch (e) {
+                error.OutOfMemory => return e,
+                error.ChordTooShort, error.ChordTooLong, error.DuplicateChordKey, error.UnknownKeyCode => {
+                    std.log.warn("chord remap on {s} rejected: {s}", .{ entry.key_ptr.*, @errorName(e) });
+                    continue;
+                },
             },
         };
         result.suppress |= @as(u64, 1) << src_idx;

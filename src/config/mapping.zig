@@ -1,6 +1,7 @@
 const std = @import("std");
 const toml = @import("toml");
 const input_codes = @import("input_codes.zig");
+const remap_mod = @import("../core/remap.zig");
 pub const MacroStep = @import("../core/macro.zig").MacroStep;
 pub const Macro = @import("../core/macro.zig").Macro;
 
@@ -309,9 +310,6 @@ fn checkRemapMacros(cfg: *const MappingConfig, map: *const RemapMap) !void {
 // Chord-array validation matching core/remap.zig::resolveChordTarget. Done at
 // validate() time so users see length/duplicate/unknown-key failures before
 // runtime; production precomputeRemap silently warns and skips.
-const CHORD_MIN_KEYS: usize = 2;
-const CHORD_MAX_KEYS: usize = 4;
-
 pub const ChordValidateError = error{
     ChordTooShort,
     ChordTooLong,
@@ -327,10 +325,10 @@ fn checkRemapChords(map: *const RemapMap) ChordValidateError!void {
             .chord_names => |n| n,
             else => continue,
         };
-        if (names.len < CHORD_MIN_KEYS) return error.ChordTooShort;
-        if (names.len > CHORD_MAX_KEYS) return error.ChordTooLong;
+        if (names.len < remap_mod.CHORD_MIN_KEYS) return error.ChordTooShort;
+        if (names.len > remap_mod.CHORD_MAX_KEYS) return error.ChordTooLong;
 
-        var seen: [CHORD_MAX_KEYS]u16 = undefined;
+        var seen: [remap_mod.CHORD_MAX_KEYS]u16 = undefined;
         var seen_len: usize = 0;
         for (names) |name| {
             const code = input_codes.resolveKeyCode(name) catch return error.UnknownKeyCode;
