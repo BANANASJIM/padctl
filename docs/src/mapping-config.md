@@ -13,6 +13,7 @@ trigger_threshold = 100
 |-------|------|---------|-------------|
 | `name` | string | — | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
 | `trigger_threshold` | integer (0–255) | null | Threshold for synthesizing digital `LT` / `RT` button events from the analog trigger axes. **Top-level only** — placing this inside `[[layer]]` is silently ignored. See below. |
+| `chord_index` | integer (0–255) | null | Selector index used by the in-controller `[chord_switch]` quick-switch. The value is matched against the position of `[chord_switch].selectors`: `chord_index = i+1` activates when `selectors[i]` is pressed. Set `chord_index = 0` (or omit) to leave a mapping unselectable via chord. See [Diagnostic Logging — Chord switch](diagnostic-logging.md#chord-switch-issue-183) for the full setup. |
 
 ## Validation behaviour
 
@@ -152,7 +153,7 @@ hold_timeout = 200
 | `name` | string | yes | Unique layer identifier |
 | `trigger` | string | yes | Button name that activates this layer |
 | `activation` | string | no | `"hold"` (default) or `"toggle"` |
-| `tap` | string | no | Button/key emitted on short press (when using hold activation) |
+| `tap` | string | no | Button/key emitted on short press (when using hold activation). May be a `ButtonId`, `KEY_*`, `mouse_*`, or `disabled`. **Cannot be `macro:<name>`** — the layer tap dispatch path does not run macros, so `tap = "macro:foo"` is rejected at validate time (`error.LayerTapCannotBeMacro`). Use `macro:<name>` from `[remap]` / `[layer.remap]` instead. |
 | `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000) |
 
 ### `[layer.remap]`

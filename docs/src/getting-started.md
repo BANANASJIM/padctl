@@ -111,8 +111,14 @@ The service runs padctl in daemon mode, scanning all config directories (user, s
 Check the daemon is running:
 
 ```sh
-padctl status
+$ padctl status
+STATUS device=Flydigi Vader 5 Pro state=active mapping=fps
 ```
+
+Each managed device prints one space-separated triple: `device=<name>`,
+`state=<active|suspended>`, `mapping=<active mapping name|(none)>`. Multiple
+devices appear on the same line. Exit code is 0 when the daemon answered
+and 1 when the response begins with `ERR` or the socket is unreachable.
 
 ## Run Manually
 
@@ -135,10 +141,18 @@ padctl --config-dir /usr/share/padctl/devices/
 ## Validate a Config
 
 ```sh
-padctl --validate devices/sony/dualsense.toml
+padctl --validate devices/sony/dualsense.toml      # device config
+padctl --validate ~/.config/padctl/mappings/fps.toml  # mapping config
 ```
 
+`--validate` auto-detects which schema to apply by scanning for a `[device]`
+section header — files containing `[device]`, `[device.*]`, or `[[device.*]]`
+are validated as device configs; everything else (including bare `name = ...`
+mapping files) is validated against the mapping schema.
+
 Exit 0 = valid. Exit 1 = validation errors printed to stderr. Exit 2 = file not found or parse failure.
+
+The flag is repeatable: `padctl --validate a.toml --validate b.toml` validates both files and exits with the worst code seen.
 
 ## Generate Device Docs
 

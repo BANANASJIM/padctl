@@ -103,6 +103,12 @@ source = { offset = 8, size = 3 }
 map = { A = 5, B = 6, X = 4, Y = 7, LB = 8, RB = 9 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `source.offset` | integer | Starting byte offset within the report |
+| `source.size` | integer | Group width in bytes; must be `1..=8` (the interpreter packs the group into a u64; values above 8 are skipped at parse time with a warning logged to stderr and the report group falls back to all buttons unmapped) |
+| `map` | table | `Button = bit_index`. Bit indexes must satisfy `0 <= bit_index < size * 8`. |
+
 Button names must be valid `ButtonId` values:
 
 `A` `B` `X` `Y` `LB` `RB` `LT` `RT` `Start` `Select` `Home` `Capture` `LS` `RS` `DPadUp` `DPadDown` `DPadLeft` `DPadRight` `M1` `M2` `M3` `M4` `Paddle1` `Paddle2` `Paddle3` `Paddle4` `TouchPad` `Mic` `C` `Z` `LM` `RM` `O`
@@ -186,6 +192,13 @@ type = "hat"   # or "buttons"
 
 ### `[output.force_feedback]`
 
+Two backends are supported: legacy rumble via uinput (default), and HID PID
+passthrough via UHID for devices whose firmware speaks the
+[USB HID PID class spec](https://www.usb.org/document-library/device-class-definition-pid-10)
+directly (most racing wheels).
+
+#### Rumble (uinput, default)
+
 ```toml
 [output.force_feedback]
 type = "rumble"
@@ -195,9 +208,52 @@ auto_stop = true     # default; set false to disable userspace auto-stop
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | — | Force-feedback type: `"rumble"` |
+| `type` | string | `"rumble"` | Force-feedback type. `"rumble"` is the only legacy value. |
 | `max_effects` | int | 16 | Maximum number of concurrent FF effect slots |
 | `auto_stop` | bool | `true` | Enable userspace rumble auto-stop. When `true`, padctl emits a stop frame to the HID device after each effect's `replay.length` elapses — compensating for the fact that uinput does not use the kernel's `ff-memless` auto-stop timer. Set to `false` only for devices whose firmware handles auto-stop internally. |
+| `backend` | string | `"uinput"` | `"uinput"` (rumble) or `"uhid"` (PID passthrough — see below). |
+| `kind` | string | `"rumble"` | `"rumble"` or `"pid"`. |
+
+#### HID PID passthrough (UHID, racing wheels)
+
+For devices that already implement HID PID effects in firmware (constant
+force, spring, damper, friction, sine periodic, etc.), padctl can publish a
+UHID node with the device's own PID descriptor and forward `UHID_OUTPUT`
+events back to the physical wheel. The kernel's `hid-pidff` driver then
+exposes the standard evdev FF interface to games and SDL — no userspace
+effect synthesis.
+
+Phase 13 Wave 6 introduced this path; closes issue #82 (Moza, Logitech G-series,
+Thrustmaster T-series, Fanatec ClubSport).
+
+```toml
+[output.force_feedback]
+backend       = "uhid"
+kind          = "pid"
+clone_vid_pid = true   # publish the UHID node with the wheel's real VID/PID
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | string | `"uinput"` | Set to `"uhid"` for PID passthrough. |
+| `kind` | string | `"rumble"` | Set to `"pid"` for PID passthrough. |
+| `clone_vid_pid` | bool | `false` | When `true`, the emitted UHID node uses `[device].vid` / `[device].pid` so games and `hid-pidff` recognize the wheel by its real identifiers. Requires non-zero VID and PID in `[device]`. |
+
+**Validation matrix** — the parser rejects illegal combinations at config load:
+
+| `backend` | `kind` | Result |
+|-----------|--------|--------|
+| `"uinput"` | `"rumble"` | OK (default; legacy uinput rumble) |
+| `"uinput"` | `"pid"` | rejected |
+| `"uhid"`   | `"rumble"` | rejected |
+| `"uhid"`   | `"pid"` | OK — also requires `[output.imu]` to be declared (UHID routing gate) |
+
+`clone_vid_pid = true` requires `[device].vid` and `[device].pid` to be non-zero.
+
+> **Kernel requirement:** the `hid-pidff` driver must be loaded, and the
+> `hid-universal-pidff` quirk module is recommended for non-Logitech wheels.
+> See the [Bazzite / Immutable Distros guide](immutable-install.md) for
+> distro-specific notes.
 
 ### `[output.aux]`
 
