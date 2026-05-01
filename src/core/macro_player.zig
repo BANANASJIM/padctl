@@ -165,7 +165,7 @@ pub const MacroPlayer = struct {
                 .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
                 .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
                 .gamepad_button => {},
-                .disabled, .macro => {},
+                .disabled, .macro, .chord => {},
             }
         }
 

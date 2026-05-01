@@ -60,7 +60,14 @@ fn openFirstHidraw() !posix.fd_t {
 
 fn mappingLabel(mapping: *const mapping_mod.MappingConfig, button: []const u8) ?[]const u8 {
     if (mapping.remap) |remap| {
-        if (remap.map.get(button)) |target| return target;
+        if (remap.map.get(button)) |target| {
+            switch (target) {
+                .string => |s| return s,
+                // Chord arrays don't have a single human label; callers fall
+                // back to the source button name.
+                else => return null,
+            }
+        }
     }
     return null;
 }
@@ -133,7 +140,17 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
             if (remap != null) {
                 var it = remap.?.map.iterator();
                 while (it.next()) |entry| {
-                    try w.print("  {s} -> {s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+                    switch (entry.value_ptr.*) {
+                        .string => |s| try w.print("  {s} -> {s}", .{ entry.key_ptr.*, s }),
+                        .chord_names => |names| {
+                            try w.print("  {s} -> chord[", .{entry.key_ptr.*});
+                            for (names, 0..) |name, i| {
+                                if (i > 0) try w.writeAll(", ");
+                                try w.print("{s}", .{name});
+                            }
+                            try w.writeAll("]");
+                        },
+                    }
                 }
             }
         }
