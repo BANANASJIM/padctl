@@ -53,9 +53,11 @@ than declaring an inline TOML literal.
 Inline literals drift away from the canonical files over time: a field
 gets renamed, a transform is added, or a fixture grows a new
 `[output.imu]` block, and the inline copy keeps testing the old shape.
-PR #193 retired the last set of inline `vader5_toml` literals after
-exactly this drift was observed (the inline copy had `gyro_y` / `gyro_z`
-swapped relative to `devices/flydigi/vader5.toml`).
+PR #193 began retiring inline `vader5_toml` literals after exactly this
+drift was observed (the inline copy had `gyro_y` / `gyro_z` swapped
+relative to `devices/flydigi/vader5.toml`). The last remaining inline copy
+in `interpreter_e2e_test.zig` was removed in PR #209; no inline device
+literals remain in the test suite.
 
 When you add a new e2e test, prefer one of these patterns:
 

@@ -13,7 +13,7 @@ trigger_threshold = 100
 |-------|------|---------|-------------|
 | `name` | string | — | Mapping profile name. Used by `padctl switch <name>` and `default_mapping` in user config to identify this profile. |
 | `trigger_threshold` | integer (0–255) | null | Threshold for synthesizing digital `LT` / `RT` button events from the analog trigger axes. **Top-level only** — placing this inside `[[layer]]` is silently ignored. See below. |
-| `chord_index` | integer (≥1) | null | Selector index used by the in-controller `[chord_switch]` quick-switch. Each selectable mapping declares a unique `chord_index`; the value is matched against `[chord_switch].selectors` in `~/.config/padctl/config.toml`. See [Diagnostic Logging — Chord switch](diagnostic-logging.md#chord-switch-issue-183) for the full setup. |
+| `chord_index` | integer (0–255) | null | Selector index used by the in-controller `[chord_switch]` quick-switch. The value is matched against the position of `[chord_switch].selectors`: `chord_index = i+1` activates when `selectors[i]` is pressed. Set `chord_index = 0` (or omit) to leave a mapping unselectable via chord. See [Diagnostic Logging — Chord switch](diagnostic-logging.md#chord-switch-issue-183) for the full setup. |
 
 ## Validation behaviour
 

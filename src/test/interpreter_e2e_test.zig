@@ -25,36 +25,6 @@ const ButtonId = state_mod.ButtonId;
 //   [16]    rt u8
 //   [17..28] IMU fields
 
-const vader5_toml =
-    \\[device]
-    \\name = "Flydigi Vader 5 Pro"
-    \\vid = 0x37d7
-    \\pid = 0x2401
-    \\[[device.interface]]
-    \\id = 1
-    \\class = "hid"
-    \\[device.init]
-    \\commands = ["5aa5 0102 03"]
-    \\response_prefix = [0x5a, 0xa5]
-    \\[[report]]
-    \\name = "extended"
-    \\interface = 1
-    \\size = 32
-    \\[report.match]
-    \\offset = 0
-    \\expect = [0x5a, 0xa5, 0xef]
-    \\[report.fields]
-    \\left_x  = { offset = 3,  type = "i16le" }
-    \\left_y  = { offset = 5,  type = "i16le", transform = "negate" }
-    \\right_x = { offset = 7,  type = "i16le" }
-    \\right_y = { offset = 9,  type = "i16le", transform = "negate" }
-    \\lt      = { offset = 15, type = "u8" }
-    \\rt      = { offset = 16, type = "u8" }
-    \\[report.button_group]
-    \\source = { offset = 11, size = 4 }
-    \\map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Select = 6, X = 7, Y = 8, Start = 9, LB = 10, RB = 11, LS = 14, RS = 15, C = 16, Z = 17, M1 = 18, M2 = 19, M3 = 20, M4 = 21, LM = 22, RM = 23, O = 24, Home = 27 }
-;
-
 fn makeIf1Sample() [32]u8 {
     var raw = [_]u8{0} ** 32;
     raw[0] = 0x5a;
@@ -68,24 +38,6 @@ fn makeIf1Sample() [32]u8 {
 }
 
 // --- Layer 1: raw bytes → GamepadState ---
-
-test "interpreter_e2e: Vader5 IF1 — axes, button A, lt" {
-    const allocator = testing.allocator;
-    const parsed = try device_mod.parseString(allocator, vader5_toml);
-    defer parsed.deinit();
-    const interp = Interpreter.init(&parsed.value);
-
-    const raw = makeIf1Sample();
-    const delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
-
-    try testing.expectEqual(@as(?i16, 1000), delta.ax);
-    try testing.expectEqual(@as(?i16, 500), delta.ay); // negated
-    try testing.expectEqual(@as(?u8, 128), delta.lt);
-
-    const btns = delta.buttons orelse return error.NoBtns;
-    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
-    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
-}
 
 test "interpreter_e2e: Vader5 IF1 — load from file and process" {
     const allocator = testing.allocator;
