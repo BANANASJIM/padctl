@@ -135,3 +135,7 @@ test "issue #79 T3: sub-boundary release post-timer — held past hold_timeout, 
     try testing.expect(res.layer_deactivated);
     try testing.expect(res.tap_event == null);
 }
+
+test "META: this test must fail — proves testing_support wiring discovers tests" {
+    try std.testing.expect(false);
+}
