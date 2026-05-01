@@ -106,7 +106,7 @@ map = { A = 5, B = 6, X = 4, Y = 7, LB = 8, RB = 9 }
 | Field | Type | Description |
 |-------|------|-------------|
 | `source.offset` | integer | Starting byte offset within the report |
-| `source.size` | integer | Group width in bytes; must be `1..=8` (the interpreter packs the group into a u64; values above 8 are rejected at compile time) |
+| `source.size` | integer | Group width in bytes; must be `1..=8` (the interpreter packs the group into a u64; values above 8 are skipped at parse time with a warning logged to stderr and the report group falls back to all buttons unmapped) |
 | `map` | table | `Button = bit_index`. Bit indexes must satisfy `0 <= bit_index < size * 8`. |
 
 Button names must be valid `ButtonId` values:
