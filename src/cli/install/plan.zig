@@ -352,7 +352,8 @@ pub const InstallPlan = struct {
         const destdir = opts.destdir;
         const staging_mode = destdir.len != 0;
 
-        const effective_user_service = opts.user_service orelse !is_root;
+        // staging mode (--destdir set, packaging build) always writes to system path
+        const effective_user_service = opts.user_service orelse (!is_root and !staging_mode);
 
         const immutable_kind = detectImmutableOs(allocator, if (staging_mode) destdir else "");
         const effective_immutable = opts.immutable or (immutable_kind != .none and !opts.no_immutable);
