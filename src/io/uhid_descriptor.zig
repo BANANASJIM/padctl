@@ -55,6 +55,7 @@ pub const BuildError = std.mem.Allocator.Error || error{
     DescriptorTooLarge,
     InvalidOutputConfig,
     IncompletePidDescriptor,
+    MissingMandatoryPidUsage,
 };
 
 // PID report-ID assignment per spec/openspec/changes/phase-13-wave-6-pidff/
@@ -77,19 +78,34 @@ pub const PID_BLOCK_LOAD_REPORT_ID: u8 = 14;
 pub const PID_POOL_REPORT_ID: u8 = 15;
 
 // Per drivers/hid/usbhid/hid-pidff.c::pidff_reports[0..PID_REQUIRED_REPORTS]
-// (8 mandatory usages: 0x21, 0x77, 0x7d, 0x7f, 0x89, 0x90, 0x96, 0xab).
-// Set Envelope/Condition/Periodic/Constant/Ramp are emitted but kernel-optional
-// (not validated here). Kernel pidff_find_reports rejects with -ENODEV if any
-// of these 8 are absent — see probe Run 2 in tools/wave6-probe/RESEARCH-REPORT.md.
+// the kernel matches reports by HID Usage on the PID Usage Page (0x0F),
+// not by Report ID. Report IDs are not normative in HID PID 1.01.
+// Kernel pidff_find_reports rejects with -ENODEV if any of these 8 usages
+// is absent — see probe Run 2 in tools/wave6-probe/RESEARCH-REPORT.md.
+pub const PID_MANDATORY_USAGES = [_]u8{
+    0x21, // Set Effect Report
+    0x77, // Effect Operation Report
+    0x7d, // Device Gain Report
+    0x7f, // PID Pool Report
+    0x89, // Block Load Report (Feature)
+    0x90, // Block Free Report
+    0x96, // Device Control Report
+    0xab, // Create New Effect Report (Feature)
+};
+pub const PID_USAGE_PAGE: u16 = 0x0F;
+
+// Report IDs are pinned by the builder for golden-test stability, but they
+// are NOT what the kernel matches on. See PID_MANDATORY_USAGES above for
+// the validator invariant.
 const PID_MANDATORY_REPORT_IDS = [_]u8{
-    PID_SET_EFFECT_REPORT_ID, // 1,  usage 0x21
-    PID_BLOCK_FREE_REPORT_ID, // 7,  usage 0x90
-    PID_EFFECT_OPERATION_REPORT_ID, // 10, usage 0x77
-    PID_DEVICE_CONTROL_REPORT_ID, // 11, usage 0x96
-    PID_DEVICE_GAIN_REPORT_ID, // 12, usage 0x7d
-    PID_CREATE_NEW_EFFECT_REPORT_ID, // 13, usage 0xab
-    PID_BLOCK_LOAD_REPORT_ID, // 14, usage 0x89
-    PID_POOL_REPORT_ID, // 15, usage 0x7f
+    PID_SET_EFFECT_REPORT_ID, // 1
+    PID_BLOCK_FREE_REPORT_ID, // 7
+    PID_EFFECT_OPERATION_REPORT_ID, // 10
+    PID_DEVICE_CONTROL_REPORT_ID, // 11
+    PID_DEVICE_GAIN_REPORT_ID, // 12
+    PID_CREATE_NEW_EFFECT_REPORT_ID, // 13
+    PID_BLOCK_LOAD_REPORT_ID, // 14
+    PID_POOL_REPORT_ID, // 15
 };
 
 /// Input report ID used for the main gamepad report. Kept `1` so a simple
@@ -495,9 +511,11 @@ pub const UhidDescriptorBuilder = struct {
     /// parameter reports.
     ///
     /// `validateMandatoryReports` runs at the end and returns
-    /// `error.IncompletePidDescriptor` if any of the 8 mandatory IDs is missing,
-    /// fail-closing the daemon before kernel `pidff_find_reports` would
-    /// crash on a malformed device.
+    /// `error.MissingMandatoryPidUsage` if any of the 8 kernel-required
+    /// PID Usages (`PID_MANDATORY_USAGES`) is absent, fail-closing the
+    /// daemon before kernel `pidff_find_reports` would reject the device.
+    /// Report IDs are NOT what the kernel matches on — see comment block
+    /// above `PID_MANDATORY_USAGES`.
     ///
     /// The `cfg` parameter is currently unused — full axis/button passthrough
     /// (sticks, hat, buttons) is deferred to a follow-up pass; the kernel
@@ -980,18 +998,25 @@ fn emitPidPoolReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !voi
     try writeByte(buf, allocator, 0xC0);
 }
 
-/// Walk a HID descriptor as a stream of HID 1.11 short items, recording every
-/// `0x85 NN` (Report ID, global) prefix encountered. After the walk, assert
-/// every required PID report ID has been seen. Long-form items (HID 1.11
-/// §6.2.2.3, prefix `0xFE`) are accepted by skipping `payload[0]` data bytes;
+/// Walk a HID descriptor as a stream of HID 1.11 short items, tracking the
+/// current Usage Page (global tag 0x04) and Usage (local tag 0x08). When a
+/// Logical Collection (Main tag 0xA0, payload byte 0x02) opens and the most
+/// recent Usage was on the PID Usage Page (0x0F), mark that Usage as seen.
+/// Returns `error.MissingMandatoryPidUsage` if any of the 8 usages required
+/// by kernel `pidff_find_reports` is absent. Long-form items (prefix 0xFE)
+/// are accepted by skipping `data_size` bytes after the long-item header;
 /// none of the current PID emit helpers use long form.
-fn validateMandatoryReports(descriptor: []const u8) BuildError!void {
-    var seen: [16]bool = .{false} ** 16;
+pub fn validateMandatoryReports(descriptor: []const u8) BuildError!void {
+    var current_usage_page: u16 = 0;
+    var current_usage: u32 = 0;
+    var current_usage_page_overridden: bool = false;
+    var seen: [PID_MANDATORY_USAGES.len]bool = .{false} ** PID_MANDATORY_USAGES.len;
+
     var i: usize = 0;
     while (i < descriptor.len) {
         const prefix = descriptor[i];
         if (prefix == 0xFE) {
-            // Long-form item — bytes: 0xFE bDataSize bLongItemTag <data>
+            // Long-form: 0xFE bDataSize bLongItemTag <data>
             if (i + 2 >= descriptor.len) return error.IncompletePidDescriptor;
             const data_size = descriptor[i + 1];
             i += 3 + data_size;
@@ -1005,15 +1030,55 @@ fn validateMandatoryReports(descriptor: []const u8) BuildError!void {
             else => unreachable,
         };
         if (i + 1 + size > descriptor.len) return error.IncompletePidDescriptor;
-        if (prefix == 0x85 and size == 1) {
-            const id = descriptor[i + 1];
-            if (id < seen.len) seen[id] = true;
+        const tag = prefix & 0xFC;
+        const payload = descriptor[i + 1 .. i + 1 + size];
+
+        if (tag == 0x04) {
+            current_usage_page = @truncate(readUnsignedLE(payload));
+        } else if (tag == 0x08) {
+            // Local Usage. Size 4 is "extended usage" — high 16 bits override
+            // the page for this single usage. Sizes 1 and 2 use the current
+            // global Usage Page. Size 0 is illegal per HID 1.11 §6.2.2.7 but
+            // we ignore rather than error to match upstream tolerant parsers.
+            current_usage = readUnsignedLE(payload);
+            current_usage_page_overridden = (size == 4);
+        } else if (tag == 0xA0 and size >= 1 and descriptor[i + 1] == 0x02) {
+            const effective_page: u16 = if (current_usage_page_overridden)
+                @intCast((current_usage >> 16) & 0xFFFF)
+            else
+                current_usage_page;
+            const effective_usage: u8 = @truncate(current_usage & 0xFF);
+            if (effective_page == PID_USAGE_PAGE) {
+                for (PID_MANDATORY_USAGES, 0..) |u, idx| {
+                    if (effective_usage == u) seen[idx] = true;
+                }
+            }
         }
+
+        // Per HID 1.11 §6.2.2.7 a Main item consumes any pending Local items;
+        // reset the Usage so a stale one cannot accidentally tag a later
+        // collection. Main tags are bType=0 → 0x80, 0x90, 0xA0, 0xB0.
+        if ((prefix & 0x0C) == 0x00) {
+            current_usage = 0;
+            current_usage_page_overridden = false;
+        }
+
         i += 1 + size;
     }
-    for (PID_MANDATORY_REPORT_IDS) |id| {
-        if (!seen[id]) return error.IncompletePidDescriptor;
+
+    for (seen) |s| {
+        if (!s) return error.MissingMandatoryPidUsage;
     }
+}
+
+fn readUnsignedLE(bytes: []const u8) u32 {
+    var v: u32 = 0;
+    var shift: u5 = 0;
+    for (bytes) |b| {
+        v |= @as(u32, b) << shift;
+        shift +%= 8;
+    }
+    return v;
 }
 
 /// Report ID used for IMU input reports. Distinct from the primary gamepad
@@ -1774,43 +1839,79 @@ test "buildForPid: 8 mandatory PID reports present per kernel pidff_find_reports
     try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
 }
 
-test "buildForPid: every required report ID surfaces during a manual byte-walk" {
+test "buildForPid: every required PID Usage surfaces during a manual byte-walk" {
     const out = device.OutputConfig{ .name = "manual-walk", .vid = 0x11FF, .pid = 0x1211 };
     const ffb = device.ForceFeedbackConfig{ .backend = "uhid", .kind = "pid" };
     const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
     defer testing.allocator.free(desc);
 
-    var seen: [16]bool = .{false} ** 16;
+    var seen: [PID_MANDATORY_USAGES.len]bool = .{false} ** PID_MANDATORY_USAGES.len;
+    var page: u16 = 0;
+    var usage: u8 = 0;
     var i: usize = 0;
     while (i < desc.len) {
         const prefix = desc[i];
         const size = hidItemSize(prefix);
-        if (prefix == 0x85 and size == 1) seen[desc[i + 1]] = true;
+        const tag = prefix & 0xFC;
+        if (tag == 0x04 and size >= 1) page = desc[i + 1];
+        if (tag == 0x08 and size >= 1) usage = desc[i + 1];
+        if (tag == 0xA0 and size >= 1 and desc[i + 1] == 0x02 and page == PID_USAGE_PAGE) {
+            for (PID_MANDATORY_USAGES, 0..) |u, idx| {
+                if (usage == u) seen[idx] = true;
+            }
+        }
         i += 1 + size;
     }
-    for (PID_MANDATORY_REPORT_IDS) |id| {
-        if (!seen[id]) {
-            std.debug.print("missing PID report ID {d}\n", .{id});
+    for (PID_MANDATORY_USAGES, 0..) |u, idx| {
+        if (!seen[idx]) {
+            std.debug.print("missing PID Usage 0x{x:0>2}\n", .{u});
             try testing.expect(false);
         }
     }
 }
 
-test "buildForPid: validateMandatoryReports rejects truncated descriptor" {
-    // Hand-crafted partial: only Report IDs 1, 2, 3 declared. Eight are
-    // missing — must fail closed.
-    const partial = [_]u8{
-        0x05, 0x0F, // Usage Page (PID)
-        0x85, 1, // Report ID 1
-        0x85, 2, // Report ID 2
-        0x85, 3, // Report ID 3
-        0xC0,
-    };
-    try testing.expectError(error.IncompletePidDescriptor, validateMandatoryReports(&partial));
+test "validateMandatoryReports: rejects descriptor missing PID Set Effect (0x21)" {
+    // 7 of 8 mandatory usages declared on PID Usage Page — Set Effect (0x21)
+    // omitted. Must fail with MissingMandatoryPidUsage.
+    var buf: [256]u8 = undefined;
+    var len: usize = 0;
+    buf[len] = 0x05;
+    buf[len + 1] = 0x0F;
+    len += 2; // Usage Page (PID)
+    const usages_present = [_]u8{ 0x77, 0x7d, 0x7f, 0x89, 0x90, 0x96, 0xab };
+    for (usages_present) |u| {
+        buf[len] = 0x09;
+        buf[len + 1] = u;
+        len += 2; // Usage
+        buf[len] = 0xA1;
+        buf[len + 1] = 0x02;
+        len += 2; // Logical Collection
+        buf[len] = 0xC0;
+        len += 1; // End Collection
+    }
+    try testing.expectError(error.MissingMandatoryPidUsage, validateMandatoryReports(buf[0..len]));
 }
 
-test "buildForPid: validateMandatoryReports accepts all 8 IDs in any order" {
-    // Synthetic descriptor that simply lists every required Report ID.
+test "validateMandatoryReports: rejects naked 0x85 NN with no surrounding Usage" {
+    // The "TP35-style" partial: a Report ID byte sequence without any
+    // Usage / Usage Page declarations. Validator must fail closed because
+    // the kernel cannot match reports without Usage anchors.
+    const partial = [_]u8{ 0x85, 0x0B, 0xC0 };
+    try testing.expectError(error.MissingMandatoryPidUsage, validateMandatoryReports(&partial));
+}
+
+test "validateMandatoryReports: accepts buildForPid output" {
+    const out = device.OutputConfig{ .name = "roundtrip", .vid = 0x11FF, .pid = 0x1211 };
+    const ffb = device.ForceFeedbackConfig{ .backend = "uhid", .kind = "pid" };
+    const desc = try UhidDescriptorBuilder.buildForPid(testing.allocator, out, ffb);
+    defer testing.allocator.free(desc);
+    try validateMandatoryReports(desc);
+}
+
+test "validateMandatoryReports: rejects all 8 Report IDs without matching Usages" {
+    // Regression for the previous validator bug: a descriptor that emits
+    // every required Report ID but no PID Usages must fail. This is the
+    // exact failure mode the old report-ID-based validator missed.
     var bytes: [PID_MANDATORY_REPORT_IDS.len * 2]u8 = undefined;
     var idx: usize = 0;
     for (PID_MANDATORY_REPORT_IDS) |id| {
@@ -1818,7 +1919,7 @@ test "buildForPid: validateMandatoryReports accepts all 8 IDs in any order" {
         bytes[idx + 1] = id;
         idx += 2;
     }
-    try validateMandatoryReports(&bytes);
+    try testing.expectError(error.MissingMandatoryPidUsage, validateMandatoryReports(&bytes));
 }
 
 test "buildForPid: descriptor includes Block Free report (kernel-required)" {
