@@ -1933,41 +1933,46 @@ test "install: all systemctl calls route through helpers" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // Read our own source to verify every systemctl invocation goes through
-    // a named helper. runSystemctlUser covers user-scope (daemon-reload,
-    // enable, start for the per-user unit); runSystemctlSystem covers
-    // system-scope (legacy unit stop/disable during migration).
+    // Scan production modules (not this test file) to verify every systemctl
+    // invocation goes through a named helper. runSystemctlUser covers
+    // user-scope; runSystemctlSystem covers system-scope (migration).
+    // These live in the same directory as this file after the install/ split.
     const src_path = @src().file;
-    var file = if (std.fs.path.isAbsolute(src_path))
-        std.fs.openFileAbsolute(src_path, .{}) catch return
-    else
-        std.fs.cwd().openFile(src_path, .{}) catch return;
-    defer file.close();
-    const src = try file.readToEndAlloc(allocator, 1 << 20);
-    defer allocator.free(src);
+    const src_dir = std.fs.path.dirname(src_path) orelse ".";
+    const prod_files = [_][]const u8{ "services.zig", "phase.zig", "migration.zig" };
 
-    var iter = std.mem.splitScalar(u8, src, '\n');
     var helper_calls: usize = 0;
-    while (iter.next()) |line| {
-        // Ignore the test itself (which mentions these names in strings).
-        if (std.mem.indexOf(u8, line, "test \"install: all systemctl") != null) continue;
-        // Skip pure comment lines — a code comment that quotes the
-        // forbidden pattern as a documentation example shouldn't trip it.
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
-        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+    for (prod_files) |name| {
+        const full = try std.fs.path.join(allocator, &.{ src_dir, name });
+        defer allocator.free(full);
+        var file = if (std.fs.path.isAbsolute(full))
+            std.fs.openFileAbsolute(full, .{}) catch continue
+        else
+            std.fs.cwd().openFile(full, .{}) catch continue;
+        defer file.close();
+        const src = try file.readToEndAlloc(allocator, 1 << 20);
+        defer allocator.free(src);
 
-        if (std.mem.indexOf(u8, line, "runSystemctlUser") != null) helper_calls += 1;
+        var iter = std.mem.splitScalar(u8, src, '\n');
+        while (iter.next()) |line| {
+            const trimmed = std.mem.trimLeft(u8, line, " \t");
+            if (std.mem.startsWith(u8, trimmed, "//")) continue;
 
-        // No raw generic-runCmd + systemctl literal on the same line outside
-        // the helpers; see runSystemctlUser / runSystemctlSystem above.
-        const has_runcmd = std.mem.indexOf(u8, line, "runCmd(&.{") != null;
-        const has_systemctl_literal = std.mem.indexOf(u8, line, "\"systemctl\"") != null;
-        if (has_runcmd and has_systemctl_literal) {
-            try testing.expect(false);
+            if (std.mem.indexOf(u8, line, "runSystemctlUser") != null or
+                std.mem.indexOf(u8, line, "runSystemctlSystem") != null)
+            {
+                helper_calls += 1;
+            }
+
+            // No raw runCmd(&.{ ... }) with a "systemctl" literal on the same
+            // line — all systemctl calls must go through the named helpers.
+            const has_runcmd = std.mem.indexOf(u8, line, "runCmd(&.{") != null;
+            const has_systemctl_literal = std.mem.indexOf(u8, line, "\"systemctl\"") != null;
+            if (has_runcmd and has_systemctl_literal) {
+                try testing.expect(false);
+            }
         }
     }
-    // Each of the 5+ call sites is one source line referencing a helper,
-    // plus the helper fn definitions and at least one internal call.
     try testing.expect(helper_calls >= 5);
 }
 
