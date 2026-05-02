@@ -159,9 +159,9 @@ test "capture: emitToml — contains [device], [[report]], [report.fields]" {
 
     const info = DeviceInfo{ .name = "Test Device", .vid = 0x37d7, .pid = 0x2401, .interface_id = 0 };
 
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try toml_gen_mod.emitToml(result, info, allocator, buf.writer());
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
 
     const out = buf.items;
     try testing.expect(std.mem.indexOf(u8, out, "[device]") != null);

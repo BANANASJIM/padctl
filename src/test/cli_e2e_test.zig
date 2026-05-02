@@ -119,9 +119,9 @@ test "scan output: VID:PID column fits 9 chars" {
 
 test "scan output: summary line format" {
     const allocator = testing.allocator;
-    var out = std.ArrayList(u8).init(allocator);
-    defer out.deinit();
-    try out.writer().print("{d} device(s) found, {d} matched, {d} unmatched.\n", .{ 3, 2, 1 });
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    try out.writer(allocator).print("{d} device(s) found, {d} matched, {d} unmatched.\n", .{ 3, 2, 1 });
     try testing.expect(std.mem.indexOf(u8, out.items, "3 device(s) found") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "2 matched") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "1 unmatched") != null);
@@ -129,11 +129,11 @@ test "scan output: summary line format" {
 
 test "scan output: unmatched capture hint format" {
     const allocator = testing.allocator;
-    var out = std.ArrayList(u8).init(allocator);
-    defer out.deinit();
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
     const vid: u16 = 0x37d7;
     const pid: u16 = 0x2401;
-    try out.writer().print("  padctl-capture --vid 0x{x:0>4} --pid 0x{x:0>4}\n", .{ vid, pid });
+    try out.writer(allocator).print("  padctl-capture --vid 0x{x:0>4} --pid 0x{x:0>4}\n", .{ vid, pid });
     try testing.expect(std.mem.indexOf(u8, out.items, "padctl-capture") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "0x37d7") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "0x2401") != null);
