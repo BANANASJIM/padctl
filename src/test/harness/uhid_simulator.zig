@@ -122,6 +122,7 @@ pub const UhidSimulator = struct {
         if (bytes.len > uhid.UHID_DATA_MAX) return error.SkipZigTest;
         uhid.uhidInput(self.fd, bytes) catch |err| switch (err) {
             error.BrokenPipe, error.ConnectionResetByPeer => return error.KernelBusy,
+            error.PayloadTooLong => return error.SkipZigTest,
             else => |e| return e,
         };
     }

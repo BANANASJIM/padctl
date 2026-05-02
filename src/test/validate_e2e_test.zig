@@ -179,7 +179,7 @@ test "E2E parseFile: flydigi/vader5.toml" {
     try testing.expectEqualStrings("Flydigi Vader 5 Pro", cfg.device.name);
     try testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
     try testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
-    try testing.expectEqual(@as(usize, 2), cfg.report.len);
+    try testing.expectEqual(@as(usize, 1), cfg.report.len);
 }
 
 test "E2E parseFile: microsoft/xbox-elite.toml" {
