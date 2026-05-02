@@ -7,15 +7,13 @@ const std = @import("std");
 const posix = std.posix;
 const testing = std.testing;
 
-const src = @import("src");
-const device_instance = src.device_instance;
-const DeviceInstance = device_instance.DeviceInstance;
-const DeviceIO = src.io.device_io.DeviceIO;
-const MockDeviceIO = src.testing_support.mock_device_io.MockDeviceIO;
-const uhid = src.io.uhid;
-const EventLoop = src.event_loop.EventLoop;
-const Interpreter = src.core.interpreter.Interpreter;
-const device_mod = src.config.device;
+const DeviceInstance = @import("../device_instance.zig").DeviceInstance;
+const DeviceIO = @import("../io/device_io.zig").DeviceIO;
+const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
+const uhid = @import("../io/uhid.zig");
+const EventLoop = @import("../event_loop.zig").EventLoop;
+const Interpreter = @import("../core/interpreter.zig").Interpreter;
+const device_mod = @import("../config/device.zig");
 
 // Ordered event log shared between the recording allocator and the test.
 const EventKind = enum { destroy_imu_dev, free_imu_name };
