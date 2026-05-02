@@ -177,7 +177,16 @@ test "config edit: no mapping found error" {
 }
 
 // MED-3: `padctl config test` — no hidraw device returns NoHidrawDevice.
+// Skip when any hidraw node is present: openFirstHidraw would attempt to open
+// it and may block in the kernel against UHID-backed virtual devices. CI
+// runners have no hidraw devices and exercise the failure path correctly.
 test "config test: no hidraw device error" {
+    var dir = std.fs.openDirAbsolute("/sys/class/hidraw", .{ .iterate = true }) catch null;
+    if (dir) |*d| {
+        defer d.close();
+        var it = d.iterate();
+        if ((it.next() catch null) != null) return error.SkipZigTest;
+    }
     const result = config_test_mod.run(testing.allocator, null, null, std.io.null_writer);
     try testing.expectError(error.NoHidrawDevice, result);
 }

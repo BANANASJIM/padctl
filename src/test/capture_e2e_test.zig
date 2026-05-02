@@ -190,7 +190,8 @@ test "capture: renderFrame — correct axis values rendered" {
     gs.ax = -1234;
     gs.ry = 5678;
     gs.gyro_x = 2345;
-    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false, .{}, .raw);
+    // Gyro section is conditional on RenderConfig.has_gyro; opt in so gyro_x renders.
+    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false, .{ .has_gyro = true }, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "-1234") != null);
     try testing.expect(std.mem.indexOf(u8, out, "5678") != null);

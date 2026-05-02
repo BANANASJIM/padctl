@@ -210,13 +210,13 @@ test "e2e: gyro mouse mode — non-zero gyro produces REL_X/REL_Y aux events" {
         \\[gyro]
         \\mode = "mouse"
         \\smoothing = 0.0
-        \\sensitivity = 1000.0
+        \\sensitivity = 32767.0
     , allocator);
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    // Large gyro value to ensure accumulation crosses integer threshold
-    const ev = try m.apply(.{ .gyro_x = 10, .gyro_y = 10 }, 16, 0);
+    // Full-deflection gyro: with smoothing=0 and sensitivity=32767, normalized*sensitivity ~= 32767 → integer pixels emitted on first frame.
+    const ev = try m.apply(.{ .gyro_x = 32767, .gyro_y = 32767 }, 16, 0);
 
     var found_rel_x = false;
     var found_rel_y = false;
@@ -393,12 +393,13 @@ test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
 
 test "e2e: dpad gamepad mode — dpad passes through unchanged, no aux KEY events" {
     const allocator = testing.allocator;
-    // Default mode is "gamepad"
+    // Default mode is "gamepad". emit_state.synthesizeDpadAxes() derives dpad axes
+    // from button state, so drive the test via the DPadUp button bit.
     var ctx = try makeMapper("", allocator);
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .dpad_y = -1 }, 16, 0);
+    const ev = try m.apply(.{ .buttons = btnMask(.DPadUp) }, 16, 0);
     for (ev.aux.slice()) |e| {
         switch (e) {
             .key => return error.UnexpectedKeyEvent,
