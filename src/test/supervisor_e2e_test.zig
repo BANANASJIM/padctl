@@ -159,6 +159,8 @@ test "supervisor: detach — instance stopped and freed" {
 
     var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
+    // Disable issue-#131-A grace window so detach tears down immediately.
+    sup.suspend_grace_sec = 0;
 
     const inst = try makeInstance(allocator, &mock, &parsed.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst, null);
@@ -190,6 +192,8 @@ test "supervisor: attach-detach-attach — second instance created normally" {
 
     var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
+    // Disable issue-#131-A grace window so detach tears down immediately.
+    sup.suspend_grace_sec = 0;
 
     const inst_a = try makeInstance(allocator, &mock_a, &parsed.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
