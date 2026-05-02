@@ -15,13 +15,6 @@ const input_offset: u32 = 0;
 const output_offset: u32 = 4096;
 const stack_size: u32 = 1024 * 1024;
 
-comptime {
-    const fields = @typeInfo(GamepadStateDelta).@"struct".fields;
-    var bit_sum: usize = 0;
-    for (fields) |f| bit_sum += @bitSizeOf(f.type);
-    std.debug.assert(bit_sum == @bitSizeOf(GamepadStateDelta));
-}
-
 pub const Wasm3Plugin = struct {
     env: c.IM3Environment = null,
     rt: c.IM3Runtime = null,
@@ -157,12 +150,13 @@ pub const Wasm3Plugin = struct {
 
     fn callWasm(f: c.IM3Function, args: []const ?*const anyopaque) c.M3Result {
         if (args.len == 0) return c.m3_Call(f, 0, null);
-        return c.m3_Call(f, @intCast(args.len), @ptrCast(args.ptr));
+        // wasm3 takes a mutable arg pointer array; we never write through it.
+        return c.m3_Call(f, @intCast(args.len), @ptrCast(@constCast(args.ptr)));
     }
 
     fn getResultI32(f: c.IM3Function, out: *i32) bool {
         const p: ?*const anyopaque = out;
-        return c.m3_GetResults(f, 1, @ptrCast(&p)) != null;
+        return c.m3_GetResults(f, 1, @ptrCast(@constCast(&p))) != null;
     }
 
     // -- host function binding --
@@ -299,8 +293,9 @@ pub const Wasm3Plugin = struct {
     // -- host callback helpers --
 
     fn pluginFromIc(ic: c.IM3ImportContext) ?*Wasm3Plugin {
-        const ctx = ic orelse return null;
-        return @ptrCast(@alignCast(ctx.userdata));
+        // IM3ImportContext is a [*c] multi-pointer; access fields via deref.
+        if (ic == null) return null;
+        return @ptrCast(@alignCast(ic.*.userdata));
     }
 
     fn setRetI32(sp: [*c]u64, val: i32) ?*const anyopaque {
@@ -332,14 +327,13 @@ pub const Wasm3Plugin = struct {
     // -- helpers --
 
     fn deltaFromBytes(buf: []const u8) GamepadStateDelta {
-        var d = GamepadStateDelta{};
-        if (buf.len < @sizeOf(GamepadStateDelta)) return d;
-        const bytes: *const [@sizeOf(GamepadStateDelta)]u8 = buf[0..@sizeOf(GamepadStateDelta)];
-        // SAFETY: GamepadStateDelta is a flat struct of optional numeric primitives.
-        // @bitCast is valid because the WASM plugin writes matching layout.
-        // If GamepadStateDelta gains padding-sensitive fields, replace with field-by-field copy.
-        d = @bitCast(bytes.*);
-        return d;
+        // GamepadStateDelta has Zig-private layout (optionals), so we cannot @bitCast
+        // raw plugin output bytes into it. Current plugins (IMU calibration, echo)
+        // write the modified raw HID report into `out`; downstream parses that buffer
+        // directly via the device protocol path. The override delta payload is unused
+        // until a structured wasm-to-delta ABI is defined.
+        _ = buf;
+        return .{};
     }
 };
 
