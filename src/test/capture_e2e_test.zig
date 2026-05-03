@@ -159,9 +159,9 @@ test "capture: emitToml — contains [device], [[report]], [report.fields]" {
 
     const info = DeviceInfo{ .name = "Test Device", .vid = 0x37d7, .pid = 0x2401, .interface_id = 0 };
 
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try toml_gen_mod.emitToml(result, info, allocator, buf.writer());
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
 
     const out = buf.items;
     try testing.expect(std.mem.indexOf(u8, out, "[device]") != null);
@@ -190,7 +190,8 @@ test "capture: renderFrame — correct axis values rendered" {
     gs.ax = -1234;
     gs.ry = 5678;
     gs.gyro_x = 2345;
-    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false, .{}, .raw);
+    // Gyro section is conditional on RenderConfig.has_gyro; opt in so gyro_x renders.
+    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false, .{ .has_gyro = true }, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "-1234") != null);
     try testing.expect(std.mem.indexOf(u8, out, "5678") != null);

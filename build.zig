@@ -90,8 +90,9 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(capture_exe);
 
     // test: Layer 0 + Layer 1 (CI); refAllDecls in main.zig pulls in debug/render.zig tests
+    // test_root.zig sits at repo root so @embedFile("../../...") paths in src/ stay within package.
     const unit_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("test_root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = .trap,
@@ -115,7 +116,7 @@ pub fn build(b: *std.Build) void {
 
     // test-tsan: ThreadSanitizer-enabled test run (local dev)
     const tsan_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("test_root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = .trap,
@@ -138,7 +139,7 @@ pub fn build(b: *std.Build) void {
 
     // test-safe: ReleaseSafe test run (catches UB under optimization)
     const safe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("test_root.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
         .sanitize_c = .trap,
@@ -327,7 +328,7 @@ pub fn build(b: *std.Build) void {
     // stay inside the module path. The `addTest` will still run the tests
     // defined in `test/uhid_uniq_pairing_test.zig` via `test-filter`.
     const uniq_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("test_root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = .trap,

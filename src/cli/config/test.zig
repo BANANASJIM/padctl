@@ -97,7 +97,7 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
             };
         }
         break :blk openFirstHidraw() catch |e| {
-            std.log.err("no hidraw device available: {}", .{e});
+            std.log.warn("no hidraw device available: {}", .{e});
             return e;
         };
     };
