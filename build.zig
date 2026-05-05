@@ -12,8 +12,13 @@ pub fn build(b: *std.Build) void {
 
     const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0" };
 
+    const zon = @import("build.zig.zon");
+    const version_override = b.option([]const u8, "version", "Override version string (default: build.zig.zon)");
+    const version = version_override orelse zon.version;
+
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "use_wasm", use_wasm);
+    build_opts.addOption([]const u8, "version", version);
 
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
