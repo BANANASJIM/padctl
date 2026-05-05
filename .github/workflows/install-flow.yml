@@ -275,7 +275,7 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::static linkage (no glibc dep)"
-            ldd /usr/bin/padctl 2>&1 | grep -q "not a dynamic executable" || { echo FAIL not statically linked; ldd /usr/bin/padctl; exit 1; }
+            file /usr/bin/padctl | grep -q "statically linked" || { echo FAIL not statically linked; file /usr/bin/padctl; ldd /usr/bin/padctl 2>&1 || true; exit 1; }
             echo "::endgroup::"
 
             echo "::group::uninstall removes everything"
