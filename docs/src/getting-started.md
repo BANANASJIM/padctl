@@ -81,6 +81,8 @@ When `--mapping` is given, the installer also writes a device-to-mapping binding
 
 > **Bazzite / immutable distros:** See the [Bazzite / Immutable Distros guide](immutable-install.md) for special installation steps.
 
+> **Install problems?** See [Troubleshooting](troubleshooting.md) for the `devices/` warning, systemd 257+ `status=218/CAPABILITIES`, and the Arch glibc 2.43 build failure.
+
 ## Verify
 
 ```sh
