@@ -157,7 +157,7 @@ jobs:
       - name: Build .deb (mirror release.yml build-deb job)
         run: |
           set -euo pipefail
-          VERSION=ci
+          VERSION=0.0.0-ci
           DEB_ARCH=amd64
           TARGET=x86_64-linux-musl
           TARBALL="padctl-ci-${TARGET}.tar.gz"
@@ -195,7 +195,7 @@ jobs:
       - name: Verify .deb file layout
         run: |
           set -euo pipefail
-          OUT=$(dpkg-deb -c padctl_ci_amd64.deb)
+          OUT=$(dpkg-deb -c padctl_0.0.0-ci_amd64.deb)
           echo "${OUT}" | grep -q ' \./usr/bin/padctl$' \
             || { echo "FAIL: /usr/bin/padctl missing"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/lib/systemd/user/padctl\.service$' \
@@ -212,7 +212,7 @@ jobs:
           docker run --rm -v "$PWD:/work:ro" debian:12 /bin/bash -euo pipefail -c '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd 2>/dev/null
-            dpkg -i /work/padctl_ci_amd64.deb || (apt-get install -fy && dpkg -i /work/padctl_ci_amd64.deb)
+            dpkg -i /work/padctl_0.0.0-ci_amd64.deb || (apt-get install -fy && dpkg -i /work/padctl_0.0.0-ci_amd64.deb)
             test -d /usr/share/padctl/devices
             test -f /usr/share/padctl/devices/flydigi/vader5.toml
             test -x /usr/bin/padctl
