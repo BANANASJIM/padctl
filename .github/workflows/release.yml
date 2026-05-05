@@ -273,8 +273,9 @@ jobs:
           sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${X86_HASH}')/" PKGBUILD
           sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${ARM_HASH}')/" PKGBUILD
 
+          HOST_UID=$(id -u)
           docker run --rm -v "$PWD:/pkg" archlinux:latest bash -c \
-            "pacman -Sy --noconfirm pacman-contrib && useradd -m builder && chown -R builder /pkg && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO'"
+            "pacman -Sy --noconfirm pacman-contrib && useradd -m -u ${HOST_UID} builder && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO'"
 
           git config user.name "bananasjim"
           git config user.email "bananasjim1@gmail.com"
