@@ -13,8 +13,15 @@ A prebuilt binary package (`padctl-bin`) is also available in the AUR.
 ### Debian / Ubuntu
 
 ```sh
-curl -fLO https://github.com/BANANASJIM/padctl/releases/download/v0.1.2/padctl_0.1.2_amd64.deb
-sudo dpkg -i padctl_0.1.2_amd64.deb
+curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_amd64.deb
+sudo dpkg -i padctl_amd64.deb
+```
+
+For arm64:
+
+```sh
+curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_arm64.deb
+sudo dpkg -i padctl_arm64.deb
 ```
 
 ## Prerequisites
