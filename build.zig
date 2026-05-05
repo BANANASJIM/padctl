@@ -185,6 +185,18 @@ pub fn build(b: *std.Build) void {
     if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     test_step.dependOn(&b.addRunArtifact(capture_tests).step);
 
+    // cli_smoke: spawn zig-out/bin/padctl as subprocess; skips if binary absent.
+    const smoke_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/cli_smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    smoke_mod.addImport("build_options", build_opts.createModule());
+    const smoke_tests = b.addTest(.{ .root_module = smoke_mod });
+    const run_smoke = b.addRunArtifact(smoke_tests);
+    run_smoke.step.dependOn(&exe.step);
+    test_step.dependOn(&run_smoke.step);
+
     // test-integration: Layer 2 (UHID, requires privilege)
     const integration_step = b.step("test-integration", "Run Layer 2 integration tests (UHID, local)");
     const integ_mod = b.createModule(.{
