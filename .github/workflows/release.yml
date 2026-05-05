@@ -16,6 +16,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify tag matches build.zig.zon version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_VER="${TAG#v}"
+          ZON_VER=$(grep -E '^\s*\.version\s*=' build.zig.zon | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$TAG_VER" != "$ZON_VER" ]; then
+            echo "::error::Tag $TAG (version $TAG_VER) does not match build.zig.zon version $ZON_VER. Bump build.zig.zon before tagging."
+            exit 1
+          fi
+          echo "tag $TAG matches build.zig.zon version $ZON_VER"
+
       - name: Generate changelog
         env:
           TAG: ${{ github.ref_name }}

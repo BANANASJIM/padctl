@@ -172,7 +172,7 @@ const DeviceInstance = device_instance.DeviceInstance;
 const Supervisor = supervisor.Supervisor;
 const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
-const VERSION = "0.1.0";
+const VERSION = @import("build_options").version;
 
 pub const DumpAction = enum { enable, disable, status, @"export", clear };
 

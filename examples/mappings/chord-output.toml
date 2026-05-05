@@ -2,6 +2,12 @@
 # A single button press emits a multi-key chord (modifier+key combo).
 # On press: down events emitted in declaration order.
 # On release: up events emitted in reverse order.
+#
+# PREVIEW — As of v0.1.5 the array syntax parses and validates, and the
+# source button is suppressed, but no key events are dispatched yet.
+# Chord output dispatch lands in a follow-up release. Buttons remapped to
+# arrays in this file currently emit nothing on press; do not deploy this
+# example as your daily mapping.
 
 [meta]
 name = "chord-output-demo"
