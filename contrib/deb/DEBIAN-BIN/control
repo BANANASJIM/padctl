@@ -1,3 +1,4 @@
+# Version/Architecture: sed-overwritten by .github/workflows/release.yml and build-deb.sh — local edits have no effect.
 Package: padctl
 Version: 0.1.0
 Architecture: amd64

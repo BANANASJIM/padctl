@@ -8,6 +8,7 @@
 
 set -euo pipefail
 
+# VERSION is passed as $1 (default 0.1.0); build-time sed patches DEBIAN/control — don't edit that file's Version directly.
 VERSION="${1:-0.1.0}"
 ARCH="$(dpkg --print-architecture)"  # amd64 or arm64
 

@@ -240,7 +240,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             // Not deferred — items must survive into run()/uninstall(); process exits after.
             var mapping_list = std.ArrayList([]const u8){};
             while (args.next()) |iarg| {
-                if (std.mem.eql(u8, iarg, "--prefix")) {
+                if (std.mem.eql(u8, iarg, "--help") or std.mem.eql(u8, iarg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, iarg, "--prefix")) {
                     opts.prefix = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, iarg, "--destdir")) {
                     opts.destdir = args.next() orelse return error.MissingArgValue;
@@ -274,7 +277,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             // Not deferred — items must survive into uninstall(); process exits after.
             var mapping_list = std.ArrayList([]const u8){};
             while (args.next()) |iarg| {
-                if (std.mem.eql(u8, iarg, "--prefix")) {
+                if (std.mem.eql(u8, iarg, "--help") or std.mem.eql(u8, iarg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, iarg, "--prefix")) {
                     opts.prefix = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, iarg, "--destdir")) {
                     opts.destdir = args.next() orelse return error.MissingArgValue;
@@ -296,7 +302,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "scan")) {
             parsed_cli.scan = true;
             while (args.next()) |sub_arg| {
-                if (std.mem.eql(u8, sub_arg, "--config-dir")) {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--config-dir")) {
                     parsed_cli.scan_config_dir = args.next() orelse return error.MissingArgValue;
                 } else {
                     std.log.err("unknown scan argument: {s}", .{sub_arg});
@@ -306,7 +315,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "list-mappings")) {
             parsed_cli.list_mappings = true;
             while (args.next()) |sub_arg| {
-                if (std.mem.eql(u8, sub_arg, "--config-dir")) {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--config-dir")) {
                     parsed_cli.list_mappings_config_dir = args.next() orelse return error.MissingArgValue;
                 } else {
                     std.log.err("unknown list-mappings argument: {s}", .{sub_arg});
@@ -331,8 +343,17 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             parsed_cli.doc_gen_output = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "reload")) {
             parsed_cli.reload = true;
-        } else if (std.mem.eql(u8, arg, "--pid")) {
-            parsed_cli.reload_pid = args.next() orelse return error.MissingArgValue;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--pid")) {
+                    parsed_cli.reload_pid = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown reload argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
         } else if (std.mem.eql(u8, arg, "config")) {
             const sub = args.next() orelse {
                 std.log.err("config: missing subcommand (list|init|edit|test)", .{});
@@ -380,7 +401,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             var device_id: ?[]const u8 = null;
             var persist = false;
             while (args.next()) |sub_arg| {
-                if (std.mem.eql(u8, sub_arg, "--device")) {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--device")) {
                     device_id = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
@@ -402,7 +426,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "status")) {
             parsed_cli.status_cmd = true;
             while (args.next()) |sub_arg| {
-                if (std.mem.eql(u8, sub_arg, "--socket")) {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
                     parsed_cli.socket_explicit = true;
                 } else {
@@ -413,7 +440,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "devices")) {
             parsed_cli.devices_cmd = true;
             while (args.next()) |sub_arg| {
-                if (std.mem.eql(u8, sub_arg, "--socket")) {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--socket")) {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
                     parsed_cli.socket_explicit = true;
                 } else {
@@ -426,6 +456,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             var dump_args: [16][]const u8 = undefined;
             var dump_argc: usize = 0;
             while (args.next()) |da| {
+                if (std.mem.eql(u8, da, "--help") or std.mem.eql(u8, da, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                }
                 if (dump_argc >= dump_args.len) {
                     std.log.err("too many dump arguments", .{});
                     return error.UnknownArgument;

@@ -1,6 +1,7 @@
 # Maintainer: padctl maintainers
 # NOTE: No release tags exist yet. Update source URLs and sha256sums when
 #       release tarballs are published at ${url}/releases/.
+# pkgver/pkgrel/sha256sums: sed-overwritten by .github/workflows/release.yml — local edits have no effect.
 pkgname=padctl-bin
 pkgver=0.1.1
 pkgrel=1
