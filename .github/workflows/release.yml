@@ -170,7 +170,7 @@ jobs:
           cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
           cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
 
-          cp -r "${SRC}/devices/"* "${DEST}/usr/share/padctl/"
+          cp -r "${SRC}/devices" "${DEST}/usr/share/padctl/"
           install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
 
           dpkg-deb --build --root-owner-group "${DEST}" "${PKG}.deb"

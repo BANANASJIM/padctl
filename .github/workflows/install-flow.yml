@@ -124,3 +124,97 @@ jobs:
 
               echo "=== all invariants passed ==="
             '
+
+  pkg-deb-smoke:
+    name: pkg / deb structure invariants
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build static padctl (musl)
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
+
+      - name: Stage release tarball (mirror release.yml build job)
+        run: |
+          set -euo pipefail
+          STAGING=padctl-ci-x86_64-linux-musl
+          mkdir -p "${STAGING}/bin" "${STAGING}/install"
+          for bin in padctl padctl-capture padctl-debug; do
+            [ -f "zig-out/bin/${bin}" ] && cp "zig-out/bin/${bin}" "${STAGING}/bin/"
+          done
+          sudo ./zig-out/bin/padctl install --destdir "$PWD/_install_stage" --prefix /usr --no-enable --no-start
+          cp _install_stage/usr/lib/systemd/user/*.service "${STAGING}/install/"
+          cp _install_stage/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
+          [ -f _install_stage/usr/bin/padctl-reconnect ] && cp _install_stage/usr/bin/padctl-reconnect "${STAGING}/install/"
+          cp -r devices "${STAGING}/"
+          cp LICENSE README.md "${STAGING}/"
+          tar czf "${STAGING}.tar.gz" "${STAGING}"
+
+      - name: Build .deb (mirror release.yml build-deb job)
+        run: |
+          set -euo pipefail
+          VERSION=ci
+          DEB_ARCH=amd64
+          TARGET=x86_64-linux-musl
+          TARBALL="padctl-ci-${TARGET}.tar.gz"
+          PKG="padctl_${VERSION}_${DEB_ARCH}"
+          DEST="${PWD}/${PKG}"
+          tar -xzf "${TARBALL}"
+          SRC="padctl-ci-${TARGET}"
+
+          mkdir -p "${DEST}/DEBIAN"
+          for f in control postinst prerm postrm; do
+            cp "contrib/deb/DEBIAN-BIN/$f" "${DEST}/DEBIAN/$f"
+          done
+          chmod 0644 "${DEST}/DEBIAN/control"
+          chmod 0755 "${DEST}/DEBIAN/postinst" "${DEST}/DEBIAN/prerm" "${DEST}/DEBIAN/postrm"
+          sed -i "s/^Version:.*/Version: ${VERSION}/" "${DEST}/DEBIAN/control"
+          sed -i "s/^Architecture:.*/Architecture: ${DEB_ARCH}/" "${DEST}/DEBIAN/control"
+
+          mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/user" \
+                   "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/share/padctl" \
+                   "${DEST}/usr/share/doc/padctl"
+
+          for bin in padctl padctl-capture padctl-debug padctl-reconnect; do
+            [ -f "${SRC}/bin/${bin}" ] && install -Dm755 "${SRC}/bin/${bin}" "${DEST}/usr/bin/${bin}"
+          done
+          [ -f "${SRC}/install/padctl-reconnect" ] && install -Dm755 "${SRC}/install/padctl-reconnect" "${DEST}/usr/bin/padctl-reconnect"
+
+          cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
+          cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
+
+          cp -r "${SRC}/devices" "${DEST}/usr/share/padctl/"
+          install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
+
+          dpkg-deb --build --root-owner-group "${DEST}" "${PKG}.deb"
+
+      - name: Verify .deb file layout
+        run: |
+          set -euo pipefail
+          OUT=$(dpkg-deb -c padctl_ci_amd64.deb)
+          echo "${OUT}" | grep -q ' \./usr/bin/padctl$' \
+            || { echo "FAIL: /usr/bin/padctl missing"; echo "${OUT}"; exit 1; }
+          echo "${OUT}" | grep -q ' \./usr/lib/systemd/user/padctl\.service$' \
+            || { echo "FAIL: padctl.service missing"; echo "${OUT}"; exit 1; }
+          echo "${OUT}" | grep -q ' \./usr/share/padctl/devices/flydigi/vader5\.toml$' \
+            || { echo "FAIL: vader5.toml not under /usr/share/padctl/devices/"; echo "${OUT}"; exit 1; }
+          DEVICES=$(echo "${OUT}" | grep -c '^.* \./usr/share/padctl/devices/.\+/.\+\.toml$' || true)
+          [ "${DEVICES}" -ge 5 ] \
+            || { echo "FAIL: expected >=5 .toml under devices/, got ${DEVICES}"; echo "${OUT}"; exit 1; }
+          echo "PASS: .deb structure invariants (${DEVICES} device TOMLs under devices/)"
+
+      - name: Install .deb in Debian 12 + post-install structural check
+        run: |
+          docker run --rm -v "$PWD:/work:ro" debian:12 /bin/bash -euo pipefail -c '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd 2>/dev/null
+            dpkg -i /work/padctl_ci_amd64.deb || (apt-get install -fy && dpkg -i /work/padctl_ci_amd64.deb)
+            test -d /usr/share/padctl/devices
+            test -f /usr/share/padctl/devices/flydigi/vader5.toml
+            test -x /usr/bin/padctl
+            /usr/bin/padctl --help >/dev/null
+          '
