@@ -215,7 +215,7 @@ jobs:
       - name: Install .deb in Debian 12 + runtime invariants
         run: |
           ZON_VER=$(grep -E '^\s*\.version\s*=' build.zig.zon | sed -E 's/.*"([^"]+)".*/\1/')
-          docker run --rm -v "$PWD:/work:ro" -e ZON_VER debian:12 /bin/bash -euo pipefail -c '
+          docker run --rm -v "$PWD:/work:ro" -e ZON_VER="${ZON_VER}" debian:12 /bin/bash -euo pipefail -c '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd 2>/dev/null
 
