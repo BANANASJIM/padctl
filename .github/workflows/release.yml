@@ -200,8 +200,36 @@ jobs:
           name: deb-${{ matrix.deb_arch }}
           path: ${{ env.DEB }}
 
+  verify-release-artifact:
+    needs: [build-deb]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - deb_arch: amd64
+    steps:
+      - name: Download .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-${{ matrix.deb_arch }}
+
+      - name: Install and smoke-test inside debian:12
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          DEB=$(ls padctl_*_${{ matrix.deb_arch }}.deb | head -1)
+          docker run --rm -v "$PWD/$DEB:/pkg/$DEB" debian:12 bash -c "
+            set -e
+            apt-get install -y /pkg/$DEB >/dev/null 2>&1
+            padctl --version | grep -F '${VERSION}'
+            padctl list-mappings
+            padctl --validate /usr/share/padctl/devices/sony/dualsense.toml
+            test -d /usr/share/padctl/devices/
+          "
+
   checksums:
-    needs: [build, build-deb]
+    needs: [build, build-deb, verify-release-artifact]
     runs-on: ubuntu-latest
 
     steps:
