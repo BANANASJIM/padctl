@@ -237,8 +237,8 @@ jobs:
 
             echo "::group::version sync (zon=${ZON_VER})"
             BIN_VER=$(/usr/bin/padctl --version | awk "{print \$2}")
-            if [ "${BIN_VER}" != "0.0.0-ci" ]; then
-              echo "FAIL: --version reported ${BIN_VER}, expected 0.0.0-ci (build.zig.zon override should propagate via build_options.version)"
+            if [ "${BIN_VER}" != "${ZON_VER}" ]; then
+              echo "FAIL: --version reported ${BIN_VER}, expected ${ZON_VER} from build.zig.zon (SSOT path build_options.version is broken)"
               exit 1
             fi
             echo "::endgroup::"
