@@ -200,21 +200,95 @@ jobs:
             || { echo "FAIL: /usr/bin/padctl missing"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/lib/systemd/user/padctl\.service$' \
             || { echo "FAIL: padctl.service missing"; echo "${OUT}"; exit 1; }
+          echo "${OUT}" | grep -q ' \./usr/lib/udev/rules\.d/60-padctl\.rules$' \
+            || { echo "FAIL: 60-padctl.rules missing"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/share/padctl/devices/flydigi/vader5\.toml$' \
             || { echo "FAIL: vader5.toml not under /usr/share/padctl/devices/"; echo "${OUT}"; exit 1; }
           DEVICES=$(echo "${OUT}" | grep -c '^.* \./usr/share/padctl/devices/.\+/.\+\.toml$' || true)
           [ "${DEVICES}" -ge 5 ] \
             || { echo "FAIL: expected >=5 .toml under devices/, got ${DEVICES}"; echo "${OUT}"; exit 1; }
-          echo "PASS: .deb structure invariants (${DEVICES} device TOMLs under devices/)"
+          BROKEN=$(echo "${OUT}" | grep -c '^.* \./usr/share/padctl/[^/]\+/[^/]\+\.toml$' || true)
+          [ "${BROKEN}" -eq 0 ] \
+            || { echo "FAIL: ${BROKEN} TOMLs at broken layout /usr/share/padctl/<vendor>/ (pre-#217 regression)"; echo "${OUT}"; exit 1; }
+          echo "PASS: .deb structure invariants (${DEVICES} device TOMLs under devices/, 0 at broken layout)"
 
-      - name: Install .deb in Debian 12 + post-install structural check
+      - name: Install .deb in Debian 12 + runtime invariants
         run: |
-          docker run --rm -v "$PWD:/work:ro" debian:12 /bin/bash -euo pipefail -c '
+          ZON_VER=$(grep -E '^\s*\.version\s*=' build.zig.zon | sed -E 's/.*"([^"]+)".*/\1/')
+          docker run --rm -v "$PWD:/work:ro" -e ZON_VER debian:12 /bin/bash -euo pipefail -c '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd 2>/dev/null
+
+            echo "::group::install"
             dpkg -i /work/padctl_0.0.0-ci_amd64.deb || (apt-get install -fy && dpkg -i /work/padctl_0.0.0-ci_amd64.deb)
-            test -d /usr/share/padctl/devices
-            test -f /usr/share/padctl/devices/flydigi/vader5.toml
-            test -x /usr/bin/padctl
-            /usr/bin/padctl --help >/dev/null
+            echo "::endgroup::"
+
+            echo "::group::reinstall idempotent"
+            dpkg -i /work/padctl_0.0.0-ci_amd64.deb
+            echo "::endgroup::"
+
+            echo "::group::file layout"
+            test -d /usr/share/padctl/devices || { echo FAIL devices dir missing; exit 1; }
+            test -f /usr/share/padctl/devices/flydigi/vader5.toml || { echo FAIL vader5.toml missing; exit 1; }
+            test -x /usr/bin/padctl || { echo FAIL padctl bin not executable; exit 1; }
+            test -f /usr/lib/systemd/user/padctl.service || { echo FAIL service unit missing; exit 1; }
+            test -f /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL udev rules missing; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::version sync (zon=${ZON_VER})"
+            BIN_VER=$(/usr/bin/padctl --version | awk "{print \$2}")
+            if [ "${BIN_VER}" != "0.0.0-ci" ]; then
+              echo "FAIL: --version reported ${BIN_VER}, expected 0.0.0-ci (build.zig.zon override should propagate via build_options.version)"
+              exit 1
+            fi
+            echo "::endgroup::"
+
+            echo "::group::shipped device TOMLs all parse"
+            FAIL=0; TOTAL=0
+            for toml in $(find /usr/share/padctl/devices -name "*.toml"); do
+              TOTAL=$((TOTAL+1))
+              /usr/bin/padctl --validate "$toml" 2>&1 | grep -q ": OK$" || { echo "FAIL validate: $toml"; FAIL=$((FAIL+1)); }
+            done
+            [ "$FAIL" -eq 0 ] || { echo "FAIL: ${FAIL}/${TOTAL} TOMLs failed --validate"; exit 1; }
+            echo "PASS validated ${TOTAL}/${TOTAL}"
+            echo "::endgroup::"
+
+            echo "::group::udev rules content (Vader 5 Pro / 8BitDo / input-group fallback)"
+            grep -q "37d7.*2401" /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL vader5 USB VID/PID rule missing; exit 1; }
+            grep -q "GROUP=\"input\"" /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL input-group fallback missing; exit 1; }
+            grep -q "TAG+=\"uaccess\"" /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL uaccess tag missing; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::systemd unit critical fields"
+            grep -qE "^ExecStart=/usr/bin/padctl" /usr/lib/systemd/user/padctl.service || { echo FAIL ExecStart wrong; exit 1; }
+            grep -qE "^StateDirectory=padctl$" /usr/lib/systemd/user/padctl.service || { echo FAIL StateDirectory wrong; exit 1; }
+            grep -qE "^NoNewPrivileges=true$" /usr/lib/systemd/user/padctl.service || { echo FAIL NoNewPrivileges missing; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::dump subcommand recognized (issue #216 symptom 3)"
+            /usr/bin/padctl dump 2>&1 | grep -qiE "unknown argument" && { echo FAIL dump still unknown; exit 1; } || echo "PASS dump recognized"
+            echo "::endgroup::"
+
+            echo "::group::scan + list-mappings smoke"
+            /usr/bin/padctl scan >/dev/null 2>&1 || { echo FAIL scan crashed; exit 1; }
+            /usr/bin/padctl list-mappings >/dev/null 2>&1 || { echo FAIL list-mappings crashed; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::static linkage (no glibc dep)"
+            ldd /usr/bin/padctl 2>&1 | grep -q "not a dynamic executable" || { echo FAIL not statically linked; ldd /usr/bin/padctl; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::uninstall removes everything"
+            apt-get remove -y padctl
+            test ! -f /usr/bin/padctl || { echo FAIL bin still present; exit 1; }
+            test ! -f /usr/lib/systemd/user/padctl.service || { echo FAIL service still present; exit 1; }
+            test ! -f /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL udev still present; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::purge cleans residual share dir"
+            apt-get purge -y padctl
+            test ! -d /usr/share/padctl || { echo FAIL share dir not cleaned: $(ls /usr/share/padctl); exit 1; }
+            echo "::endgroup::"
+
+            echo "ALL INVARIANTS PASS"
           '
