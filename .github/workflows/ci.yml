@@ -128,6 +128,12 @@ jobs:
             setup: dnf install -y ca-certificates curl xz gcc gcc-c++ make pkgconf-pkg-config kernel-headers glibc-headers glibc-devel
     steps:
       - uses: actions/checkout@v4
+      - name: Install Zig (host)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Build musl binary (host)
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
       - name: Run check-all in container
         env:
           DISTRO_IMAGE: ${{ matrix.image }}
@@ -147,3 +153,20 @@ jobs:
               timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false test-safe --summary all
               timeout 600 /tmp/zig-x86_64-linux-0.15.2/zig build -Dlibusb=false check-fmt
             " 2>&1 | tee distro-check.log
+      - name: Smoke-test musl binary in container
+        # Catches dynamic-linker / glibc symbol issues that zig build test cannot catch (issue #147)
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/zig-out/bin/padctl:/usr/local/bin/padctl" \
+            -v "$PWD/devices:/devices" \
+            "$DISTRO_IMAGE" \
+            /bin/sh -c "
+              set -e
+              padctl --version
+              padctl --help > /dev/null
+              padctl scan --help > /dev/null
+              padctl --validate /devices/sony/dualsense.toml
+            "

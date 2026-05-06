@@ -307,10 +307,11 @@ jobs:
 
           HOST_UID=$(id -u)
           docker run --rm -v "$PWD:/pkg" archlinux:latest bash -c \
-            "pacman -Sy --noconfirm pacman-contrib && useradd -m -u ${HOST_UID} builder && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO'"
+            "pacman -Sy --noconfirm pacman-contrib fakeroot binutils && useradd -m -u ${HOST_UID} builder && chown -R builder /pkg && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO && makepkg --nodeps --noextract --nobuild --noconfirm'"
 
-          git config user.name "bananasjim"
-          git config user.email "bananasjim1@gmail.com"
+          # --global writes to ~/.gitconfig (runner home), not .git/config which docker chowned to builder uid
+          git config --global user.name "bananasjim"
+          git config --global user.email "bananasjim1@gmail.com"
           git add PKGBUILD .SRCINFO
           git commit -m "update to ${VERSION}"
           git push
