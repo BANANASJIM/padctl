@@ -307,9 +307,10 @@ jobs:
 
           HOST_UID=$(id -u)
           docker run --rm -v "$PWD:/pkg" archlinux:latest bash -c \
-            "pacman -Sy --noconfirm pacman-contrib fakeroot binutils && useradd -m -u ${HOST_UID} builder && chown -R builder /pkg && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO && makepkg --nodeps --noextract --nobuild --noconfirm'"
+            "pacman -Sy --noconfirm pacman-contrib fakeroot binutils namcap && useradd -m -u ${HOST_UID} builder && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO && namcap PKGBUILD'"
+          sudo chown -R "$(id -u):$(id -g)" /tmp/padctl-bin || true
 
-          # --global writes to ~/.gitconfig (runner home), not .git/config which docker chowned to builder uid
+          # --global writes to ~/.gitconfig (runner home), not .git/config which may be owned by builder uid
           git config --global user.name "bananasjim"
           git config --global user.email "bananasjim1@gmail.com"
           git add PKGBUILD .SRCINFO
