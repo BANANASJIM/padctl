@@ -1709,15 +1709,18 @@ test "install: udev rules must not contain SYSTEMD_WANTS" {
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"systemd\"") == null);
 }
 
-test "install: service content has hardening directives" {
+test "install: user unit has no systemd 257+ incompatible hardening (issue #216)" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const content = try generateServiceContent(allocator, "/usr");
     defer allocator.free(content);
-    try testing.expect(std.mem.indexOf(u8, content, "NoNewPrivileges=true") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "LockPersonality=true") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "ProtectClock=true") != null);
+    // NoNewPrivileges, LockPersonality, ProtectClock cause EXIT_CAPABILITIES (218)
+    // in user scope on systemd 257+ — must be absent from the user unit.
+    try testing.expect(std.mem.indexOf(u8, content, "NoNewPrivileges=") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "LockPersonality=") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "ProtectClock=") == null);
     try testing.expect(std.mem.indexOf(u8, content, "SupplementaryGroups") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
 }
 
 test "install: old system unit triggers migration hint" {

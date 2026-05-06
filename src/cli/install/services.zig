@@ -26,9 +26,6 @@ pub fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) 
         \\ExecStart={s}
         \\Restart=on-failure
         \\RestartSec=3
-        \\NoNewPrivileges=true
-        \\LockPersonality=true
-        \\ProtectClock=true
         \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,
         \\# /var/lib/padctl on system services. systemd pre-creates it with
         \\# the right perms, exports $STATE_DIRECTORY, and auto-whitelists
@@ -115,7 +112,6 @@ pub fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []cons
         \\PrivateTmp=true
         \\RuntimeDirectory=padctl
         \\StateDirectory=padctl
-        \\NoNewPrivileges=true
         \\SupplementaryGroups=input
         \\DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw
