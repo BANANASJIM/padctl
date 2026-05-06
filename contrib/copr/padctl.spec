@@ -1,3 +1,4 @@
+# Version: update this field when cutting a new COPR release (not overwritten by release.yml).
 Name:           padctl
 Version:        0.1.0
 Release:        1%{?dist}
