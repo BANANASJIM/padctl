@@ -31,6 +31,8 @@ If the list is empty, the old package is still installed — re-download and rei
 
 ## User service exits with `status=218/CAPABILITIES` on Ubuntu 26.04 / systemd 257+
 
+**Fixed in v0.1.6.** If you are running an older release, use the workaround below.
+
 **Symptoms:**
 
 - `systemctl --user status padctl.service` shows:
@@ -41,12 +43,12 @@ If the list is empty, the old package is still installed — re-download and rei
 - The daemon never starts; `padctl status` returns `cannot connect to padctl daemon`.
 - The restart counter climbs in `journalctl --user -u padctl.service`.
 
-**Root cause:** the user service unit declares `LockPersonality=true`, `ProtectClock=true`, and
-`NoNewPrivileges=true`. systemd 257+ enforces these options more strictly on user instances; the
-kernel rejects the capability adjustments required to apply them, killing the process before it
-starts.
+**Root cause (pre-v0.1.6):** the user service unit declared `LockPersonality=true`,
+`ProtectClock=true`, and `NoNewPrivileges=true`. systemd 257+ enforces these options more
+strictly on user instances; the kernel rejects the capability adjustments required to apply
+them, killing the process before it starts.
 
-**Workaround:** install a drop-in that clears the three offending directives:
+**Workaround (pre-v0.1.6 only):** install a drop-in that clears the three offending directives:
 
 ```sh
 mkdir -p ~/.config/systemd/user/padctl.service.d
@@ -64,7 +66,7 @@ Assigning an empty value to a systemd directive resets it to the default (unset)
 and security impact is small: the daemon runs as your user with no privileged operations, so
 removing these three flags does not expand what it can do.
 
-Reference: [issue #220](https://github.com/BANANASJIM/padctl/issues/220)
+Reference: [issue #216](https://github.com/BANANASJIM/padctl/issues/216)
 
 ---
 

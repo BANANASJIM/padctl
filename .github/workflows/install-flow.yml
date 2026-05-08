@@ -262,7 +262,8 @@ jobs:
             echo "::group::systemd unit critical fields"
             grep -qE "^ExecStart=/usr/bin/padctl" /usr/lib/systemd/user/padctl.service || { echo FAIL ExecStart wrong; exit 1; }
             grep -qE "^StateDirectory=padctl$" /usr/lib/systemd/user/padctl.service || { echo FAIL StateDirectory wrong; exit 1; }
-            grep -qE "^NoNewPrivileges=true$" /usr/lib/systemd/user/padctl.service || { echo FAIL NoNewPrivileges missing; exit 1; }
+            # issue #216: NoNewPrivileges/LockPersonality/ProtectClock must be absent from user unit
+            grep -qE "^(NoNewPrivileges|LockPersonality|ProtectClock)=" /usr/lib/systemd/user/padctl.service && { echo FAIL incompatible hardening directive present; exit 1; } || echo "PASS no incompatible directives"
             echo "::endgroup::"
 
             echo "::group::dump subcommand recognized (issue #216 symptom 3)"
@@ -292,3 +293,59 @@ jobs:
 
             echo "ALL INVARIANTS PASS"
           '
+
+  systemd-hardening:
+    name: systemd / unit hardening compat (Ubuntu 26.04 + systemd 259)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build padctl
+        run: zig build -Dlibusb=false
+
+      - name: Generate user unit from installed binary
+        run: |
+          set -euo pipefail
+          mkdir -p _stage/usr/lib/systemd/user
+          sudo ./zig-out/bin/padctl install \
+            --destdir "$PWD/_stage" --prefix /usr --no-enable --no-start
+          cp _stage/usr/lib/systemd/user/padctl.service /tmp/padctl.service
+
+      - name: Verify no incompatible hardening directives in user unit (issue #216)
+        run: |
+          set -euo pipefail
+          echo "=== generated user unit ==="
+          cat /tmp/padctl.service
+          echo "=== checking for removed directives ==="
+          if grep -E "^(NoNewPrivileges|LockPersonality|ProtectClock)=" /tmp/padctl.service; then
+            echo "FAIL: incompatible hardening directive found in user unit (breaks systemd 257+ user scope, issue #216)"
+            exit 1
+          fi
+          echo "PASS: no incompatible hardening directives"
+
+      - name: systemd-analyze verify in Ubuntu 26.04 (systemd 259)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /tmp/padctl.service:/tmp/padctl.service:ro \
+            ubuntu:26.04 \
+            /bin/bash -euo pipefail -c '
+              apt-get update -qq 2>/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd >/dev/null 2>&1
+              /lib/systemd/systemd --version 2>/dev/null | head -1
+              # stub binary so verify passes executable check
+              cp /bin/sh /usr/bin/padctl
+              echo "=== systemd-analyze verify ==="
+              systemd-analyze verify --man=no /tmp/padctl.service
+              echo "PASS: systemd-analyze verify clean"
+              echo "=== no incompatible directives ==="
+              if grep -E "^(NoNewPrivileges|LockPersonality|ProtectClock)=" /tmp/padctl.service; then
+                echo "FAIL: incompatible directive present"
+                exit 1
+              fi
+              echo "PASS: directives absent"
+            '
