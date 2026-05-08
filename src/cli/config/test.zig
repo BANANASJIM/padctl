@@ -181,11 +181,6 @@ test "test: mappingLabel with no remap returns null" {
     try std.testing.expectEqual(@as(?[]const u8, null), mappingLabel(&m, "A"));
 }
 
-test "test: openFirstHidraw returns error when no device" {
-    // In CI there are no hidraw devices; ensure it returns an error cleanly.
-    const result = openFirstHidraw();
-    // May succeed or fail depending on environment; just ensure no panic.
-    if (result) |fd| {
-        posix.close(fd);
-    } else |_| {}
-}
+// "openFirstHidraw returns error when no device" test removed: openFirstHidraw
+// scans /dev/hidraw0..63 and on dev machines an orphaned UHID device causes
+// hid_hw_open D-state even with O_NONBLOCK. The function is exercised via run().

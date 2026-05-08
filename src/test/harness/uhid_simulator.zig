@@ -225,34 +225,8 @@ fn findHidrawPath(vid: u16, pid: u16, expect_uniq: []const u8) !?HidrawEntry {
     return null;
 }
 
-// --- Tests -----------------------------------------------------------------
-
-const testing = std.testing;
-
-test "uhid_simulator: non-linux host skips cleanly" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-    try testing.expectError(error.SkipZigTest, UhidSimulator.create(.{
-        .vid = 0xFADE,
-        .pid = 0xCAFE,
-        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
-    }));
-}
-
-test "uhid_simulator: linux host without /dev/uhid or caps skips cleanly" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    // `/dev/uhid` may exist but not be writable under test runners. We accept
-    // either outcome: the device either came up, in which case we tear it
-    // down, or we see SkipZigTest — both are "no CI failure".
-    var sim = UhidSimulator.create(.{
-        .vid = 0xFADE,
-        .pid = 0xCAFE,
-        .name = "padctl-sim-test",
-        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
-        .hidraw_timeout_ms = 50,
-    }) catch |err| switch (err) {
-        error.SkipZigTest, error.HidrawNotFound, error.AccessDenied => return error.SkipZigTest,
-        else => |e| return e,
-    };
-    defer sim.destroy();
-    try testing.expect(sim.fd >= 0);
-}
+// Self-tests removed: UhidSimulator.create opens /dev/uhid and findHidrawPath
+// scans /dev/hidraw*. On a host with an orphaned UHID device, posix.open with
+// O_NONBLOCK still blocks in hid_hw_open (kernel limitation). Coverage via
+// steam_deck_uhid_e2e_test and supervisor_uhid_grace_integration_test under
+// `zig build test-integration`, where /dev/uhid access is intentional.

@@ -1,4 +1,8 @@
 #!/bin/sh
+# test-uhid is excluded from pre-push: it opens /dev/uhid and the Wave A4
+# SIGTERM/SIGINT handler has no SIGKILL path — a leaked device parks subsequent
+# runs in kernel D-state indefinitely. Run manually before merging any change
+# that touches UHID paths: PADCTL_TEST_REQUIRE_UHID=1 zig build test-uhid
 set -e
 
 if [ "$SKIP_TSAN" = "1" ]; then
