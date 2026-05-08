@@ -335,37 +335,27 @@ pub fn build(b: *std.Build) void {
     gen_e2e_tests.linkLibC();
     e2e_step.dependOn(&b.addRunArtifact(gen_e2e_tests).step);
 
-    // test-uhid-uniq: Phase 13 Wave 5 canary — run ONLY the
-    // `src/test/uhid_uniq_pairing_test.zig` file as a standalone test binary.
-    // Split from `test` so the privileged Docker canary doesn't accidentally
-    // trigger other tests that probe real hidraw devices on the host and
-    // deadlock in `hid_hw_open`.
-    const uniq_step = b.step("test-uhid-uniq", "Run UHID uniq pairing test only (Wave 5 canary)");
-    // Root at src/ so the test's relative imports (../io/uhid.zig etc.)
-    // stay inside the module path. The `addTest` will still run the tests
-    // defined in `test/uhid_uniq_pairing_test.zig` via `test-filter`.
-    const uniq_mod = b.createModule(.{
-        .root_source_file = b.path("test_root.zig"),
+    // test-uhid: UHID kernel-touching tests. Excluded from test/test-safe/test-tsan
+    // because opening /dev/uhid triggers hid_hw_open in the kernel; a leaked device
+    // parks subsequent runs in D-state indefinitely (SIGKILL has no userspace handler).
+    // Requires /dev/uhid + CAP_SYS_ADMIN or input group membership.
+    // Do NOT add to check-all — run explicitly before merging UHID-affecting changes.
+    const uhid_step = b.step("test-uhid", "Run UHID kernel-touching tests (requires /dev/uhid + privilege)");
+    const uhid_mod = b.createModule(.{
+        .root_source_file = b.path("test_root_uhid.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = .trap,
     });
-    uniq_mod.addImport("toml", toml_mod);
-    uniq_mod.addImport("analyse", capture_analyse_mod);
-    uniq_mod.addImport("toml_gen", capture_toml_gen_mod);
-    uniq_mod.addImport("build_options", build_opts.createModule());
-    if (use_wasm) addWasm3(b, uniq_mod, wasm3_c_flags);
-    const uniq_tests = b.addTest(.{
-        .root_module = uniq_mod,
-        .filters = &.{"uhid_uniq_pairing_test"},
-    });
+    uhid_mod.addImport("toml", toml_mod);
+    const uhid_tests = b.addTest(.{ .root_module = uhid_mod });
     if (use_libusb) {
-        uniq_tests.linkSystemLibrary("usb-1.0");
+        uhid_tests.linkSystemLibrary("usb-1.0");
     } else {
-        uniq_tests.addIncludePath(b.path("compat"));
+        uhid_tests.addIncludePath(b.path("compat"));
     }
-    uniq_tests.linkLibC();
-    uniq_step.dependOn(&b.addRunArtifact(uniq_tests).step);
+    uhid_tests.linkLibC();
+    uhid_step.dependOn(&b.addRunArtifact(uhid_tests).step);
 
     // spike (only available when spike/toml_spike.zig exists)
     if (std.fs.cwd().access("spike/toml_spike.zig", .{})) |_| {

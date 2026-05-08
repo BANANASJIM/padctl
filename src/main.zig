@@ -1106,7 +1106,9 @@ test {
     _ = @import("core/rumble_scheduler.zig");
     _ = @import("io/uniq.zig");
     _ = @import("test/bugfix_regression_test.zig");
-    _ = @import("test/uhid_uniq_pairing_test.zig");
+    // uhid_uniq_pairing_test is EXCLUDED: it opens /dev/uhid and triggers
+    // hid_hw_open in the kernel, which can deadlock under SIGKILL/OOM (Wave A4
+    // SIGTERM handler has no SIGKILL path). Run via: zig build test-uhid
     _ = @import("test/macro_gamepad_button_test.zig");
     _ = @import("test/macro_e2e_test.zig");
     _ = @import("test/properties/config_props.zig");

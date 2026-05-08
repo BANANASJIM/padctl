@@ -39,3 +39,8 @@ jobs:
         env:
           PADCTL_TEST_REQUIRE_UHID: "1"
         run: zig build test-integration
+      - name: Run UHID kernel-touching unit tests (test-uhid)
+        if: steps.uhid_probe.outputs.uhid_ok == 'true'
+        env:
+          PADCTL_TEST_REQUIRE_UHID: "1"
+        run: zig build test-uhid
