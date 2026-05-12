@@ -296,12 +296,17 @@ test "macro: layer switch while macro active — held keys released, macros clea
     _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
-    // Press LT — processLayerTriggers fires action.active_changed on the rising
-    // edge of a hold trigger, which clears active_macros and emits releases.
+    // Press LT — PENDING entry alone must not clear macros (issue #79 fix).
     const lt_mask = btnMask(.LT);
-    const ev = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, 0);
+    _ = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
-    // active_macros must be empty after layer switch.
+    // Advance to ACTIVE then release LT → real layer transition → active_changed
+    // fires through processLayerTriggers → active_macros cleared, releases emitted.
+    _ = m.layer.onTimerExpired();
+    const ev = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+
+    // active_macros must be empty after the layer truly deactivates.
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 
     // At least one release event for KEY_LEFTSHIFT should be in aux.
