@@ -100,7 +100,6 @@ pub const LayerState = struct {
                     const res = self.onTriggerPress(cfg.name, timeout, now_ns);
                     if (res.arm_timer_ms) |ms| {
                         action.arm_timer_ms = ms;
-                        action.active_changed = true;
                     }
                 } else if (!pressed and was_pressed) {
                     // Only process release for the layer that owns tap_hold.
@@ -443,9 +442,38 @@ test "layer: processLayerTriggers: Hold press → PENDING, arm timer" {
     const action = ls.processLayerTriggers(&configs, lt, 0, 0);
     try testing.expect(action.arm_timer_ms != null);
     try testing.expectEqual(@as(?u64, 200), action.arm_timer_ms);
-    try testing.expect(action.active_changed);
     try testing.expect(ls.tap_hold != null);
     try testing.expectEqual(TapHoldPhase.pending, ls.tap_hold.?.phase);
+}
+
+test "layer: hold PENDING entry does not signal active_changed" {
+    // Regression: PENDING entry must not trigger mapper's active_changed reset
+    // path (gyro/stick reset + macro release emission). Only real transitions
+    // (PENDING→ACTIVE, ACTIVE→IDLE, tap-resolve, toggle) signal active_changed.
+    // Candidate root cause for issue #79.
+    const hold_cfg = LayerConfig{ .name = "aim", .trigger = "LM", .activation = "hold", .hold_timeout = 200 };
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{hold_cfg};
+    const lm = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.LM)));
+
+    const action = ls.processLayerTriggers(&configs, lm, 0, 0);
+    try testing.expect(action.arm_timer_ms != null);
+    try testing.expect(!action.active_changed);
+}
+
+test "layer: hold PENDING -> ACTIVE transition signals active_changed" {
+    // Guard against over-aggressive removal: the timer-fire path must still
+    // mark the layer state as changed so callers refresh getActive().
+    const hold_cfg = LayerConfig{ .name = "aim", .trigger = "LM", .activation = "hold", .hold_timeout = 200 };
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{hold_cfg};
+    const lm = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.LM)));
+
+    _ = ls.processLayerTriggers(&configs, lm, 0, 0);
+    const res = ls.onTimerExpired();
+    try testing.expect(res.layer_activated);
 }
 
 test "layer: processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive returns layer" {
