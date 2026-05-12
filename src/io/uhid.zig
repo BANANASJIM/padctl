@@ -92,7 +92,7 @@ pub const UhidDestroyEvent = extern struct {
 /// or the caller lacks permission so tests relying on a real UHID device
 /// skip cleanly on CI hosts without the capability.
 pub fn openUhid() !posix.fd_t {
-    return posix.open("/dev/uhid", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
+    return posix.open("/dev/uhid", .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| switch (err) {
         error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1020,4 +1020,15 @@ test "uhid: pollOutputReport returns null on WouldBlock (empty pipe)" {
     var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
     const report = try dev.pollOutputReport(&read_buf);
     try testing.expectEqual(@as(?OutputReport, null), report);
+}
+
+test "uhid: openUhid sets O_NONBLOCK on the fd" {
+    const fd = openUhid() catch |err| switch (err) {
+        error.SkipZigTest => return error.SkipZigTest,
+        else => return err,
+    };
+    defer posix.close(fd);
+    const flags: i32 = @intCast(try posix.fcntl(fd, posix.F.GETFL, 0));
+    const O_NONBLOCK_BIT: i32 = 0o4000;
+    try std.testing.expect((flags & O_NONBLOCK_BIT) != 0);
 }
