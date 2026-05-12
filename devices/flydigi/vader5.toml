@@ -98,20 +98,15 @@ Start  = "BTN_START"
 Home   = "BTN_MODE"
 LS     = "BTN_THUMBL"
 RS     = "BTN_THUMBR"
-M1     = "BTN_TRIGGER_HAPPY5"
-M2     = "BTN_TRIGGER_HAPPY7"
-M3     = "BTN_TRIGGER_HAPPY6"
-M4     = "BTN_TRIGGER_HAPPY8"
-O      = "BTN_TRIGGER_HAPPY9"
-# Less-common Vader 5 buttons — uncomment to expose to userland.
-# Input-side bit positions are declared in [report.button_group].map above
-# (C=16, Z=17, LM=22, RM=23). The BTN_TRIGGER_HAPPY* targets are arbitrary
-# but distinct from the M1–M4 block above; renumber if they collide with
-# mappings you use.
-# C      = "BTN_TRIGGER_HAPPY1"
-# Z      = "BTN_TRIGGER_HAPPY2"
-# LM     = "BTN_TRIGGER_HAPPY3"
-# RM     = "BTN_TRIGGER_HAPPY4"
+C      = "BTN_4"
+Z      = "BTN_5"
+LM     = "BTN_6"
+RM     = "BTN_7"
+M1     = "BTN_0"
+M2     = "BTN_1"
+M3     = "BTN_2"
+M4     = "BTN_3"
+O      = "BTN_8"
 
 [output.dpad]
 type = "hat"
