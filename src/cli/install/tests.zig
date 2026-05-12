@@ -817,6 +817,20 @@ test "install: generateReconnectScript has required commands" {
     try testing.expect(std.mem.indexOf(u8, script, "/etc/padctl/mappings/") != null);
 }
 
+test "services: generateReconnectScript embeds correct mappings dir for prefix=/usr/local" {
+    // Convention: sysconfdir is always /etc regardless of --prefix.
+    // systemConfigDir() in src/config/paths.zig is the SSOT.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+    // Binary path uses prefix
+    try testing.expect(std.mem.indexOf(u8, script, "/usr/local/bin/padctl") != null);
+    // Mappings dir is always /etc — not /usr/local/etc
+    try testing.expect(std.mem.indexOf(u8, script, "/etc/padctl/mappings") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "/usr/local/etc") == null);
+}
+
 test "install: generateUdevRules includes hotplug reconnect rules" {
     const testing = std.testing;
     const allocator = testing.allocator;
