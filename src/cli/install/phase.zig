@@ -335,8 +335,16 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
-    std.fs.deleteFileAbsolute("/run/padctl/padctl.pid") catch {};
-    std.fs.deleteFileAbsolute("/run/padctl/padctl.sock") catch {};
+    {
+        const path = try std.fmt.allocPrint(allocator, "{s}/run/padctl/padctl.pid", .{destdir});
+        defer allocator.free(path);
+        std.fs.deleteFileAbsolute(path) catch {};
+    }
+    {
+        const path = try std.fmt.allocPrint(allocator, "{s}/run/padctl/padctl.sock", .{destdir});
+        defer allocator.free(path);
+        std.fs.deleteFileAbsolute(path) catch {};
+    }
 
     if (destdir.len == 0) {
         const reload_plan = services.currentPlanFromEnv();
