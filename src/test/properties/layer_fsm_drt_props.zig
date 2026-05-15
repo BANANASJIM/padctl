@@ -73,6 +73,36 @@ fn splitFirst(comptime n: usize, line: []const u8) [n + 1][]const u8 {
     return out;
 }
 
+// LAYER_FSM rows are `action,description,before,after` where `before` and
+// `after` are Lean `repr (Option TapHoldState)` blobs that are EITHER the
+// literal `none` OR `some { ... }` with internal commas (but no nested
+// braces — `repr (Option TapHoldState)` has exactly one brace pair). A
+// fixed-comma split corrupts `before`/`after`, so locate the
+// before/after boundary structurally: skip the two comma-free leading
+// fields, then find the comma that terminates the first repr blob (right
+// after `none`, or right after the matching `}`).
+fn splitLayerFsmRow(line: []const u8) [4][]const u8 {
+    var out: [4][]const u8 = .{""} ** 4;
+    const c1 = std.mem.indexOfScalar(u8, line, ',') orelse return out;
+    out[0] = line[0..c1];
+    const rest1 = line[c1 + 1 ..];
+    const c2 = std.mem.indexOfScalar(u8, rest1, ',') orelse return out;
+    out[1] = rest1[0..c2];
+    const blobs = rest1[c2 + 1 ..];
+
+    const trimmed = std.mem.trimLeft(u8, blobs, " ");
+    var boundary: usize = undefined;
+    if (std.mem.startsWith(u8, trimmed, "none")) {
+        boundary = std.mem.indexOfScalar(u8, blobs, ',') orelse blobs.len;
+    } else {
+        const close = std.mem.indexOfScalar(u8, blobs, '}') orelse blobs.len;
+        boundary = if (std.mem.indexOfScalarPos(u8, blobs, close, ',')) |b| b else blobs.len;
+    }
+    out[2] = blobs[0..boundary];
+    out[3] = if (boundary < blobs.len) blobs[boundary + 1 ..] else "";
+    return out;
+}
+
 // --- BUTTON_DECODE ---
 //
 // CSV schema: `srcOff,srcSize,entries,expected`
@@ -244,7 +274,7 @@ test "layer_fsm_drt: LAYER_FSM transitions vs production LayerState" {
     var row: usize = 0;
     while (lines.next()) |line| {
         if (!isDataLine(line)) break;
-        const f = splitFirst(3, line); // action, description, before, after
+        const f = splitLayerFsmRow(line); // action, description, before, after
         const action = f[0];
         const before = parseRepr(f[2]);
         const after = parseRepr(f[3]);
