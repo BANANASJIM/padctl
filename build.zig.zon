@@ -4,8 +4,8 @@
     .version = "0.1.5",
     .dependencies = .{
         .toml = .{
-            .url = "https://github.com/sam701/zig-toml/archive/refs/heads/main.tar.gz",
-            .hash = "toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR",
+            .url = "https://github.com/sam701/zig-toml/archive/24e0deeceaad1b7f1b12027ebae1c65ff1d86e33.tar.gz",
+            .hash = "toml-0.3.0-bV14BVqIAQANb68hDuVPZ72hrcIhT-fv_fcIbetQIAyg",
         },
     },
     .minimum_zig_version = "0.15.0",
