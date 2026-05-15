@@ -335,7 +335,7 @@ test "transition_coverage: all 23 TransitionId classes reached" {
 
     // --- Generative sweep to catch any remaining gaps ---
     {
-        var prng = std.Random.DefaultPrng.init(0xB4_C0VERAGE);
+        var prng = std.Random.DefaultPrng.init(0xB4C0FFEE);
         const rng = prng.random();
 
         for (0..300) |_| {
