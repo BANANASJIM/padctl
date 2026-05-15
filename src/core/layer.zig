@@ -476,6 +476,32 @@ test "layer: hold PENDING -> ACTIVE transition signals active_changed" {
     try testing.expect(res.layer_activated);
 }
 
+test "mutation audit: layer — active_changed PENDING gate must be killable" {
+    // Mutation audit (TP1, design/testing.md):
+    // Re-adding `action.active_changed = true;` at processLayerTriggers
+    // Hold-press branch (formerly src/core/layer.zig:103 pre-PR #231)
+    // makes the assertion below fail.
+    //
+    // Verification: directly edit the Hold-press branch of processLayerTriggers,
+    // re-add `action.active_changed = true;`, run `zig build test` — the
+    // `try testing.expect(!action.active_changed)` below fires.  Revert the edit.
+    // NOTE: `git revert 924cef0` is NOT a viable mutation vehicle — it also removes
+    // the companion regression tests at layer.zig:449/:465 (circular dependency).
+    //
+    // Companion regression guards: layer.zig:449 (PENDING does NOT signal)
+    // and :465 (PENDING→ACTIVE DOES signal).
+    const hold_cfg = LayerConfig{ .name = "aim", .trigger = "LM", .activation = "hold", .hold_timeout = 200 };
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{hold_cfg};
+    const lm = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.LM)));
+
+    const action = ls.processLayerTriggers(&configs, lm, 0, 0);
+    try testing.expect(!action.active_changed);
+    try testing.expect(action.arm_timer_ms != null);
+    try testing.expectEqual(TapHoldPhase.pending, ls.tap_hold.?.phase);
+}
+
 test "layer: processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive returns layer" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
