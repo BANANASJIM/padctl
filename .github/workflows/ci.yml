@@ -157,6 +157,15 @@ jobs:
               timeout 600 /opt/zig/zig build -Dlibusb=false test-safe --summary all
               timeout 600 /opt/zig/zig build -Dlibusb=false check-fmt
             " 2>&1 | tee distro-check.log
+      # The container above runs as root (apt-get/dnf require it), so any
+      # .zig-cache / zig-out files it writes are root-owned on the host.
+      # The subsequent host build step and the setup-zig post-job cache-save
+      # trim both run as the unprivileged `runner` user; root-owned files make
+      # the post-job `unlink` trim fail with EACCES once the cache exceeds the
+      # 2 GiB limit. Reclaim ownership so runner-side steps can manage them.
+      - name: Reclaim container-written cache ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .zig-cache zig-out 2>/dev/null || true
       - name: Build musl binary (host)
         run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
       - name: Smoke-test musl binary in container
