@@ -22,6 +22,7 @@ const OutputEvents = @import("../../core/mapper.zig").OutputEvents;
 // same convention used by the hand-written scenario tests below (see the
 // `oout.gamepad.buttons & ~lt` comparisons).
 const LAYER_TRIGGER_MASK: u64 = blk: {
+    @setEvalBranchQuota(100_000);
     var m: u64 = 0;
     // Mirrors config_gen.zig `layer_triggers` — the only buttons a generated
     // config can use as a layer trigger (production suppresses / tap-injects
