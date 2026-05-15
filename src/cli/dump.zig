@@ -50,6 +50,7 @@ pub fn writeDiagnosticsConfig(allocator: std.mem.Allocator, dir_path: []const u8
         .device = if (existing_pr) |pr| pr.value.device else null,
         .diagnostics = diag,
         .supervisor = if (existing_pr) |pr| pr.value.supervisor else .{},
+        .chord_switch = if (existing_pr) |pr| pr.value.chord_switch else null,
     };
 
     user_config_mod.writeAtomic(allocator, config_path, &cfg) catch |err| switch (err) {

@@ -1367,10 +1367,10 @@ fn escapeTomlString(writer: anytype, s: []const u8) !void {
 }
 
 /// Write a config.toml with a single device binding. Reads the existing
-/// file so every section ([diagnostics], [supervisor], unrelated [[device]]
-/// entries) survives the round-trip; only the target device's mapping is
-/// updated. Delegates to `user_config.writeAtomic` for atomic .tmp+rename
-/// so a crash mid-write never truncates the live config.
+/// file so every section ([diagnostics], [supervisor], [chord_switch],
+/// unrelated [[device]] entries) survives the round-trip; only the target
+/// device's mapping is updated. Delegates to `user_config.writeAtomic` for
+/// atomic .tmp+rename so a crash mid-write never truncates the live config.
 fn writeConfigToml(
     allocator: std.mem.Allocator,
     dir: []const u8,
@@ -1423,6 +1423,7 @@ fn writeConfigToml(
         .device = new_devices,
         .diagnostics = if (existing) |e| e.value.diagnostics else .{},
         .supervisor = if (existing) |e| e.value.supervisor else .{},
+        .chord_switch = if (existing) |e| e.value.chord_switch else null,
     };
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
