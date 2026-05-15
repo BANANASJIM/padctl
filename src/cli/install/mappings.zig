@@ -262,6 +262,7 @@ pub fn writeBinding(
         .device = new_devices,
         .diagnostics = if (existing) |e| e.value.diagnostics else .{},
         .supervisor = if (existing) |e| e.value.supervisor else .{},
+        .chord_switch = if (existing) |e| e.value.chord_switch else null,
     };
     try user_config_mod.writeAtomic(allocator, config_path, &cfg);
 }

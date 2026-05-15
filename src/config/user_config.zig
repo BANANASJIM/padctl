@@ -201,6 +201,16 @@ pub fn emitToml(writer: anytype, cfg: *const UserConfig) !void {
         try writer.print("\n[supervisor]\nsuspend_grace_sec = {d}\n", .{sup.suspend_grace_sec});
     }
 
+    // Issue #183: round-trip [chord_switch] so a full-file rewrite (e.g. by
+    // `padctl switch`, `padctl dump`, or a re-install binding write) never
+    // silently drops the user's in-controller switch config.
+    if (cfg.chord_switch) |cs| {
+        try writer.writeAll("\n[chord_switch]\n");
+        if (cs.modifier) |mod| try emitTomlStringArray(writer, "modifier", mod);
+        if (cs.selectors) |sel| try emitTomlStringArray(writer, "selectors", sel);
+        try writer.print("hold_ms = {d}\n", .{cs.hold_ms});
+    }
+
     if (cfg.device) |entries| {
         for (entries) |d| {
             try writer.writeAll("\n[[device]]\nname = \"");
@@ -213,6 +223,17 @@ pub fn emitToml(writer: anytype, cfg: *const UserConfig) !void {
             }
         }
     }
+}
+
+fn emitTomlStringArray(writer: anytype, key: []const u8, items: []const []const u8) !void {
+    try writer.print("{s} = [", .{key});
+    for (items, 0..) |it, i| {
+        if (i != 0) try writer.writeAll(", ");
+        try writer.writeByte('"');
+        try escapeTomlString(writer, it);
+        try writer.writeByte('"');
+    }
+    try writer.writeAll("]\n");
 }
 
 /// Escape a TOML basic-string payload (between the enclosing `"`).
@@ -736,4 +757,76 @@ test "user_config: missing [chord_switch] leaves field null (issue #183)" {
     defer result.deinit();
 
     try std.testing.expectEqual(@as(?ChordSwitchConfig, null), result.value.chord_switch);
+}
+
+// Issue #183 regression: `padctl switch <name>` does a full-file rewrite
+// of config.toml via emitToml/writeAtomic. Before the fix, emitToml never
+// serialised [chord_switch], so switching destroyed the user's in-controller
+// switch config. This asserts the round-trip preserves [chord_switch].
+//
+// Falsifiability: this test FAILS if either production mutation is reverted:
+//   (1) remove the [chord_switch] emission block in emitToml() — re-parse
+//       finds chord_switch == null and the modifier/selectors/hold_ms
+//       assertions error out; or
+//   (2) drop `.chord_switch = ...` from the writeConfigToml/dump/install
+//       UserConfig literals (the `rewritten` struct below mirrors that
+//       call-site) — chord_switch becomes null and the test fails identically.
+test "user_config: switch-style full rewrite preserves [chord_switch] (issue #183 regression)" {
+    const allocator = std.testing.allocator;
+    const original =
+        \\version = 1
+        \\
+        \\[chord_switch]
+        \\modifier = ["LM", "RM"]
+        \\selectors = ["A", "B", "X", "Y"]
+        \\hold_ms = 120
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var parsed = try parser.parseString(original);
+    defer parsed.deinit();
+
+    // Mirror writeConfigToml: rebuild the config preserving every section
+    // except the changed device mapping (here: "fps" -> "racing").
+    var new_devices = [_]DeviceEntry{.{ .name = "Vader 5 Pro", .default_mapping = "racing" }};
+    const rewritten = UserConfig{
+        .version = parsed.value.version,
+        .device = &new_devices,
+        .diagnostics = parsed.value.diagnostics,
+        .supervisor = parsed.value.supervisor,
+        .chord_switch = parsed.value.chord_switch,
+    };
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try emitToml(buf.writer(allocator), &rewritten);
+
+    var reparser = toml.Parser(UserConfig).init(allocator);
+    defer reparser.deinit();
+    var roundtripped = try reparser.parseString(buf.items);
+    defer roundtripped.deinit();
+
+    // Device mapping change took effect.
+    const devs = roundtripped.value.device orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), devs.len);
+    try std.testing.expectEqualStrings("racing", devs[0].default_mapping.?);
+
+    // [chord_switch] survived the rewrite, byte-for-byte intact.
+    const cs = roundtripped.value.chord_switch orelse return error.TestUnexpectedResult;
+    const mod = cs.modifier orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), mod.len);
+    try std.testing.expectEqualStrings("LM", mod[0]);
+    try std.testing.expectEqualStrings("RM", mod[1]);
+    const sels = cs.selectors orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 4), sels.len);
+    try std.testing.expectEqualStrings("A", sels[0]);
+    try std.testing.expectEqualStrings("B", sels[1]);
+    try std.testing.expectEqualStrings("X", sels[2]);
+    try std.testing.expectEqualStrings("Y", sels[3]);
+    try std.testing.expectEqual(@as(i64, 120), cs.hold_ms);
 }
