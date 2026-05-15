@@ -330,7 +330,15 @@ pub const Wasm3Plugin = struct {
         }
         s.last_trap_ts = now;
         if (s.trap_count >= 10) {
-            wasm_log.err("plugin auto-unloaded: trap rate exceeded", .{});
+            // Graceful defensive recovery, not a host error: a misbehaving
+            // plugin is dropped and auto-unloaded. Must stay at .warn — the
+            // Zig test runner fails any test that emits a .err-level log, and
+            // `wasm3: trap rate-limiting auto-unloads plugin` exercises this
+            // exact branch (see #214 / PR #246 CI run 25932763622: a .err here
+            // failed the suite, mis-attributed by the --listen runner to the
+            // next test `tomlEscape`). The trap itself is already logged at
+            // .warn above; auto-unload is the same severity.
+            wasm_log.warn("plugin auto-unloaded: trap rate exceeded", .{});
             unload(@ptrCast(s));
         }
     }
@@ -409,26 +417,40 @@ test "wasm3: no exports returns false/passthrough" {
     try testing.expectEqual(ProcessResult.passthrough, result);
 }
 
-// Falsifiability contract for issue #214 defensive load() path.
+// Falsifiability contract for issue #214 — full wasm3 runtime activation.
 //
-// What this proves: load() of a plugin that exports none of
-// init_device/process_calibration/process_report must (a) NOT crash inside
-// wasm3 C (the issue #214 SIGILL — wasm3 third-party C UB trapped by the
-// project's `.sanitize_c = .trap`, surfacing at m3_FindFunction →
-// CompileFunction on first lazy compile) and (b) leave all three IM3Function
-// slots null so the orelse-guards passthrough/return-false instead of calling
-// a stale function pointer.
+// Three layered defects had to fall for these 13 tests to run green; the
+// original `skip_wasm3_runtime_tests = true` hid all of them at once:
+//
+//  (A) First-compile SIGILL: wasm3 third-party C has intentional UB the
+//      project's `.sanitize_c = .trap` turned into a SIGILL at m3_FindFunction
+//      → CompileFunction on first lazy compile. Fixed by `-fno-sanitize=
+//      undefined` on `wasm3_c_flags` (wasm3 C only; first-party stays strict).
+//  (B) Stale IM3Function on missing export: m3_FindFunction returns a non-null
+//      M3Result on miss but leaves the out-pointer indeterminate. Fixed by
+//      `findOptionalFn` forcing null so the orelse-guards passthrough/false.
+//  (C) Runtime trap was NOT process-fatal — wasm3's `unreachable` opcode
+//      returns a clean M3Result (m3Err_trapUnreachable) from m3_Call, which
+//      callWasm() already checks and routes to handleTrap → .drop/auto-unload.
+//      The actual suite failure (#214's real unfixed cause, NOT the
+//      misdiagnosed "missing export") was that handleTrap's auto-unload
+//      diagnostic was emitted at std.log.err. Zig's default test runner FAILS
+//      any test that emits a .err-level log; `trap rate-limiting auto-unloads
+//      plugin` hits that branch, so the suite failed and the --listen runner
+//      mis-attributed the death to the next test `tomlEscape` (PR #246 CI run
+//      25932763622). Fixed by demoting auto-unload to .warn (it is graceful
+//      defensive recovery, same severity as the `wasm trap:` line).
 //
 // Production mutations that make this suite fail (do not apply):
 //   1. Drop `-fno-sanitize=undefined` from `wasm3_c_flags` in build.zig
-//      → wasm3 C UB is trapped → SIGILL the moment any wasm function is
-//        lazily compiled (every load()/initDevice test SIGABRTs, exactly
-//        issue #214).
+//      → wasm3 C UB trapped → SIGILL on first lazy compile (issue #214 (A)).
 //   2. Revert load()'s `findOptionalFn` back to `_ = c.m3_FindFunction(...)`
-//      → the explicit null-on-miss contract relied on by initDevice/
-//        processReport/processCalibration is no longer guaranteed.
-//   3. Re-introduce `const skip_wasm3_runtime_tests = true;` and the guards
-//      → these 13 tests vacuously pass (SkipZigTest), re-hiding the crash.
+//      → stale IM3Function used through the orelse-guards (issue #214 (B)).
+//   3. Restore `wasm_log.err` for the auto-unload diagnostic in handleTrap
+//      → `trap rate-limiting auto-unloads plugin` logs at .err → Zig test
+//        runner fails the suite, mis-blamed on the next test (issue #214 (C)).
+//   4. Re-introduce `const skip_wasm3_runtime_tests = true;` and the guards
+//      → all 13 tests vacuously pass (SkipZigTest), re-hiding (A)+(B)+(C).
 test "wasm3: load() with plugin missing all exports does not crash and nulls fn slots" {
     const t = try testCreate();
     const plugin = t.plugin;
