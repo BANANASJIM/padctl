@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+if ! zig fmt --check src/ tools/ 2>/dev/null; then
+    echo "ERROR: zig fmt check failed. Run 'zig fmt src/ tools/' to fix."
+    exit 1
+fi
+
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    echo "pre-commit: SKIP_BUILD=1 set, skipping zig build (host #147 workaround; CI still gates)"
+else
+    if ! zig build --cache-dir /tmp/zig-hook-cache 2>/dev/null; then
+        echo "ERROR: zig build failed."
+        exit 1
+    fi
+fi
