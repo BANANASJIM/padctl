@@ -482,11 +482,11 @@ test "mutation audit: layer — active_changed PENDING gate must be killable" {
     // Hold-press branch (formerly src/core/layer.zig:103 pre-PR #231)
     // makes the assertion below fail.
     //
-    // Manual verification on commit 106cb8c:
-    //   git revert 924cef0 --no-commit  # PR #231 fix commit
-    //   zig build test 2>&1 | grep "mutation audit: layer"
-    //   observed: FAIL — action.active_changed was true, expected false
-    //   git restore --staged --worktree .
+    // Verification: directly edit the Hold-press branch of processLayerTriggers,
+    // re-add `action.active_changed = true;`, run `zig build test` — the
+    // `try testing.expect(!action.active_changed)` below fires.  Revert the edit.
+    // NOTE: `git revert 924cef0` is NOT a viable mutation vehicle — it also removes
+    // the companion regression tests at layer.zig:449/:465 (circular dependency).
     //
     // Companion regression guards: layer.zig:449 (PENDING does NOT signal)
     // and :465 (PENDING→ACTIVE DOES signal).
