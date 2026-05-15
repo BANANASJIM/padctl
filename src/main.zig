@@ -134,6 +134,7 @@ pub const testing_support = struct {
     pub const regression_corpus_props = @import("test/properties/regression_corpus_props.zig");
     pub const device_specific_props = @import("test/properties/device_specific_props.zig");
     pub const lean_drt_props = @import("test/properties/lean_drt_props.zig");
+    pub const transition_coverage_props = @import("test/properties/transition_coverage_props.zig");
     pub const reference_interp = @import("test/reference_interp.zig");
     pub const gen = @import("test/gen/gen.zig");
     // Phase 13 Wave 1 T5: surface fixture + simulator harness for unit tests.
