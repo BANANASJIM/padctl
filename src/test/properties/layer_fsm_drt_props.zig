@@ -15,6 +15,8 @@
 const std = @import("std");
 const testing = std.testing;
 const layer = @import("../../core/layer.zig");
+const interpreter = @import("../../core/interpreter.zig");
+const device = @import("../../config/device.zig");
 
 const csv_data = @embedFile("../../../formal/lean/test_vectors.csv");
 
@@ -54,25 +56,6 @@ fn parseUint(s: []const u8) u64 {
     return std.fmt.parseInt(u64, s, 10) catch 0;
 }
 
-// Split on the first `n` commas only; the remainder (which may itself
-// contain commas, as the Lean `repr` blobs do) is returned untouched as
-// the final element.
-fn splitFirst(comptime n: usize, line: []const u8) [n + 1][]const u8 {
-    var out: [n + 1][]const u8 = .{""} ** (n + 1);
-    var idx: usize = 0;
-    var start: usize = 0;
-    var i: usize = 0;
-    while (i < line.len and idx < n) : (i += 1) {
-        if (line[i] == ',') {
-            out[idx] = line[start..i];
-            idx += 1;
-            start = i + 1;
-        }
-    }
-    out[idx] = line[start..];
-    return out;
-}
-
 // LAYER_FSM rows are `action,description,before,after` where `before` and
 // `after` are Lean `repr (Option TapHoldState)` blobs that are EITHER the
 // literal `none` OR `some { ... }` with internal commas (but no nested
@@ -105,80 +88,215 @@ fn splitLayerFsmRow(line: []const u8) [4][]const u8 {
 
 // --- BUTTON_DECODE ---
 //
-// CSV schema: `srcOff,srcSize,entries,expected`
-//   entries := `srcBit:dstBit` pairs joined by `|`
-//   expected := decoded u64 bitset (Lean decodeButtonGroup result)
-// The raw source bytes are NOT a CSV column — the Lean generator hardcodes
-// them per row (0x05, 0xFF, 0x00). We mirror that hardcoded-raw pattern
-// exactly as lean_drt_props.zig does for CHECKSUM/READFIELD, then drive the
-// production button-decode loop and compare to the CSV `expected`.
+// True Lean-vs-PRODUCTION differential. The Lean oracle proves
+// `decodeButtonGroup`; this drives the REAL production decode through the
+// public `Interpreter.processReport` entrypoint, which internally runs the
+// private `interpreter.extractAndFillCompiled` button_group path
+// (src/core/interpreter.zig). No inlined reference reimplementation — the
+// "actual" value comes from production, the "expected" value comes solely
+// from the embedded Lean CSV.
 //
-// Production decode (interpreter.extractAndFillCompiled button_group path):
-//   src_val = LE uint over raw[srcOff..srcOff+srcSize]
-//   for each (bitIdx -> btnBit): bit btnBit of result := bit bitIdx of src_val
+// CSV schema (declared header): `srcOff,srcSize,entries,hex_bytes,expected`
+//   entries  := `srcBit:dstBit` pairs joined by `|`
+//   hex_bytes:= declared by the Lean header but CURRENTLY UNPOPULATED — the
+//               generator (formal/lean/test/OracleMain.lean
+//               emitButtonDecodeVectors) emits only 4 fields per data row.
+//   expected := decoded u64 bitset (Lean decodeButtonGroup result)
+// The arity-defensive parser below accepts BOTH the current 4-field form
+// (hex_bytes omitted) and a future 5-field form (hex_bytes populated), and
+// FAILS LOUDLY with the row index on any other arity, so a future populated
+// column can never silently shift `expected` to the wrong column (#237-trap).
+//
+// Production mapping note: production maps a source bit to a `ButtonId`
+// enum, and the decoded bitset sets bit `@intFromEnum(ButtonId)`. The Lean
+// `dstBit` is a raw destination bit index. We therefore choose, per entry,
+// the ButtonId whose enum ordinal == dstBit, so the production output
+// bitset is directly comparable to the Lean `expected` bitset.
 
-fn productionDecode(raw: []const u8, src_off: usize, src_size: usize, entries: []const [2]u6) u64 {
-    const n = @min(src_size, 8);
-    var src_val: u64 = 0;
-    for (0..n) |i| {
-        src_val |= @as(u64, raw[src_off + i]) << @intCast(i * 8);
-    }
-    var bits: u64 = 0;
-    for (entries) |e| {
-        const pressed = (src_val >> e[0]) & 1 == 1;
-        if (pressed) bits |= @as(u64, 1) << e[1];
-    }
-    return bits;
-}
+const Entry = struct { src_bit: u6, dst_bit: u6 };
 
-fn parseEntries(spec: []const u8, buf: *[MAX_ENTRIES][2]u6) []const [2]u6 {
+// Parse the `entries` cell (`srcBit:dstBit` pairs joined by `|`).
+fn parseEntries(spec: []const u8, buf: *[MAX_ENTRIES]Entry) []const Entry {
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, spec, '|');
     while (it.next()) |pair| {
         const sep = std.mem.indexOfScalar(u8, pair, ':') orelse continue;
         buf[n] = .{
-            @intCast(parseUint(pair[0..sep])),
-            @intCast(parseUint(pair[sep + 1 ..])),
+            .src_bit = @intCast(parseUint(pair[0..sep])),
+            .dst_bit = @intCast(parseUint(pair[sep + 1 ..])),
         };
         n += 1;
     }
     return buf[0..n];
 }
 
+// Split a CSV row on EVERY comma. Returns the field count so the caller can
+// assert the row arity explicitly. The Lean `entries` cell uses `|` and `:`
+// as separators (never `,`), so a flat comma split is unambiguous here.
+fn splitAll(line: []const u8, buf: *[8][]const u8) usize {
+    var n: usize = 0;
+    var start: usize = 0;
+    for (line, 0..) |c, i| {
+        if (c == ',') {
+            if (n >= buf.len) return n;
+            buf[n] = line[start..i];
+            n += 1;
+            start = i + 1;
+        }
+    }
+    if (n < buf.len) {
+        buf[n] = line[start..];
+        n += 1;
+    }
+    return n;
+}
+
+// Resolve a destination bit index to the ButtonId whose enum ordinal equals
+// it, so the production decoded bitset (which sets bit @intFromEnum) is
+// directly comparable to the Lean `expected` bitset.
+fn buttonNameForBit(dst_bit: u6) ?[]const u8 {
+    inline for (@typeInfo(interpreter.ButtonId).@"enum".fields) |f| {
+        if (f.value == dst_bit) return f.name;
+    }
+    return null;
+}
+
+// Drive the REAL production button_group decode for one CSV row: synthesize
+// a device TOML whose `[report.button_group].map` encodes the row's
+// src→dst entries, parse it, and run `Interpreter.processReport` (which
+// calls the private extractAndFillCompiled button_group path). Returns the
+// production `delta.buttons` bitset.
+fn productionDecodeRow(
+    allocator: std.mem.Allocator,
+    raw_byte: u8,
+    entries: []const Entry,
+) !u64 {
+    var toml: std.ArrayList(u8) = .{};
+    defer toml.deinit(allocator);
+    const w = toml.writer(allocator);
+    try w.writeAll(
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 2
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.button_group]
+        \\source = { offset = 1, size = 1 }
+        \\map = {
+    );
+    for (entries, 0..) |e, i| {
+        const name = buttonNameForBit(e.dst_bit) orelse return error.LeanOracleNoButtonForBit;
+        if (i != 0) try w.writeAll(", ");
+        try w.print("{s} = {d}", .{ name, e.src_bit });
+    }
+    try w.writeAll(" }\n");
+
+    const parsed = try device.parseString(allocator, toml.items);
+    defer parsed.deinit();
+    const interp = interpreter.Interpreter.init(&parsed.value);
+    // raw[0]=0x01 satisfies report.match; raw[1] is the button_group source
+    // byte the Lean row hardcodes.
+    const raw = [_]u8{ 0x01, raw_byte };
+    const delta = (try interp.processReport(0, &raw)) orelse return error.LeanOracleNoMatch;
+    return delta.buttons orelse 0;
+}
+
 test "layer_fsm_drt: BUTTON_DECODE vectors vs production decode" {
     var lines = seekSection("# BUTTON_DECODE");
     _ = lines.next(); // skip column header
 
-    // Hardcoded raw source bytes, matched positionally to the Lean oracle
-    // generator (formal/lean/test/OracleMain.lean emitButtonDecodeVectors).
-    const raws = [_][]const u8{
-        &[_]u8{0x05}, // 0,1,0:0|2:4
-        &[_]u8{0xFF}, // 0,1,0:0|7:7
-        &[_]u8{0x00}, // 0,1,0:0
-    };
+    // Source bytes hardcoded by the Lean oracle generator, matched
+    // positionally (formal/lean/test/OracleMain.lean emitButtonDecodeVectors:
+    // 0x05, 0xFF, 0x00). srcOff/srcSize from the CSV are asserted below to
+    // stay 0/1 so this single-byte mapping remains valid.
+    const raw_bytes = [_]u8{ 0x05, 0xFF, 0x00 };
 
     var row: usize = 0;
     while (lines.next()) |line| {
         if (!isDataLine(line)) break;
-        const f = splitFirst(3, line); // srcOff, srcSize, entries, expected
-        const src_off: usize = @intCast(parseUint(f[0]));
-        const src_size: usize = @intCast(parseUint(f[1]));
-        var ebuf: [MAX_ENTRIES][2]u6 = undefined;
-        const entries = parseEntries(f[2], &ebuf);
-        const expected = parseUint(f[3]);
 
-        if (row >= raws.len) {
+        // D1 arity-defensive parse: split on EVERY comma and select fields
+        // by position from a verified arity. The header declares 5 columns
+        // (srcOff,srcSize,entries,hex_bytes,expected) but the generator
+        // currently emits only 4 (hex_bytes omitted). Accept exactly the
+        // 4-field form OR a future 5-field form, fail LOUDLY otherwise so a
+        // populated hex_bytes column can never silently become `expected`.
+        var fbuf: [8][]const u8 = undefined;
+        const nf = splitAll(line, &fbuf);
+        const has_hex = switch (nf) {
+            4 => false, // srcOff,srcSize,entries,expected
+            5 => true, // srcOff,srcSize,entries,hex_bytes,expected
+            else => {
+                std.debug.print(
+                    "BUTTON_DECODE row {d}: unexpected field count {d} " ++
+                        "(want 4 or 5): {s}\n",
+                    .{ row, nf, line },
+                );
+                return error.LeanOracleBadArity;
+            },
+        };
+        const src_off: usize = @intCast(parseUint(fbuf[0]));
+        const src_size: usize = @intCast(parseUint(fbuf[1]));
+        const entries_cell = fbuf[2];
+        // `expected` is ALWAYS the LAST field; `hex_bytes`, when present, is
+        // field index 3. Selecting by arity (not a fixed split count)
+        // eliminates the wrong-column compare.
+        const expected = parseUint(fbuf[nf - 1]);
+        if (has_hex) {
+            // Cross-check: when the generator does populate hex_bytes, its
+            // low byte must equal the raw byte we hardcode for this row, or
+            // the differential is silently testing the wrong input.
+            const hex = parseUint(fbuf[3]);
+            if (row < raw_bytes.len and @as(u8, @truncate(hex)) != raw_bytes[row]) {
+                std.debug.print(
+                    "BUTTON_DECODE row {d}: CSV hex_bytes low={x} != " ++
+                        "hardcoded raw {x}\n",
+                    .{ row, @as(u8, @truncate(hex)), raw_bytes[row] },
+                );
+                return error.LeanOracleRawDrift;
+            }
+        }
+
+        if (row >= raw_bytes.len) {
             std.debug.print(
-                "BUTTON_DECODE row {d}: no hardcoded raw bytes — CSV grew, update raws[]\n",
+                "BUTTON_DECODE row {d}: no hardcoded raw byte — CSV grew, " ++
+                    "update raw_bytes[]\n",
                 .{row},
             );
             return error.LeanOracleRawMissing;
         }
-        const actual = productionDecode(raws[row], src_off, src_size, entries);
+        // This consumer's single-byte source assumption; assert rather than
+        // silently mis-decode if a future row changes srcOff/srcSize.
+        if (src_off != 0 or src_size != 1) {
+            std.debug.print(
+                "BUTTON_DECODE row {d}: srcOff={d} srcSize={d} — consumer " ++
+                    "assumes 0/1, extend productionDecodeRow\n",
+                .{ row, src_off, src_size },
+            );
+            return error.LeanOracleUnsupportedSource;
+        }
+
+        var ebuf: [MAX_ENTRIES]Entry = undefined;
+        const entries = parseEntries(entries_cell, &ebuf);
+        const actual = try productionDecodeRow(
+            testing.allocator,
+            raw_bytes[row],
+            entries,
+        );
         if (actual != expected) {
             std.debug.print(
-                "BUTTON_DECODE row {d} MISMATCH: lean-expected={d} production-actual={d} (entries={s})\n",
-                .{ row, expected, actual, f[2] },
+                "BUTTON_DECODE row {d} MISMATCH: lean-expected={d} " ++
+                    "production-actual={d} (entries={s})\n",
+                .{ row, expected, actual, entries_cell },
             );
             return error.LeanOracleMismatch;
         }
@@ -251,9 +369,15 @@ fn applyAction(ls: *layer.LayerState, action: []const u8) void {
     } else if (std.mem.eql(u8, action, "timer")) {
         _ = ls.onTimerExpired();
     } else if (std.mem.eql(u8, action, "release")) {
-        // Release before timeout from pending → tap; from active with
-        // elapsed >= timeout → plain deactivate. now_ns large enough so the
-        // active-branch falls into the deactivate-only path (matches Lean).
+        // COUPLING (D3): seedState sets press_ns=0, hold_timeout_ns=200ms.
+        // now_ns=1s ≫ press_ns + hold_timeout_ns, so elapsed ≫ timeout and
+        // onTriggerRelease takes the active→plain-deactivate branch (and the
+        // pending→tap branch when phase is pending). This is correct ONLY
+        // for release rows whose Lean `before` is past-timeout / pending. A
+        // future "release within timeout from pending/active" row would need
+        // now_ns derived from the seeded timeout (e.g. < hold_timeout_ns) —
+        // adding such a row without revisiting this constant would silently
+        // mask a divergence.
         _ = ls.onTriggerRelease(null, 1_000_000_000);
     }
 }
