@@ -161,6 +161,22 @@ pub fn applyWithLayer(
     // [7] assemble emit state
     var emit = os.gs;
     emit.buttons = (cur_buttons & ~suppressed_buttons) | injected_buttons;
+
+    // Production (`mapper.zig` -> `emit_state.synthesizeDpadAxes()`) derives the
+    // emitted dpad hat axes purely from the post-remap DPad* button bits, NOT
+    // from the raw `delta.dpad_x/y` input. Independently reimplement that
+    // coupling here (no shared code with state.zig — TP5/F5) so the
+    // deterministic differential genuinely covers DPad-button -> hat-axis
+    // synthesis, suppression, and DPad remap inject/suppress interaction.
+    {
+        const up = (emit.buttons & btnMask(.DPadUp)) != 0;
+        const down = (emit.buttons & btnMask(.DPadDown)) != 0;
+        const left = (emit.buttons & btnMask(.DPadLeft)) != 0;
+        const right = (emit.buttons & btnMask(.DPadRight)) != 0;
+        emit.dpad_x = @as(i8, @intFromBool(right)) - @as(i8, @intFromBool(left));
+        emit.dpad_y = @as(i8, @intFromBool(down)) - @as(i8, @intFromBool(up));
+    }
+
     if (suppress_dpad_hat) {
         emit.dpad_x = 0;
         emit.dpad_y = 0;
@@ -608,18 +624,38 @@ test "mapper_oracle: suppress accumulates base + layer" {
     try testing.expectEqual(@as(u64, 0), out.gamepad.buttons & b_mask);
 }
 
-test "mapper_oracle: dpad gamepad mode passthrough" {
-    var os = OracleState{};
-    const parsed = try parseCfg(
-        \\[dpad]
-        \\mode = "gamepad"
-    );
-    defer parsed.deinit();
+test "mapper_oracle: dpad hat synthesized from DPad button bits" {
+    // Production (`mapper.zig` -> `synthesizeDpadAxes`) derives the emitted hat
+    // axes purely from the post-remap DPad* button bits, not from the raw
+    // `delta.dpad_x/y`. The oracle reimplements that coupling, so a raw
+    // axis-only delta with no DPad buttons emits a neutral hat...
+    {
+        var os = OracleState{};
+        const parsed = try parseCfg(
+            \\[dpad]
+            \\mode = "gamepad"
+        );
+        defer parsed.deinit();
 
-    const out = apply(&os, .{ .dpad_x = 1, .dpad_y = -1 }, &parsed.value, 0);
-    try testing.expectEqual(@as(i8, 1), out.gamepad.dpad_x);
-    try testing.expectEqual(@as(i8, -1), out.gamepad.dpad_y);
-    try testing.expectEqual(@as(usize, 0), out.aux.len);
+        const out = apply(&os, .{ .dpad_x = 1, .dpad_y = -1 }, &parsed.value, 0);
+        try testing.expectEqual(@as(i8, 0), out.gamepad.dpad_x);
+        try testing.expectEqual(@as(i8, 0), out.gamepad.dpad_y);
+        try testing.expectEqual(@as(usize, 0), out.aux.len);
+    }
+    // ...while DPad button bits synthesize the corresponding hat axes.
+    {
+        var os = OracleState{};
+        const parsed = try parseCfg(
+            \\[dpad]
+            \\mode = "gamepad"
+        );
+        defer parsed.deinit();
+
+        const out = apply(&os, .{ .buttons = btnMask(.DPadRight) | btnMask(.DPadUp) }, &parsed.value, 0);
+        try testing.expectEqual(@as(i8, 1), out.gamepad.dpad_x);
+        try testing.expectEqual(@as(i8, -1), out.gamepad.dpad_y);
+        try testing.expectEqual(@as(usize, 0), out.aux.len);
+    }
 }
 
 test "mapper_oracle: prev_buttons in output" {
