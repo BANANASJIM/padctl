@@ -1739,16 +1739,31 @@ test "mapper: #79 dual-ready ppoll — apply uses caller now_ns, tap fires at pr
     try testing.expectEqual(@as(u64, 0), ev_clear.gamepad.buttons & a_mask);
 }
 
-test "mapper: #79 timing boundary sweep — tap fires iff release_ns < hold_timeout_ns" {
-    // 7 release_delta × 3 seeds = 21 cases.
-    // release < hold_timeout (200ms): tap fires via race-case branch.
-    // release >= hold_timeout: timer fires first → ACTIVE → release does NOT emit tap.
+test "mapper: #79 timing boundary sweep — tap fires via .pending branch iff release_ns < hold_timeout_ns" {
+    // 7 release_delta × 3 press bases = 21 cases.
+    //
+    // Falsifiability (TP1): the tap-fires cases (delta < 200) release the
+    // trigger while the hold timer is STILL PENDING — the timer is never
+    // manually expired, so onTriggerRelease takes the `.pending` branch.
+    // That is the exact #79 race the user reported ("tap, release before the
+    // hold timer fires"). A `macro:hold_x` runs in parallel: a spurious
+    // active_changed reset on the PENDING-press frame (the PR #231 / #79 bug)
+    // calls emitPendingReleases + active_macros.clearRetainingCapacity,
+    // which drops the held X gamepad bit and the active macro. We assert
+    // both on the PENDING-press frame, so re-adding the mutation is visible.
+    //
+    // The held-past-hold_timeout cases (delta >= 200) DO expire the timer
+    // first → onTriggerRelease takes the legitimate `.active` branch → no tap.
     const allocator = testing.allocator;
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const m1_mask: u64 = @as(u64, 1) << m1_idx;
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     const a_mask: u64 = @as(u64, 1) << a_idx;
+    const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const x_mask: u64 = @as(u64, 1) << x_idx;
 
     const release_deltas_ms = [_]u64{ 1, 50, 100, 195, 199, 200, 201 };
     const press_bases: [3]i128 = .{ 0xA000_0000, 0xB000_0000, 0xC000_0000 };
@@ -1762,27 +1777,52 @@ test "mapper: #79 timing boundary sweep — tap fires iff release_ns < hold_time
                 \\activation = "hold"
                 \\tap = "A"
                 \\hold_timeout = 200
+                \\
+                \\[remap]
+                \\M1 = "macro:hold_x"
+                \\
+                \\[[macro]]
+                \\name = "hold_x"
+                \\steps = [
+                \\  { down = "X" },
+                \\  { delay = 100000 },
+                \\  { up = "X" },
+                \\]
             , allocator);
             defer parsed.deinit();
 
             var m = try makeMapper(&parsed.value, allocator);
             defer m.deinit();
 
-            // Press at base timestamp → PENDING
-            _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
+            // Frame A: press M1 → macro arms, X held across the long delay.
+            const ev_macro = try m.apply(.{ .buttons = m1_mask }, 16, press_ns);
+            try testing.expect((ev_macro.gamepad.buttons & x_mask) != 0);
+            try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
-            // Timer fires at press+200ms → ACTIVE
-            _ = m.onLayerTimerExpired();
+            // Frame B: press LT while M1 still held → Hold PENDING entry.
+            // This is the PENDING-press frame. With PR #231's fix the macro
+            // survives (no active_changed reset); with the mutation re-added
+            // the spurious reset cancels the macro and drops the X bit.
+            const ev_pending = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, press_ns);
+            try testing.expect((ev_pending.gamepad.buttons & x_mask) != 0);
+            try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
             const release_ns: i128 = press_ns + @as(i128, delta_ms) * 1_000_000;
-            const ev_tap = try m.apply(.{ .buttons = 0 }, 16, release_ns);
 
             if (delta_ms < 200) {
-                // Race-case: release before hold_timeout → tap must fire
+                // Race-case: release LT while the hold timer is STILL PENDING
+                // (timer never expired) → `.pending` branch must emit the tap.
+                const ev_tap = try m.apply(.{ .buttons = m1_mask }, 16, release_ns);
                 try testing.expect((ev_tap.gamepad.buttons & a_mask) != 0);
+                // Macro state must have survived the whole race window.
+                try testing.expect((ev_tap.gamepad.buttons & x_mask) != 0);
+                try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
             } else {
-                // Past hold_timeout → layer deactivates, no tap
-                try testing.expectEqual(@as(u64, 0), ev_tap.gamepad.buttons & a_mask);
+                // Held past hold_timeout: expire the timer first → ACTIVE,
+                // release takes the `.active` branch → no tap.
+                _ = m.onLayerTimerExpired();
+                const ev_hold = try m.apply(.{ .buttons = m1_mask }, 16, release_ns);
+                try testing.expectEqual(@as(u64, 0), ev_hold.gamepad.buttons & a_mask);
             }
         }
     }

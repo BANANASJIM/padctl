@@ -105,22 +105,33 @@ test "property: rapid hold layer toggle — state stays consistent" {
     }
 }
 
-test "prop: layer tap fires reliably under hold_timeout — 1000 iter random timing" {
-    // Direct empirical foil to the "sometimes triggered, mostly not" report for #79.
-    // Pre-PR-231 mutation produces < 1000 fires; post-fix produces exactly 1000.
+test "prop: layer tap fires reliably under hold_timeout via .pending branch — 1000 iter random timing" {
+    // Direct empirical foil to the "sometimes triggered, mostly not" report
+    // for #79. Each iter releases the trigger while the hold timer is STILL
+    // PENDING (onLayerTimerExpired is NEVER called) — the real #79 race path
+    // through onTriggerRelease's `.pending` branch. A parallel macro:hold_x
+    // keeps the X gamepad bit held across the race window. With PR #231's fix
+    // the PENDING-press frame does not signal active_changed, so the macro
+    // survives and the tap fires every iteration. With the mutation re-added
+    // the press-frame reset cancels the macro and drops X, and `tap_and_macro`
+    // counts < 1000 → test fails.
     const allocator = testing.allocator;
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const m1_mask: u64 = @as(u64, 1) << m1_idx;
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     const a_mask: u64 = @as(u64, 1) << a_idx;
+    const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const x_mask: u64 = @as(u64, 1) << x_idx;
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const rng = prng.random();
 
-    var tap_fired_count: usize = 0;
+    var tap_and_macro_ok: usize = 0;
     for (0..1000) |_| {
-        // release_delta_ms ∈ [1, 199]
+        // release_delta_ms ∈ [1, 199] — always < hold_timeout (200ms).
         const delta_ms = rng.intRangeAtMost(u64, 1, 199);
         // press_ns ∈ [1e9, 1e12]
         const press_ns: i128 = rng.intRangeAtMost(i64, 1_000_000_000, 1_000_000_000_000);
@@ -132,34 +143,64 @@ test "prop: layer tap fires reliably under hold_timeout — 1000 iter random tim
             \\activation = "hold"
             \\tap = "A"
             \\hold_timeout = 200
+            \\
+            \\[remap]
+            \\M1 = "macro:hold_x"
+            \\
+            \\[[macro]]
+            \\name = "hold_x"
+            \\steps = [
+            \\  { down = "X" },
+            \\  { delay = 100000 },
+            \\  { up = "X" },
+            \\]
         , allocator);
         defer ctx.deinit();
         var m = &ctx.mapper;
 
-        _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
-        _ = m.onLayerTimerExpired();
+        // M1 press → macro arms, X held across the long delay.
+        _ = try m.apply(.{ .buttons = m1_mask }, 16, press_ns);
+        // LT press while M1 held → Hold PENDING entry (no active_changed
+        // under the fix; spurious reset under the mutation).
+        _ = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, press_ns);
+        // Release LT while the timer is STILL PENDING (never expired) →
+        // `.pending` race branch must emit the tap.
         const release_ns: i128 = press_ns + @as(i128, delta_ms) * 1_000_000;
-        const ev = try m.apply(.{ .buttons = 0 }, 16, release_ns);
-        if ((ev.gamepad.buttons & a_mask) != 0) tap_fired_count += 1;
+        const ev = try m.apply(.{ .buttons = m1_mask }, 16, release_ns);
+
+        const tap_ok = (ev.gamepad.buttons & a_mask) != 0;
+        const macro_ok = (ev.gamepad.buttons & x_mask) != 0 and m.active_macros.items.len == 1;
+        if (tap_ok and macro_ok) tap_and_macro_ok += 1;
     }
-    try testing.expectEqual(@as(usize, 1000), tap_fired_count);
+    try testing.expectEqual(@as(usize, 1000), tap_and_macro_ok);
 }
 
-test "prop: layer tap NOT fired when held past hold_timeout — 1000 iter" {
-    // Upper boundary guard. Pre-fix could spuriously emit tap; post-fix never emits.
+test "prop: layer tap NOT fired when held past hold_timeout, macro survives PENDING frame — 1000 iter" {
+    // Upper-boundary guard. The timer IS expired here (legitimate `.active`
+    // path), so the held-past case never emits a tap — that is the boundary
+    // invariant. Independently, the #79 falsifiability observable is checked
+    // BEFORE the timer fires: a parallel macro:hold_x must survive the
+    // PENDING-press frame. With PR #231's fix it does; with the mutation
+    // re-added the press-frame active_changed reset cancels the macro and
+    // drops X → macro_survived_count < 1000 → test fails.
     const allocator = testing.allocator;
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const m1_mask: u64 = @as(u64, 1) << m1_idx;
     const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     const a_mask: u64 = @as(u64, 1) << a_idx;
+    const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const x_mask: u64 = @as(u64, 1) << x_idx;
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const rng = prng.random();
 
     var tap_fired_count: usize = 0;
+    var macro_survived_count: usize = 0;
     for (0..1000) |_| {
-        // release_delta_ms ∈ [201, 500]
+        // release_delta_ms ∈ [201, 500] — always > hold_timeout (200ms).
         const delta_ms = rng.intRangeAtMost(u64, 201, 500);
         const press_ns: i128 = rng.intRangeAtMost(i64, 1_000_000_000, 1_000_000_000_000);
 
@@ -170,17 +211,38 @@ test "prop: layer tap NOT fired when held past hold_timeout — 1000 iter" {
             \\activation = "hold"
             \\tap = "A"
             \\hold_timeout = 200
+            \\
+            \\[remap]
+            \\M1 = "macro:hold_x"
+            \\
+            \\[[macro]]
+            \\name = "hold_x"
+            \\steps = [
+            \\  { down = "X" },
+            \\  { delay = 100000 },
+            \\  { up = "X" },
+            \\]
         , allocator);
         defer ctx.deinit();
         var m = &ctx.mapper;
 
-        _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
+        // M1 press → macro arms, X held.
+        _ = try m.apply(.{ .buttons = m1_mask }, 16, press_ns);
+        // LT press while M1 held → Hold PENDING entry. Macro must survive
+        // this frame under the fix (falsifiability observable).
+        const ev_pending = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, press_ns);
+        if ((ev_pending.gamepad.buttons & x_mask) != 0 and m.active_macros.items.len == 1)
+            macro_survived_count += 1;
+
+        // Expire the hold timer first → ACTIVE → release takes the
+        // legitimate `.active` branch → no tap.
         _ = m.onLayerTimerExpired();
         const release_ns: i128 = press_ns + @as(i128, delta_ms) * 1_000_000;
-        const ev = try m.apply(.{ .buttons = 0 }, 16, release_ns);
+        const ev = try m.apply(.{ .buttons = m1_mask }, 16, release_ns);
         if ((ev.gamepad.buttons & a_mask) != 0) tap_fired_count += 1;
     }
     try testing.expectEqual(@as(usize, 0), tap_fired_count);
+    try testing.expectEqual(@as(usize, 1000), macro_survived_count);
 }
 
 // P3b: rapid toggle activation
