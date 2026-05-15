@@ -9,6 +9,7 @@ const transition_id = @import("../gen/transition_id.zig");
 const mapping = @import("../../config/mapping.zig");
 const device_mod = @import("../../config/device.zig");
 const state_mod = @import("../../core/state.zig");
+const remap_mod = @import("../../core/remap.zig");
 
 const GamepadStateDelta = state_mod.GamepadStateDelta;
 const Frame = sequence_gen.Frame;
@@ -37,44 +38,105 @@ const LAYER_TRIGGER_MASK: u64 = blk: {
 };
 
 /// True if the generated config contains ONLY subsystems the deterministic
-/// oracle (`mapper_oracle.zig`) faithfully reimplements. For configs that
-/// exercise an unmodeled subsystem the A==B deterministic compare is
-/// intentionally skipped (F5: do NOT fake a green by routing both through
-/// shared code, and do NOT weaken the compare for the modeled subset). The
-/// float property check (`checkGyroSign`) still runs for every config.
+/// oracle (`mapper_oracle.zig`) PROVABLY reimplements line-for-line. This is a
+/// strict POSITIVE allowlist (whitelist), NOT an open-ended denylist: the
+/// deterministic A==B exact-compare runs ONLY on config shapes the oracle is
+/// proven faithful to; every other shape is explicitly OUT of exact-compare
+/// scope (documented below), not silently weakened. The float property check
+/// (`checkGyroSign`) still runs for EVERY config (F5: do NOT fake a green by
+/// routing both through shared code, do NOT weaken the compare for the in-scope
+/// subset, do NOT lower the `compared > 0` floor).
 ///
-/// Honestly scoped to TODAY's oracle fidelity. Carved-out aux-event gaps,
-/// each a genuine oracle model gap (NOT a production bug — verified against
-/// `git show origin/main:src/core/{mapper,layer,remap}.zig`):
+/// A previous iteration used a denylist (`configIsFullyModeled` excluding
+/// macro, then +tap). That is whack-a-mole: an open-ended exclusion list
+/// cannot be proven complete, and CI kept surfacing new unmodeled aux
+/// categories (macro -> tap -> ...). Inverting to an allowlist makes the
+/// in-scope set finite and provable.
 ///
-///  1. `[[macro]]` / `macro:` remap targets — oracle treats `.macro` as a
-///     no-op (`mapper_oracle.zig` `.macro => {}`); production runs a real
-///     `MacroPlayer` that emits key/button aux events across frames.
+/// === PROVEN-FAITHFUL ALLOWLIST (in exact-compare scope) ===
 ///
-///  2. Hold-layer `tap = "<key>"` — production resolves `cfg.tap` and, on a
-///     tap gesture (PENDING+release, or ACTIVE+release within hold_timeout),
-///     calls `emitTapEvent` -> `remap.applyTarget(.tap)`, emitting a
-///     press+release aux pair for a `.key`/`.mouse_button` tap target
-///     (`mapper.zig:357`, `remap.zig:40`, `layer.zig:onTriggerRelease`). The
-///     oracle's `processLayers` ignores `cfg.tap` entirely — it only injects
-///     the trigger *gamepad bit* via `pending_tap_release` and emits zero aux
-///     key events. This surfaces as the `compareAux` key-count mismatch
-///     (e.g. `expected 1, found 3`: dpad-arrow edge + KEY_F5 press + release).
+/// A config is oracle-faithful iff it has NO `[[layer]]`, NO `[[macro]]`, and
+/// every `[remap]` target resolves to one of {gamepad_button, key,
+/// mouse_button, disabled}. For that shape every deterministic subsystem the
+/// compare touches (buttons & ~LAYER_TRIGGER_MASK, dpad_x/y, ordered key /
+/// mouse_button aux) is independently reimplemented with identical semantics
+/// (verified vs `git show origin/main:src/core/{mapper,dpad,remap}.zig`):
 ///
-/// TODO(F-followup): teach `mapper_oracle.zig` to model the `cfg.tap` aux
-/// emission (and, separately, the macro player) so these configs can rejoin
-/// the deterministic exact-compare. Tracked in
+///  * base remap resolution — production `precomputeRemap` (`mapper.zig:579`)
+///    and oracle `collectRemap` both resolve via `remap_mod.resolveTarget`
+///    (same function, `remap.zig:resolveTarget`); same suppress-bit + per-src
+///    inject map.
+///  * `.key` / `.mouse_button` emit — both edge-gated `pressed != prev_pressed`
+///    (prod `mapper.zig:343-348` -> `remap.applyTarget`; oracle `apply` step
+///    [6] `.key`/`.mouse_button` branch); identical (code, pressed) pair.
+///  * `.gamepad_button` inject — both level-triggered `if (pressed)` OR-bit
+///    each frame (prod `mapper.zig:338-342`; oracle step [6] `.gamepad_button`).
+///  * `.disabled` — both no-op + source bit added to suppress mask.
+///  * dpad-arrow synthesis — prod delegates to `dpad.zig:processDpad`; oracle
+///    `processDpad` is line-for-line identical (edge detect on dpad_x/y vs
+///    prev, KEY_UP/DOWN/LEFT/RIGHT, `suppress_gamepad` -> DPad* suppress +
+///    hat zero). `effectiveDpadConfig` with no layer == `cfg.dpad orelse {}`,
+///    matching oracle `dpad_cfg = cfg.dpad`.
+///  * dpad hat axis — both derive `emit.dpad_x/y` from post-remap DPad* bits
+///    (prod `emit_state.synthesizeDpadAxes()`; oracle step [7] reimpl).
+///  * prev-frame mask — both snapshot prev buttons / prev dpad each frame.
+///
+/// === EXCLUDED (explicitly OUT of exact-compare scope) ===
+///
+/// Each is a genuine oracle model gap (NOT a production bug); exact-compare is
+/// skipped, float check still runs:
+///
+///  E1. ANY `[[layer]]` — production drives the hold FSM via timerfd replay +
+///      `onTimerExpired` and, on every layer transition, resets gyro/stick and
+///      zeroes `prev.dpad_x/y` (`mapper.zig:178-190`) so dpad-arrow edges
+///      re-fire after a transition. It also handles the issue-#79 ACTIVE +
+///      release-within-`hold_timeout` race by emitting a tap and deactivating
+///      (`layer.zig:onTriggerRelease`). The oracle promotes by accumulating
+///      `dt_ms` and performs NONE of the active_changed resets. These are
+///      independent mechanisms, not line-for-line equivalent, so any layered
+///      config (incl. layer-`tap`, `[layer.dpad/gyro/stick]` overrides) is
+///      out of scope. Conservative: when unsure the oracle matches a layer
+///      sub-behaviour, EXCLUDE the whole layered shape.
+///  E2. `[[macro]]` / `macro:` targets — oracle `.macro => {}`; production runs
+///      a real `MacroPlayer` emitting key/button aux across frames
+///      (`mapper.zig:321-336,362-393`).
+///  E3. chord array remap targets — never emitted by `config_gen.zig` and a
+///      no-op both sides today, but excluded defensively (dispatch lands B-2).
+///  E4. gyro / stick `.rel` output, gyro-joystick stick override, trigger
+///      threshold, chord switch — not reproduced by the oracle. `.rel` is
+///      covered by `checkGyroSign`; the others are never emitted by the
+///      generator. Excluded from exact-compare by construction.
+///
+/// TODO(F-followup): teach `mapper_oracle.zig` to model the layer FSM
+/// active_changed resets / #79 race / `cfg.tap`, and the macro player, so those
+/// shapes can rejoin the deterministic exact-compare. Tracked in
 /// `research/test-code-audit-2026-05-15.md`.
-fn configIsFullyModeled(cfg: *const mapping.MappingConfig) bool {
+fn configIsOracleFaithful(cfg: *const mapping.MappingConfig) bool {
+    // E1: any layer at all takes the config out of scope.
+    if (cfg.layer) |layers| {
+        if (layers.len != 0) return false;
+    }
+    // E2: any macro definition.
     if (cfg.macro) |m| {
         if (m.len != 0) return false;
     }
-    // Gap 2: any hold layer carrying a `tap` field exercises the unmodeled
-    // tap-event aux path. Carve it out symmetrically (only `tap` non-null;
-    // a hold layer without `tap` stays in the exact-compare set).
-    if (cfg.layer) |layers| {
-        for (layers) |*lc| {
-            if (lc.tap != null) return false;
+    // Allowlist of base-remap target kinds the oracle reproduces exactly.
+    // E2/E3: reject `macro:` and chord-array targets. Unknown strings resolve
+    // to nothing in BOTH prod (`precomputeRemap` skip) and oracle
+    // (`collectRemap` skip), so they are equivalence-safe and allowed through.
+    if (cfg.remap) |rm| {
+        var it = rm.map.iterator();
+        while (it.next()) |entry| {
+            switch (entry.value_ptr.*) {
+                .chord_names => return false, // E3
+                .string => |s| {
+                    const t = remap_mod.resolveTarget(s) catch continue; // unknown: skipped both sides
+                    switch (t) {
+                        .key, .mouse_button, .gamepad_button, .disabled => {},
+                        .macro, .chord => return false, // E2 / E3
+                    }
+                },
+            }
         }
     }
     return true;
@@ -123,7 +185,7 @@ fn runHarness(
 
         var os = OracleState{};
 
-        const do_compare = configIsFullyModeled(&ctx.parsed.value);
+        const do_compare = configIsOracleFaithful(&ctx.parsed.value);
 
         var frames_buf: [200]Frame = undefined;
         const frames = frames_buf[0..@min(n_frames, frames_buf.len)];
@@ -495,7 +557,7 @@ test "generative: real device configs x compatible mapping x random sequences" {
         defer mc.deinit();
 
         var os = OracleState{};
-        const do_compare = configIsFullyModeled(&mc.parsed.value);
+        const do_compare = configIsOracleFaithful(&mc.parsed.value);
 
         var frames_buf: [100]Frame = undefined;
         sequence_gen.randomSequence(rng, &frames_buf, map_parsed.value);
