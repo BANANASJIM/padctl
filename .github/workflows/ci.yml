@@ -11,9 +11,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Build the Lean formal-spec oracle once and publish it as an artifact.
+  # The interactive-Lean-oracle DRT suite in src/test/properties/drt_props.zig
+  # only runs when formal/lean/.lake/build/bin/oracle exists; without this job
+  # every DRT oracle test silently SkipZigTest's in CI (audit F2). The Lean
+  # toolchain (elan + lake build) is heavy, so it is built once here and
+  # downloaded by the zig-test jobs rather than rebuilt per matrix leg.
+  # Cross-workflow artifacts are not reachable via `needs:`, so the oracle is
+  # built inside this workflow (not reused from lean.yml).
+  lean-oracle:
+    name: lean-oracle
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      - name: Build Lean oracle
+        working-directory: formal/lean
+        run: lake build oracle
+      - name: Verify oracle binary exists
+        run: test -x formal/lean/.lake/build/bin/oracle
+      - name: Upload oracle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-oracle
+          path: formal/lean/.lake/build/bin/oracle
+          if-no-files-found: error
+          retention-days: 1
+
   check-matrix:
     name: check / ${{ matrix.os }} / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    needs: [lean-oracle]
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +57,11 @@ jobs:
             zig_args: -Dwasm=false
           - name: libusb-false
             zig_args: -Dlibusb=false
+    env:
+      # Turn a missing oracle into a hard failure (no silent SkipZigTest) so
+      # the formal-spec differential coverage can never regress to skip again.
+      # Mirrors the existing PADCTL_TEST_REQUIRE_UHID pattern (e2e.yml).
+      PADCTL_TEST_REQUIRE_LEAN: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install Zig
@@ -35,6 +71,16 @@ jobs:
       - name: Install system dependencies
         if: matrix.name != 'libusb-false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+      - name: Download Lean oracle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lean-oracle
+          path: formal/lean/.lake/build/bin
+      - name: Restore oracle executable bit
+        run: |
+          set -eo pipefail
+          chmod +x formal/lean/.lake/build/bin/oracle
+          test -x formal/lean/.lake/build/bin/oracle
       # Three separate `zig build` processes (Option C from PR #166 fc4937b)
       # to avoid Zig issue #22453 inter-step flock contention. Each process
       # has its own .zig-cache lock space.
@@ -52,11 +98,15 @@ jobs:
   check:
     name: check
     runs-on: ubuntu-22.04
-    needs: [check-matrix]
+    needs: [lean-oracle, check-matrix]
     if: ${{ always() }}
     steps:
-      - name: Require check matrix success
+      - name: Require lean-oracle and check matrix success
         run: |
+          if [ "${{ needs.lean-oracle.result }}" != "success" ]; then
+            echo "lean-oracle result: ${{ needs.lean-oracle.result }}"
+            exit 1
+          fi
           if [ "${{ needs.check-matrix.result }}" != "success" ]; then
             echo "check-matrix result: ${{ needs.check-matrix.result }}"
             exit 1
@@ -157,6 +207,15 @@ jobs:
               timeout 600 /opt/zig/zig build -Dlibusb=false test-safe --summary all
               timeout 600 /opt/zig/zig build -Dlibusb=false check-fmt
             " 2>&1 | tee distro-check.log
+      # The container above runs as root (apt-get/dnf require it), so any
+      # .zig-cache / zig-out files it writes are root-owned on the host.
+      # The subsequent host build step and the setup-zig post-job cache-save
+      # trim both run as the unprivileged `runner` user; root-owned files make
+      # the post-job `unlink` trim fail with EACCES once the cache exceeds the
+      # 2 GiB limit. Reclaim ownership so runner-side steps can manage them.
+      - name: Reclaim container-written cache ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .zig-cache zig-out 2>/dev/null || true
       - name: Build musl binary (host)
         run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
       - name: Smoke-test musl binary in container

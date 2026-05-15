@@ -134,6 +134,8 @@ pub const testing_support = struct {
     pub const regression_corpus_props = @import("test/properties/regression_corpus_props.zig");
     pub const device_specific_props = @import("test/properties/device_specific_props.zig");
     pub const lean_drt_props = @import("test/properties/lean_drt_props.zig");
+    pub const transition_coverage_props = @import("test/properties/transition_coverage_props.zig");
+    pub const layer_fsm_drt_props = @import("test/properties/layer_fsm_drt_props.zig");
     pub const reference_interp = @import("test/reference_interp.zig");
     pub const gen = @import("test/gen/gen.zig");
     // Phase 13 Wave 1 T5: surface fixture + simulator harness for unit tests.
@@ -1367,10 +1369,10 @@ fn escapeTomlString(writer: anytype, s: []const u8) !void {
 }
 
 /// Write a config.toml with a single device binding. Reads the existing
-/// file so every section ([diagnostics], [supervisor], unrelated [[device]]
-/// entries) survives the round-trip; only the target device's mapping is
-/// updated. Delegates to `user_config.writeAtomic` for atomic .tmp+rename
-/// so a crash mid-write never truncates the live config.
+/// file so every section ([diagnostics], [supervisor], [chord_switch],
+/// unrelated [[device]] entries) survives the round-trip; only the target
+/// device's mapping is updated. Delegates to `user_config.writeAtomic` for
+/// atomic .tmp+rename so a crash mid-write never truncates the live config.
 fn writeConfigToml(
     allocator: std.mem.Allocator,
     dir: []const u8,
@@ -1423,6 +1425,7 @@ fn writeConfigToml(
         .device = new_devices,
         .diagnostics = if (existing) |e| e.value.diagnostics else .{},
         .supervisor = if (existing) |e| e.value.supervisor else .{},
+        .chord_switch = if (existing) |e| e.value.chord_switch else null,
     };
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
