@@ -10,7 +10,14 @@ pub fn build(b: *std.Build) void {
     const coverage = b.option(bool, "test-coverage", "Run tests with kcov coverage") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Substring filter passed to addTest.filters (local dev)");
 
-    const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0" };
+    // wasm3 is vendored third-party C with intentional UB-prone interpreter
+    // patterns (aggressive pointer casts in m3_compile.c/m3_exec.c). The project
+    // builds every module with `.sanitize_c = .trap`, which turns the first such
+    // UB into SIGILL the moment a wasm function is lazily compiled — this is the
+    // real root cause of issue #214 (crash at m3_FindFunction → CompileFunction,
+    // not a missing export). Exempt only this third-party translation unit set
+    // from UBSan-trap; all first-party code keeps the strict sanitizer.
+    const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0", "-fno-sanitize=undefined" };
 
     const zon = @import("build.zig.zon");
     const version_override = b.option([]const u8, "version", "Override version string (default: build.zig.zon)");

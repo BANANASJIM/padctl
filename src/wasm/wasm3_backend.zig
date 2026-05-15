@@ -73,9 +73,20 @@ pub const Wasm3Plugin = struct {
 
         linkHostFunctions(s);
 
-        _ = c.m3_FindFunction(&s.fn_init, s.rt, "init_device");
-        _ = c.m3_FindFunction(&s.fn_calib, s.rt, "process_calibration");
-        _ = c.m3_FindFunction(&s.fn_proc, s.rt, "process_report");
+        // A plugin may legitimately omit any of these exports. m3_FindFunction
+        // returns a non-null M3Result on miss; don't rely on its out-pointer
+        // post-state — force null so initDevice/processCalibration/processReport
+        // orelse-guards are correct for any incomplete plugin (passthrough/false
+        // instead of calling through a stale/invalid IM3Function).
+        s.fn_init = findOptionalFn(s.rt, "init_device");
+        s.fn_calib = findOptionalFn(s.rt, "process_calibration");
+        s.fn_proc = findOptionalFn(s.rt, "process_report");
+    }
+
+    fn findOptionalFn(rt: c.IM3Runtime, name: [*:0]const u8) c.IM3Function {
+        var f: c.IM3Function = null;
+        if (c.m3_FindFunction(&f, rt, name) != null) return null;
+        return f;
     }
 
     fn initDevice(ptr: *anyopaque) bool {
@@ -319,7 +330,15 @@ pub const Wasm3Plugin = struct {
         }
         s.last_trap_ts = now;
         if (s.trap_count >= 10) {
-            wasm_log.err("plugin auto-unloaded: trap rate exceeded", .{});
+            // Graceful defensive recovery, not a host error: a misbehaving
+            // plugin is dropped and auto-unloaded. Must stay at .warn — the
+            // Zig test runner fails any test that emits a .err-level log, and
+            // `wasm3: trap rate-limiting auto-unloads plugin` exercises this
+            // exact branch (see #214 / PR #246 CI run 25932763622: a .err here
+            // failed the suite, mis-attributed by the --listen runner to the
+            // next test `tomlEscape`). The trap itself is already logged at
+            // .warn above; auto-unload is the same severity.
+            wasm_log.warn("plugin auto-unloaded: trap rate exceeded", .{});
             unload(@ptrCast(s));
         }
     }
@@ -341,18 +360,12 @@ pub const Wasm3Plugin = struct {
 
 const testing = std.testing;
 
-// Runtime tests revealed by PR #213 testing_support wiring fix. Echo plugin lacks
-// init_device export; m3_FindFunction crashes. Latent bug — investigate separately.
-// TODO(wasm3-runtime-debt): see follow-up issue.
-const skip_wasm3_runtime_tests = true;
-
 fn testCreate() !struct { plugin: WasmPlugin, self: *Wasm3Plugin } {
     const plugin = try Wasm3Plugin.create(testing.allocator);
     return .{ .plugin = plugin, .self = @ptrCast(@alignCast(plugin.ptr)) };
 }
 
 test "wasm3: load echo plugin succeeds" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     const self = t.self;
@@ -365,7 +378,6 @@ test "wasm3: load echo plugin succeeds" {
 }
 
 test "wasm3: initDevice returns true" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -376,7 +388,6 @@ test "wasm3: initDevice returns true" {
 }
 
 test "wasm3: processReport echo round-trip returns override" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -394,7 +405,6 @@ test "wasm3: processReport echo round-trip returns override" {
 }
 
 test "wasm3: no exports returns false/passthrough" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -407,8 +417,63 @@ test "wasm3: no exports returns false/passthrough" {
     try testing.expectEqual(ProcessResult.passthrough, result);
 }
 
+// Falsifiability contract for issue #214 — full wasm3 runtime activation.
+//
+// Three layered defects had to fall for these 13 tests to run green; the
+// original `skip_wasm3_runtime_tests = true` hid all of them at once:
+//
+//  (A) First-compile SIGILL: wasm3 third-party C has intentional UB the
+//      project's `.sanitize_c = .trap` turned into a SIGILL at m3_FindFunction
+//      → CompileFunction on first lazy compile. Fixed by `-fno-sanitize=
+//      undefined` on `wasm3_c_flags` (wasm3 C only; first-party stays strict).
+//  (B) Stale IM3Function on missing export: m3_FindFunction returns a non-null
+//      M3Result on miss but leaves the out-pointer indeterminate. Fixed by
+//      `findOptionalFn` forcing null so the orelse-guards passthrough/false.
+//  (C) Runtime trap was NOT process-fatal — wasm3's `unreachable` opcode
+//      returns a clean M3Result (m3Err_trapUnreachable) from m3_Call, which
+//      callWasm() already checks and routes to handleTrap → .drop/auto-unload.
+//      The actual suite failure (#214's real unfixed cause, NOT the
+//      misdiagnosed "missing export") was that handleTrap's auto-unload
+//      diagnostic was emitted at std.log.err. Zig's default test runner FAILS
+//      any test that emits a .err-level log; `trap rate-limiting auto-unloads
+//      plugin` hits that branch, so the suite failed and the --listen runner
+//      mis-attributed the death to the next test `tomlEscape` (PR #246 CI run
+//      25932763622). Fixed by demoting auto-unload to .warn (it is graceful
+//      defensive recovery, same severity as the `wasm trap:` line).
+//
+// Production mutations that make this suite fail (do not apply):
+//   1. Drop `-fno-sanitize=undefined` from `wasm3_c_flags` in build.zig
+//      → wasm3 C UB trapped → SIGILL on first lazy compile (issue #214 (A)).
+//   2. Revert load()'s `findOptionalFn` back to `_ = c.m3_FindFunction(...)`
+//      → stale IM3Function used through the orelse-guards (issue #214 (B)).
+//   3. Restore `wasm_log.err` for the auto-unload diagnostic in handleTrap
+//      → `trap rate-limiting auto-unloads plugin` logs at .err → Zig test
+//        runner fails the suite, mis-blamed on the next test (issue #214 (C)).
+//   4. Re-introduce `const skip_wasm3_runtime_tests = true;` and the guards
+//      → all 13 tests vacuously pass (SkipZigTest), re-hiding (A)+(B)+(C).
+test "wasm3: load() with plugin missing all exports does not crash and nulls fn slots" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    const self = t.self;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    // no_exports.wasm exports only `memory` — no init_device/process_*.
+    try plugin.load(@embedFile("../../tests/wasm/no_exports.wasm"), &ctx);
+    try testing.expect(self.env != null);
+    try testing.expect(self.rt != null);
+    try testing.expect(self.fn_init == null);
+    try testing.expect(self.fn_calib == null);
+    try testing.expect(self.fn_proc == null);
+    // Defensive call paths: missing init_device => false, missing
+    // process_report => passthrough, missing process_calibration => no-op.
+    try testing.expect(!plugin.initDevice());
+    var out: [4]u8 = undefined;
+    try testing.expectEqual(ProcessResult.passthrough, plugin.processReport(&[_]u8{ 0x01, 0x02, 0x03, 0x04 }, &out));
+    plugin.processCalibration(&[_]u8{ 0x01, 0x02, 0x03, 0x04 });
+}
+
 test "wasm3: invalid wasm bytes returns error" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -418,7 +483,6 @@ test "wasm3: invalid wasm bytes returns error" {
 }
 
 test "wasm3: unload then destroy lifecycle" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     const self = t.self;
@@ -432,7 +496,6 @@ test "wasm3: unload then destroy lifecycle" {
 }
 
 test "wasm3: processCalibration does not crash" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -443,7 +506,6 @@ test "wasm3: processCalibration does not crash" {
 }
 
 test "wasm3: trap in processReport returns drop" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     const self = t.self;
@@ -458,7 +520,6 @@ test "wasm3: trap in processReport returns drop" {
 }
 
 test "wasm3: trap rate-limiting auto-unloads plugin" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     const self = t.self;
@@ -538,7 +599,6 @@ const MockDeviceCtx = struct {
 };
 
 test "imu_cal: init_device reads calibration via device_read" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -570,7 +630,6 @@ test "imu_cal: init_device reads calibration via device_read" {
 }
 
 test "imu_cal: process_calibration path and calibrated output" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -619,7 +678,6 @@ test "imu_cal: process_calibration path and calibrated output" {
 }
 
 test "imu_cal: zero denominator fallback" {
-    if (skip_wasm3_runtime_tests) return error.SkipZigTest;
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
