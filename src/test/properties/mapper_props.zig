@@ -105,6 +105,84 @@ test "property: rapid hold layer toggle — state stays consistent" {
     }
 }
 
+test "prop: layer tap fires reliably under hold_timeout — 1000 iter random timing" {
+    // Direct empirical foil to the "sometimes triggered, mostly not" report for #79.
+    // Pre-PR-231 mutation produces < 1000 fires; post-fix produces exactly 1000.
+    const allocator = testing.allocator;
+
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rng = prng.random();
+
+    var tap_fired_count: usize = 0;
+    for (0..1000) |_| {
+        // release_delta_ms ∈ [1, 199]
+        const delta_ms = rng.intRangeAtMost(u64, 1, 199);
+        // press_ns ∈ [1e9, 1e12]
+        const press_ns: i128 = rng.intRangeAtMost(i64, 1_000_000_000, 1_000_000_000_000);
+
+        var ctx = try makeMapper(
+            \\[[layer]]
+            \\name = "fps"
+            \\trigger = "LT"
+            \\activation = "hold"
+            \\tap = "A"
+            \\hold_timeout = 200
+        , allocator);
+        defer ctx.deinit();
+        var m = &ctx.mapper;
+
+        _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
+        _ = m.onLayerTimerExpired();
+        const release_ns: i128 = press_ns + @as(i128, delta_ms) * 1_000_000;
+        const ev = try m.apply(.{ .buttons = 0 }, 16, release_ns);
+        if ((ev.gamepad.buttons & a_mask) != 0) tap_fired_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1000), tap_fired_count);
+}
+
+test "prop: layer tap NOT fired when held past hold_timeout — 1000 iter" {
+    // Upper boundary guard. Pre-fix could spuriously emit tap; post-fix never emits.
+    const allocator = testing.allocator;
+
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rng = prng.random();
+
+    var tap_fired_count: usize = 0;
+    for (0..1000) |_| {
+        // release_delta_ms ∈ [201, 500]
+        const delta_ms = rng.intRangeAtMost(u64, 201, 500);
+        const press_ns: i128 = rng.intRangeAtMost(i64, 1_000_000_000, 1_000_000_000_000);
+
+        var ctx = try makeMapper(
+            \\[[layer]]
+            \\name = "fps"
+            \\trigger = "LT"
+            \\activation = "hold"
+            \\tap = "A"
+            \\hold_timeout = 200
+        , allocator);
+        defer ctx.deinit();
+        var m = &ctx.mapper;
+
+        _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
+        _ = m.onLayerTimerExpired();
+        const release_ns: i128 = press_ns + @as(i128, delta_ms) * 1_000_000;
+        const ev = try m.apply(.{ .buttons = 0 }, 16, release_ns);
+        if ((ev.gamepad.buttons & a_mask) != 0) tap_fired_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), tap_fired_count);
+}
+
 // P3b: rapid toggle activation
 test "property: rapid toggle layer — state stays consistent" {
     const allocator = testing.allocator;

@@ -1738,3 +1738,52 @@ test "mapper: #79 dual-ready ppoll — apply uses caller now_ns, tap fires at pr
     const ev_clear = try m.apply(.{}, 16, release_ns + 1_000_000);
     try testing.expectEqual(@as(u64, 0), ev_clear.gamepad.buttons & a_mask);
 }
+
+test "mapper: #79 timing boundary sweep — tap fires iff release_ns < hold_timeout_ns" {
+    // 7 release_delta × 3 seeds = 21 cases.
+    // release < hold_timeout (200ms): tap fires via race-case branch.
+    // release >= hold_timeout: timer fires first → ACTIVE → release does NOT emit tap.
+    const allocator = testing.allocator;
+
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
+
+    const release_deltas_ms = [_]u64{ 1, 50, 100, 195, 199, 200, 201 };
+    const press_bases: [3]i128 = .{ 0xA000_0000, 0xB000_0000, 0xC000_0000 };
+
+    for (press_bases) |press_ns| {
+        for (release_deltas_ms) |delta_ms| {
+            const parsed = try makeMapping(
+                \\[[layer]]
+                \\name = "fps"
+                \\trigger = "LT"
+                \\activation = "hold"
+                \\tap = "A"
+                \\hold_timeout = 200
+            , allocator);
+            defer parsed.deinit();
+
+            var m = try makeMapper(&parsed.value, allocator);
+            defer m.deinit();
+
+            // Press at base timestamp → PENDING
+            _ = try m.apply(.{ .buttons = lt_mask }, 16, press_ns);
+
+            // Timer fires at press+200ms → ACTIVE
+            _ = m.onLayerTimerExpired();
+
+            const release_ns: i128 = press_ns + @as(i128, delta_ms) * 1_000_000;
+            const ev_tap = try m.apply(.{ .buttons = 0 }, 16, release_ns);
+
+            if (delta_ms < 200) {
+                // Race-case: release before hold_timeout → tap must fire
+                try testing.expect((ev_tap.gamepad.buttons & a_mask) != 0);
+            } else {
+                // Past hold_timeout → layer deactivates, no tap
+                try testing.expectEqual(@as(u64, 0), ev_tap.gamepad.buttons & a_mask);
+            }
+        }
+    }
+}
