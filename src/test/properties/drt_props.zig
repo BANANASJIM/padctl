@@ -155,13 +155,33 @@ fn compareDelta(fr: lean.FieldResult, delta: anytype) !void {
     }
 }
 
-fn initOracle() error{SkipZigTest}!*lean.LeanOracle {
-    var oracle = lean.LeanOracle.init() catch {
-        return error.SkipZigTest;
+// PADCTL_TEST_REQUIRE_LEAN=1 turns a missing/broken Lean oracle into a hard
+// failure instead of a silent skip. CI sets this so the formal-spec
+// differential coverage can never regress to SkipZigTest unnoticed (audit F2).
+// Mirrors requireUhid() in src/test/uhid_uniq_pairing_test.zig.
+fn requireLean() bool {
+    const v = std.posix.getenv("PADCTL_TEST_REQUIRE_LEAN") orelse return false;
+    return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+}
+
+fn reportMissingOracle(reason: []const u8) error{ SkipZigTest, LeanOracleRequired } {
+    std.log.warn(
+        "DRT: Lean oracle unavailable ({s}) — formal-spec differential coverage is SILENT. " ++
+            "Build it via 'cd formal/lean && lake build oracle', " ++
+            "or set PADCTL_TEST_REQUIRE_LEAN=1 to turn this into a hard failure.",
+        .{reason},
+    );
+    if (requireLean()) return error.LeanOracleRequired;
+    return error.SkipZigTest;
+}
+
+fn initOracle() error{ SkipZigTest, LeanOracleRequired }!*lean.LeanOracle {
+    var oracle = lean.LeanOracle.init() catch |err| {
+        return reportMissingOracle(@errorName(err));
     };
     const heap_oracle = std.heap.page_allocator.create(lean.LeanOracle) catch {
         oracle.deinit();
-        return error.SkipZigTest;
+        return reportMissingOracle("oracle heap allocation failed");
     };
     heap_oracle.* = oracle;
     std.log.info("DRT: using Lean subprocess oracle", .{});
@@ -181,9 +201,7 @@ test "DRT: production interpreter matches reference oracle on random packets" {
     var rng = std.Random.DefaultPrng.init(0xC0FFEE_42);
     const random = rng.random();
 
-    const oracle = initOracle() catch |err| switch (err) {
-        error.SkipZigTest => return error.SkipZigTest,
-    };
+    const oracle = try initOracle();
     defer deinitOracle(oracle);
 
     for (paths.items) |path| {
@@ -233,9 +251,7 @@ test "DRT: structured random packets — valid field values at correct offsets" 
     var rng = std.Random.DefaultPrng.init(0xABCD_EF01);
     const random = rng.random();
 
-    const oracle = initOracle() catch |err| switch (err) {
-        error.SkipZigTest => return error.SkipZigTest,
-    };
+    const oracle = try initOracle();
     defer deinitOracle(oracle);
 
     for (paths.items) |path| {
