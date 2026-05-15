@@ -751,6 +751,57 @@ test "uninstall: legacy padctl-resume.service is removed (non-immutable)" {
     } else |_| {}
 }
 
+test "install: uninstall applies destdir to runtime state paths" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const run_dir = try std.fmt.allocPrint(allocator, "{s}/run/padctl", .{staging});
+    defer allocator.free(run_dir);
+    try ensureDirAll(allocator, run_dir);
+
+    const pid_path = try std.fmt.allocPrint(allocator, "{s}/padctl.pid", .{run_dir});
+    defer allocator.free(pid_path);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/padctl.sock", .{run_dir});
+    defer allocator.free(sock_path);
+
+    {
+        var f = try std.fs.createFileAbsolute(pid_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("12345\n");
+    }
+    {
+        var f = try std.fs.createFileAbsolute(sock_path, .{ .truncate = true });
+        defer f.close();
+    }
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    if (std.fs.accessAbsolute(pid_path, .{})) |_| {
+        std.debug.print("padctl.pid not cleaned up under destdir: {s}\n", .{pid_path});
+        return error.RuntimePidNotRemoved;
+    } else |_| {}
+
+    if (std.fs.accessAbsolute(sock_path, .{})) |_| {
+        std.debug.print("padctl.sock not cleaned up under destdir: {s}\n", .{sock_path});
+        return error.RuntimeSockNotRemoved;
+    } else |_| {}
+}
+
 test "install: generateReconnectScript has required commands" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -764,6 +815,20 @@ test "install: generateReconnectScript has required commands" {
     // Must re-apply mapping on hotplug
     try testing.expect(std.mem.indexOf(u8, script, "/usr/local/bin/padctl switch") != null);
     try testing.expect(std.mem.indexOf(u8, script, "/etc/padctl/mappings/") != null);
+}
+
+test "services: generateReconnectScript embeds correct mappings dir for prefix=/usr/local" {
+    // Convention: sysconfdir is always /etc regardless of --prefix.
+    // systemConfigDir() in src/config/paths.zig is the SSOT.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+    // Binary path uses prefix
+    try testing.expect(std.mem.indexOf(u8, script, "/usr/local/bin/padctl") != null);
+    // Mappings dir is always /etc — not /usr/local/etc
+    try testing.expect(std.mem.indexOf(u8, script, "/etc/padctl/mappings") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "/usr/local/etc") == null);
 }
 
 test "install: generateUdevRules includes hotplug reconnect rules" {

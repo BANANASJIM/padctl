@@ -79,6 +79,8 @@ pub fn generateReconnectScript(allocator: std.mem.Allocator, prefix: []const u8)
         \\
         \\# Re-apply mapping after hotplug (device reconnects in passthrough mode).
         \\# Apply the first mapping found (sorted for deterministic selection).
+        \\# /etc/padctl/mappings is the FHS sysconfdir — fixed at /etc regardless
+        \\# of --prefix. systemConfigDir() in src/config/paths.zig is the SSOT.
         \\sleep 2
         \\for f in $(ls /etc/padctl/mappings/*.toml 2>/dev/null | sort); do
         \\    [ -f "$f" ] || continue

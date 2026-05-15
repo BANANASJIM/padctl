@@ -522,6 +522,7 @@ fn extractAndFillCompiled(cr: *const CompiledReport, raw: []const u8, delta: *Ga
     }
 
     if (cr.button_group) |*cbg| {
+        if (cbg.src_off + cbg.src_size > raw.len) return;
         const src_val = readUintBytes(raw, cbg.src_off, cbg.src_size);
         var bits: u64 = delta.buttons orelse 0;
         for (cbg.entries[0..cbg.count]) |entry| {
@@ -1924,4 +1925,33 @@ test "readUintBytes: clamps size to 8" {
     const buf = [_]u8{0x01} ** 16;
     const result = readUintBytes(&buf, 0, 12);
     try testing.expectEqual(@as(u64, 0x0101010101010101), result);
+}
+
+test "interpreter: readUintBytes rejects src_off+src_size > raw.len" {
+    // Directly construct a CompiledReport with button_group { src_off=6, src_size=4 }
+    // and call extractAndFillCompiled with an 8-byte buffer.
+    // cbg.src_off(6) + cbg.src_size(4) = 10 > 8 = raw.len.
+    // Without the bounds check, readUintBytes panics in ReleaseSafe (OOB slice).
+    // With the check, the button_group is skipped gracefully and delta.buttons stays null.
+    const dummy_report = device.ReportConfig{
+        .name = "dummy",
+        .interface = 0,
+        .size = 8,
+    };
+    var cr = CompiledReport{
+        .src = &dummy_report,
+        .checksum = null,
+        .fields = undefined,
+        .field_count = 0,
+        .button_group = CompiledButtonGroup{
+            .src_off = 6,
+            .src_size = 4,
+            .entries = undefined,
+            .count = 0,
+        },
+    };
+    const raw = [_]u8{0} ** 8;
+    var delta = GamepadStateDelta{};
+    extractAndFillCompiled(&cr, &raw, &delta);
+    try testing.expectEqual(@as(?u64, null), delta.buttons);
 }
