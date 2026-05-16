@@ -1,7 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 const device = @import("../config/device.zig");
-const Interpreter = @import("../core/interpreter.zig").Interpreter;
+const interp = @import("../core/interpreter.zig");
+const Interpreter = interp.Interpreter;
 
 const boundary_i16 = [_]i16{ 0, 1, -1, std.math.maxInt(i16), std.math.minInt(i16), 16384 };
 
@@ -135,5 +136,31 @@ test "boundary: chain deadzone(1000), scale(-32768, 32767)" {
     const dead_vals = [_]i16{ 0, 999, -999 };
     inline for (dead_vals) |v| {
         try testing.expectEqual(scaled_zero, try runOne(&interp, v));
+    }
+}
+
+// issue #215 / ADR-017: production negate/abs MUST match the Lean oracle's
+// single-point saturation at the type-min boundary `val == -(t_max+1) -> t_max`.
+// Asserted directly via runTransformChain (DRT-independent). Reverting the
+// single-point guard in interpreter.zig makes this test FAIL.
+test "issue215: negate/abs single-point saturation matches Lean oracle" {
+    // i8: t_max = 127, type-min = -(127+1) = -128.
+    {
+        var neg = interp.compileTransformChain("negate", .i8);
+        try testing.expectEqual(@as(i64, 127), interp.runTransformChain(-128, &neg));
+        var abs_ = interp.compileTransformChain("abs", .i8);
+        try testing.expectEqual(@as(i64, 127), interp.runTransformChain(-128, &abs_));
+        // Non-minInt out-of-range input must NOT saturate (oracle: raw -val/natAbs).
+        try testing.expectEqual(@as(i64, 256), interp.runTransformChain(-256, &neg));
+        try testing.expectEqual(@as(i64, 256), interp.runTransformChain(-256, &abs_));
+        // In-range still raw.
+        try testing.expectEqual(@as(i64, 127), interp.runTransformChain(-127, &neg));
+    }
+    // Wider type i32le: t_max = 2147483647, type-min = -2147483648.
+    {
+        var neg = interp.compileTransformChain("negate", .i32le);
+        try testing.expectEqual(@as(i64, 2147483647), interp.runTransformChain(-2147483648, &neg));
+        var abs_ = interp.compileTransformChain("abs", .i32le);
+        try testing.expectEqual(@as(i64, 2147483647), interp.runTransformChain(-2147483648, &abs_));
     }
 }
