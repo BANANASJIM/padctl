@@ -230,9 +230,16 @@ pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64
     var val = initial;
     const t_max = typeMaxByTag(chain.type_tag);
     for (chain.items[0..chain.len]) |tr| {
+        // Lean oracle (formal/lean/Padctl/Transform.lean): negate/abs saturate
+        // at the single type-min point `val == Int.negSucc tMax` (= -(t_max+1))
+        // to t_max, otherwise raw -val / natAbs. This is a SINGLE-POINT guard,
+        // not a range clamp — broadening it would clamp scale→negate stick
+        // values to ±t_max (severe real-device regression). See ADR-017.
+        const type_min: i64 = -(t_max + 1);
         val = switch (tr.op) {
-            .negate => if (val == std.math.minInt(i64)) std.math.maxInt(i64) else -val,
+            .negate => if (val == type_min) t_max else if (val == std.math.minInt(i64)) std.math.maxInt(i64) else -val,
             .abs => blk: {
+                if (val == type_min) break :blk t_max;
                 const clamped = if (val == std.math.minInt(i64)) std.math.maxInt(i64) else val;
                 break :blk @intCast(@abs(clamped));
             },
