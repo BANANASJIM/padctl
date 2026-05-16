@@ -50,6 +50,7 @@ const std = @import("std");
 const uhid = @import("uhid.zig");
 const device = @import("../config/device.zig");
 const state_mod = @import("../core/state.zig");
+const input_codes = @import("../config/input_codes.zig");
 
 pub const BuildError = std.mem.Allocator.Error || error{
     DescriptorTooLarge,
@@ -239,9 +240,44 @@ pub const UhidDescriptorBuilder = struct {
             break :blk @intCast(n);
         } else 0;
         if (button_count > 0) {
+            // Build per-button Usage array in ButtonId enum order.
+            // Buttons with a direct BTN_* → Usage mapping get their canonical
+            // Usage; others (e.g. BTN_TRIGGER_HAPPY) get the lowest free Usage
+            // so the descriptor stays valid and ≤64 entries.
+            var button_usages: [64]u8 = undefined;
+            var occupied = std.bit_set.IntegerBitSet(65).initEmpty();
+            {
+                const buttons = out.buttons.?;
+                var slot: u8 = 0;
+                inline for (@typeInfo(state_mod.ButtonId).@"enum".fields) |f| {
+                    if (slot >= button_count) break;
+                    if (buttons.map.get(f.name)) |code_str| {
+                        const code = input_codes.resolveBtnCode(code_str) catch null;
+                        const usage = if (code) |c| btnCodeToHidUsage(c) else null;
+                        if (usage) |u| {
+                            button_usages[slot] = u;
+                            occupied.set(u);
+                        } else {
+                            button_usages[slot] = 0; // resolved later
+                        }
+                        slot += 1;
+                    }
+                }
+                // Fill unresolved slots with lowest free Usage.
+                var next_free: u8 = 1;
+                for (button_usages[0..button_count]) |*u| {
+                    if (u.* == 0) {
+                        while (next_free <= 64 and occupied.isSet(next_free)) : (next_free += 1) {}
+                        u.* = next_free;
+                        occupied.set(next_free);
+                        next_free += 1;
+                    }
+                }
+            }
             try writeItem1(&buf, allocator, 0x05, 0x09); // Usage Page (Button)
-            try writeItem1(&buf, allocator, 0x19, 0x01); // Usage Minimum (1)
-            try writeItem1(&buf, allocator, 0x29, button_count); // Usage Maximum (N)
+            for (button_usages[0..button_count]) |u| {
+                try writeItem1(&buf, allocator, 0x09, u); // Usage (N)
+            }
             try writeItem1(&buf, allocator, 0x15, 0x00); // Logical Minimum (0)
             try writeItem1(&buf, allocator, 0x25, 0x01); // Logical Maximum (1)
             try writeItem1(&buf, allocator, 0x75, 0x01); // Report Size (1)
@@ -1119,9 +1155,24 @@ pub const MAX_REPORT_BYTES: usize = 32;
 
 pub const EncodeError = error{ReportTooLong};
 
+/// Maps a Linux BTN_* evdev code to its HID Button Page Usage number.
+/// The kernel maps Button Page usages to evdev codes in four groups of 16:
+///   Usage  1-16 → BTN_GAMEPAD (0x130-0x13F)
+///   Usage 17-32 → BTN_MISC    (0x100-0x10F)
+///   Usage 33-48 → BTN_MOUSE   (0x110-0x11F)
+///   Usage 49-64 → BTN_JOYSTICK(0x120-0x12F)
+/// Returns null for codes outside these ranges (e.g. BTN_TRIGGER_HAPPY).
+fn btnCodeToHidUsage(code: u16) ?u8 {
+    if (code >= 0x130 and code <= 0x13F) return @intCast(code - 0x130 + 1);
+    if (code >= 0x100 and code <= 0x10F) return @intCast(code - 0x100 + 17);
+    if (code >= 0x110 and code <= 0x11F) return @intCast(code - 0x110 + 33);
+    if (code >= 0x120 and code <= 0x12F) return @intCast(code - 0x120 + 49);
+    return null;
+}
+
 /// Stable HID-bit-index → `state_mod.ButtonId` assignment. The builder's
-/// button pass emits `Usage Minimum 1, Usage Maximum button_count`; the
-/// encoder walks `ButtonId` in declaration order and packs a 1-bit entry for
+/// button pass emits one Usage item per button in ButtonId declaration order;
+/// the encoder walks `ButtonId` in the same order and packs a 1-bit entry for
 /// each id that appears in `cfg.buttons`. Determinism matters: SDL assumes
 /// a stable ordering between descriptor enumeration and report payload.
 fn buttonIdSlot(cfg: device.OutputConfig, bit_idx: u8) ?state_mod.ButtonId {
