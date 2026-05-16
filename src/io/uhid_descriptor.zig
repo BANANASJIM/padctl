@@ -81,7 +81,7 @@ pub const PID_POOL_REPORT_ID: u8 = 15;
 // the kernel matches reports by HID Usage on the PID Usage Page (0x0F),
 // not by Report ID. Report IDs are not normative in HID PID 1.01.
 // Kernel pidff_find_reports rejects with -ENODEV if any of these 8 usages
-// is absent — see probe Run 2 in tools/wave6-probe/RESEARCH-REPORT.md.
+// is absent — see the hid-pidff bind probe in issue #82 / PR #161.
 pub const PID_MANDATORY_USAGES = [_]u8{
     0x21, // Set Effect Report
     0x77, // Effect Operation Report
