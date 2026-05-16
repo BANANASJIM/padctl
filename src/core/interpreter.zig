@@ -237,7 +237,7 @@ pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64
         // values to ±t_max (severe real-device regression). See ADR-017.
         const type_min: i64 = -(t_max + 1);
         val = switch (tr.op) {
-            .negate => if (val == type_min) t_max else if (val == std.math.minInt(i64)) std.math.maxInt(i64) else -val,
+            .negate => if (val == std.math.minInt(i64)) std.math.maxInt(i64) else -val,
             .abs => blk: {
                 if (val == type_min) break :blk t_max;
                 const clamped = if (val == std.math.minInt(i64)) std.math.maxInt(i64) else val;
