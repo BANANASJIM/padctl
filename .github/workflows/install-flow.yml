@@ -134,18 +134,27 @@ jobs:
               echo "=== sentinel mechanism invariants (Scenario A: enabled install) ==="
               FAIL=0
 
+              # Literal single quotes inside this docker -c argument (the whole
+              # script is single-quoted by the host runner shell) would prematurely
+              # close the host single-quote and corrupt parsing. Keep every check
+              # predicate single-quote-free: the sentinel-gate substring lives in a
+              # double-quoted variable and grep -F matches it verbatim.
+              SENTINEL=/etc/padctl/service-enabled
+              SENTINEL_GATE="test -e ${SENTINEL} && "
+              RULE=/usr/local/lib/udev/rules.d/61-padctl-driver-block.rules
+
               check "61 driver-block rule exists" \
-                "[ -f /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules ]"
+                "[ -f \"\$RULE\" ]"
 
               check "61 rule unbind is sentinel-gated" \
-                "grep -q 'test -e /etc/padctl/service-enabled && ' /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules"
+                "grep -qF -- \"\$SENTINEL_GATE\" \"\$RULE\""
 
               check "sentinel present after enabled install" \
-                "[ -e /etc/padctl/service-enabled ]"
+                "[ -e \"\$SENTINEL\" ]"
 
               mkdir -p /tmp/fakesys && : > /tmp/fakesys/unbind
               check "predicate-true reaches unbind" \
-                "/bin/sh -c 'test -e /etc/padctl/service-enabled && echo 1-1:1.0 > /tmp/fakesys/unbind'; [ -s /tmp/fakesys/unbind ]"
+                "{ [ -e \"\$SENTINEL\" ] && printf %s 1-1:1.0 > /tmp/fakesys/unbind; }; [ -s /tmp/fakesys/unbind ]"
 
               if [ $FAIL -ne 0 ]; then
                 echo "=== SCENARIO A FAILED ==="
@@ -161,14 +170,14 @@ jobs:
               FAIL=0
 
               check "61 rule still sentinel-gated after --no-enable" \
-                "grep -q 'test -e /etc/padctl/service-enabled && ' /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules"
+                "grep -qF -- \"\$SENTINEL_GATE\" \"\$RULE\""
 
               check "NO sentinel under --no-enable" \
-                "[ ! -e /etc/padctl/service-enabled ]"
+                "[ ! -e \"\$SENTINEL\" ]"
 
               : > /tmp/fakesys/unbind
               check "predicate-false skips unbind" \
-                "/bin/sh -c 'test -e /etc/padctl/service-enabled && echo X > /tmp/fakesys/unbind'; [ ! -s /tmp/fakesys/unbind ]"
+                "{ [ -e \"\$SENTINEL\" ] && printf %s X > /tmp/fakesys/unbind; }; [ ! -s /tmp/fakesys/unbind ]"
 
               if [ $FAIL -ne 0 ]; then
                 echo "=== SCENARIO B FAILED ==="
