@@ -84,6 +84,17 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         mapping_failed = mapping_failed or binding_failed;
     }
 
+    // Sentinel gates the conditional driver-block udev rule (issue #137):
+    // present ⇒ unbind fires as before; absent ⇒ xpad keeps the device so a
+    // non-enabled install never leaves the controller ownerless. Always
+    // clear it on the non-enable path so a re-install with --no-enable over
+    // a previously-enabled install does not leave a stale sentinel.
+    if (udev.shouldProactiveUnbind(&plan)) {
+        udev.writeServiceSentinel(allocator, &plan) catch {};
+    } else {
+        udev.removeServiceSentinel(allocator, plan.opts.destdir);
+    }
+
     if (plan.do_enable_systemctl) {
         services.runSystemctlPhase(&plan);
     } else if (!plan.staging_mode) {
@@ -245,6 +256,10 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
+
+    // issue #137: drop the service-enabled sentinel so a future replug of a
+    // block_kernel_drivers device is not unbound by a stale udev rule.
+    udev.removeServiceSentinel(allocator, destdir);
 
     if (effective_user_service) {
         if (std.posix.getenv("HOME")) |home| {

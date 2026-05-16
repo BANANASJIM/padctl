@@ -55,6 +55,11 @@ const parseStringArray = _udev.parseStringArray;
 const parseHexOrDec = _udev.parseHexOrDec;
 const generateUdevRules = _udev.generateUdevRules;
 const generateDriverBlockRules = _udev.generateDriverBlockRules;
+const generateDriverBlockRulesFromEntries = _udev.generateDriverBlockRulesFromEntries;
+const sentinelPath = udev_mod.sentinelPath;
+const writeServiceSentinel = udev_mod.writeServiceSentinel;
+const removeServiceSentinel = udev_mod.removeServiceSentinel;
+const shouldProactiveUnbind = udev_mod.shouldProactiveUnbind;
 
 // migration.zig
 const ensureUserXdgDirs = migration_mod.ensureUserXdgDirs;
@@ -1286,6 +1291,199 @@ test "install: generateDriverBlockRules skips when no drivers configured" {
     };
     // File should not have been created — if it was, fail the test
     return error.TestUnexpectedResult;
+}
+
+// --- issue #137: conditional driver-block + service-enabled sentinel ---
+
+// Builds a single-driver entry list and generates the driver-block rules with
+// an explicit sentinel path. Caller owns nothing extra; entries are stack-lived.
+fn genIssue137Rules(allocator: std.mem.Allocator, rules_path: []const u8, sentinel: []const u8) !void {
+    const drivers = [_][]const u8{"xpad"};
+    const entries = [_]UdevEntry{.{
+        .name = "Test Pad",
+        .vid = 0x0f0d,
+        .pid = 0x00c1,
+        .block_kernel_drivers = &drivers,
+    }};
+    try generateDriverBlockRulesFromEntries(allocator, &entries, rules_path, sentinel);
+}
+
+fn readRulesFile(allocator: std.mem.Allocator, rules_path: []const u8) ![]u8 {
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, 8192);
+}
+
+// (1) MUTATION-CI-PROOF: every line that performs an `unbind` must be guarded
+// by a `test -e <sentinel> &&` predicate. FAILS if the sentinel predicate is
+// removed from the unbind RUN+= line in generateDriverBlockRulesFromEntries
+// (reverting to the unconditional `echo %k > .../unbind` shape).
+test "install: #137 every unbind line is sentinel-gated" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    const sentinel = "/etc/padctl/service-enabled";
+    try genIssue137Rules(allocator, rules_path, sentinel);
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    const guard = try std.fmt.allocPrint(allocator, "test -e {s} &&", .{sentinel});
+    defer allocator.free(guard);
+    try testing.expect(std.mem.indexOf(u8, content, guard) != null);
+
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "unbind") == null) continue;
+        try testing.expect(std.mem.indexOf(u8, line, "test -e ") != null);
+        try testing.expect(std.mem.indexOf(u8, line, sentinel) != null);
+    }
+}
+
+// (2) FAILS if the ACTION=="remove" rebind loop is deleted from
+// generateDriverBlockRulesFromEntries.
+test "install: #137 generates ACTION==remove rebind line" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try genIssue137Rules(allocator, rules_path, "/etc/padctl/service-enabled");
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"remove\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/bind") != null);
+}
+
+// (3) FAILS if writeServiceSentinel stops writing or sentinelPath diverges
+// from the file actually written when the plan is enabling & not --no-enable.
+test "install: #137 writeServiceSentinel creates the gating file" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const opts = InstallOptions{ .destdir = destdir };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    // destdir set → staging → do_enable_systemctl=false; force the enabling
+    // shape this test is about by checking shouldProactiveUnbind precondition
+    // directly is covered by test (7); here we exercise the writer/path pair.
+    try writeServiceSentinel(allocator, &plan);
+
+    const path = try sentinelPath(allocator, destdir);
+    defer allocator.free(path);
+    try std.fs.accessAbsolute(path, .{});
+}
+
+// (4) FAILS if the install path writes a sentinel under --no-enable. Drives
+// the predicate that gates writeServiceSentinel in phase.zig.
+test "install: #137 no sentinel under --no-enable" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .no_enable = true };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!shouldProactiveUnbind(&plan));
+}
+
+// (5) FAILS if shouldProactiveUnbind returns true when do_enable_systemctl is
+// false (staged build), which would write a sentinel for a non-running install.
+test "install: #137 no sentinel when do_enable_systemctl false" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .destdir = "/tmp/staging137" };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.do_enable_systemctl);
+    try testing.expect(!shouldProactiveUnbind(&plan));
+}
+
+// (6) FAILS if removeServiceSentinel does not delete the file, or is not
+// idempotent (panics / errors on the second call when already absent).
+test "install: #137 removeServiceSentinel deletes and is idempotent" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const opts = InstallOptions{ .destdir = destdir };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try writeServiceSentinel(allocator, &plan);
+
+    const path = try sentinelPath(allocator, destdir);
+    defer allocator.free(path);
+    try std.fs.accessAbsolute(path, .{});
+
+    removeServiceSentinel(allocator, destdir);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(path, .{}));
+    removeServiceSentinel(allocator, destdir); // idempotent: must not error/panic
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(path, .{}));
+}
+
+// (7) FAILS if shouldProactiveUnbind is not exactly
+// (do_enable_systemctl && !no_enable). Table over both axes.
+test "install: #137 shouldProactiveUnbind truth table" {
+    const testing = std.testing;
+    const Case = struct {
+        opts: InstallOptions,
+        env: EnvSnapshot,
+        want: bool,
+    };
+    const cases = [_]Case{
+        // enabling, not --no-enable → true
+        .{
+            .opts = .{},
+            .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
+            .want = true,
+        },
+        // enabling but --no-enable → false
+        .{
+            .opts = .{ .no_enable = true },
+            .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+        // staged (do_enable_systemctl=false), not --no-enable → false
+        .{
+            .opts = .{ .destdir = "/tmp/s137" },
+            .env = .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+        // staged AND --no-enable → false
+        .{
+            .opts = .{ .destdir = "/tmp/s137", .no_enable = true },
+            .env = .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+    };
+    for (cases) |c| {
+        const plan = try InstallPlan.compute(testing.allocator, c.opts, c.env);
+        defer plan.deinit(testing.allocator);
+        try testing.expectEqual(c.want, shouldProactiveUnbind(&plan));
+    }
 }
 
 // --- Phase 5: mapping installation ---
