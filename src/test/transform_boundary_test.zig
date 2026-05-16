@@ -1,8 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 const device = @import("../config/device.zig");
-const interp = @import("../core/interpreter.zig");
-const Interpreter = interp.Interpreter;
+const interpreter = @import("../core/interpreter.zig");
+const Interpreter = interpreter.Interpreter;
 
 const boundary_i16 = [_]i16{ 0, 1, -1, std.math.maxInt(i16), std.math.minInt(i16), 16384 };
 
@@ -146,21 +146,21 @@ test "boundary: chain deadzone(1000), scale(-32768, 32767)" {
 test "issue215: negate/abs single-point saturation matches Lean oracle" {
     // i8: t_max = 127, type-min = -(127+1) = -128.
     {
-        var neg = interp.compileTransformChain("negate", .i8);
-        try testing.expectEqual(@as(i64, 127), interp.runTransformChain(-128, &neg));
-        var abs_ = interp.compileTransformChain("abs", .i8);
-        try testing.expectEqual(@as(i64, 127), interp.runTransformChain(-128, &abs_));
+        var neg = interpreter.compileTransformChain("negate", .i8);
+        try testing.expectEqual(@as(i64, 127), interpreter.runTransformChain(-128, &neg));
+        var abs_ = interpreter.compileTransformChain("abs", .i8);
+        try testing.expectEqual(@as(i64, 127), interpreter.runTransformChain(-128, &abs_));
         // Non-minInt out-of-range input must NOT saturate (oracle: raw -val/natAbs).
-        try testing.expectEqual(@as(i64, 256), interp.runTransformChain(-256, &neg));
-        try testing.expectEqual(@as(i64, 256), interp.runTransformChain(-256, &abs_));
+        try testing.expectEqual(@as(i64, 256), interpreter.runTransformChain(-256, &neg));
+        try testing.expectEqual(@as(i64, 256), interpreter.runTransformChain(-256, &abs_));
         // In-range still raw.
-        try testing.expectEqual(@as(i64, 127), interp.runTransformChain(-127, &neg));
+        try testing.expectEqual(@as(i64, 127), interpreter.runTransformChain(-127, &neg));
     }
     // Wider type i32le: t_max = 2147483647, type-min = -2147483648.
     {
-        var neg = interp.compileTransformChain("negate", .i32le);
-        try testing.expectEqual(@as(i64, 2147483647), interp.runTransformChain(-2147483648, &neg));
-        var abs_ = interp.compileTransformChain("abs", .i32le);
-        try testing.expectEqual(@as(i64, 2147483647), interp.runTransformChain(-2147483648, &abs_));
+        var neg = interpreter.compileTransformChain("negate", .i32le);
+        try testing.expectEqual(@as(i64, 2147483647), interpreter.runTransformChain(-2147483648, &neg));
+        var abs_ = interpreter.compileTransformChain("abs", .i32le);
+        try testing.expectEqual(@as(i64, 2147483647), interpreter.runTransformChain(-2147483648, &abs_));
     }
 }
