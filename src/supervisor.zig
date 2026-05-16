@@ -1534,7 +1534,6 @@ pub const Supervisor = struct {
             const mapping_name: []const u8 = blk: {
                 if (m.switch_mapping) |sm| {
                     if (sm.value.name) |n| break :blk n;
-                    if (m.switch_mapping_stem) |s| break :blk s;
                 }
                 if (m.default_mapping_pr) |dm| {
                     if (dm.value.name) |n| break :blk n;
