@@ -103,6 +103,58 @@ jobs:
                 exit 1
               fi
 
+              # ---- Scenario A: enabled install => sentinel-gated rule + predicate-true reaches unbind ----
+              echo "=== sentinel mechanism invariants (Scenario A: enabled install) ==="
+              FAIL=0
+
+              check "61 driver-block rule exists" \
+                "[ -f /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules ]"
+
+              check "61 rule unbind is sentinel-gated" \
+                "grep -q 'test -e /etc/padctl/service-enabled && ' /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules"
+
+              check "sentinel present after enabled install" \
+                "[ -e /etc/padctl/service-enabled ]"
+
+              mkdir -p /tmp/fakesys && : > /tmp/fakesys/unbind
+              check "predicate-true reaches unbind" \
+                "/bin/sh -c 'test -e /etc/padctl/service-enabled && echo 1-1:1.0 > /tmp/fakesys/unbind'; [ -s /tmp/fakesys/unbind ]"
+
+              if [ $FAIL -ne 0 ]; then
+                echo "=== SCENARIO A FAILED ==="
+                exit 1
+              fi
+
+              # ---- Scenario B: --no-enable install => no sentinel => predicate-false skips unbind ----
+              su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
+                HOME=/home/testuser \
+                /usr/local/bin/padctl install --prefix /usr/local --no-enable 2>&1"
+
+              echo "=== sentinel mechanism invariants (Scenario B: --no-enable install) ==="
+              FAIL=0
+
+              check "61 rule still sentinel-gated after --no-enable" \
+                "grep -q 'test -e /etc/padctl/service-enabled && ' /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules"
+
+              check "NO sentinel under --no-enable" \
+                "[ ! -e /etc/padctl/service-enabled ]"
+
+              : > /tmp/fakesys/unbind
+              check "predicate-false skips unbind" \
+                "/bin/sh -c 'test -e /etc/padctl/service-enabled && echo X > /tmp/fakesys/unbind'; [ ! -s /tmp/fakesys/unbind ]"
+
+              if [ $FAIL -ne 0 ]; then
+                echo "=== SCENARIO B FAILED ==="
+                exit 1
+              fi
+
+              rm -rf /tmp/fakesys
+
+              # Re-install with enabled so sentinel exists for uninstall to remove (Scenario C)
+              su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
+                HOME=/home/testuser \
+                /usr/local/bin/padctl install --prefix /usr/local 2>&1"
+
               # ---- uninstall ----
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
@@ -116,6 +168,10 @@ jobs:
 
               check "/etc/systemd/user/padctl.service removed after uninstall" \
                 "[ ! -f /etc/systemd/user/padctl.service ]"
+
+              # ---- Scenario C: uninstall removes the sentinel ----
+              check "sentinel removed after uninstall" \
+                "[ ! -e /etc/padctl/service-enabled ]"
 
               if [ $FAIL -ne 0 ]; then
                 echo "=== UNINSTALL INVARIANTS FAILED ==="
