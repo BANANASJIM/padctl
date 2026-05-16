@@ -34,6 +34,7 @@ pub const ManagedInstance = struct {
     thread: std.Thread,
     mapping_arena: std.heap.ArenaAllocator,
     switch_mapping: ?*mapping_cfg.ParseResult = null,
+    switch_mapping_stem: ?[]const u8 = null,
     default_mapping_pr: ?*mapping_cfg.ParseResult = null,
     suspended: bool = false,
     /// CLOCK_MONOTONIC deadline (ns). When non-null and `now >= deadline`,
@@ -59,9 +60,11 @@ const SwitchTx = struct {
     idx: usize,
     new_mapper: ?Mapper,
     parsed_ptr: ?*mapping_cfg.ParseResult,
+    path_stem: ?[]const u8 = null,
     old_mapper: ?Mapper = null,
     old_mapping_cfg: ?*const MappingConfig = null,
     old_switch_mapping: ?*mapping_cfg.ParseResult = null,
+    old_switch_mapping_stem: ?[]const u8 = null,
     committed: bool = false,
 };
 
@@ -607,6 +610,7 @@ pub const Supervisor = struct {
             pm.deinit();
             self.allocator.destroy(pm);
         }
+        if (m.switch_mapping_stem) |s| self.allocator.free(s);
         if (m.default_mapping_pr) |pm| {
             pm.deinit();
             self.allocator.destroy(pm);
@@ -677,6 +681,10 @@ pub const Supervisor = struct {
             self.allocator.destroy(pm);
             m.switch_mapping = null;
         }
+        if (m.switch_mapping_stem) |s| {
+            self.allocator.free(s);
+            m.switch_mapping_stem = null;
+        }
     }
 
     fn handleSwitchNone(self: *Supervisor, fd: posix.fd_t, device_id: ?[]const u8) void {
@@ -731,11 +739,16 @@ pub const Supervisor = struct {
                 self.allocator.destroy(pm);
                 m.switch_mapping = null;
             }
+            if (m.switch_mapping_stem) |s| {
+                self.allocator.free(s);
+                m.switch_mapping_stem = null;
+            }
         }
 
         m.instance.mapper = tx.old_mapper;
         m.instance.mapping_cfg = tx.old_mapping_cfg;
         m.switch_mapping = tx.old_switch_mapping;
+        m.switch_mapping_stem = tx.old_switch_mapping_stem;
         restartManagedThread(m) catch |err| {
             std.log.err("rollback restart failed for {s}: {}", .{ m.phys_key, err });
         };
@@ -743,6 +756,7 @@ pub const Supervisor = struct {
         tx.old_mapper = null;
         tx.old_mapping_cfg = null;
         tx.old_switch_mapping = null;
+        tx.old_switch_mapping_stem = null;
         tx.committed = false;
     }
 
@@ -767,12 +781,14 @@ pub const Supervisor = struct {
                     pm.deinit();
                     self.allocator.destroy(pm);
                 }
+                if (tx.old_switch_mapping_stem) |s| self.allocator.free(s);
             } else {
                 if (tx.new_mapper) |*new| new.deinit();
                 if (tx.parsed_ptr) |pm| {
                     pm.deinit();
                     self.allocator.destroy(pm);
                 }
+                if (tx.path_stem) |s| self.allocator.free(s);
             }
         }
     }
@@ -782,6 +798,7 @@ pub const Supervisor = struct {
         tx.old_mapper = m.instance.mapper;
         tx.old_mapping_cfg = m.instance.mapping_cfg;
         tx.old_switch_mapping = m.switch_mapping;
+        tx.old_switch_mapping_stem = m.switch_mapping_stem;
 
         m.instance.stop();
         m.thread.join();
@@ -812,17 +829,21 @@ pub const Supervisor = struct {
             m.instance.mapper = tx.old_mapper;
             m.instance.mapping_cfg = tx.old_mapping_cfg;
             m.switch_mapping = tx.old_switch_mapping;
+            m.switch_mapping_stem = tx.old_switch_mapping_stem;
             restartManagedThread(m) catch |rollback_err| {
                 std.log.err("rollback restart failed for {s}: {}", .{ m.phys_key, rollback_err });
             };
             tx.old_mapper = null;
             tx.old_mapping_cfg = null;
             tx.old_switch_mapping = null;
+            tx.old_switch_mapping_stem = null;
             tx.committed = false;
             return err;
         };
         m.switch_mapping = tx.parsed_ptr;
+        m.switch_mapping_stem = tx.path_stem;
         tx.parsed_ptr = null;
+        tx.path_stem = null;
         tx.committed = true;
     }
 
@@ -1428,6 +1449,12 @@ pub const Supervisor = struct {
             txs.deinit(self.allocator);
         }
 
+        const resolved_stem = self.allocator.dupe(u8, std.fs.path.stem(path.?)) catch {
+            cs.sendResponse(fd, "ERR oom\n");
+            return;
+        };
+        defer self.allocator.free(resolved_stem);
+
         for (targets.items) |idx| {
             const m = &self.managed.items[idx];
             const parsed = mapping_cfg.parseFile(self.allocator, path.?) catch {
@@ -1446,11 +1473,17 @@ pub const Supervisor = struct {
                 cs.sendResponse(fd, "ERR switch-failed\n");
                 return;
             };
+            const stem_copy = self.allocator.dupe(u8, resolved_stem) catch {
+                cs.sendResponse(fd, "ERR oom\n");
+                return;
+            };
             txs.append(self.allocator, .{
                 .idx = idx,
                 .new_mapper = new_mapper,
                 .parsed_ptr = parsed_ptr,
+                .path_stem = stem_copy,
             }) catch {
+                self.allocator.free(stem_copy);
                 cs.sendResponse(fd, "ERR oom\n");
                 return;
             };
@@ -1501,6 +1534,7 @@ pub const Supervisor = struct {
             const mapping_name: []const u8 = blk: {
                 if (m.switch_mapping) |sm| {
                     if (sm.value.name) |n| break :blk n;
+                    if (m.switch_mapping_stem) |s| break :blk s;
                 }
                 if (m.default_mapping_pr) |dm| {
                     if (dm.value.name) |n| break :blk n;
@@ -2767,6 +2801,56 @@ test "supervisor: Supervisor: status shows (none) when no mapping loaded" {
     var resp_buf: [256]u8 = undefined;
     const n = try posix.read(resp_fds[1], &resp_buf);
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") != null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+}
+
+test "supervisor: Supervisor: status uses file stem when mapping name field is null (issue #248)" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const map_pr = try allocator.create(mapping_mod.ParseResult);
+    map_pr.* = try mapping_mod.parseString(allocator, "");
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, map_pr);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    // Simulate a successful switch: switch_mapping set, stem stored, name field null.
+    const switch_pr = try allocator.create(mapping_mod.ParseResult);
+    switch_pr.* = try mapping_mod.parseString(allocator, "");
+    const m = &sup.managed.items[0];
+    m.switch_mapping = switch_pr;
+    m.switch_mapping_stem = try allocator.dupe(u8, "my-pad");
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    // Must show file stem, not "(none)". Falsifiability: revert the
+    // `if (m.switch_mapping_stem) |s| break :blk s;` line in handleStatus
+    // and this assertion fails because the response will contain "mapping=(none)".
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=my-pad") != null);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
 
     defer {
         sup.stopAll();
