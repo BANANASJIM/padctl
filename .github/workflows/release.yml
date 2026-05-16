@@ -47,11 +47,12 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${TAG}"
-          --title "${TAG}"
-          --notes-file CHANGELOG.md
-          --draft=false
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists — skipping create (idempotent re-run)"
+          else
+            gh release create "${TAG}" --title "${TAG}" --notes-file CHANGELOG.md --draft=false
+          fi
 
   gen-install-artifacts:
     runs-on: ubuntu-latest
