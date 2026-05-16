@@ -449,8 +449,8 @@ pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries
             // still works as a plain kernel gamepad (issue #137 fail-safe).
             const line = try std.fmt.allocPrint(
                 allocator,
-                "ACTION==\"add|bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'test -e {s} && echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",
-                .{ e.vid, e.pid, driver, sentinel_path, driver, e.name },
+                "ACTION==\"add|bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",
+                .{ e.vid, e.pid, driver, driver, e.name },
             );
             defer allocator.free(line);
             try buf.appendSlice(allocator, line);
