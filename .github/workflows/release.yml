@@ -225,7 +225,8 @@ jobs:
           DEB=$(ls padctl_*_${{ matrix.deb_arch }}.deb | head -1)
           docker run --rm -v "$PWD/$DEB:/pkg/$DEB" debian:12 bash -c "
             set -e
-            apt-get install -y /pkg/$DEB >/dev/null 2>&1
+            apt-get update -qq
+            apt-get install -y /pkg/$DEB
             padctl --version | grep -F '${VERSION}'
             padctl list-mappings
             padctl --validate /usr/share/padctl/devices/sony/dualsense.toml
