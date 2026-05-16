@@ -50,6 +50,20 @@ jobs:
               cp /opt/padctl/bin/padctl /usr/local/bin/padctl
               chmod +x /usr/local/bin/padctl
 
+              # Pre-stage device TOMLs at the installed-package share path.
+              # The binary lives at /usr/local/bin/padctl and the install runs
+              # from testuser HOME (su - login shell), so install.findDevicesSourceDir
+              # finds no source `devices/` near the binary or in cwd — exactly the
+              # real deb/AUR scenario where the package already shipped device
+              # configs into <prefix>/share/padctl/devices. installDeviceConfigs
+              # then takes the "package already shipped" branch and
+              # collectAllDeviceEntries scans share_dir, so vader5.toml
+              # (block_kernel_drivers=["xpad"]) drives generateDriverBlockRules
+              # to emit 61-padctl-driver-block.rules. Without this, no device
+              # TOMLs are scanned and the 61 rule is never written.
+              mkdir -p /usr/local/share/padctl/devices
+              cp -r /opt/padctl/devices/. /usr/local/share/padctl/devices/
+
               # ---- install ----
               # Run as testuser so SUDO_USER is set when they call sudo padctl install.
               # udevadm/systemctl calls inside padctl will fail silently (no daemon) —
@@ -104,6 +118,19 @@ jobs:
               fi
 
               # ---- Scenario A: enabled install => sentinel-gated rule + predicate-true reaches unbind ----
+              # Sandbox install: sudo SUDO_USER=testuser ... padctl install --prefix /usr/local
+              #   - is_root=true (sudo), destdir="" => staging_mode=false
+              #   - detectImmutableOs("")=.none in privileged debian:12 (writable /usr,
+              #     no /run/ostree-booted) => effective_immutable=false
+              #   - resolveUdevDir(destdir="",prefix="/usr/local",imm=false)
+              #     => /usr/local/lib/udev/rules.d  (plan.zig:65-70)
+              #   - installWillStartUserService(true,null,"","testuser")=true
+              #     => do_enable_systemctl = !staging && true = true  (plan.zig:383)
+              #   - shouldProactiveUnbind = do_enable_systemctl && !no_enable = true
+              #     => writeServiceSentinel runs (sentinelPath("")=/etc/padctl/service-enabled),
+              #        independent of the systemctl --user warn-fail (no user bus)
+              #   - device TOMLs pre-staged at /usr/local/share/padctl/devices => vader5
+              #     block_kernel_drivers=["xpad"] => 61 rule emitted, sentinel-gated.
               echo "=== sentinel mechanism invariants (Scenario A: enabled install) ==="
               FAIL=0
 
