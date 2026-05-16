@@ -97,9 +97,6 @@ pub fn writeServiceSentinel(allocator: std.mem.Allocator, plan: *const InstallPl
     var f = try std.fs.createFileAbsolute(path, .{ .truncate = true });
     defer f.close();
     try f.writeAll(content);
-    _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
-    _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch {};
-    _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 }
 
 /// Remove the service-enabled sentinel. Idempotent: a missing file is success
