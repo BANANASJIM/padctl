@@ -137,27 +137,18 @@ test "sendCommand: empty response returns EndOfStream" {
     try testing.expectError(error.BrokenPipe, result);
 }
 
-// Issue #216 (partial): "cannot connect to padctl daemon". The systemd
-// capabilities / SupplementaryGroups / hidraw-permission half is an
-// environment-layer concern (NOT-UNIT-TESTABLE; the install-side guard lives
-// in src/cli/install/tests.zig "issue #216"). The padctl-side testable slice
-// (research/issue-regression-coverage-audit-2026-05-15.md §D.6) is: the client
-// connect path must surface a *specific*, diagnosable error rather than a
-// catch-all, so callers can distinguish a malformed socket path from a
-// genuinely-unreachable daemon. `connectToSocket` is the exact function every
-// CLI client (status/devices/switch/dump) calls before printing "cannot
-// connect to padctl daemon".
+// The client connect path must surface a *specific*, diagnosable error rather
+// than a catch-all, so callers can distinguish a malformed socket path from a
+// genuinely-unreachable daemon. `connectToSocket` is called by every CLI client
+// (status/devices/switch/dump) before printing "cannot connect to padctl daemon".
 //
-// Falsifiability contract (audit §D.6): the explicit validation branch
+// Falsifiability: the explicit validation branch
 //   `if (path.len == 0 or path[0] != '/' or indexOf(path, "..") != null)
 //        return error.InvalidPath;`
-// is what makes the error specific. If that guard is removed/weakened (errors
-// "mapped back to catch-all"), an empty or relative or "..":-traversal path
-// instead falls through to posix.socket/posix.connect and fails with a generic
-// posix errno (e.g. error.FileNotFound / AddressNotAvailable) — NOT
-// error.InvalidPath. Under that mutation every `expectError(error.InvalidPath,
-// ...)` below fails. Independently provable by deleting that `if` line.
-test "socket_client: connectToSocket: malformed paths return specific InvalidPath (issue #216)" {
+// makes the error specific. Removing that guard lets invalid paths fall through
+// to posix.socket/posix.connect and fail with a generic errno — NOT
+// error.InvalidPath — so every `expectError(error.InvalidPath, ...)` below fails.
+test "socket_client: connectToSocket: malformed paths return specific InvalidPath" {
     // Empty path — must not be a generic socket/connect failure.
     try testing.expectError(error.InvalidPath, connectToSocket(""));
 
@@ -172,7 +163,7 @@ test "socket_client: connectToSocket: malformed paths return specific InvalidPat
 // concrete posix ConnectError member (FileNotFound for a missing AF_UNIX
 // node), never an opaque/unexpected error. This pins the "daemon not running"
 // diagnostic to a specific, actionable error variant.
-test "socket_client: connectToSocket: nonexistent absolute socket yields concrete posix error (issue #216)" {
+test "socket_client: connectToSocket: nonexistent absolute socket yields concrete posix error" {
     const result = connectToSocket("/run/padctl-issue216-nonexistent/padctl.sock");
     try testing.expectError(error.FileNotFound, result);
 }
