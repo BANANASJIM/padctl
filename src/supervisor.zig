@@ -2992,6 +2992,112 @@ test "supervisor: Supervisor: status uses default-mapping file stem when name fi
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
 }
 
+// Issue #248 regression (second guard): verifies the full config-from-dir path.
+// startFromDirWithRoot parses the device TOML, confirms config is stored, then
+// buildDefaultMapping reads the name-less mapping file and derives the stem via
+// std.fs.path.stem — the same computation that line 1797 relies on. handleStatus
+// must return mapping=mypad, not mapping=(none).
+//
+// NOTE: line 1797 (the store inside startFromDirWithRoot) cannot be reached at
+// Layer 0 — discoverAllWithRoot opens real hidraw char devices via ioctl which
+// are unavailable without hardware. This test exercises every other link in the
+// chain: TOML dir scan → config parsed → buildDefaultMapping real file read →
+// stem derived → spawnInstance → handleStatus:1545 stem branch.
+//
+// Falsifiability:
+//   - Reverting handleStatus:1545 `if (m.default_mapping_stem) |s| break :blk s;`
+//     → response contains "mapping=(none)" → test fails.
+//   - Breaking buildDefaultMapping stem extraction (e.g. returning null stem)
+//     → default_dm.?.stem assertion fails → test fails.
+//   - If startFromDirWithRoot silently drops the parsed config
+//     → sup.configs.items.len == 0 assertion fails → test fails.
+test "supervisor: Supervisor: status stem fallback — config parsed from TOML dir, name-less mapping file (issue #248 guard 2)" {
+    const allocator = testing.allocator;
+
+    // Device TOML dir: one device file that startFromDirWithRoot will parse.
+    var dev_dir = testing.tmpDir(.{});
+    defer dev_dir.cleanup();
+    try dev_dir.dir.writeFile(.{ .sub_path = "testdev.toml", .data = minimal_device_toml });
+    const dev_dir_path = try dev_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dev_dir_path);
+
+    // Mapping file with NO `name =` line so handleStatus must use stem.
+    var map_dir = testing.tmpDir(.{});
+    defer map_dir.cleanup();
+    try map_dir.dir.writeFile(.{
+        .sub_path = "mypad.toml",
+        .data =
+        \\[stick.left]
+        \\mode = "gamepad"
+        \\
+        ,
+    });
+    const map_dir_path = try map_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(map_dir_path);
+    const mapping_path = try std.fs.path.join(allocator, &.{ map_dir_path, "mypad.toml" });
+    defer allocator.free(mapping_path);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    const cfg_str =
+        \\[[device]]
+        \\name = "T"
+        \\default_mapping = "mypad"
+    ;
+    var ucfg_parser = @import("toml").Parser(user_config_mod.UserConfig).init(allocator);
+    defer ucfg_parser.deinit();
+    sup.user_cfg = try ucfg_parser.parseString(cfg_str);
+    sup.test_default_mapping_override = try allocator.dupe(u8, mapping_path);
+
+    // startFromDirWithRoot scans the device TOML dir; no hidraw hardware online
+    // (nonexistent dev_root) so managed.items stays empty, but configs must be
+    // populated — this exercises the TOML-dir scan path that feeds line 1797.
+    try sup.startFromDirWithRoot(dev_dir_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+    try testing.expectEqualStrings("T", sup.configs.items[0].value.device.name);
+
+    // Production resolver: reads the real mapping file, parses (name == null),
+    // derives stem via std.fs.path.stem — same logic that line 1797 stores.
+    const default_dm = sup.buildDefaultMapping("T");
+    try testing.expect(default_dm != null);
+    const default_pr_ptr = default_dm.?.pr;
+    const default_stem = default_dm.?.stem;
+    try testing.expect(default_pr_ptr.value.name == null);
+    try testing.expectEqualStrings("mypad", default_stem);
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst, default_pr_ptr);
+    // Assign stem exactly as production callers do at line 1797 / line 2032.
+    sup.managed.items[sup.managed.items.len - 1].default_mapping_stem = default_stem;
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=mypad") != null);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
+}
+
 test "supervisor: Supervisor: two devnames attached simultaneously — independent threads" {
     const allocator = testing.allocator;
 
