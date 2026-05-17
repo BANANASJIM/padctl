@@ -162,9 +162,8 @@ pub fn findDeviceNameForMapping(
 }
 
 /// Write (or update) a device→mapping binding in `{destdir}/etc/padctl/config.toml`.
-/// PR #168 audit V1: the underlying writeAtomic + escapeTomlString chain
-/// hard-rejects control chars in `device_name`, surfacing as
-/// error.InvalidDeviceName. Do not bypass.
+/// The underlying writeAtomic + escapeTomlString chain hard-rejects control
+/// chars in `device_name`, surfacing as error.InvalidDeviceName. Do not bypass.
 pub fn writeBinding(
     allocator: std.mem.Allocator,
     destdir: []const u8,

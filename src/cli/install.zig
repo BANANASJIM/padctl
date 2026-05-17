@@ -1,6 +1,5 @@
 // Public surface of the install package. Implementation lives under
-// `src/cli/install/`. Architecture-review Finding #2: split the prior
-// 5005-LoC monolith into plan/services/udev/migration/mappings/phase.
+// `src/cli/install/` (plan/services/udev/migration/mappings/phase).
 
 const plan = @import("install/plan.zig");
 const phase = @import("install/phase.zig");

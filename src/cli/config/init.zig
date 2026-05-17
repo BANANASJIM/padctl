@@ -293,7 +293,7 @@ fn buildGeneratedToml(
     return buf.toOwnedSlice(allocator);
 }
 
-test "init: every (preset, template) combination round-trips through mapping.validate (issue #53)" {
+test "init: every (preset, template) combination round-trips through mapping.validate" {
     const allocator = std.testing.allocator;
     const mapping_mod = @import("../../config/mapping.zig");
 
@@ -315,7 +315,7 @@ test "init: every (preset, template) combination round-trips through mapping.val
     }
 }
 
-test "init: every (preset, template) round-trips through tools.validate.validateFile (issue #53)" {
+test "init: every (preset, template) round-trips through tools.validate.validateFile" {
     const allocator = std.testing.allocator;
     const validate_mod = @import("../../tools/validate.zig");
 
@@ -346,7 +346,7 @@ test "init: every (preset, template) round-trips through tools.validate.validate
     }
 }
 
-test "init: validate-before-write gate rejects invalid TOML and writes no file (issue #53)" {
+test "init: validate-before-write gate rejects invalid TOML and writes no file" {
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});

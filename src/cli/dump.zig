@@ -135,7 +135,6 @@ pub fn deleteLogFiles(log_dir: []const u8) u32 {
     for (names) |name| {
         var path_buf: [280]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ log_dir, name }) catch continue;
-        // Check file exists before attempting delete.
         std.fs.accessAbsolute(path, .{}) catch continue;
         // Try direct delete first; fall back to sudo rm for root-owned files.
         std.fs.deleteFileAbsolute(path) catch {
@@ -224,7 +223,6 @@ pub fn runClear(
     const user_log_dir: ?[]u8 = paths.stateDir(allocator) catch null;
     defer if (user_log_dir) |d| allocator.free(d);
 
-    // Aggregate stats from both locations.
     const sys_stats = getLogStats(sys_log_dir);
     const user_stats = if (user_log_dir) |ud| getLogStats(ud) else null;
     const stats = mergeStats(sys_stats, user_stats) orelse {
@@ -232,7 +230,6 @@ pub fn runClear(
         return;
     };
 
-    // Show stats.
     var size_buf: [32]u8 = undefined;
     const size_str = formatSize(&size_buf, stats.total_size);
     stdout.print("{d} log file{s}, {s}", .{
@@ -249,14 +246,12 @@ pub fn runClear(
     }
     stdout.print("\n", .{}) catch {};
 
-    // Check for TTY.
     const stdin_fd = std.posix.STDIN_FILENO;
     if (!std.posix.isatty(stdin_fd)) {
         stderr.print("error: refusing to delete logs without interactive confirmation (stdin is not a TTY)\n", .{}) catch {};
         std.process.exit(1);
     }
 
-    // Prompt.
     stdout.print("Delete all logs? [y/N] ", .{}) catch {};
     var input_buf: [16]u8 = undefined;
     const n = std.posix.read(stdin_fd, &input_buf) catch {
@@ -342,19 +337,17 @@ pub fn runExport(
         std.process.exit(1);
     };
 
-    // Compute cutoff timestamp.
     const now_secs = @as(u64, @intCast(std.time.timestamp()));
     const cutoff_secs = if (now_secs > period_secs) now_secs - period_secs else 0;
     var cutoff_buf: [23]u8 = undefined;
     const cutoff = formatTimestamp(&cutoff_buf, cutoff_secs);
 
-    // Find the active log directory.
     const sys_log_dir = "/var/log/padctl";
     const user_log_dir: ?[]u8 = paths.stateDir(allocator) catch null;
     defer if (user_log_dir) |d| allocator.free(d);
     const log_dir = pickActiveLogDir(sys_log_dir, user_log_dir);
 
-    // Open output: file or stdout. Supports both relative and absolute paths.
+    // Supports both relative and absolute output paths.
     if (output_path) |op| {
         var f = (if (op.len > 0 and op[0] == '/')
             std.fs.createFileAbsolute(op, .{ .truncate = true })
@@ -525,7 +518,7 @@ const TS_LEN = 23; // "YYYY-MM-DDTHH:MM:SS.mmm"
 pub fn getLogStats(log_dir: []const u8) ?LogStats {
     var stats = LogStats{ .total_size = 0, .file_count = 0 };
 
-    // Check rotated file first (older data → first timestamp).
+    // Rotated file holds older data → first timestamp.
     var bak_path_buf: [280]u8 = undefined;
     const bak_path = std.fmt.bufPrint(&bak_path_buf, "{s}/padctl.log.1", .{log_dir}) catch return null;
     if (scanFile(bak_path)) |info| {
@@ -541,7 +534,7 @@ pub fn getLogStats(log_dir: []const u8) ?LogStats {
         }
     }
 
-    // Check current file (newer data → last timestamp).
+    // Current file holds newer data → last timestamp.
     var cur_path_buf: [280]u8 = undefined;
     const cur_path = std.fmt.bufPrint(&cur_path_buf, "{s}/padctl.log", .{log_dir}) catch return null;
     if (scanFile(cur_path)) |info| {
