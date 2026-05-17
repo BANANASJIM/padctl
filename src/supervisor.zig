@@ -845,6 +845,9 @@ pub const Supervisor = struct {
             return err;
         };
         m.switch_mapping = tx.parsed_ptr;
+        // Invariant (issue #248): switch_mapping_stem must always be set together
+        // with switch_mapping so handleStatus can report the mapping name. Any new
+        // apply-mapping path must derive and assign switch_mapping_stem here.
         m.switch_mapping_stem = tx.path_stem;
         tx.parsed_ptr = null;
         tx.path_stem = null;
@@ -1359,30 +1362,6 @@ pub const Supervisor = struct {
         if (dup and found != null)
             std.log.warn("chord_switch: chord_index={d} matches multiple mappings; using '{s}' (first by name)", .{ chord_index, found.? });
         return found;
-    }
-
-    fn applySwitchMapping(self: *Supervisor, m: *ManagedInstance, parsed_ptr: *mapping_cfg.ParseResult) !void {
-        const new_mapper = try Mapper.init(&parsed_ptr.value, m.instance.loop.macro_timer_fd, self.allocator);
-        m.instance.stop();
-        m.thread.join();
-        self.clearSwitchMapping(m);
-        const old_mcfg = m.instance.mapping_cfg;
-        if (m.instance.mapper) |*old| old.deinit();
-        m.instance.mapper = new_mapper;
-        m.instance.mapping_cfg = &parsed_ptr.value;
-        self.installChordDetector(m);
-        m.instance.rebuildAuxIfChanged(&parsed_ptr.value, old_mcfg) catch |err| {
-            std.log.warn("rebuildAuxIfChanged: {}", .{err});
-        };
-        restartManagedThread(m) catch |err| {
-            if (m.instance.mapper) |*mapper| {
-                mapper.deinit();
-                m.instance.mapper = null;
-            }
-            m.instance.mapping_cfg = null;
-            return err;
-        };
-        m.switch_mapping = parsed_ptr;
     }
 
     fn handleSwitch(self: *Supervisor, fd: posix.fd_t, name: []const u8, device_id: ?[]const u8) void {

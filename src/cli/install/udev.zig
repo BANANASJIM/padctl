@@ -251,6 +251,24 @@ pub fn collectAllDeviceEntries(allocator: std.mem.Allocator, plan: *const Instal
     return try collectDeviceEntries(allocator, all_dirs.items);
 }
 
+/// Like collectAllDeviceEntries but without an InstallPlan. Used by uninstall,
+/// which has no plan; reads the resolved device config dirs plus an explicit
+/// share dir (still present at call time, before it is removed).
+pub fn collectDeviceEntriesForUninstall(
+    allocator: std.mem.Allocator,
+    share_dir: []const u8,
+) !std.ArrayList(UdevEntry) {
+    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
+    defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
+    var all_dirs: std.ArrayList([]const u8) = .{};
+    defer all_dirs.deinit(allocator);
+    try all_dirs.append(allocator, share_dir);
+    if (config_dirs) |dirs| {
+        for (dirs) |d| try all_dirs.append(allocator, d);
+    }
+    return try collectDeviceEntries(allocator, all_dirs.items);
+}
+
 pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, entries: []const UdevEntry) !void {
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{plan.udev_dir});
     defer allocator.free(rules_path);
@@ -549,6 +567,119 @@ pub fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const Udev
                     std.log.warn("could not unbind {s} from kernel driver '{s}' (try replug or reboot to evict the shadow device): {}", .{ de.name, driver, err });
                 }
             }
+        }
+    }
+}
+
+/// Inverse of probeAndUnbindDrivers: walk <sys_root>/sys/bus/usb/devices/ and,
+/// for any USB device whose idVendor:idProduct matches an entry, rebind every
+/// interface that currently has no driver back to a blocked driver. Called by
+/// uninstall after the sentinel + driver-block rule are removed so a controller
+/// that is still plugged in and currently unbound is restored to the kernel
+/// driver without requiring a physical replug.
+/// Requires root; skips silently / warn-logs on permission errors. A best-effort
+/// `modprobe <driver>` is issued first so the rebind target exists even if the
+/// module was never auto-loaded. `sys_root` is "" in production; tests inject a
+/// tmpDir path (P9).
+pub fn probeAndRebindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntry, sys_root: []const u8) void {
+    const devices_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/devices",
+        .{sys_root},
+    ) catch return;
+    defer allocator.free(devices_path);
+
+    var devices_dir = std.fs.openDirAbsolute(devices_path, .{ .iterate = true }) catch return;
+    defer devices_dir.close();
+
+    for (entries) |entry| {
+        if (entry.block_kernel_drivers.len == 0) continue;
+
+        var it = devices_dir.iterate();
+        while (it.next() catch null) |de| {
+            if (de.kind != .sym_link and de.kind != .directory) continue;
+            if (de.name.len == 0 or de.name[0] < '0' or de.name[0] > '9') continue;
+            // Skip interface nodes ("1-1.4:1.0"); only match top-level devices.
+            if (std.mem.indexOfScalar(u8, de.name, ':') != null) continue;
+
+            const vendor_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/sys/bus/usb/devices/{s}/idVendor",
+                .{ sys_root, de.name },
+            ) catch continue;
+            defer allocator.free(vendor_path);
+
+            const product_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/sys/bus/usb/devices/{s}/idProduct",
+                .{ sys_root, de.name },
+            ) catch continue;
+            defer allocator.free(product_path);
+
+            const vid = readSysHex(vendor_path) catch continue;
+            const pid = readSysHex(product_path) catch continue;
+            if (vid != entry.vid or pid != entry.pid) continue;
+
+            for (entry.block_kernel_drivers) |driver| {
+                // Best-effort: ensure the module is present before binding.
+                if (sys_root.len == 0) runCmd(&.{ "modprobe", driver });
+
+                const bind_path = std.fmt.allocPrint(
+                    allocator,
+                    "{s}/sys/bus/usb/drivers/{s}/bind",
+                    .{ sys_root, driver },
+                ) catch continue;
+                defer allocator.free(bind_path);
+
+                rebindInterfaces(allocator, sys_root, de.name, bind_path, driver);
+            }
+        }
+    }
+}
+
+/// For each interface child of USB device `dev_name` ("<dev_name>:N.M") that has
+/// no `driver` symlink, write its name to the driver `bind` attribute.
+fn rebindInterfaces(
+    allocator: std.mem.Allocator,
+    sys_root: []const u8,
+    dev_name: []const u8,
+    bind_path: []const u8,
+    driver: []const u8,
+) void {
+    const dev_dir_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/devices/{s}",
+        .{ sys_root, dev_name },
+    ) catch return;
+    defer allocator.free(dev_dir_path);
+
+    var dev_dir = std.fs.openDirAbsolute(dev_dir_path, .{ .iterate = true }) catch return;
+    defer dev_dir.close();
+
+    var it = dev_dir.iterate();
+    while (it.next() catch null) |child| {
+        if (child.kind != .directory and child.kind != .sym_link) continue;
+        // Interface dirs are named "<dev_name>:cfg.iface".
+        if (!std.mem.startsWith(u8, child.name, dev_name)) continue;
+        if (child.name.len <= dev_name.len or child.name[dev_name.len] != ':') continue;
+
+        const driver_link = std.fmt.allocPrint(
+            allocator,
+            "{s}/sys/bus/usb/devices/{s}/{s}/driver",
+            .{ sys_root, dev_name, child.name },
+        ) catch continue;
+        defer allocator.free(driver_link);
+
+        // Already bound to some driver — leave it alone.
+        if (std.fs.accessAbsolute(driver_link, .{})) |_| continue else |_| {}
+
+        if (std.fs.openFileAbsolute(bind_path, .{ .mode = .write_only })) |f| {
+            defer f.close();
+            f.writeAll(child.name) catch |err| {
+                std.log.warn("could not rebind {s} to kernel driver '{s}' (replug or run `modprobe {s}` to restore it): {}", .{ child.name, driver, driver, err });
+            };
+        } else |err| {
+            std.log.warn("could not rebind {s} to kernel driver '{s}' (replug or run `modprobe {s}` to restore it): {}", .{ child.name, driver, driver, err });
         }
     }
 }
