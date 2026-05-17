@@ -47,7 +47,14 @@ suppress_gamepad = true   # suppress raw axis when mode is mouse/scroll
 # --- Gyroscope (off by default) ---
 
 [gyro]
-mode = "off"   # set to "mouse" to enable gyro-to-mouse
+mode = "off"   # "off" | "mouse" | "joystick"
+
+# Joystick mode: route gyro to a virtual stick axis instead of mouse events.
+# Useful for games that read right stick for camera but lack native gyro support.
+# target = "right_stick"   # "right_stick" (default) or "left_stick"
+# mode   = "joystick"
+# deadzone    = 200
+# sensitivity = 1.5
 
 # --- Macros (referenced by "macro:<name>" in remap values) ---
 

@@ -140,7 +140,7 @@ Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Se
 
 ### Gyroscope (`[gyro]`)
 
-Translates gyroscope motion to mouse movement. Off by default.
+Translates gyroscope motion to mouse movement or a virtual stick. Off by default.
 
 ```toml
 [gyro]
@@ -153,6 +153,21 @@ invert_y    = true
 ```
 
 Omit `activate` to have gyro always active when mode is `"mouse"`.
+
+#### Joystick mode
+
+Set `mode = "joystick"` to route the gyro signal to a virtual stick axis instead of mouse events. Use `target` to choose which stick receives the output:
+
+```toml
+[gyro]
+mode   = "joystick"
+target = "right_stick"   # "right_stick" (default) or "left_stick"
+deadzone    = 200
+sensitivity = 1.5
+smoothing   = 0.3
+```
+
+This is useful for games that read the right stick for camera control but do not natively support gyro input. All other `[gyro]` fields (`sensitivity`, `deadzone`, `smoothing`, `curve`, `invert_x`, `invert_y`) apply in joystick mode the same way as in mouse mode.
 
 ### Sticks (`[stick.left]` / `[stick.right]`)
 

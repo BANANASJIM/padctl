@@ -57,7 +57,7 @@ Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not
 
 ## `[remap]`
 
-Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
+Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_extra`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
 
 ```toml
 [remap]
@@ -67,6 +67,8 @@ M3 = "disabled"
 A = "B"
 M4 = "macro:dodge_roll"
 ```
+
+Array values (e.g. `M1 = ["KEY_LEFTMETA", "KEY_1"]`) are parsed and resolved as chord targets (2–4 keys) but are not yet dispatched — chord output is planned for a future release.
 
 ## `[gyro]`
 
@@ -85,7 +87,8 @@ invert_y = true
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | `"off"` | `"off"` or `"mouse"` |
+| `mode` | string | `"off"` | `"off"`, `"mouse"`, or `"joystick"`. In `"joystick"` mode the processed gyro signal is routed to a virtual stick axis instead of mouse `REL_X/Y` events. |
+| `target` | string | `"right_stick"` | `"right_stick"` or `"left_stick"`. Selects which stick axis receives the gyro output. Only used when `mode = "joystick"`. |
 | `activate` | string | — | Button name to hold for activation (e.g. `"LS"`, `"hold_RB"`) |
 | `sensitivity` | float | — | Overall sensitivity multiplier |
 | `sensitivity_x` | float | — | X-axis sensitivity override |
@@ -204,6 +207,16 @@ suppress_gamepad = true
 ### `[layer.adaptive_trigger]`
 
 Per-layer adaptive trigger override. Same fields as top-level `[adaptive_trigger]`.
+
+```toml
+[layer.adaptive_trigger]
+mode = "weapon"
+
+[layer.adaptive_trigger.left]
+start    = 30
+end      = 120
+strength = 200
+```
 
 ## `[adaptive_trigger]`
 
