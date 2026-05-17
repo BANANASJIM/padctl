@@ -255,9 +255,8 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Resolve device path; also track the resolved interface for TOML output.
+    // Resolve device path; interface_id is read from sysfs after path is final (both paths).
     var path_buf: [128]u8 = undefined;
-    var resolved_interface_id: u8 = 0;
     const device_path: []const u8 = if (cli.device) |d|
         d
     else blk: {
@@ -275,9 +274,9 @@ pub fn main() !void {
             std.process.exit(1);
         };
         defer allocator.free(p);
-        resolved_interface_id = hidraw_mod.readInterfaceId(p) orelse 0;
         break :blk try std.fmt.bufPrint(&path_buf, "{s}", .{p});
     };
+    const resolved_interface_id: u8 = hidraw_mod.readInterfaceId(device_path) orelse 0;
 
     const accmode: posix.ACCMODE = if (cli.config_path != null) .RDWR else .RDONLY;
     const fd = posix.open(device_path, .{ .ACCMODE = accmode, .NONBLOCK = true }, 0) catch |err| {

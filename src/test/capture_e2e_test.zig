@@ -8,6 +8,7 @@ const analyse_mod = @import("analyse");
 const toml_gen_mod = @import("toml_gen");
 const render_mod = @import("../debug/render.zig");
 const state_mod = @import("../core/state.zig");
+const hidraw_mod = @import("../io/hidraw.zig");
 
 const Frame = analyse_mod.Frame;
 const AnalysisResult = analyse_mod.AnalysisResult;
@@ -212,4 +213,42 @@ test "capture: renderFrame — pressed button differs from released" {
     try render_mod.renderFrame(fbs_off.writer(), &gs_off, &[_]u8{}, false, .{}, .raw);
 
     try testing.expect(!std.mem.eql(u8, fbs_on.getWritten(), fbs_off.getWritten()));
+}
+
+// --- T4: --device interface resolution (regression for #264 --device path) ---
+
+// Falsifiability: reverting the unconditional `readInterfaceId(device_path)` call in
+// tools/padctl-capture.zig (making it vid/pid-branch-only again) leaves the --device
+// path with interface_id = 0, breaking Vader 5 Pro (interface 1) device configs.
+// This test exercises the same parseInterfaceId logic that readInterfaceId uses,
+// verifying that a Vader 5 Pro HID_PHYS string resolves to interface 1, and that
+// interface 1 is faithfully emitted in the TOML [[device.interface]] block.
+
+test "capture: --device path interface resolution — Vader5Pro phys input1 yields id=1 in TOML" {
+    const allocator = testing.allocator;
+
+    // Simulate the sysfs HID_PHYS value seen on a Vader 5 Pro hidraw1 node.
+    // readInterfaceId() parses this via parseInterfaceId; the result is assigned
+    // unconditionally to resolved_interface_id for both --device and --vid/--pid paths.
+    const phys = "usb-xhci_hcd.0.auto-1/input1";
+    const iface = hidraw_mod.parseInterfaceId(phys);
+    try testing.expectEqual(@as(?u8, 1), iface);
+
+    // Verify emitToml propagates the interface into both [[device.interface]] id and
+    // [[report]] interface fields.
+    const result = AnalysisResult{
+        .report_size = 64,
+        .magic = &[_]analyse_mod.MagicByte{},
+        .buttons = &[_]analyse_mod.ButtonCandidate{},
+        .axes = &[_]analyse_mod.AxisCandidate{},
+    };
+    const info = DeviceInfo{ .name = "Vader 5 Pro", .vid = 0x3537, .pid = 0x1012, .interface_id = iface.? };
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
+
+    const out = buf.items;
+    try testing.expect(std.mem.indexOf(u8, out, "id = 1") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "interface = 1") != null);
 }
