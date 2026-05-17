@@ -209,6 +209,13 @@ jobs:
               check "sentinel removed after uninstall" \
                 "[ ! -e /etc/padctl/service-enabled ]"
 
+              # ---- issue #137: uninstall removes the generated driver-block
+              # rule symmetrically with 60-padctl.rules (uninstall hygiene). No
+              # real USB/xpad in rootless Docker, so the active rebind itself
+              # is not exercised here — only the file-removal invariant.
+              check "61-padctl-driver-block.rules removed after uninstall" \
+                "[ ! -e /usr/local/lib/udev/rules.d/61-padctl-driver-block.rules ]"
+
               if [ $FAIL -ne 0 ]; then
                 echo "=== UNINSTALL INVARIANTS FAILED ==="
                 exit 1

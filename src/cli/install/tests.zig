@@ -43,6 +43,7 @@ const freeArgv = services_mod.freeArgv;
 const UdevEntry = udev_mod.UdevEntry;
 const isValidIdentifier = udev_mod.isValidIdentifier;
 const probeAndUnbindDrivers = udev_mod.probeAndUnbindDrivers;
+const probeAndRebindDrivers = udev_mod.probeAndRebindDrivers;
 const readSysHex = udev_mod.readSysHex;
 const findDevicesSourceDir = udev_mod.findDevicesSourceDir;
 const imu_udev_rules_content = udev_mod.imu_udev_rules_content;
@@ -2984,5 +2985,129 @@ test "tomlEscape: round-trip via real TOML parser" {
         const parsed = try parser.parseString(toml_text);
         defer parsed.deinit();
         try std.testing.expectEqualStrings(input, parsed.value.name);
+    }
+}
+
+// issue #137: probeAndRebindDrivers is the inverse of probeAndUnbindDrivers.
+// It must rebind a matching device's unbound interface, leave an already-bound
+// interface alone, and ignore non-matching devices.
+// Falsifiability: deleting the `f.writeAll(child.name)` line in
+// rebindInterfaces (udev.zig) makes the "1-1.4:1.0" bind assertion fail.
+test "uninstall: #137 probeAndRebindDrivers binds unbound matching interface only" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("sys/bus/usb/drivers/xpad");
+    // Matching device 37d7:2401 with an UNBOUND interface (no driver symlink).
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.0");
+    // Matching device with an already-BOUND interface (has driver symlink).
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.1");
+    // Non-matching device.
+    try tmp.dir.makePath("sys/bus/usb/devices/2-2.1/2-2.1:1.0");
+
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idVendor", .{});
+        defer f.close();
+        try f.writeAll("37d7\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idProduct", .{});
+        defer f.close();
+        try f.writeAll("2401\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idVendor", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idProduct", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+
+    // Mark 1-1.4:1.1 as already bound.
+    {
+        const drv = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/devices/1-1.4/1-1.4:1.1/driver", .{tmp_path});
+        defer allocator.free(drv);
+        try std.posix.symlink("../../../../bus/usb/drivers/xpad", drv);
+    }
+
+    // bind file: writable regular file simulating the sysfs write target.
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/drivers/xpad/bind", .{});
+        defer f.close();
+    }
+
+    const entries = [_]UdevEntry{.{
+        .name = "Test Device",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .block_kernel_drivers = &[_][]const u8{"xpad"},
+    }};
+    probeAndRebindDrivers(allocator, &entries, tmp_path);
+
+    const bind_path = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/drivers/xpad/bind", .{tmp_path});
+    defer allocator.free(bind_path);
+    var bf = try std.fs.openFileAbsolute(bind_path, .{});
+    defer bf.close();
+    const written = try bf.readToEndAlloc(allocator, 128);
+    defer allocator.free(written);
+    // Only the unbound interface 1-1.4:1.0 is written; the already-bound
+    // 1-1.4:1.1 and non-matching 2-2.1:1.0 must be absent.
+    try testing.expectEqualStrings("1-1.4:1.0", written);
+}
+
+// issue #137: uninstall must remove the generated 61-padctl-driver-block.rules
+// file symmetrically with 60-padctl.rules (uninstall hygiene). This guards the
+// `files[]` entry in phase.zig uninstall().
+// Falsifiability: deleting the
+// "/lib/udev/rules.d/61-padctl-driver-block.rules" entry from the `files[]`
+// array in phase.zig uninstall() makes the RuleFileNotRemoved error fire.
+test "uninstall: #137 removes 61-padctl-driver-block.rules" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const rules_dir = try std.fmt.allocPrint(allocator, "{s}/usr/local/lib/udev/rules.d", .{staging});
+    defer allocator.free(rules_dir);
+    try ensureDirAll(allocator, rules_dir);
+
+    const rule_60 = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{rules_dir});
+    defer allocator.free(rule_60);
+    const rule_61 = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{rules_dir});
+    defer allocator.free(rule_61);
+    for ([_][]const u8{ rule_60, rule_61 }) |p| {
+        var f = try std.fs.createFileAbsolute(p, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# padctl generated\n");
+    }
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    for ([_][]const u8{ rule_60, rule_61 }) |p| {
+        if (std.fs.accessAbsolute(p, .{})) |_| {
+            std.debug.print("uninstall did not remove rule file: {s}\n", .{p});
+            return error.RuleFileNotRemoved;
+        } else |_| {}
     }
 }
