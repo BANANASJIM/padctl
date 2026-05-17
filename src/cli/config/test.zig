@@ -150,6 +150,7 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
                             }
                             try w.writeAll("]");
                         },
+                        .gesture => try w.print("  {s} -> <gesture>", .{entry.key_ptr.*}),
                     }
                 }
             }

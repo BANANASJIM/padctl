@@ -196,7 +196,7 @@ pub fn classify(
                         if (std.mem.startsWith(u8, s, "macro:"))
                             tracker.mark(.macro_cancelled_by_layer);
                     },
-                    .chord_names => {},
+                    .chord_names, .gesture => {},
                 }
             }
         }
@@ -246,8 +246,8 @@ fn classifyRemapTargets(tracker: *CoverageTracker, cfg: *const mapping.MappingCo
                 else
                     tracker.mark(.remap_inject_gamepad);
             },
-            // Chord arrays count as keyboard injection (every element is KEY_*).
-            .chord_names => tracker.mark(.remap_inject_key),
+            // Chord/gesture targets count as keyboard injection (elements are KEY_*).
+            .chord_names, .gesture => tracker.mark(.remap_inject_key),
         }
     }
 }

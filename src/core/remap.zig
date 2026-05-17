@@ -15,7 +15,33 @@ pub const RemapTargetResolved = union(enum) {
     // Chord output: 2..=4 evdev key codes. Codes are owned by the Mapper
     // allocator (allocated in precomputeRemap, freed in Mapper.deinit).
     chord: []const u16,
+    // Gesture node. Heap-allocated by resolveGestureTarget, freed by the
+    // Mapper allocator. The engine drives the legs; applyTarget is a no-op.
+    gesture: *ResolvedGesture,
 };
+
+pub const ResolvedGesture = struct {
+    tap: ?RemapTargetResolved,
+    hold: ?RemapTargetResolved,
+    double: ?RemapTargetResolved,
+    hold_ns: i128,
+    double_ns: i128,
+    has_double: bool,
+};
+
+pub fn resolveGestureTarget(allocator: std.mem.Allocator, spec: anytype) !RemapTargetResolved {
+    const node = try allocator.create(ResolvedGesture);
+    errdefer allocator.destroy(node);
+    node.* = .{
+        .tap = if (spec.tap) |t| try resolveTarget(t) else null,
+        .hold = if (spec.hold) |t| try resolveTarget(t) else null,
+        .double = if (spec.double) |t| try resolveTarget(t) else null,
+        .hold_ns = @as(i128, spec.hold_ms) * std.time.ns_per_ms,
+        .double_ns = @as(i128, spec.double_ms) * std.time.ns_per_ms,
+        .has_double = spec.double != null,
+    };
+    return .{ .gesture = node };
+}
 
 pub const TargetAction = enum { press, release, tap };
 
@@ -66,7 +92,7 @@ pub fn applyTarget(
                 },
             }
         },
-        .disabled, .macro, .chord => {},
+        .disabled, .macro, .chord, .gesture => {},
     }
 }
 
@@ -209,4 +235,54 @@ test "remap: resolveChordTarget: unknown key code propagates resolveKeyCode erro
     const allocator = std.testing.allocator;
     const names = [_][]const u8{ "KEY_NOT_REAL", "KEY_1" };
     try std.testing.expectError(error.UnknownKeyCode, resolveChordTarget(allocator, &names));
+}
+
+test "remap: resolveGestureTarget: all legs resolve, ms->ns conversion" {
+    const allocator = std.testing.allocator;
+    const spec = .{
+        .tap = @as(?[]const u8, "KEY_X"),
+        .hold = @as(?[]const u8, "KEY_Y"),
+        .double = @as(?[]const u8, "KEY_Z"),
+        .hold_ms = @as(u32, 400),
+        .double_ms = @as(u32, 200),
+    };
+    const target = try resolveGestureTarget(allocator, spec);
+    defer allocator.destroy(target.gesture);
+    const g = target.gesture;
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_X"), g.tap.?.key);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_Y"), g.hold.?.key);
+    try std.testing.expectEqual(try input_codes.resolveKeyCode("KEY_Z"), g.double.?.key);
+    try std.testing.expectEqual(@as(i128, 400 * std.time.ns_per_ms), g.hold_ns);
+    try std.testing.expectEqual(@as(i128, 200 * std.time.ns_per_ms), g.double_ns);
+    try std.testing.expect(g.has_double);
+}
+
+test "remap: resolveGestureTarget: tap-only leaves hold/double null, has_double false" {
+    const allocator = std.testing.allocator;
+    const spec = .{
+        .tap = @as(?[]const u8, "B"),
+        .hold = @as(?[]const u8, null),
+        .double = @as(?[]const u8, null),
+        .hold_ms = @as(u32, 300),
+        .double_ms = @as(u32, 250),
+    };
+    const target = try resolveGestureTarget(allocator, spec);
+    defer allocator.destroy(target.gesture);
+    const g = target.gesture;
+    try std.testing.expectEqual(ButtonId.B, g.tap.?.gamepad_button);
+    try std.testing.expect(g.hold == null);
+    try std.testing.expect(g.double == null);
+    try std.testing.expect(!g.has_double);
+}
+
+test "remap: resolveGestureTarget: unknown leg propagates UnknownRemapTarget" {
+    const allocator = std.testing.allocator;
+    const spec = .{
+        .tap = @as(?[]const u8, "not_a_target"),
+        .hold = @as(?[]const u8, null),
+        .double = @as(?[]const u8, null),
+        .hold_ms = @as(u32, 300),
+        .double_ms = @as(u32, 250),
+    };
+    try std.testing.expectError(error.UnknownRemapTarget, resolveGestureTarget(allocator, spec));
 }

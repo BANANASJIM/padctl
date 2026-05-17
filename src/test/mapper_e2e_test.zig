@@ -688,3 +688,171 @@ test "e2e: partial modifier — only LM held, selector fires as normal input" {
     try testing.expectEqual(@as(?u8, null), ev.chord_switch_request);
     try testing.expect((ev.gamepad.buttons & btnMask(.A)) != 0);
 }
+
+// --- gesture: per-button tap/hold/double-press ---
+
+fn keyCode(name: []const u8) u16 {
+    return (mapper_mod.resolveTarget(name) catch unreachable).key;
+}
+
+fn auxHasKey(ev: anytype, code: u16, pressed: bool) bool {
+    for (ev.aux.slice()) |e| {
+        switch (e) {
+            .key => |k| if (k.code == code and k.pressed == pressed) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+test "e2e gesture: tap-only key emits press+release on release (no double, zero latency)" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_X" }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    const ev_press = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    try testing.expectEqual(@as(usize, 0), ev_press.aux.len); // nothing on press
+    // source button suppressed (gesture engine is the sole emitter)
+    try testing.expectEqual(@as(u64, 0), ev_press.gamepad.buttons & btnMask(.A));
+
+    const ev_rel = try m.apply(.{ .buttons = 0 }, 16, t0 + 30 * std.time.ns_per_ms);
+    try testing.expect(auxHasKey(ev_rel, keyCode("KEY_X"), true));
+    try testing.expect(auxHasKey(ev_rel, keyCode("KEY_X"), false));
+}
+
+test "e2e gesture: hold key fires at deadline and releases on button up" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y", hold_ms = 300 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    // hold deadline armed on the shared macro timer queue; drive expiry while held
+    const aux_exp = m.onMacroTimerExpired(t0 + 300 * std.time.ns_per_ms);
+    var saw_hold_press = false;
+    for (aux_exp.slice()) |e| switch (e) {
+        .key => |k| if (k.code == keyCode("KEY_Y") and k.pressed) {
+            saw_hold_press = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_hold_press);
+
+    // release button -> hold key release
+    const ev_rel = try m.apply(.{ .buttons = 0 }, 16, t0 + 500 * std.time.ns_per_ms);
+    try testing.expect(auxHasKey(ev_rel, keyCode("KEY_Y"), false));
+    // tap must NOT fire when hold consumed the gesture
+    try testing.expect(!auxHasKey(ev_rel, keyCode("KEY_X"), true));
+}
+
+test "e2e gesture: double fires on second press inside window" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_X", double = "KEY_Z", double_ms = 250 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    const ev_r1 = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+    // tap deferred while the double window is open
+    try testing.expect(!auxHasKey(ev_r1, keyCode("KEY_X"), true));
+
+    const ev_p2 = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0 + 100 * std.time.ns_per_ms);
+    try testing.expect(auxHasKey(ev_p2, keyCode("KEY_Z"), true));
+    try testing.expect(auxHasKey(ev_p2, keyCode("KEY_Z"), false));
+}
+
+test "e2e gesture: double-window timeout collapses to single tap" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_X", double = "KEY_Z", double_ms = 250 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    _ = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+    // double window expires with no second press -> single tap
+    const aux_exp = m.onMacroTimerExpired(t0 + 300 * std.time.ns_per_ms);
+    var saw_tap_press = false;
+    for (aux_exp.slice()) |e| switch (e) {
+        .key => |k| if (k.code == keyCode("KEY_X") and k.pressed) {
+            saw_tap_press = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_tap_press);
+}
+
+test "e2e gesture: timer-context gamepad tap stages full press one frame before release" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "B", double = "Y", double_ms = 250 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    _ = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+    // double window times out -> single tap of gamepad B, staged for next apply
+    _ = m.onMacroTimerExpired(t0 + 300 * std.time.ns_per_ms);
+
+    // frame N: B pressed (staged tap promoted)
+    const ev1 = try m.apply(.{ .buttons = 0 }, 16, t0 + 310 * std.time.ns_per_ms);
+    try testing.expect((ev1.gamepad.buttons & btnMask(.B)) != 0);
+    // frame N+1: B released (pending_tap_release)
+    const ev2 = try m.apply(.{ .buttons = 0 }, 16, t0 + 320 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & btnMask(.B));
+}
+
+test "e2e gesture back-compat: plain string remap A=KEY_F13 unchanged (immediate edge)" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = "KEY_F13"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), ev.aux.len);
+    switch (ev.aux.get(0)) {
+        .key => |k| {
+            try testing.expectEqual(KEY_F13, k.code);
+            try testing.expect(k.pressed);
+        },
+        else => return error.WrongEventType,
+    }
+}
+
+test "e2e gesture back-compat: chord array remap A=[KEY_LEFTMETA,KEY_1] unchanged" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = ["KEY_LEFTMETA", "KEY_1"]
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    // chord source button is suppressed via precompute; chord output is driven
+    // by the chord pipeline, not the gesture engine — behaviour unchanged.
+    const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16, 0);
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(usize, 0), ev.aux.len);
+}

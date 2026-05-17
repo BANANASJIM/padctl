@@ -138,6 +138,29 @@ Available target types:
 
 Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `LS`, `RS`, `M1`, `M2`, `M3`, `M4`, `LM`, `RM`, `C`, `Z`
 
+#### Tap / hold / double-press on one button
+
+Bind separate actions to a short press, a long press, and a double press of the
+same button by using an inline table instead of a string:
+
+```toml
+[remap]
+A  = { tap = "KEY_X", hold = "KEY_Y", double = "KEY_Z" }
+B  = { tap = "B", hold = "KEY_LEFTSHIFT" }           # tap passes B through, hold = shift
+RB = { tap = "RB", hold = "KEY_TAB", hold_ms = 400, double_ms = 200 }
+```
+
+- `tap` fires on release (short press), `hold` fires once held past `hold_ms`
+  (default 300 ms), `double` fires on a second press within `double_ms` (default
+  250 ms) of the first release.
+- At least one leg is required; absent legs do nothing. Legs are single targets
+  only — `macro:<name>` and chord arrays are not allowed inside a gesture.
+- Works the same in `[layer.remap]`.
+- Trade-off: when `double` is set, `tap` is delayed until the double-press
+  window closes (the only way to tell a single press from the first of a
+  double). Omit `double` to keep `tap` instant. Plain string and chord remaps
+  are unchanged and never add latency.
+
 ### Gyroscope (`[gyro]`)
 
 Translates gyroscope motion to mouse movement or a virtual stick. Off by default.

@@ -148,10 +148,8 @@ pub fn applyWithLayer(
             },
             .disabled => {},
             .macro => {},
-            // Chord dispatch lands in PR B-2; oracle treats it as a no-op for
-            // now (matches applyTarget) — generators won't produce chord
-            // remaps until B-2 lands.
             .chord => {},
+            .gesture => {},
         }
     }
 
@@ -260,11 +258,11 @@ fn collectRemap(
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse continue;
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
         // Unknown targets skipped — matches production mapper.zig behaviour.
-        // Chord arrays are also skipped here: the oracle has no allocator and
-        // dispatch lands in B-2, so chord doesn't affect oracle output.
+        // Chord/gesture targets are skipped here: the oracle has no allocator and
+        // dispatch lands in B-2, so neither affects oracle output.
         const target = switch (entry.value_ptr.*) {
             .string => |s| remap_mod.resolveTarget(s) catch continue,
-            .chord_names => continue,
+            .chord_names, .gesture => continue,
         };
         suppressed.* |= @as(u64, 1) << src_idx;
         per_src[@intCast(src_idx)] = target;

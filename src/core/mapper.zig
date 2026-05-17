@@ -18,6 +18,7 @@ const REL_WHEEL: u16 = c.REL_WHEEL;
 const REL_HWHEEL: u16 = c.REL_HWHEEL;
 
 const remap_mod = @import("remap.zig");
+const gesture_mod = @import("gesture.zig");
 const chord_detector_mod = @import("chord_detector.zig");
 pub const RemapTargetResolved = remap_mod.RemapTargetResolved;
 pub const resolveTarget = remap_mod.resolveTarget;
@@ -52,6 +53,45 @@ const ResolvedRemap = struct {
     suppress: u64,
 };
 
+const GESTURE_TOKEN_SLOTS = gesture_mod.GESTURE_SLOTS * 2;
+
+const GestureTokenEntry = struct {
+    token: u32,
+    src_idx: u6,
+    leg: gesture_mod.GestureLeg,
+};
+
+// Maps live timer tokens armed by the gesture engine back to (slot, leg) so
+// onMacroTimerExpired can route expiry. Bounded by concurrent gesture timers.
+const GestureTokenTable = struct {
+    entries: [GESTURE_TOKEN_SLOTS]?GestureTokenEntry = [_]?GestureTokenEntry{null} ** GESTURE_TOKEN_SLOTS,
+
+    fn put(self: *GestureTokenTable, token: u32, src_idx: u6, leg: gesture_mod.GestureLeg) void {
+        for (&self.entries) |*e| {
+            if (e.* == null) {
+                e.* = .{ .token = token, .src_idx = src_idx, .leg = leg };
+                return;
+            }
+        }
+    }
+
+    fn take(self: *GestureTokenTable, token: u32) ?GestureTokenEntry {
+        for (&self.entries) |*e| {
+            if (e.*) |v| {
+                if (v.token == token) {
+                    e.* = null;
+                    return v;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn clear(self: *GestureTokenTable) void {
+        self.entries = [_]?GestureTokenEntry{null} ** GESTURE_TOKEN_SLOTS;
+    }
+};
+
 pub const Mapper = struct {
     config: *const MappingConfig,
     layer: LayerState,
@@ -67,6 +107,14 @@ pub const Mapper = struct {
     // to reach output before pending_tap_release fires; staged here, promoted
     // to injected+pending_tap_release at the next apply.
     macro_timer_tap_pending: u64,
+    gesture_engine: gesture_mod.GestureEngine,
+    gesture_tokens: GestureTokenTable,
+    // Same staging discipline as macro_timer_tap_pending: gamepad taps emitted
+    // from gesture timer expiry need one apply() to reach output.
+    gesture_timer_tap_pending: u64,
+    // Gamepad bits held by an active gesture hold leg; re-asserted each frame
+    // until the hold leg emits its release.
+    gesture_held_gamepad: u64,
     timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
     active_macros: std.ArrayList(MacroPlayer),
@@ -111,6 +159,10 @@ pub const Mapper = struct {
             .injected_buttons = 0,
             .pending_tap_release = null,
             .macro_timer_tap_pending = 0,
+            .gesture_engine = .{},
+            .gesture_tokens = .{},
+            .gesture_timer_tap_pending = 0,
+            .gesture_held_gamepad = 0,
             .timer_fd = timer_fd,
             .allocator = allocator,
             .active_macros = .{},
@@ -124,6 +176,8 @@ pub const Mapper = struct {
     pub fn deinit(self: *Mapper) void {
         self.layer.deinit();
         self.active_macros.deinit(self.allocator);
+        self.gesture_engine.reset();
+        self.gesture_tokens.clear();
         self.timer_queue.deinit();
         freeResolvedRemap(self.allocator, self.resolved_base);
         for (self.resolved_layers) |r| freeResolvedRemap(self.allocator, r);
@@ -184,6 +238,14 @@ pub const Mapper = struct {
             self.active_macros.clearRetainingCapacity();
             // Discard tap bits staged from a cancelled macro's timer expiry.
             self.macro_timer_tap_pending = 0;
+            // Cancel in-flight gestures; mirror the macro-cancel above.
+            for (self.gesture_tokens.entries) |maybe| {
+                if (maybe) |e| self.timer_queue.cancel(e.token, now_ns);
+            }
+            self.gesture_tokens.clear();
+            self.gesture_engine.reset();
+            self.gesture_timer_tap_pending = 0;
+            self.gesture_held_gamepad = 0;
         }
 
         self.suppressed_buttons = 0;
@@ -196,6 +258,14 @@ pub const Mapper = struct {
             const existing = self.pending_tap_release orelse 0;
             self.pending_tap_release = existing | self.macro_timer_tap_pending;
             self.macro_timer_tap_pending = 0;
+        }
+
+        // Promote gesture-timer tap bits staged at last expiry.
+        if (self.gesture_timer_tap_pending != 0) {
+            self.injected_buttons |= self.gesture_timer_tap_pending;
+            const existing = self.pending_tap_release orelse 0;
+            self.pending_tap_release = existing | self.gesture_timer_tap_pending;
+            self.gesture_timer_tap_pending = 0;
         }
 
         // Suppress layer trigger buttons so they don't leak to uinput output.
@@ -344,8 +414,18 @@ pub const Mapper = struct {
                 // Chord source button is suppressed via precomputeRemap; chord
                 // events are emitted by the chord output pipeline, not here.
                 .chord => {},
+                .gesture => |node| {
+                    if (pressed != prev_pressed) {
+                        const out = self.gesture_engine.onButtonEdge(@intCast(i), node, pressed, now_ns);
+                        self.applyGestureOutcome(@intCast(i), out, &aux, false, now_ns);
+                    }
+                },
             }
         }
+
+        // Re-assert gamepad bits held by an active gesture hold leg; the engine
+        // emits press once, so the bit must persist across frames until release.
+        self.injected_buttons |= self.gesture_held_gamepad;
 
         if (action.tap_event) |tap| {
             emitTapEvent(tap, &aux, &self.injected_buttons, &self.pending_tap_release);
@@ -444,6 +524,74 @@ pub const Mapper = struct {
         return AuxEventList{};
     }
 
+    // Translate one gesture-engine Outcome into output. `from_timer` selects
+    // the gamepad-tap staging path: timer-context taps stage into
+    // gesture_timer_tap_pending so a full press is visible one frame before the
+    // release; apply-context taps use pending_tap_release directly.
+    fn applyGestureOutcome(
+        self: *Mapper,
+        src_idx: u6,
+        out: gesture_mod.Outcome,
+        aux: *AuxEventList,
+        from_timer: bool,
+        now_ns: i128,
+    ) void {
+        if (out.cancel_hold or out.cancel_double) {
+            // Tokens are matched by value at expiry; cancel both the queue
+            // entry and the routing record so a stale expiry is inert.
+            var ti: usize = 0;
+            while (ti < self.gesture_tokens.entries.len) : (ti += 1) {
+                const e = self.gesture_tokens.entries[ti] orelse continue;
+                if (e.src_idx != src_idx) continue;
+                if ((out.cancel_hold and e.leg == .hold) or
+                    (out.cancel_double and e.leg == .double))
+                {
+                    self.timer_queue.cancel(e.token, now_ns);
+                    self.gesture_tokens.entries[ti] = null;
+                }
+            }
+        }
+        for (out.slice()) |em| {
+            switch (em.target) {
+                .gamepad_button => |dst| {
+                    const mask = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst)));
+                    switch (em.action) {
+                        .press => {
+                            self.injected_buttons |= mask;
+                            self.gesture_held_gamepad |= mask;
+                        },
+                        .release => {
+                            self.injected_buttons &= ~mask;
+                            self.gesture_held_gamepad &= ~mask;
+                        },
+                        .tap => if (from_timer) {
+                            self.gesture_timer_tap_pending |= mask;
+                        } else {
+                            self.injected_buttons |= mask;
+                            const existing = self.pending_tap_release orelse 0;
+                            self.pending_tap_release = existing | mask;
+                        },
+                    }
+                },
+                else => {
+                    const act: remap_mod.TargetAction = switch (em.action) {
+                        .press => .press,
+                        .release => .release,
+                        .tap => .tap,
+                    };
+                    remap_mod.applyTarget(em.target, act, aux, &self.injected_buttons, null, null);
+                },
+            }
+        }
+        if (out.arm) |a| {
+            const token = self.next_token;
+            self.next_token +%= 1;
+            self.timer_queue.arm(a.deadline_ns, token, now_ns) catch return;
+            self.gesture_tokens.put(token, src_idx, a.leg);
+            self.gesture_engine.setArmToken(src_idx, a.leg, token);
+        }
+    }
+
     // Macro timerfd (slot 4) expiry only — must NOT call onLayerTimerExpired().
     pub fn onMacroTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
         var aux = AuxEventList{};
@@ -451,6 +599,13 @@ pub const Mapper = struct {
         var buf: [16]timer_queue_mod.Deadline = undefined;
         const expired = self.timer_queue.drainExpired(now_ns, &buf);
         for (expired) |d| {
+            if (self.gesture_tokens.take(d.token)) |ge| {
+                const src_bit = @as(u64, 1) << ge.src_idx;
+                const held = (self.state.buttons & src_bit) != 0;
+                const out = self.gesture_engine.onTimerExpired(ge.src_idx, ge.leg, held, now_ns);
+                self.applyGestureOutcome(ge.src_idx, out, &aux, true, now_ns);
+                continue;
+            }
             var idx: usize = 0;
             while (idx < self.active_macros.items.len) {
                 if (self.active_macros.items[idx].timer_token == d.token) {
@@ -562,6 +717,7 @@ fn freeResolvedRemap(allocator: std.mem.Allocator, r: ResolvedRemap) void {
         const t = maybe_target orelse continue;
         switch (t) {
             .chord => |codes| allocator.free(codes),
+            .gesture => |node| allocator.destroy(node),
             else => {},
         }
     }
@@ -590,6 +746,13 @@ fn precomputeRemap(allocator: std.mem.Allocator, remap_map: mapping.RemapMap) !R
                 error.OutOfMemory => return e,
                 error.ChordTooShort, error.ChordTooLong, error.DuplicateChordKey, error.UnknownKeyCode => {
                     std.log.warn("chord remap on {s} rejected: {s}", .{ entry.key_ptr.*, @errorName(e) });
+                    continue;
+                },
+            },
+            .gesture => |spec| remap_mod.resolveGestureTarget(allocator, spec) catch |e| switch (e) {
+                error.OutOfMemory => return e,
+                else => {
+                    std.log.warn("gesture remap on {s} rejected: {s}", .{ entry.key_ptr.*, @errorName(e) });
                     continue;
                 },
             },

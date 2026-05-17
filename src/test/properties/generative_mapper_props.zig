@@ -128,12 +128,12 @@ fn configIsOracleFaithful(cfg: *const mapping.MappingConfig) bool {
         var it = rm.map.iterator();
         while (it.next()) |entry| {
             switch (entry.value_ptr.*) {
-                .chord_names => return false, // E3
+                .chord_names, .gesture => return false, // E3
                 .string => |s| {
                     const t = remap_mod.resolveTarget(s) catch continue; // unknown: skipped both sides
                     switch (t) {
                         .key, .mouse_button, .gamepad_button, .disabled => {},
-                        .macro, .chord => return false, // E2 / E3
+                        .macro, .chord, .gesture => return false, // E2 / E3
                     }
                 },
             }

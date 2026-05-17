@@ -8,13 +8,22 @@ pub const Macro = @import("../core/macro.zig").Macro;
 
 const ButtonId = state.ButtonId;
 
-// `[remap]` value is either a single string ("KEY_F13", "macro:dodge_roll",
-// "BTN_LEFT", gamepad-button name) or an array of KEY_* strings (chord output).
-// RemapMap below has a `tomlIntoStruct` hook that inspects the raw toml.Value
-// per entry to choose between the two forms.
+// `[remap]` value is a single string ("KEY_F13", "macro:dodge_roll", "BTN_LEFT",
+// gamepad-button name), an array of KEY_* strings (chord output), or an inline
+// table describing tap/hold/double gesture legs. RemapMap below has a
+// `tomlIntoStruct` hook that inspects the raw toml.Value per entry.
+pub const GestureSpec = struct {
+    tap: ?[]const u8 = null,
+    hold: ?[]const u8 = null,
+    double: ?[]const u8 = null,
+    hold_ms: u32 = 300,
+    double_ms: u32 = 250,
+};
+
 pub const RemapValue = union(enum) {
     string: []const u8,
     chord_names: []const []const u8,
+    gesture: GestureSpec,
 };
 
 pub const RemapMap = struct {
@@ -38,6 +47,46 @@ pub const RemapMap = struct {
                         }
                     }
                     break :blk .{ .chord_names = names };
+                },
+                .table => |tbl| blk: {
+                    if (tbl.count() == 0) return error.InvalidValueType;
+                    var spec = GestureSpec{};
+                    var tit = tbl.iterator();
+                    while (tit.next()) |te| {
+                        const k = te.key_ptr.*;
+                        if (std.mem.eql(u8, k, "tap") or
+                            std.mem.eql(u8, k, "hold") or
+                            std.mem.eql(u8, k, "double"))
+                        {
+                            const s = switch (te.value_ptr.*) {
+                                .string => |sv| sv,
+                                else => return error.InvalidValueType,
+                            };
+                            const dup: []u8 = try ctx.alloc.alloc(u8, s.len);
+                            @memcpy(dup, s);
+                            if (std.mem.eql(u8, k, "tap")) {
+                                spec.tap = dup;
+                            } else if (std.mem.eql(u8, k, "hold")) {
+                                spec.hold = dup;
+                            } else {
+                                spec.double = dup;
+                            }
+                        } else if (std.mem.eql(u8, k, "hold_ms") or std.mem.eql(u8, k, "double_ms")) {
+                            const iv = switch (te.value_ptr.*) {
+                                .integer => |i| i,
+                                else => return error.InvalidValueType,
+                            };
+                            if (iv < 0 or iv > std.math.maxInt(u32)) return error.InvalidValueType;
+                            if (std.mem.eql(u8, k, "hold_ms")) {
+                                spec.hold_ms = @intCast(iv);
+                            } else {
+                                spec.double_ms = @intCast(iv);
+                            }
+                        } else {
+                            return error.InvalidValueType;
+                        }
+                    }
+                    break :blk .{ .gesture = spec };
                 },
                 else => return error.InvalidValueType,
             };
@@ -150,6 +199,11 @@ fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *co
                 // Chord output: every element is a KEY_* code (validated at
                 // validate() time). Capability is keyboard regardless of count.
                 for (names) |name| scanTarget(caps, name);
+            },
+            .gesture => |g| {
+                if (g.tap) |t| scanTarget(caps, t);
+                if (g.hold) |t| scanTarget(caps, t);
+                if (g.double) |t| scanTarget(caps, t);
             },
         }
     }
@@ -306,6 +360,37 @@ fn checkRemapMacros(cfg: *const MappingConfig, map: *const RemapMap) !void {
             },
             // Chord arrays cannot reference macros — validated separately.
             .chord_names => {},
+            // Gesture legs cannot be macros — enforced in checkRemapGestures.
+            .gesture => {},
+        }
+    }
+}
+
+fn gestureLegInvalid(target: []const u8) bool {
+    if (std.mem.startsWith(u8, target, "macro:")) return true;
+    _ = remap_mod.resolveTarget(target) catch return true;
+    return false;
+}
+
+fn checkRemapGestures(cfg: *const MappingConfig, map: *const RemapMap, is_base: bool) !void {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        const g = switch (entry.value_ptr.*) {
+            .gesture => |gv| gv,
+            else => continue,
+        };
+        if (g.tap == null and g.hold == null and g.double == null) return error.InvalidConfig;
+        if (g.hold_ms < 1 or g.hold_ms > 5000) return error.InvalidConfig;
+        if (g.double_ms < 1 or g.double_ms > 5000) return error.InvalidConfig;
+        if (g.tap) |t| if (gestureLegInvalid(t)) return error.InvalidConfig;
+        if (g.hold) |t| if (gestureLegInvalid(t)) return error.InvalidConfig;
+        if (g.double) |t| if (gestureLegInvalid(t)) return error.InvalidConfig;
+
+        if (is_base) {
+            const layers = cfg.layer orelse continue;
+            for (layers) |*lc| {
+                if (std.mem.eql(u8, lc.trigger, entry.key_ptr.*)) return error.InvalidConfig;
+            }
         }
     }
 }
@@ -657,6 +742,7 @@ pub fn validate(cfg: *const MappingConfig) !void {
     if (cfg.remap) |*m| {
         try checkRemapMacros(cfg, m);
         try checkRemapChords(m);
+        try checkRemapGestures(cfg, m, true);
     }
     if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
     if (cfg.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
@@ -695,6 +781,7 @@ pub fn validate(cfg: *const MappingConfig) !void {
         if (layer.remap) |*m| {
             try checkRemapMacros(cfg, m);
             try checkRemapChords(m);
+            try checkRemapGestures(cfg, m, false);
         }
         if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
         if (layer.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
@@ -1739,4 +1826,146 @@ test "chord remap: layer-level chord too long is rejected by validate" {
     );
     defer result.deinit();
     try std.testing.expectError(error.ChordTooLong, validate(&result.value));
+}
+
+test "gesture parse: full tap/hold/double with custom thresholds" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y", double = "KEY_Z", hold_ms = 400, double_ms = 200 }
+    );
+    defer result.deinit();
+    const g = result.value.remap.?.map.get("A").?.gesture;
+    try std.testing.expectEqualStrings("KEY_X", g.tap.?);
+    try std.testing.expectEqualStrings("KEY_Y", g.hold.?);
+    try std.testing.expectEqualStrings("KEY_Z", g.double.?);
+    try std.testing.expectEqual(@as(u32, 400), g.hold_ms);
+    try std.testing.expectEqual(@as(u32, 200), g.double_ms);
+}
+
+test "gesture parse: partial legs default thresholds" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\B = { tap = "B", hold = "KEY_LEFTSHIFT" }
+        \\Y = { tap = "Y", double = "KEY_F" }
+    );
+    defer result.deinit();
+    const gb = result.value.remap.?.map.get("B").?.gesture;
+    try std.testing.expectEqualStrings("KEY_LEFTSHIFT", gb.hold.?);
+    try std.testing.expect(gb.double == null);
+    try std.testing.expectEqual(@as(u32, 300), gb.hold_ms);
+    try std.testing.expectEqual(@as(u32, 250), gb.double_ms);
+    const gy = result.value.remap.?.map.get("Y").?.gesture;
+    try std.testing.expect(gy.hold == null);
+    try std.testing.expectEqualStrings("KEY_F", gy.double.?);
+}
+
+test "gesture parse: empty inline table rejected" {
+    const allocator = std.testing.allocator;
+    if (parseString(allocator,
+        \\[remap]
+        \\A = {}
+    )) |r| {
+        var rr = r;
+        rr.deinit();
+        return error.EmptyGestureTableAccepted;
+    } else |_| {}
+}
+
+test "gesture parse: unknown key in inline table rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidValueType, parseString(allocator,
+        \\[remap]
+        \\A = { tap = "KEY_X", bogus = "KEY_Y" }
+    ));
+}
+
+test "gesture validate: at least one leg required" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = { hold_ms = 400 }
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "gesture validate: threshold out of range rejected" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = { tap = "KEY_X", hold_ms = 9000 }
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "gesture validate: macro leg rejected" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = { tap = "macro:foo" }
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "gesture validate: base gesture key equal to a layer trigger rejected" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\Select = { tap = "KEY_X" }
+        \\
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "gesture validate: valid full gesture passes" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y", double = "KEY_Z" }
+    );
+    defer result.deinit();
+    try validate(&result.value);
+}
+
+test "gesture deriveAux: legs contribute keyboard and mouse caps" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "mouse_left", double = "KEY_Z" }
+    );
+    defer result.deinit();
+    const caps = deriveAuxFromMapping(&result.value);
+    try std.testing.expect(caps.needs_keyboard);
+    try std.testing.expect(caps.mouse_buttons & 1 != 0);
+}
+
+test "gesture back-compat: plain string remap still parses as string" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\X = "KEY_SPACE"
+    );
+    defer result.deinit();
+    try std.testing.expectEqualStrings("KEY_SPACE", result.value.remap.?.map.get("X").?.string);
+}
+
+test "gesture back-compat: chord array remap still parses as chord_names" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\C = ["KEY_K", "KEY_L"]
+    );
+    defer result.deinit();
+    const names = result.value.remap.?.map.get("C").?.chord_names;
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("KEY_K", names[0]);
+    try std.testing.expectEqualStrings("KEY_L", names[1]);
 }

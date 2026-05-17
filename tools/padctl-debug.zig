@@ -224,12 +224,10 @@ pub fn main() !void {
                     if (mapping_parsed) |mp| {
                         if (mp.value.remap) |remap| {
                             if (remap.map.get(entry.key_ptr.*)) |target_v| {
-                                // Chord remap is rendered as the source button
-                                // name unchanged here; the debug TUI doesn't yet
-                                // visualize chords (PR B-2 follow-up).
+                                // Chord/gesture remap not yet visualized in debug TUI.
                                 const target = switch (target_v) {
                                     .string => |s| s,
-                                    .chord_names => continue,
+                                    .chord_names, .gesture => continue,
                                 };
                                 if (std.mem.eql(u8, target, "disabled")) {
                                     continue; // skip disabled buttons
@@ -271,8 +269,8 @@ pub fn main() !void {
                     if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
                         const target = switch (entry.value_ptr.*) {
                             .string => |s| s,
-                            // Chord remap not yet rendered in debug TUI.
-                            .chord_names => continue,
+                            // Chord/gesture remap not yet rendered in debug TUI.
+                            .chord_names, .gesture => continue,
                         };
                         if (std.mem.eql(u8, target, "disabled")) continue;
 

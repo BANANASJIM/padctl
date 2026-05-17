@@ -70,6 +70,40 @@ M4 = "macro:dodge_roll"
 
 Array values (e.g. `M1 = ["KEY_LEFTMETA", "KEY_1"]`) are parsed and resolved as chord targets (2–4 keys) but are not yet dispatched — chord output is planned for a future release.
 
+### Gesture bindings (tap / hold / double-press)
+
+A `[remap]` value may also be an inline table that binds different actions to
+short press, long press, and double press of the same button:
+
+```toml
+[remap]
+A  = { tap = "KEY_X", hold = "KEY_Y", double = "KEY_Z" }
+B  = { tap = "B", hold = "KEY_LEFTSHIFT" }
+Y  = { tap = "Y", double = "KEY_F" }
+RB = { tap = "RB", hold = "KEY_TAB", hold_ms = 400, double_ms = 200 }
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `tap` | string | — | Action for a short press (fired on release). |
+| `hold` | string | — | Action fired once the button is held past `hold_ms`. |
+| `double` | string | — | Action fired when a second press starts within `double_ms` of the first release. |
+| `hold_ms` | integer (1–5000) | 300 | Hold threshold in milliseconds. |
+| `double_ms` | integer (1–5000) | 250 | Double-press window in milliseconds. |
+
+At least one of `tap` / `hold` / `double` must be set. Each leg is a single
+target (`ButtonId`, `KEY_*`, `mouse_*`, or `disabled`); `macro:<name>` and chord
+arrays are not allowed inside a gesture. An empty table `{}` or an unknown key
+is rejected at parse time; out-of-range thresholds and a base-`[remap]` gesture
+key that collides with a `[[layer]]` `trigger` are rejected at validate time.
+Absent legs simply do nothing.
+
+Latency trade-off: when `double` is set, `tap` cannot fire until the
+double-press window has elapsed (the engine must wait to see whether a second
+press arrives). Without `double`, `tap` fires immediately on release with zero
+added latency. Plain string and chord-array remap forms are unaffected and
+incur no extra latency.
+
 ## `[gyro]`
 
 Global gyro-to-mouse configuration.
