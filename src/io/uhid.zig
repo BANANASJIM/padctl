@@ -12,10 +12,8 @@
 //!   - `UHID_INPUT2`  — inject an input report (payload = HID report bytes).
 //!   - `UHID_DESTROY` — tear the device down.
 //!
-//! Phase 13 Wave 1 T1 scope: extract the previously test-local UAPI bindings
-//! from `src/test/uhid_integration_test.zig:11-99` into a reusable module so
-//! production code (added in T2/T3) can share them. This is a mechanical
-//! refactor — no behaviour change.
+//! UHID UAPI bindings extracted into a shared module so both production code
+//! and tests can import them without duplication.
 
 const std = @import("std");
 const posix = std.posix;
@@ -43,8 +41,7 @@ pub const HID_MAX_DESCRIPTOR_SIZE: usize = 4096;
 /// fields relevant to the event type but rejects short writes.
 pub const UHID_EVENT_SIZE: usize = 4380;
 
-/// USB bus type — used for `UhidCreate2Req.bus` so FFB (Wave 6) sees a bustype
-/// the kernel `hid-pidff` driver accepts. See ADR-015 R2.
+/// USB bus type required by the kernel `hid-pidff` driver for force-feedback binding.
 pub const BUS_USB: u16 = 0x03;
 
 // --- UAPI payload structs --------------------------------------------------
@@ -153,7 +150,7 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
     _ = posix.write(fd, &buf) catch {};
 }
 
-// --- Wave 6 T3: UHID_OUTPUT types -------------------------------------------
+// --- UHID_OUTPUT types -------------------------------------------------------
 
 /// Kernel sends `UHID_OUTPUT` when the HID driver writes an output report.
 pub const UHID_OUTPUT: u32 = 6;
@@ -179,9 +176,8 @@ pub const OutputReport = struct {
 // --- High-level UhidDevice (T2 + T3) ---------------------------------------
 
 /// Precise error set for `UhidDevice.init` / `UhidDevice.initWithFd`. Keeps
-/// the vtable callers out of `anyerror` land (see Phase 10 T9 VTable
-/// error-set convergence work). `InvalidFd` is only reachable from
-/// `initWithFd`; both constructors share the set for API symmetry.
+/// the vtable callers out of `anyerror` land. `InvalidFd` is only reachable
+/// from `initWithFd`; both constructors share the set for API symmetry.
 pub const InitError = error{
     ConfigInvalid,
     DescriptorTooLarge,
@@ -194,9 +190,7 @@ pub const InitError = error{
 ///
 /// The `uniq` string feeds the `/sys/class/hid/.../uniq` attribute that
 /// padctl's routing layer reads via `EVIOCGUNIQ` to pair SDL IMU and
-/// main-pad nodes (see `decisions/015-uhid-imu-migration.md` §7 AC4). Wave 1
-/// accepts a caller-provided descriptor; Wave 2 introduces the TOML-driven
-/// descriptor builder.
+/// main-pad nodes (see `decisions/015-uhid-imu-migration.md` §7 AC4).
 pub const Config = struct {
     vid: u16,
     pid: u16,
@@ -207,7 +201,7 @@ pub const Config = struct {
     uniq: []const u8 = "",
     /// Raw HID report descriptor bytes. Must fit in `HID_MAX_DESCRIPTOR_SIZE`.
     descriptor: []const u8,
-    /// Bus type — defaults to USB. `hid-pidff` (Wave 6) requires `BUS_USB`.
+    /// Bus type — defaults to USB. `hid-pidff` requires `BUS_USB`.
     bus: u16 = BUS_USB,
     /// Device version (`bcdDevice`-like). Optional; 0 is accepted.
     version: u32 = 0,
@@ -229,20 +223,18 @@ pub const Config = struct {
 
 /// A UHID-backed output device implementing the shared `OutputDevice` vtable.
 ///
-/// Phase 13 Wave 1 scope (T2):
-///   - Struct layout + vtable wiring matching `UinputDevice`
-///     (`src/io/uinput.zig:73-94`).
-///   - `emit(state)` ships a minimal 4-byte stick payload via `UHID_INPUT2`
-///     (Wave 2 replaces this with the descriptor-driven encoder).
-///   - `pollFf()` always returns `null` (Wave 2+ wires FF routing).
+///   - `emit(state)` dispatches to `uhid_descriptor.encodeReport` when
+///     `Config.output` is set, to `encodeImuReport` when only `Config.imu`
+///     is set, or to a raw 4-byte stick stub for legacy tests with no config.
+///   - `pollFf()` always returns `null` — FF output reports are consumed
+///     via `pollOutputReport`; the vtable path is unused.
 ///   - `close()` sends `UHID_DESTROY` and closes the fd.
 pub const UhidDevice = struct {
     fd: posix.fd_t,
     vid: u16,
     pid: u16,
-    /// Last state passed to `emit()`. Wave 3 reads this during routing
-    /// switches to preserve pressed buttons / stick positions across backend
-    /// handoffs.
+    /// Last state passed to `emit()`. Read by the routing layer during
+    /// backend handoffs to preserve pressed buttons / stick positions.
     state_snapshot: state.GamepadState = .{},
     /// Owned-by-caller copies: `UhidDevice` does not free these. The daemon
     /// stores the backing TOML allocator; CI tests use string literals.
@@ -254,8 +246,8 @@ pub const UhidDevice = struct {
     /// Optional `ImuConfig` — when set AND `output` is null, `emit()`
     /// dispatches to `encodeImuReport` (6 × i16 accel + gyro axes).
     imu: ?device_cfg.ImuConfig,
-    /// Wave 6 T3: optional callback invoked for each `UHID_OUTPUT` report
-    /// received from the kernel (FFB effect data → physical hidraw, T4).
+    /// Optional callback invoked for each `UHID_OUTPUT` report received from
+    /// the kernel (FFB effect data forwarded to physical hidraw).
     output_cb: ?*const fn (ctx: *anyopaque, report: OutputReport) void = null,
     output_ctx: ?*anyopaque = null,
 
@@ -425,10 +417,10 @@ pub const UhidDevice = struct {
         self.state_snapshot = s;
     }
 
-    /// Inject an arbitrary payload as a `UHID_INPUT2` event. Wave 2 callers
-    /// (descriptor-aware encoder) feed already-encoded bytes in directly;
-    /// Wave 1 tests use it to exercise framing without a real descriptor.
-    /// Prefer `emit()` for GamepadState-driven paths.
+    /// Inject an arbitrary payload as a `UHID_INPUT2` event. Prefer `emit()`
+    /// for `GamepadState`-driven paths; use `emitRaw` only when the caller
+    /// has already encoded the HID report bytes (e.g. tests with hand-written
+    /// descriptors).
     pub fn emitRaw(self: *UhidDevice, payload: []const u8) uinput.EmitError!void {
         uhidInput(self.fd, payload) catch |err| switch (err) {
             error.BrokenPipe, error.ConnectionResetByPeer => return error.DeviceGone,
@@ -479,9 +471,9 @@ pub const UhidDevice = struct {
         };
     }
 
-    /// Wave 1 stub: no FF events yet. Wave 2+ replaces this with real
-    /// `UHID_OUTPUT` handling (kernel → userspace → physical hidraw when the
-    /// PID descriptor path lands in Wave 6).
+    /// Always returns `null` — FF output reports from the kernel are consumed
+    /// via `pollOutputReport` and routed through `output_cb`; the vtable
+    /// `poll_ff` path is unused for UHID devices.
     pub fn pollFf(self: *UhidDevice) uinput.PollFfError!?uinput.FfEvent {
         _ = self;
         return null;
@@ -677,7 +669,6 @@ test "uhid_device_vtable_match: emit + close frame UHID_INPUT2 / UHID_DESTROY" {
     try testing.expectEqual(@as(u8, 128), buf[8]);
     try testing.expectEqual(@as(u8, 128), buf[9]);
 
-    // pollFf stub returns null in Wave 1.
     try testing.expectEqual(@as(?uinput.FfEvent, null), try dev.pollFf());
 
     // close() sends UHID_DESTROY and closes fd — validate the destroy frame

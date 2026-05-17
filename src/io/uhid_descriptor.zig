@@ -1,13 +1,6 @@
 //! UHID HID report descriptor builder — translates an `OutputConfig` into a
 //! kernel-acceptable HID report descriptor byte stream.
 //!
-//! Phase 13 Wave 2 (T6). Wave 1 introduced `UhidDevice` in `src/io/uhid.zig`
-//! which accepts a raw descriptor bytes blob; Wave 2 builds the production
-//! path: given a device's `[output]` TOML (buttons, axes, dpad,
-//! force_feedback, touchpad) produce the descriptor bytes. Wave 3 will wire
-//! the builder into the supervisor; Wave 2 is pure builder + tests, with no
-//! behavioural change to the supervisor path.
-//!
 //! ## Descriptor layout (baseline gamepad)
 //!
 //! We emit a single top-level Application Collection with Usage
@@ -29,8 +22,7 @@
 //! Output report (if `[output.force_feedback]` is `rumble`):
 //!
 //! 6. A 3-byte Vendor-Defined output carrying `{report_id, strong_magnitude,
-//!    weak_magnitude}` — the minimum the supervisor's Wave 3 rumble bridge
-//!    will need. A full PID descriptor lands in Wave 6 (issue #82).
+//!    weak_magnitude}` consumed by the supervisor's rumble bridge.
 //!
 //! ## Error handling
 //!
@@ -58,8 +50,7 @@ pub const BuildError = std.mem.Allocator.Error || error{
     MissingMandatoryPidUsage,
 };
 
-// PID report-ID assignment per spec/openspec/changes/phase-13-wave-6-pidff/
-// design.md §T1. Report IDs themselves are not normative in HID PID 1.01 —
+// PID report-ID assignment. Report IDs are not normative in HID PID 1.01 —
 // kernel `pidff_find_reports` looks up reports by Usage, not by ID — but a
 // fixed assignment keeps the golden test stable and the wire format
 // debuggable.
@@ -81,7 +72,7 @@ pub const PID_POOL_REPORT_ID: u8 = 15;
 // the kernel matches reports by HID Usage on the PID Usage Page (0x0F),
 // not by Report ID. Report IDs are not normative in HID PID 1.01.
 // Kernel pidff_find_reports rejects with -ENODEV if any of these 8 usages
-// is absent — see the hid-pidff bind probe in issue #82 / PR #161.
+// is absent.
 pub const PID_MANDATORY_USAGES = [_]u8{
     0x21, // Set Effect Report
     0x77, // Effect Operation Report
@@ -114,8 +105,7 @@ const PID_MANDATORY_REPORT_IDS = [_]u8{
 pub const INPUT_REPORT_ID: u8 = 1;
 
 /// Output report ID used for the FFB rumble output report. 2 byte payload
-/// `{strong_magnitude, weak_magnitude}` (both u8 0..255). Matches the layout
-/// Wave 3's rumble bridge is expected to parse.
+/// `{strong_magnitude, weak_magnitude}` (both u8 0..255).
 pub const FF_OUTPUT_REPORT_ID: u8 = 2;
 
 /// Maximum touch contacts the builder will emit. Matches Steam Deck's
@@ -187,8 +177,7 @@ fn writeLogicalMax(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, v: i32
 
 /// HID Usage (Generic Desktop page) for common axis codes. Returns null for
 /// axis codes the baseline descriptor does not cover (e.g. `ABS_WHEEL`,
-/// `ABS_HAT0X` — those are handled by separate dpad/wheel paths or deferred
-/// to Wave 3+).
+/// `ABS_HAT0X` — those are handled by separate dpad/wheel paths).
 fn axisUsage(code: []const u8) ?u8 {
     if (std.mem.eql(u8, code, "ABS_X")) return 0x30;
     if (std.mem.eql(u8, code, "ABS_Y")) return 0x31;
@@ -411,11 +400,8 @@ pub const UhidDescriptorBuilder = struct {
         var emitted_any: bool = emitted_any_input;
         if (out.force_feedback) |ff| {
             if (std.mem.eql(u8, ff.type, "rumble")) {
-                // A placeholder vendor-defined 2-byte output report that the
-                // Wave 3 supervisor can parse as {strong, weak} magnitudes.
-                // The PID descriptor for FFB lands in Wave 6; this minimal
-                // stub is enough for the kernel `UHID_CREATE2` to accept the
-                // descriptor + for the rumble path to exist in Wave 3.
+                // A vendor-defined 2-byte output report {strong_magnitude, weak_magnitude}
+                // consumed by the supervisor's rumble bridge.
                 try writeItem2(&buf, allocator, 0x06, 0xFF00); // Usage Page (Vendor-Defined 0xFF00)
                 try writeItem1(&buf, allocator, 0x85, FF_OUTPUT_REPORT_ID);
                 try writeItem1(&buf, allocator, 0x09, 0x01); // Usage (Vendor Usage 1)
@@ -445,7 +431,7 @@ pub const UhidDescriptorBuilder = struct {
     /// `SDL_EVDEV_GuessDeviceClass` classifies the resulting `/dev/input/eventN`
     /// node as an accelerometer. The previous Sensor-page descriptor bound to
     /// `hid-sensor-hub` and exposed an IIO device instead, which is invisible
-    /// to SDL / Steam — see ADR-015 §Alternatives + reviewer report R-C B1.
+    /// to SDL / Steam.
     ///
     /// Report layout (report ID `IMU_REPORT_ID`):
     ///   1 byte  report ID
@@ -517,12 +503,10 @@ pub const UhidDescriptorBuilder = struct {
     /// Report IDs are NOT what the kernel matches on — see comment block
     /// above `PID_MANDATORY_USAGES`.
     ///
-    /// The `cfg` parameter is currently unused — full axis/button passthrough
-    /// (sticks, hat, buttons) is deferred to a follow-up pass; the kernel
-    /// pidff binding only requires the PID collection to be present, so the
-    /// minimal joystick preamble here is sufficient for Wave 6 stage 1. The
-    /// parameter is kept on the signature so call-sites that already plumb
-    /// `OutputConfig` don't change shape.
+    /// The `cfg` parameter is currently unused — the kernel pidff binding only
+    /// requires the PID collection to be present, so the minimal joystick
+    /// preamble is sufficient. The parameter is kept on the signature so
+    /// call-sites that already plumb `OutputConfig` don't change shape.
     pub fn buildForPid(
         allocator: std.mem.Allocator,
         cfg: device.OutputConfig,
@@ -862,11 +846,9 @@ fn emitPidEffectOperationReport(buf: *std.ArrayList(u8), allocator: std.mem.Allo
 
 fn emitPidDeviceControlReport(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
     // Outer usage = 0x96 (PID Device Control Report container) per kernel
-    // `drivers/hid/usbhid/hid-pidff.c::pidff_reports`. The probe descriptor
-    // (tools/wave6-probe/pidff_probe.py) used 0x95 (PID Device Control
-    // field) — that is the cause of probe Run 2's `pidff_find_reports
-    // -ENODEV` failure. We use 0x96 here so the kernel can locate the
-    // report.
+    // `drivers/hid/usbhid/hid-pidff.c::pidff_reports`. Must be 0x96, not
+    // 0x95 (the PID Device Control field usage) — the kernel looks up the
+    // report by container usage and rejects -ENODEV otherwise.
     try writeItem1(buf, allocator, 0x09, 0x96);
     try writeItem1(buf, allocator, 0xA1, 0x02);
     try writeItem1(buf, allocator, 0x85, PID_DEVICE_CONTROL_REPORT_ID);
@@ -1601,7 +1583,7 @@ test "descriptor: reject > UHID_DATA_MAX via excessive button count is capped to
     try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
 }
 
-// --- Regression tests for CodeRabbit PR #132 findings ------------------------
+// --- Regression tests ---
 // Each test exercises a failure mode that was silent (axis drop, unchecked
 // @intCast) or contradicted the docstring (FFB-only rejection) in the
 // pre-fix builder.
@@ -1702,7 +1684,7 @@ test "descriptor: FFB-only output (no input buttons/axes) produces a valid descr
     try testing.expect(found);
 }
 
-// --- buildForImu tests (Phase 13 Wave 3 T5a/T5b) ---------------------------
+// --- buildForImu tests -------------------------------------------------------
 
 test "buildForImu: default ranges produce the pinned golden descriptor" {
     const imu = device.ImuConfig{};
@@ -1812,7 +1794,7 @@ test "buildForImu: primary pad descriptor DOES emit Usage Page Button (control s
     try testing.expect(found);
 }
 
-// --- buildForPid tests (Phase 13 Wave 6 T1) --------------------------------
+// --- buildForPid tests -------------------------------------------------------
 
 test "buildForPid: 8 mandatory PID reports present per kernel pidff_find_reports" {
     const out = device.OutputConfig{ .name = "moza-r5-fixture", .vid = 0x11FF, .pid = 0x1211 };
@@ -1951,14 +1933,9 @@ test "buildForPid: stays within HID_MAX_DESCRIPTOR_SIZE" {
     try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
 }
 
-// TODO(T1d): pin the byte sequence emitted by buildForPid against a known-good
-// reference once the first real-hardware run shows kernel `hid-universal-pidff`
-// FFB init success (no `Error initialising force feedback`, no
-// `pidff_find_reports -ENODEV`, no kernel OOPS in `hid_hw_open+0x71`). Probe
-// Run 2's 7-of-12 descriptor (tools/wave6-probe/pidff_probe.py) cannot be used
-// as a reference — it caused FFB init failure. See
-// openspec/changes/phase-13-wave-6-pidff/tasks.md §T1d for the gating
-// procedure. Until then this test is intentionally skipped.
+// TODO: pin the byte sequence emitted by buildForPid against a known-good
+// reference once real-hardware validates kernel `hid-universal-pidff` FFB init
+// (no `pidff_find_reports -ENODEV`). Until then this test is intentionally skipped.
 test "buildForPid: matches reference PID descriptor (Moza R5)" {
     return error.SkipZigTest;
 }

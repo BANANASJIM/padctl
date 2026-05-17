@@ -469,9 +469,8 @@ pub const UinputDevice = struct {
                 // Return on the first EV_FF observed. Any remaining events
                 // stay in the kernel socket buffer; level-triggered ppoll
                 // on the fd will re-fire on the next loop iteration so
-                // they are drained one-per-call in FIFO order (fix for
-                // issue #65: rapid PLAY+STOP bursts used to collapse to
-                // the last event and lose the earlier one).
+                // they are drained one-per-call in FIFO order, preserving
+                // rapid PLAY+STOP bursts.
                 break;
             }
         }
@@ -1686,8 +1685,6 @@ test "uinput: GenericUinputDevice.emitGeneric: no change produces no write" {
 }
 
 // --- Instrumentation correctness tests ---
-
-// Phase 13 Wave 3 T2b: initBoxed heap-alloc wrapper.
 
 test "uinput: initBoxed heap-allocates and returns owning pointer" {
     // /dev/uinput is typically root-only on CI. Skip gracefully when the

@@ -19,15 +19,15 @@ pub const DiagnosticsConfig = struct {
 /// Runtime supervisor tunables. All fields have production defaults and
 /// are optional — a missing `[supervisor]` section leaves them as-is.
 pub const SupervisorConfig = struct {
-    /// Issue #131-A: seconds to preserve a suspended instance's uinput so
-    /// a wireless sleep/wake cycle does not break SDL's cached eventN
-    /// reference. Negative values treated as 0 (immediate teardown);
+    /// Seconds to preserve a suspended instance's uinput so a wireless
+    /// sleep/wake cycle does not break SDL's cached eventN reference.
+    /// Negative values treated as 0 (immediate teardown);
     /// values > u32_max clamped. See `Supervisor.suspend_grace_sec`.
     suspend_grace_sec: i64 = 15,
 };
 
-/// Issue #183: in-controller mapping switch. When `modifier` is held and
-/// any `selectors[i]` is pressed, the daemon switches to whichever mapping
+/// In-controller mapping switch. When `modifier` is held and any
+/// `selectors[i]` is pressed, the daemon switches to whichever mapping
 /// declares `chord_index = i+1`. `hold_ms` is a debounce window — selector
 /// edges within this window after the modifier first becomes fully held
 /// are ignored. A missing or empty section disables the feature.
@@ -201,9 +201,9 @@ pub fn emitToml(writer: anytype, cfg: *const UserConfig) !void {
         try writer.print("\n[supervisor]\nsuspend_grace_sec = {d}\n", .{sup.suspend_grace_sec});
     }
 
-    // Issue #183: round-trip [chord_switch] so a full-file rewrite (e.g. by
-    // `padctl switch`, `padctl dump`, or a re-install binding write) never
-    // silently drops the user's in-controller switch config.
+    // Round-trip [chord_switch] so a full-file rewrite (e.g. by `padctl switch`,
+    // `padctl dump`, or a re-install binding write) never silently drops the
+    // user's in-controller switch config.
     if (cfg.chord_switch) |cs| {
         try writer.writeAll("\n[chord_switch]\n");
         if (cs.modifier) |mod| try emitTomlStringArray(writer, "modifier", mod);
@@ -238,10 +238,9 @@ fn emitTomlStringArray(writer: anytype, key: []const u8, items: []const []const 
 
 /// Escape a TOML basic-string payload (between the enclosing `"`).
 ///
-/// Control characters are REJECTED with error.InvalidDeviceName — per PR #168
-/// (audit V1) the project's defensive-boundary policy is: control bytes in
-/// device names indicate input corruption (broken sysfs, malicious udev rule,
-/// hand-edited bad TOML) — surface loudly, don't silent-normalize.
+/// Control characters are REJECTED with error.InvalidDeviceName — control bytes
+/// in device names indicate input corruption (broken sysfs, malicious udev
+/// rule, hand-edited bad TOML) and must surface loudly, not be silent-normalized.
 /// Tab (0x09) is the only control byte TOML basic strings permit; it passes through.
 pub fn escapeTomlString(writer: anytype, s: []const u8) !void {
     for (s) |c| {
@@ -690,14 +689,14 @@ test "writeAtomic escapes TOML special characters in device names" {
     try std.testing.expectEqualStrings("m1", findDefaultMapping(&result, "Quote\"Backslash\\Pad").?);
 }
 
-test "escapeTomlString rejects newline (PR #168 regression)" {
+test "escapeTomlString rejects newline" {
     const a = std.testing.allocator;
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(a);
     try std.testing.expectError(error.InvalidDeviceName, escapeTomlString(buf.writer(a), "Bad\nName"));
 }
 
-test "escapeTomlString rejects control byte 0x07 (PR #168 regression)" {
+test "escapeTomlString rejects control byte 0x07" {
     const a = std.testing.allocator;
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(a);
@@ -720,7 +719,7 @@ test "escapeTomlString escapes backslash and double-quote" {
     try std.testing.expectEqualStrings("a\\\\b\\\"c", buf.items);
 }
 
-test "user_config: [chord_switch] section parses modifier + selectors + hold_ms (issue #183)" {
+test "user_config: [chord_switch] section parses modifier + selectors + hold_ms" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\version = 1
@@ -746,7 +745,7 @@ test "user_config: [chord_switch] section parses modifier + selectors + hold_ms 
     try std.testing.expectEqual(@as(i64, 120), cs.hold_ms);
 }
 
-test "user_config: missing [chord_switch] leaves field null (issue #183)" {
+test "user_config: missing [chord_switch] leaves field null" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\version = 1
@@ -759,10 +758,8 @@ test "user_config: missing [chord_switch] leaves field null (issue #183)" {
     try std.testing.expectEqual(@as(?ChordSwitchConfig, null), result.value.chord_switch);
 }
 
-// Issue #183 regression: `padctl switch <name>` does a full-file rewrite
-// of config.toml via emitToml/writeAtomic. Before the fix, emitToml never
-// serialised [chord_switch], so switching destroyed the user's in-controller
-// switch config. This asserts the round-trip preserves [chord_switch].
+// `padctl switch <name>` does a full-file rewrite via emitToml/writeAtomic.
+// This asserts the round-trip preserves [chord_switch].
 //
 // Falsifiability: this test FAILS if either production mutation is reverted:
 //   (1) remove the [chord_switch] emission block in emitToml() — re-parse
@@ -771,7 +768,7 @@ test "user_config: missing [chord_switch] leaves field null (issue #183)" {
 //   (2) drop `.chord_switch = ...` from the writeConfigToml/dump/install
 //       UserConfig literals (the `rewritten` struct below mirrors that
 //       call-site) — chord_switch becomes null and the test fails identically.
-test "user_config: switch-style full rewrite preserves [chord_switch] (issue #183 regression)" {
+test "user_config: switch-style full rewrite preserves [chord_switch]" {
     const allocator = std.testing.allocator;
     const original =
         \\version = 1
