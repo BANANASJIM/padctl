@@ -1542,7 +1542,6 @@ pub const Supervisor = struct {
                 }
                 if (m.default_mapping_pr) |dm| {
                     if (dm.value.name) |n| break :blk n;
-                    if (m.default_mapping_stem) |s| break :blk s;
                 }
                 break :blk "(none)";
             };
