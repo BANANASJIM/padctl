@@ -3035,7 +3035,9 @@ test "uninstall: #137 probeAndRebindDrivers binds unbound matching interface onl
     {
         const drv = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/devices/1-1.4/1-1.4:1.1/driver", .{tmp_path});
         defer allocator.free(drv);
-        try std.posix.symlink("../../../../bus/usb/drivers/xpad", drv);
+        // Relative target must resolve from the symlink's own directory
+        // (.../devices/1-1.4/1-1.4:1.1/): three "../" reach .../bus/usb/.
+        try std.posix.symlink("../../../drivers/xpad", drv);
     }
 
     // bind file: writable regular file simulating the sysfs write target.
