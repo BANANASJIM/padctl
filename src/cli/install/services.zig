@@ -24,6 +24,7 @@ pub fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) 
         \\[Service]
         \\Type=simple
         \\ExecStart={s}
+        \\SupplementaryGroups=input
         \\Restart=on-failure
         \\RestartSec=3
         \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,

@@ -34,7 +34,9 @@ pub const ManagedInstance = struct {
     thread: std.Thread,
     mapping_arena: std.heap.ArenaAllocator,
     switch_mapping: ?*mapping_cfg.ParseResult = null,
+    switch_mapping_stem: ?[]const u8 = null,
     default_mapping_pr: ?*mapping_cfg.ParseResult = null,
+    default_mapping_stem: ?[]const u8 = null,
     suspended: bool = false,
     /// CLOCK_MONOTONIC deadline (ns). When non-null and `now >= deadline`,
     /// `gcExpiredGrace()` tears the entry down. Set by `detach()` when
@@ -59,9 +61,11 @@ const SwitchTx = struct {
     idx: usize,
     new_mapper: ?Mapper,
     parsed_ptr: ?*mapping_cfg.ParseResult,
+    path_stem: ?[]const u8 = null,
     old_mapper: ?Mapper = null,
     old_mapping_cfg: ?*const MappingConfig = null,
     old_switch_mapping: ?*mapping_cfg.ParseResult = null,
+    old_switch_mapping_stem: ?[]const u8 = null,
     committed: bool = false,
 };
 
@@ -169,6 +173,7 @@ pub const Supervisor = struct {
     ctrl_sock: ?ControlSocket,
     user_cfg: ?user_config_mod.ParseResult = null,
     test_switch_mapping_override: ?[]const u8 = null,
+    test_default_mapping_override: ?[]const u8 = null,
     test_switch_fail_commit_index: ?usize = null,
     /// Issue #131-A: `detach()` preserves the virtual uinput for this many
     /// seconds to survive wireless sleep/wake. Once the deadline passes
@@ -317,6 +322,7 @@ pub const Supervisor = struct {
         if (self.ctrl_sock) |*cs| cs.deinit();
         if (self.user_cfg) |*uc| uc.deinit();
         if (self.test_switch_mapping_override) |p| self.allocator.free(p);
+        if (self.test_default_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
@@ -607,10 +613,12 @@ pub const Supervisor = struct {
             pm.deinit();
             self.allocator.destroy(pm);
         }
+        if (m.switch_mapping_stem) |s| self.allocator.free(s);
         if (m.default_mapping_pr) |pm| {
             pm.deinit();
             self.allocator.destroy(pm);
         }
+        if (m.default_mapping_stem) |s| self.allocator.free(s);
         m.instance.deinit();
         self.allocator.destroy(m.instance);
         m.mapping_arena.deinit();
@@ -677,6 +685,10 @@ pub const Supervisor = struct {
             self.allocator.destroy(pm);
             m.switch_mapping = null;
         }
+        if (m.switch_mapping_stem) |s| {
+            self.allocator.free(s);
+            m.switch_mapping_stem = null;
+        }
     }
 
     fn handleSwitchNone(self: *Supervisor, fd: posix.fd_t, device_id: ?[]const u8) void {
@@ -731,11 +743,16 @@ pub const Supervisor = struct {
                 self.allocator.destroy(pm);
                 m.switch_mapping = null;
             }
+            if (m.switch_mapping_stem) |s| {
+                self.allocator.free(s);
+                m.switch_mapping_stem = null;
+            }
         }
 
         m.instance.mapper = tx.old_mapper;
         m.instance.mapping_cfg = tx.old_mapping_cfg;
         m.switch_mapping = tx.old_switch_mapping;
+        m.switch_mapping_stem = tx.old_switch_mapping_stem;
         restartManagedThread(m) catch |err| {
             std.log.err("rollback restart failed for {s}: {}", .{ m.phys_key, err });
         };
@@ -743,6 +760,7 @@ pub const Supervisor = struct {
         tx.old_mapper = null;
         tx.old_mapping_cfg = null;
         tx.old_switch_mapping = null;
+        tx.old_switch_mapping_stem = null;
         tx.committed = false;
     }
 
@@ -767,12 +785,14 @@ pub const Supervisor = struct {
                     pm.deinit();
                     self.allocator.destroy(pm);
                 }
+                if (tx.old_switch_mapping_stem) |s| self.allocator.free(s);
             } else {
                 if (tx.new_mapper) |*new| new.deinit();
                 if (tx.parsed_ptr) |pm| {
                     pm.deinit();
                     self.allocator.destroy(pm);
                 }
+                if (tx.path_stem) |s| self.allocator.free(s);
             }
         }
     }
@@ -782,6 +802,7 @@ pub const Supervisor = struct {
         tx.old_mapper = m.instance.mapper;
         tx.old_mapping_cfg = m.instance.mapping_cfg;
         tx.old_switch_mapping = m.switch_mapping;
+        tx.old_switch_mapping_stem = m.switch_mapping_stem;
 
         m.instance.stop();
         m.thread.join();
@@ -812,17 +833,24 @@ pub const Supervisor = struct {
             m.instance.mapper = tx.old_mapper;
             m.instance.mapping_cfg = tx.old_mapping_cfg;
             m.switch_mapping = tx.old_switch_mapping;
+            m.switch_mapping_stem = tx.old_switch_mapping_stem;
             restartManagedThread(m) catch |rollback_err| {
                 std.log.err("rollback restart failed for {s}: {}", .{ m.phys_key, rollback_err });
             };
             tx.old_mapper = null;
             tx.old_mapping_cfg = null;
             tx.old_switch_mapping = null;
+            tx.old_switch_mapping_stem = null;
             tx.committed = false;
             return err;
         };
         m.switch_mapping = tx.parsed_ptr;
+        // Invariant (issue #248): switch_mapping_stem must always be set together
+        // with switch_mapping so handleStatus can report the mapping name. Any new
+        // apply-mapping path must derive and assign switch_mapping_stem here.
+        m.switch_mapping_stem = tx.path_stem;
         tx.parsed_ptr = null;
+        tx.path_stem = null;
         tx.committed = true;
     }
 
@@ -1336,30 +1364,6 @@ pub const Supervisor = struct {
         return found;
     }
 
-    fn applySwitchMapping(self: *Supervisor, m: *ManagedInstance, parsed_ptr: *mapping_cfg.ParseResult) !void {
-        const new_mapper = try Mapper.init(&parsed_ptr.value, m.instance.loop.macro_timer_fd, self.allocator);
-        m.instance.stop();
-        m.thread.join();
-        self.clearSwitchMapping(m);
-        const old_mcfg = m.instance.mapping_cfg;
-        if (m.instance.mapper) |*old| old.deinit();
-        m.instance.mapper = new_mapper;
-        m.instance.mapping_cfg = &parsed_ptr.value;
-        self.installChordDetector(m);
-        m.instance.rebuildAuxIfChanged(&parsed_ptr.value, old_mcfg) catch |err| {
-            std.log.warn("rebuildAuxIfChanged: {}", .{err});
-        };
-        restartManagedThread(m) catch |err| {
-            if (m.instance.mapper) |*mapper| {
-                mapper.deinit();
-                m.instance.mapper = null;
-            }
-            m.instance.mapping_cfg = null;
-            return err;
-        };
-        m.switch_mapping = parsed_ptr;
-    }
-
     fn handleSwitch(self: *Supervisor, fd: posix.fd_t, name: []const u8, device_id: ?[]const u8) void {
         var cs = &self.ctrl_sock.?;
         if (self.managed.items.len == 0) {
@@ -1428,6 +1432,12 @@ pub const Supervisor = struct {
             txs.deinit(self.allocator);
         }
 
+        const resolved_stem = self.allocator.dupe(u8, std.fs.path.stem(path.?)) catch {
+            cs.sendResponse(fd, "ERR oom\n");
+            return;
+        };
+        defer self.allocator.free(resolved_stem);
+
         for (targets.items) |idx| {
             const m = &self.managed.items[idx];
             const parsed = mapping_cfg.parseFile(self.allocator, path.?) catch {
@@ -1446,11 +1456,17 @@ pub const Supervisor = struct {
                 cs.sendResponse(fd, "ERR switch-failed\n");
                 return;
             };
+            const stem_copy = self.allocator.dupe(u8, resolved_stem) catch {
+                cs.sendResponse(fd, "ERR oom\n");
+                return;
+            };
             txs.append(self.allocator, .{
                 .idx = idx,
                 .new_mapper = new_mapper,
                 .parsed_ptr = parsed_ptr,
+                .path_stem = stem_copy,
             }) catch {
+                self.allocator.free(stem_copy);
                 cs.sendResponse(fd, "ERR oom\n");
                 return;
             };
@@ -1501,9 +1517,11 @@ pub const Supervisor = struct {
             const mapping_name: []const u8 = blk: {
                 if (m.switch_mapping) |sm| {
                     if (sm.value.name) |n| break :blk n;
+                    if (m.switch_mapping_stem) |s| break :blk s;
                 }
                 if (m.default_mapping_pr) |dm| {
                     if (dm.value.name) |n| break :blk n;
+                    if (m.default_mapping_stem) |s| break :blk s;
                 }
                 break :blk "(none)";
             };
@@ -1585,18 +1603,50 @@ pub const Supervisor = struct {
 
     /// Look up the user config's default_mapping for device_name, find and parse the mapping file.
     /// Caller owns the returned ParseResult (call deinit on it). Returns null if none configured.
-    fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?mapping_cfg.ParseResult {
+    const DefaultMapping = struct { result: mapping_cfg.ParseResult, stem: []u8 };
+
+    fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?DefaultMapping {
         const ucfg = &(self.user_cfg orelse return null);
         const mapping_name = user_config_mod.findDefaultMapping(ucfg, device_name) orelse return null;
-        const path = mapping_discovery.findMapping(self.allocator, mapping_name) catch return null;
-        if (path == null) {
-            std.log.warn("mapping file \"{s}\" not found in XDG paths", .{mapping_name});
+        const path = blk: {
+            if (builtin.is_test) {
+                if (self.test_default_mapping_override) |override_path| {
+                    break :blk self.allocator.dupe(u8, override_path) catch return null;
+                }
+            }
+            break :blk (mapping_discovery.findMapping(self.allocator, mapping_name) catch return null) orelse {
+                std.log.warn("mapping file \"{s}\" not found in XDG paths", .{mapping_name});
+                return null;
+            };
+        };
+        defer self.allocator.free(path);
+        const result = mapping_cfg.parseFile(self.allocator, path) catch return null;
+        const stem = self.allocator.dupe(u8, std.fs.path.stem(path)) catch {
+            var r = result;
+            r.deinit();
             return null;
-        }
-        defer self.allocator.free(path.?);
-        const result = mapping_cfg.parseFile(self.allocator, path.?) catch return null;
-        std.log.info("mapping discovery: device \"{s}\" mapping \"{s}\" from \"{s}\"", .{ device_name, mapping_name, path.? });
-        return result;
+        };
+        std.log.info("mapping discovery: device \"{s}\" mapping \"{s}\" from \"{s}\"", .{ device_name, mapping_name, path });
+        return .{ .result = result, .stem = stem };
+    }
+
+    const DefaultMappingPtr = struct { pr: *mapping_cfg.ParseResult, stem: []u8 };
+
+    /// Resolve the user-configured default mapping for `device_name` into a
+    /// heap-owned ParseResult plus the file stem (used by `handleStatus` when
+    /// the mapping file omits a `name =` field — issue #248). Returns null
+    /// when no default mapping is configured or it fails to load/allocate;
+    /// on null nothing is leaked. Ownership transfers to the caller.
+    fn buildDefaultMapping(self: *const Supervisor, device_name: []const u8) ?DefaultMappingPtr {
+        const dm = self.loadUserDefaultMapping(device_name) orelse return null;
+        const p = self.allocator.create(mapping_cfg.ParseResult) catch {
+            var r = dm.result;
+            r.deinit();
+            self.allocator.free(dm.stem);
+            return null;
+        };
+        p.* = dm.result;
+        return .{ .pr = p, .stem = dm.stem };
     }
 
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
@@ -1691,12 +1741,9 @@ pub const Supervisor = struct {
                 }
                 // seen now owns phys bytes via the key slot
 
-                const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
-                    const pr = self.loadUserDefaultMapping(cfg_ptr.value.device.name) orelse break :blk null;
-                    const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
-                    p.* = pr;
-                    break :blk p;
-                };
+                const default_dm = self.buildDefaultMapping(cfg_ptr.value.device.name);
+                const default_pr_ptr: ?*mapping_cfg.ParseResult = if (default_dm) |d| d.pr else null;
+                const default_stem: ?[]u8 = if (default_dm) |d| d.stem else null;
                 const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
                 const inst_ptr = try self.allocator.create(DeviceInstance);
@@ -1707,6 +1754,7 @@ pub const Supervisor = struct {
                         p.deinit();
                         self.allocator.destroy(p);
                     }
+                    if (default_stem) |s| self.allocator.free(s);
                     // reclaim phys from seen
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
@@ -1720,10 +1768,12 @@ pub const Supervisor = struct {
                         p.deinit();
                         self.allocator.destroy(p);
                     }
+                    if (default_stem) |s| self.allocator.free(s);
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
                     continue;
                 };
+                self.managed.items[self.managed.items.len - 1].default_mapping_stem = default_stem;
                 // Register devname → phys so detach() can find this instance.
                 const devname = std.fs.path.basename(hidraw_path);
                 self.bindManagedDevname(&self.managed.items[self.managed.items.len - 1], devname, phys) catch |err|
@@ -1925,12 +1975,9 @@ pub const Supervisor = struct {
             return;
         }
 
-        const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
-            const pr = self.loadUserDefaultMapping(cfg.?.device.name) orelse break :blk null;
-            const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
-            p.* = pr;
-            break :blk p;
-        };
+        const default_dm = self.buildDefaultMapping(cfg.?.device.name);
+        const default_pr_ptr: ?*mapping_cfg.ParseResult = if (default_dm) |d| d.pr else null;
+        const default_stem: ?[]u8 = if (default_dm) |d| d.stem else null;
         const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
@@ -1942,8 +1989,10 @@ pub const Supervisor = struct {
                 p.deinit();
                 self.allocator.destroy(p);
             }
+            if (default_stem) |s| self.allocator.free(s);
             return;
         };
+        const managed_len_before = self.managed.items.len;
         self.attachWithInstance(devname, phys, inst_ptr, default_pr_ptr) catch |err| {
             inst_ptr.deinit();
             self.allocator.destroy(inst_ptr);
@@ -1951,8 +2000,19 @@ pub const Supervisor = struct {
                 p.deinit();
                 self.allocator.destroy(p);
             }
+            if (default_stem) |s| self.allocator.free(s);
             return err;
         };
+        if (default_stem) |s| {
+            // attachWithInstance may early-return without spawning (devname
+            // already tracked / live dup). Only attribute the stem to the
+            // tail item when a new instance was actually appended.
+            if (self.managed.items.len > managed_len_before) {
+                self.managed.items[self.managed.items.len - 1].default_mapping_stem = s;
+            } else {
+                self.allocator.free(s);
+            }
+        }
         std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
         // Log FF config for rumble diagnostics.
         if (cfg.?.output) |out| {
@@ -2773,6 +2833,248 @@ test "supervisor: Supervisor: status shows (none) when no mapping loaded" {
         sup.ctrl_sock = null;
         sup.deinit();
     }
+}
+
+test "supervisor: Supervisor: status uses file stem when mapping name field is null (issue #248)" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const map_pr = try allocator.create(mapping_mod.ParseResult);
+    map_pr.* = try mapping_mod.parseString(allocator, "");
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, map_pr);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    // Simulate a successful switch: switch_mapping set, stem stored, name field null.
+    const switch_pr = try allocator.create(mapping_mod.ParseResult);
+    switch_pr.* = try mapping_mod.parseString(allocator, "");
+    const m = &sup.managed.items[0];
+    m.switch_mapping = switch_pr;
+    m.switch_mapping_stem = try allocator.dupe(u8, "my-pad");
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    // Must show file stem, not "(none)". Falsifiability: revert the
+    // `if (m.switch_mapping_stem) |s| break :blk s;` line in handleStatus
+    // and this assertion fails because the response will contain "mapping=(none)".
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=my-pad") != null);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+}
+
+// Issue #248 regression: a mapping applied via the user-config default
+// mapping path (NOT a live `padctl switch`) made `padctl status` print
+// `mapping=(none)` when the mapping file had no `name =` field. PR #252
+// only fixed the `switch_mapping` branch of handleStatus; the
+// `default_mapping_pr` branch had no file-stem fallback. This test drives
+// the REAL production resolver `buildDefaultMapping` (real file read, real
+// TOML parse with no `name=`, real std.fs.path.stem) — it does NOT
+// hand-assign default_mapping_pr / default_mapping_stem.
+test "supervisor: Supervisor: status uses default-mapping file stem when name field is null (issue #248)" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    // Real mapping file with NO `name =` line — all MappingConfig fields
+    // are optional so this parses with name == null.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{
+        .sub_path = "mypad.toml",
+        .data =
+        \\[stick.left]
+        \\mode = "gamepad"
+        \\
+        ,
+    });
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+    const mapping_path = try std.fs.path.join(allocator, &.{ tmp_path, "mypad.toml" });
+    defer allocator.free(mapping_path);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    // Real user config: device "T" -> default_mapping = "mypad".
+    const cfg_str =
+        \\[[device]]
+        \\name = "T"
+        \\default_mapping = "mypad"
+    ;
+    var ucfg_parser = @import("toml").Parser(user_config_mod.UserConfig).init(allocator);
+    defer ucfg_parser.deinit();
+    sup.user_cfg = try ucfg_parser.parseString(cfg_str);
+    sup.test_default_mapping_override = try allocator.dupe(u8, mapping_path);
+
+    // Production resolver: reads the real file, parses it (name == null),
+    // computes the stem via std.fs.path.stem(path).
+    const default_dm = sup.buildDefaultMapping("T");
+    try testing.expect(default_dm != null);
+    const default_pr_ptr = default_dm.?.pr;
+    const default_stem = default_dm.?.stem;
+    try testing.expect(default_pr_ptr.value.name == null);
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst, default_pr_ptr);
+    // Mirror the production callers exactly (startFromDirWithRoot ~1797,
+    // attach path ~2032): store the resolver-derived stem on the tail item.
+    sup.managed.items[sup.managed.items.len - 1].default_mapping_stem = default_stem;
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    // Falsifiability: revert the `if (m.default_mapping_stem) |s| break :blk s;`
+    // line in handleStatus's `default_mapping_pr` branch and this fails
+    // because the response will contain "mapping=(none)".
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=mypad") != null);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
+}
+
+// Issue #248 regression (second guard): verifies the full config-from-dir path.
+// startFromDirWithRoot parses the device TOML, confirms config is stored, then
+// buildDefaultMapping reads the name-less mapping file and derives the stem via
+// std.fs.path.stem — the same computation that line 1797 relies on. handleStatus
+// must return mapping=mypad, not mapping=(none).
+//
+// NOTE: line 1797 (the store inside startFromDirWithRoot) cannot be reached at
+// Layer 0 — discoverAllWithRoot opens real hidraw char devices via ioctl which
+// are unavailable without hardware. This test exercises every other link in the
+// chain: TOML dir scan → config parsed → buildDefaultMapping real file read →
+// stem derived → spawnInstance → handleStatus:1545 stem branch.
+//
+// Falsifiability:
+//   - Reverting handleStatus:1545 `if (m.default_mapping_stem) |s| break :blk s;`
+//     → response contains "mapping=(none)" → test fails.
+//   - Breaking buildDefaultMapping stem extraction (e.g. returning null stem)
+//     → default_dm.?.stem assertion fails → test fails.
+//   - If startFromDirWithRoot silently drops the parsed config
+//     → sup.configs.items.len == 0 assertion fails → test fails.
+test "supervisor: Supervisor: status stem fallback — config parsed from TOML dir, name-less mapping file (issue #248 guard 2)" {
+    const allocator = testing.allocator;
+
+    // Device TOML dir: one device file that startFromDirWithRoot will parse.
+    var dev_dir = testing.tmpDir(.{});
+    defer dev_dir.cleanup();
+    try dev_dir.dir.writeFile(.{ .sub_path = "testdev.toml", .data = minimal_device_toml });
+    const dev_dir_path = try dev_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dev_dir_path);
+
+    // Mapping file with NO `name =` line so handleStatus must use stem.
+    var map_dir = testing.tmpDir(.{});
+    defer map_dir.cleanup();
+    try map_dir.dir.writeFile(.{
+        .sub_path = "mypad.toml",
+        .data =
+        \\[stick.left]
+        \\mode = "gamepad"
+        \\
+        ,
+    });
+    const map_dir_path = try map_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(map_dir_path);
+    const mapping_path = try std.fs.path.join(allocator, &.{ map_dir_path, "mypad.toml" });
+    defer allocator.free(mapping_path);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    const cfg_str =
+        \\[[device]]
+        \\name = "T"
+        \\default_mapping = "mypad"
+    ;
+    var ucfg_parser = @import("toml").Parser(user_config_mod.UserConfig).init(allocator);
+    defer ucfg_parser.deinit();
+    sup.user_cfg = try ucfg_parser.parseString(cfg_str);
+    sup.test_default_mapping_override = try allocator.dupe(u8, mapping_path);
+
+    // startFromDirWithRoot scans the device TOML dir; no hidraw hardware online
+    // (nonexistent dev_root) so managed.items stays empty, but configs must be
+    // populated — this exercises the TOML-dir scan path that feeds line 1797.
+    try sup.startFromDirWithRoot(dev_dir_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+    try testing.expectEqualStrings("T", sup.configs.items[0].value.device.name);
+
+    // Production resolver: reads the real mapping file, parses (name == null),
+    // derives stem via std.fs.path.stem — same logic that line 1797 stores.
+    const default_dm = sup.buildDefaultMapping("T");
+    try testing.expect(default_dm != null);
+    const default_pr_ptr = default_dm.?.pr;
+    const default_stem = default_dm.?.stem;
+    try testing.expect(default_pr_ptr.value.name == null);
+    try testing.expectEqualStrings("mypad", default_stem);
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst, default_pr_ptr);
+    // Assign stem exactly as production callers do at line 1797 / line 2032.
+    sup.managed.items[sup.managed.items.len - 1].default_mapping_stem = default_stem;
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=mypad") != null);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
 }
 
 test "supervisor: Supervisor: two devnames attached simultaneously — independent threads" {

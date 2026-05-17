@@ -43,6 +43,7 @@ const freeArgv = services_mod.freeArgv;
 const UdevEntry = udev_mod.UdevEntry;
 const isValidIdentifier = udev_mod.isValidIdentifier;
 const probeAndUnbindDrivers = udev_mod.probeAndUnbindDrivers;
+const probeAndRebindDrivers = udev_mod.probeAndRebindDrivers;
 const readSysHex = udev_mod.readSysHex;
 const findDevicesSourceDir = udev_mod.findDevicesSourceDir;
 const imu_udev_rules_content = udev_mod.imu_udev_rules_content;
@@ -55,6 +56,11 @@ const parseStringArray = _udev.parseStringArray;
 const parseHexOrDec = _udev.parseHexOrDec;
 const generateUdevRules = _udev.generateUdevRules;
 const generateDriverBlockRules = _udev.generateDriverBlockRules;
+const generateDriverBlockRulesFromEntries = _udev.generateDriverBlockRulesFromEntries;
+const sentinelPath = udev_mod.sentinelPath;
+const writeServiceSentinel = udev_mod.writeServiceSentinel;
+const removeServiceSentinel = udev_mod.removeServiceSentinel;
+const shouldProactiveUnbind = udev_mod.shouldProactiveUnbind;
 
 // migration.zig
 const ensureUserXdgDirs = migration_mod.ensureUserXdgDirs;
@@ -267,6 +273,21 @@ test "install: generateServiceContent is user unit" {
     try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
 }
 
+test "install: generateServiceContent user unit has SupplementaryGroups=input" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr");
+    defer allocator.free(content);
+    // ADR-008 Update 2026-05-17 / ADR-014:24 consumer half: the headless/linger
+    // user daemon needs the 'input' GID to reach group-owned hidraw nodes.
+    // Strict newline boundaries pin it as its own directive line.
+    // Falsifiability: revert services.zig generateServiceContent
+    // SupplementaryGroups=input line → this fails.
+    try testing.expect(std.mem.indexOf(u8, content, "\nSupplementaryGroups=input\n") != null);
+    // Coexists with the user-unit invariant: still no User= directive.
+    try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
+}
+
 test "install: generateUdevRules produces valid output" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -306,7 +327,10 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "2401") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"input\"") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null); // hidraw rule
+    // ADR-008 Update 2026-05-17 / ADR-014:24: hidraw line keeps uaccess and
+    // adds GROUP="input", MODE="0660" for headless/linger fallback, VID/PID-scoped.
+    // Falsifiability: revert udev.zig hidraw format-string append → this fails.
+    try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"37d7\", ATTRS{idProduct}==\"2401\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
     // ADR-015: /dev/uhid must get uaccess so the user service can create
@@ -1288,6 +1312,199 @@ test "install: generateDriverBlockRules skips when no drivers configured" {
     return error.TestUnexpectedResult;
 }
 
+// --- issue #137: conditional driver-block + service-enabled sentinel ---
+
+// Builds a single-driver entry list and generates the driver-block rules with
+// an explicit sentinel path. Caller owns nothing extra; entries are stack-lived.
+fn genIssue137Rules(allocator: std.mem.Allocator, rules_path: []const u8, sentinel: []const u8) !void {
+    const drivers = [_][]const u8{"xpad"};
+    const entries = [_]UdevEntry{.{
+        .name = "Test Pad",
+        .vid = 0x0f0d,
+        .pid = 0x00c1,
+        .block_kernel_drivers = &drivers,
+    }};
+    try generateDriverBlockRulesFromEntries(allocator, &entries, rules_path, sentinel);
+}
+
+fn readRulesFile(allocator: std.mem.Allocator, rules_path: []const u8) ![]u8 {
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, 8192);
+}
+
+// (1) MUTATION-CI-PROOF: every line that performs an `unbind` must be guarded
+// by a `test -e <sentinel> &&` predicate. FAILS if the sentinel predicate is
+// removed from the unbind RUN+= line in generateDriverBlockRulesFromEntries
+// (reverting to the unconditional `echo %k > .../unbind` shape).
+test "install: #137 every unbind line is sentinel-gated" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    const sentinel = "/etc/padctl/service-enabled";
+    try genIssue137Rules(allocator, rules_path, sentinel);
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    const guard = try std.fmt.allocPrint(allocator, "test -e {s} &&", .{sentinel});
+    defer allocator.free(guard);
+    try testing.expect(std.mem.indexOf(u8, content, guard) != null);
+
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "unbind") == null) continue;
+        try testing.expect(std.mem.indexOf(u8, line, "test -e ") != null);
+        try testing.expect(std.mem.indexOf(u8, line, sentinel) != null);
+    }
+}
+
+// (2) FAILS if the ACTION=="remove" rebind loop is deleted from
+// generateDriverBlockRulesFromEntries.
+test "install: #137 generates ACTION==remove rebind line" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try genIssue137Rules(allocator, rules_path, "/etc/padctl/service-enabled");
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"remove\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/bind") != null);
+}
+
+// (3) FAILS if writeServiceSentinel stops writing or sentinelPath diverges
+// from the file actually written when the plan is enabling & not --no-enable.
+test "install: #137 writeServiceSentinel creates the gating file" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const opts = InstallOptions{ .destdir = destdir };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    // destdir set → staging → do_enable_systemctl=false; force the enabling
+    // shape this test is about by checking shouldProactiveUnbind precondition
+    // directly is covered by test (7); here we exercise the writer/path pair.
+    try writeServiceSentinel(allocator, &plan);
+
+    const path = try sentinelPath(allocator, destdir);
+    defer allocator.free(path);
+    try std.fs.accessAbsolute(path, .{});
+}
+
+// (4) FAILS if the install path writes a sentinel under --no-enable. Drives
+// the predicate that gates writeServiceSentinel in phase.zig.
+test "install: #137 no sentinel under --no-enable" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .no_enable = true };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!shouldProactiveUnbind(&plan));
+}
+
+// (5) FAILS if shouldProactiveUnbind returns true when do_enable_systemctl is
+// false (staged build), which would write a sentinel for a non-running install.
+test "install: #137 no sentinel when do_enable_systemctl false" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .destdir = "/tmp/staging137" };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.do_enable_systemctl);
+    try testing.expect(!shouldProactiveUnbind(&plan));
+}
+
+// (6) FAILS if removeServiceSentinel does not delete the file, or is not
+// idempotent (panics / errors on the second call when already absent).
+test "install: #137 removeServiceSentinel deletes and is idempotent" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const opts = InstallOptions{ .destdir = destdir };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try writeServiceSentinel(allocator, &plan);
+
+    const path = try sentinelPath(allocator, destdir);
+    defer allocator.free(path);
+    try std.fs.accessAbsolute(path, .{});
+
+    removeServiceSentinel(allocator, destdir);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(path, .{}));
+    removeServiceSentinel(allocator, destdir); // idempotent: must not error/panic
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(path, .{}));
+}
+
+// (7) FAILS if shouldProactiveUnbind is not exactly
+// (do_enable_systemctl && !no_enable). Table over both axes.
+test "install: #137 shouldProactiveUnbind truth table" {
+    const testing = std.testing;
+    const Case = struct {
+        opts: InstallOptions,
+        env: EnvSnapshot,
+        want: bool,
+    };
+    const cases = [_]Case{
+        // enabling, not --no-enable → true
+        .{
+            .opts = .{},
+            .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
+            .want = true,
+        },
+        // enabling but --no-enable → false
+        .{
+            .opts = .{ .no_enable = true },
+            .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+        // staged (do_enable_systemctl=false), not --no-enable → false
+        .{
+            .opts = .{ .destdir = "/tmp/s137" },
+            .env = .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+        // staged AND --no-enable → false
+        .{
+            .opts = .{ .destdir = "/tmp/s137", .no_enable = true },
+            .env = .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+    };
+    for (cases) |c| {
+        const plan = try InstallPlan.compute(testing.allocator, c.opts, c.env);
+        defer plan.deinit(testing.allocator);
+        try testing.expectEqual(c.want, shouldProactiveUnbind(&plan));
+    }
+}
+
 // --- Phase 5: mapping installation ---
 
 test "install: installMapping copies mapping to /etc/padctl/mappings/" {
@@ -1784,7 +2001,10 @@ test "install: user unit has no systemd 257+ incompatible hardening (issue #216)
     try testing.expect(std.mem.indexOf(u8, content, "NoNewPrivileges=") == null);
     try testing.expect(std.mem.indexOf(u8, content, "LockPersonality=") == null);
     try testing.expect(std.mem.indexOf(u8, content, "ProtectClock=") == null);
-    try testing.expect(std.mem.indexOf(u8, content, "SupplementaryGroups") == null);
+    // SupplementaryGroups=input is required (ADR-008 Update 2026-05-17 /
+    // ADR-014:24) and is NOT a systemd 257+ incompatible directive, so it
+    // intentionally stays in the user unit; only the hardening triad above
+    // is forbidden.
     try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
 }
 
@@ -2786,5 +3006,131 @@ test "tomlEscape: round-trip via real TOML parser" {
         const parsed = try parser.parseString(toml_text);
         defer parsed.deinit();
         try std.testing.expectEqualStrings(input, parsed.value.name);
+    }
+}
+
+// issue #137: probeAndRebindDrivers is the inverse of probeAndUnbindDrivers.
+// It must rebind a matching device's unbound interface, leave an already-bound
+// interface alone, and ignore non-matching devices.
+// Falsifiability: deleting the `f.writeAll(child.name)` line in
+// rebindInterfaces (udev.zig) makes the "1-1.4:1.0" bind assertion fail.
+test "uninstall: #137 probeAndRebindDrivers binds unbound matching interface only" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("sys/bus/usb/drivers/xpad");
+    // Matching device 37d7:2401 with an UNBOUND interface (no driver symlink).
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.0");
+    // Matching device with an already-BOUND interface (has driver symlink).
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.1");
+    // Non-matching device.
+    try tmp.dir.makePath("sys/bus/usb/devices/2-2.1/2-2.1:1.0");
+
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idVendor", .{});
+        defer f.close();
+        try f.writeAll("37d7\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idProduct", .{});
+        defer f.close();
+        try f.writeAll("2401\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idVendor", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idProduct", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+
+    // Mark 1-1.4:1.1 as already bound.
+    {
+        const drv = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/devices/1-1.4/1-1.4:1.1/driver", .{tmp_path});
+        defer allocator.free(drv);
+        // Relative target must resolve from the symlink's own directory
+        // (.../devices/1-1.4/1-1.4:1.1/): three "../" reach .../bus/usb/.
+        try std.posix.symlink("../../../drivers/xpad", drv);
+    }
+
+    // bind file: writable regular file simulating the sysfs write target.
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/drivers/xpad/bind", .{});
+        defer f.close();
+    }
+
+    const entries = [_]UdevEntry{.{
+        .name = "Test Device",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .block_kernel_drivers = &[_][]const u8{"xpad"},
+    }};
+    probeAndRebindDrivers(allocator, &entries, tmp_path);
+
+    const bind_path = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/drivers/xpad/bind", .{tmp_path});
+    defer allocator.free(bind_path);
+    var bf = try std.fs.openFileAbsolute(bind_path, .{});
+    defer bf.close();
+    const written = try bf.readToEndAlloc(allocator, 128);
+    defer allocator.free(written);
+    // Only the unbound interface 1-1.4:1.0 is written; the already-bound
+    // 1-1.4:1.1 and non-matching 2-2.1:1.0 must be absent.
+    try testing.expectEqualStrings("1-1.4:1.0", written);
+}
+
+// issue #137: uninstall must remove the generated 61-padctl-driver-block.rules
+// file symmetrically with 60-padctl.rules (uninstall hygiene). This guards the
+// `files[]` entry in phase.zig uninstall().
+// Falsifiability: deleting the
+// "/lib/udev/rules.d/61-padctl-driver-block.rules" entry from the `files[]`
+// array in phase.zig uninstall() makes the RuleFileNotRemoved error fire.
+test "uninstall: #137 removes 61-padctl-driver-block.rules" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const rules_dir = try std.fmt.allocPrint(allocator, "{s}/usr/local/lib/udev/rules.d", .{staging});
+    defer allocator.free(rules_dir);
+    try ensureDirAll(allocator, rules_dir);
+
+    const rule_60 = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{rules_dir});
+    defer allocator.free(rule_60);
+    const rule_61 = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{rules_dir});
+    defer allocator.free(rule_61);
+    for ([_][]const u8{ rule_60, rule_61 }) |p| {
+        var f = try std.fs.createFileAbsolute(p, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# padctl generated\n");
+    }
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    for ([_][]const u8{ rule_60, rule_61 }) |p| {
+        if (std.fs.accessAbsolute(p, .{})) |_| {
+            std.debug.print("uninstall did not remove rule file: {s}\n", .{p});
+            return error.RuleFileNotRemoved;
+        } else |_| {}
     }
 }

@@ -47,6 +47,67 @@ pub const UdevEntry = struct {
     clone_vid_pid: bool = false,
 };
 
+/// Path to the service-enabled sentinel. `/etc/padctl` is the fixed FHS
+/// sysconfdir (consistent with the reconnect-script `/etc/padctl/mappings`
+/// path in services.zig), so only `destdir` is prefixed — never `prefix`.
+pub fn sentinelPath(allocator: std.mem.Allocator, destdir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/etc/padctl/service-enabled", .{destdir});
+}
+
+/// Proactive unbind / sentinel write is performed only when this install
+/// actually enables and starts a runnable user service. Pure predicate so
+/// tests can table-drive it; the absence of the sentinel is what makes the
+/// generated udev rule fail-safe (issue #137).
+pub fn shouldProactiveUnbind(plan: *const InstallPlan) bool {
+    return plan.do_enable_systemctl and !plan.opts.no_enable;
+}
+
+/// Write the service-enabled sentinel. Only its existence is load-bearing for
+/// the udev `test -e` predicate; the body is provenance for debugging.
+pub fn writeServiceSentinel(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/etc/padctl", .{plan.opts.destdir});
+    defer allocator.free(dir_path);
+    try ensureDirAll(allocator, dir_path);
+
+    const path = try sentinelPath(allocator, plan.opts.destdir);
+    defer allocator.free(path);
+
+    var buf: [64]u8 = undefined;
+    const now = std.time.timestamp();
+    const es = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(now, 0)) };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    const iso = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,
+        @as(u32, @intFromEnum(md.month)) + 1,
+        @as(u32, md.day_index) + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch "unknown";
+
+    const content = try std.fmt.allocPrint(
+        allocator,
+        "padctl service-enabled sentinel v1\nprefix={s}\nwritten-by=padctl install\ndate={s}\n",
+        .{ plan.prefix, iso },
+    );
+    defer allocator.free(content);
+
+    var f = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(content);
+}
+
+/// Remove the service-enabled sentinel. Idempotent: a missing file is success
+/// so `--no-enable` re-install over a previously-enabled install and uninstall
+/// can both call this unconditionally.
+pub fn removeServiceSentinel(allocator: std.mem.Allocator, destdir: []const u8) void {
+    const path = sentinelPath(allocator, destdir) catch return;
+    defer allocator.free(path);
+    std.fs.deleteFileAbsolute(path) catch {};
+}
+
 pub fn writeImuUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/90-padctl.rules", .{plan.udev_dir});
     defer allocator.free(rules_path);
@@ -190,6 +251,24 @@ pub fn collectAllDeviceEntries(allocator: std.mem.Allocator, plan: *const Instal
     return try collectDeviceEntries(allocator, all_dirs.items);
 }
 
+/// Like collectAllDeviceEntries but without an InstallPlan. Used by uninstall,
+/// which has no plan; reads the resolved device config dirs plus an explicit
+/// share dir (still present at call time, before it is removed).
+pub fn collectDeviceEntriesForUninstall(
+    allocator: std.mem.Allocator,
+    share_dir: []const u8,
+) !std.ArrayList(UdevEntry) {
+    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
+    defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
+    var all_dirs: std.ArrayList([]const u8) = .{};
+    defer all_dirs.deinit(allocator);
+    try all_dirs.append(allocator, share_dir);
+    if (config_dirs) |dirs| {
+        for (dirs) |d| try all_dirs.append(allocator, d);
+    }
+    return try collectDeviceEntries(allocator, all_dirs.items);
+}
+
 pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, entries: []const UdevEntry) !void {
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{plan.udev_dir});
     defer allocator.free(rules_path);
@@ -200,7 +279,9 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
 
     const driver_rules_path = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{plan.udev_dir});
     defer allocator.free(driver_rules_path);
-    generateDriverBlockRulesFromEntries(allocator, entries, driver_rules_path) catch |err| {
+    const sentinel = try sentinelPath(allocator, plan.opts.destdir);
+    defer allocator.free(sentinel);
+    generateDriverBlockRulesFromEntries(allocator, entries, driver_rules_path, sentinel) catch |err| {
         var errbuf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&errbuf, "warning: driver block rules not generated: {}\n", .{err}) catch "warning: driver block rules error\n";
         _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
@@ -209,8 +290,10 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
     // Evict already-attached devices without waiting for reboot.
     // udevadm trigger only sends add events; bind rules fire on the next
     // plug cycle. Proactively writing to sysfs unbind covers devices that
-    // are already claimed by a blocking driver at install time.
-    if (!plan.staging_mode and plan.is_root) {
+    // are already claimed by a blocking driver at install time — but only
+    // when this install actually starts a runnable service (issue #137),
+    // otherwise an unbound device would be left ownerless.
+    if (!plan.staging_mode and plan.is_root and shouldProactiveUnbind(plan)) {
         probeAndUnbindDrivers(allocator, entries, "");
     }
 }
@@ -310,7 +393,7 @@ pub fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []con
     for (entries) |e| {
         const line = try std.fmt.allocPrint(
             allocator,
-            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"uaccess\"\nACTION==\"add\", SUBSYSTEM==\"input\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", GROUP=\"input\", MODE=\"0660\"\n# {s}\n",
+            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\nACTION==\"add\", SUBSYSTEM==\"input\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", GROUP=\"input\", MODE=\"0660\"\n# {s}\n",
             .{ e.vid, e.pid, e.vid, e.pid, e.name },
         );
         defer allocator.free(line);
@@ -358,7 +441,7 @@ fn generateUdevRulesFromDirs(allocator: std.mem.Allocator, dirs: []const []const
     try generateUdevRulesFromEntries(allocator, entries.items, rules_path, prefix);
 }
 
-pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries: []const UdevEntry, rules_path: []const u8) !void {
+pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries: []const UdevEntry, rules_path: []const u8, sentinel_path: []const u8) !void {
     var has_blocks = false;
     for (entries) |e| {
         if (e.block_kernel_drivers.len > 0) {
@@ -378,10 +461,28 @@ pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries
 
     for (entries) |e| {
         for (e.block_kernel_drivers) |driver| {
+            // Unbind only when the service-enabled sentinel exists. If padctl
+            // is not deployed/enabled the sentinel is absent, `test -e` fails,
+            // `&&` short-circuits, and xpad keeps the device so the controller
+            // still works as a plain kernel gamepad (issue #137 fail-safe).
             const line = try std.fmt.allocPrint(
                 allocator,
-                "ACTION==\"add|bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",
-                .{ e.vid, e.pid, driver, driver, e.name },
+                "ACTION==\"add|bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'test -e {s} && echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",
+                .{ e.vid, e.pid, driver, sentinel_path, driver, e.name },
+            );
+            defer allocator.free(line);
+            try buf.appendSlice(allocator, line);
+        }
+    }
+
+    // On device removal, rebind the kernel driver (or modprobe it) so a stale
+    // unbind never persists across replug when padctl is no longer enabled.
+    for (entries) |e| {
+        for (e.block_kernel_drivers) |driver| {
+            const line = try std.fmt.allocPrint(
+                allocator,
+                "ACTION==\"remove\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", RUN+=\"/bin/sh -c 'test -e {s} && echo %k > /sys/bus/usb/drivers/{s}/bind || /sbin/modprobe {s}'\"\n",
+                .{ e.vid, e.pid, sentinel_path, driver, driver },
             );
             defer allocator.free(line);
             try buf.appendSlice(allocator, line);
@@ -397,7 +498,7 @@ pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries
 fn generateDriverBlockRules(allocator: std.mem.Allocator, dirs: []const []const u8, rules_path: []const u8) !void {
     var entries = try collectDeviceEntries(allocator, dirs);
     defer freeDeviceEntries(allocator, &entries);
-    try generateDriverBlockRulesFromEntries(allocator, entries.items, rules_path);
+    try generateDriverBlockRulesFromEntries(allocator, entries.items, rules_path, "/etc/padctl/service-enabled");
 }
 
 /// Walk <sys_root>/sys/bus/usb/drivers/<driver>/ and synchronously unbind any
@@ -466,6 +567,119 @@ pub fn probeAndUnbindDrivers(allocator: std.mem.Allocator, entries: []const Udev
                     std.log.warn("could not unbind {s} from kernel driver '{s}' (try replug or reboot to evict the shadow device): {}", .{ de.name, driver, err });
                 }
             }
+        }
+    }
+}
+
+/// Inverse of probeAndUnbindDrivers: walk <sys_root>/sys/bus/usb/devices/ and,
+/// for any USB device whose idVendor:idProduct matches an entry, rebind every
+/// interface that currently has no driver back to a blocked driver. Called by
+/// uninstall after the sentinel + driver-block rule are removed so a controller
+/// that is still plugged in and currently unbound is restored to the kernel
+/// driver without requiring a physical replug.
+/// Requires root; skips silently / warn-logs on permission errors. A best-effort
+/// `modprobe <driver>` is issued first so the rebind target exists even if the
+/// module was never auto-loaded. `sys_root` is "" in production; tests inject a
+/// tmpDir path (P9).
+pub fn probeAndRebindDrivers(allocator: std.mem.Allocator, entries: []const UdevEntry, sys_root: []const u8) void {
+    const devices_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/devices",
+        .{sys_root},
+    ) catch return;
+    defer allocator.free(devices_path);
+
+    var devices_dir = std.fs.openDirAbsolute(devices_path, .{ .iterate = true }) catch return;
+    defer devices_dir.close();
+
+    for (entries) |entry| {
+        if (entry.block_kernel_drivers.len == 0) continue;
+
+        var it = devices_dir.iterate();
+        while (it.next() catch null) |de| {
+            if (de.kind != .sym_link and de.kind != .directory) continue;
+            if (de.name.len == 0 or de.name[0] < '0' or de.name[0] > '9') continue;
+            // Skip interface nodes ("1-1.4:1.0"); only match top-level devices.
+            if (std.mem.indexOfScalar(u8, de.name, ':') != null) continue;
+
+            const vendor_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/sys/bus/usb/devices/{s}/idVendor",
+                .{ sys_root, de.name },
+            ) catch continue;
+            defer allocator.free(vendor_path);
+
+            const product_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/sys/bus/usb/devices/{s}/idProduct",
+                .{ sys_root, de.name },
+            ) catch continue;
+            defer allocator.free(product_path);
+
+            const vid = readSysHex(vendor_path) catch continue;
+            const pid = readSysHex(product_path) catch continue;
+            if (vid != entry.vid or pid != entry.pid) continue;
+
+            for (entry.block_kernel_drivers) |driver| {
+                // Best-effort: ensure the module is present before binding.
+                if (sys_root.len == 0) runCmd(&.{ "modprobe", driver });
+
+                const bind_path = std.fmt.allocPrint(
+                    allocator,
+                    "{s}/sys/bus/usb/drivers/{s}/bind",
+                    .{ sys_root, driver },
+                ) catch continue;
+                defer allocator.free(bind_path);
+
+                rebindInterfaces(allocator, sys_root, de.name, bind_path, driver);
+            }
+        }
+    }
+}
+
+/// For each interface child of USB device `dev_name` ("<dev_name>:N.M") that has
+/// no `driver` symlink, write its name to the driver `bind` attribute.
+fn rebindInterfaces(
+    allocator: std.mem.Allocator,
+    sys_root: []const u8,
+    dev_name: []const u8,
+    bind_path: []const u8,
+    driver: []const u8,
+) void {
+    const dev_dir_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/devices/{s}",
+        .{ sys_root, dev_name },
+    ) catch return;
+    defer allocator.free(dev_dir_path);
+
+    var dev_dir = std.fs.openDirAbsolute(dev_dir_path, .{ .iterate = true }) catch return;
+    defer dev_dir.close();
+
+    var it = dev_dir.iterate();
+    while (it.next() catch null) |child| {
+        if (child.kind != .directory and child.kind != .sym_link) continue;
+        // Interface dirs are named "<dev_name>:cfg.iface".
+        if (!std.mem.startsWith(u8, child.name, dev_name)) continue;
+        if (child.name.len <= dev_name.len or child.name[dev_name.len] != ':') continue;
+
+        const driver_link = std.fmt.allocPrint(
+            allocator,
+            "{s}/sys/bus/usb/devices/{s}/{s}/driver",
+            .{ sys_root, dev_name, child.name },
+        ) catch continue;
+        defer allocator.free(driver_link);
+
+        // Already bound to some driver — leave it alone.
+        if (std.fs.accessAbsolute(driver_link, .{})) |_| continue else |_| {}
+
+        if (std.fs.openFileAbsolute(bind_path, .{ .mode = .write_only })) |f| {
+            defer f.close();
+            f.writeAll(child.name) catch |err| {
+                std.log.warn("could not rebind {s} to kernel driver '{s}' (replug or run `modprobe {s}` to restore it): {}", .{ child.name, driver, driver, err });
+            };
+        } else |err| {
+            std.log.warn("could not rebind {s} to kernel driver '{s}' (replug or run `modprobe {s}` to restore it): {}", .{ child.name, driver, driver, err });
         }
     }
 }
@@ -598,6 +812,7 @@ pub const _internals_for_tests = struct {
     pub const collectDeviceEntries = @import("udev.zig").collectDeviceEntries;
     pub const generateUdevRules = @import("udev.zig").generateUdevRules;
     pub const generateDriverBlockRules = @import("udev.zig").generateDriverBlockRules;
+    pub const generateDriverBlockRulesFromEntries = @import("udev.zig").generateDriverBlockRulesFromEntries;
 };
 
 // setupTestUdev writes a udev rule that grants world-read access to UHID virtual

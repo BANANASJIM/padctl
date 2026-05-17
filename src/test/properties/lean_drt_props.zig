@@ -81,12 +81,6 @@ test "lean_drt: transform negate vectors" {
         if (!std.mem.eql(u8, f[0], "negate") and !std.mem.eql(u8, f[0], "abs")) continue;
         const input = parseInt(f[1]);
         const t_max_raw = parseUint(f[2]);
-        // TODO(lean-drt-saturation-debt): Lean oracle saturates negate/abs to t_max for
-        // out-of-range inputs (e.g. negate(-128, t_max=127) -> 127), production returns
-        // the raw arithmetic result (128). Skip out-of-range inputs until production
-        // gains a saturation pass — see lean_drt header comment about oracle truth.
-        const t_max_signed: i64 = @intCast(t_max_raw);
-        if (input < -t_max_signed or input > t_max_signed) continue;
         const expected = parseInt(f[3]);
         const op: interp.TransformOp = if (std.mem.eql(u8, f[0], "negate")) .negate else .abs;
         var chain = interp.CompiledTransformChain{ .type_tag = tMaxToFieldType(t_max_raw) };
