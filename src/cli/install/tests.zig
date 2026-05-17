@@ -273,6 +273,21 @@ test "install: generateServiceContent is user unit" {
     try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
 }
 
+test "install: generateServiceContent user unit has SupplementaryGroups=input" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr");
+    defer allocator.free(content);
+    // ADR-008 Update 2026-05-17 / ADR-014:24 consumer half: the headless/linger
+    // user daemon needs the 'input' GID to reach group-owned hidraw nodes.
+    // Strict newline boundaries pin it as its own directive line.
+    // Falsifiability: revert services.zig generateServiceContent
+    // SupplementaryGroups=input line → this fails.
+    try testing.expect(std.mem.indexOf(u8, content, "\nSupplementaryGroups=input\n") != null);
+    // Coexists with the user-unit invariant: still no User= directive.
+    try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
+}
+
 test "install: generateUdevRules produces valid output" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -312,7 +327,10 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "2401") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"input\"") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null); // hidraw rule
+    // ADR-008 Update 2026-05-17 / ADR-014:24: hidraw line keeps uaccess and
+    // adds GROUP="input", MODE="0660" for headless/linger fallback, VID/PID-scoped.
+    // Falsifiability: revert udev.zig hidraw format-string append → this fails.
+    try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"37d7\", ATTRS{idProduct}==\"2401\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
     // ADR-015: /dev/uhid must get uaccess so the user service can create
@@ -1983,7 +2001,10 @@ test "install: user unit has no systemd 257+ incompatible hardening (issue #216)
     try testing.expect(std.mem.indexOf(u8, content, "NoNewPrivileges=") == null);
     try testing.expect(std.mem.indexOf(u8, content, "LockPersonality=") == null);
     try testing.expect(std.mem.indexOf(u8, content, "ProtectClock=") == null);
-    try testing.expect(std.mem.indexOf(u8, content, "SupplementaryGroups") == null);
+    // SupplementaryGroups=input is required (ADR-008 Update 2026-05-17 /
+    // ADR-014:24) and is NOT a systemd 257+ incompatible directive, so it
+    // intentionally stays in the user unit; only the hardening triad above
+    // is forbidden.
     try testing.expect(std.mem.indexOf(u8, content, "StateDirectory=padctl") != null);
 }
 
