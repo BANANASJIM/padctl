@@ -121,7 +121,7 @@ pub const AuxConfig = struct {
 pub const ImuConfig = struct {
     // Default is "uhid" so bare `ImuConfig{}` literals are validator-legal and
     // a TOML `[output.imu]` block without an explicit `backend` key picks the
-    // only accepted value (validate() rejects "uinput" per ADR-015).
+    // only accepted value (validate() rejects "uinput").
     backend: []const u8 = "uhid",
     name: ?[]const u8 = null,
     vid: ?i64 = null,
@@ -130,9 +130,8 @@ pub const ImuConfig = struct {
     gyro_range: ?[2]i64 = null,
 };
 
-// Full Wave 6 force_feedback schema. Extends the legacy FfConfig fields
-// (type, max_effects, auto_stop) so existing callers compile unchanged, and
-// adds backend/kind/clone_vid_pid for UHID PID passthrough (T5).
+// Force-feedback config. Extends the legacy fields (type, max_effects,
+// auto_stop) with backend/kind/clone_vid_pid for UHID PID passthrough.
 pub const ForceFeedbackConfig = struct {
     // Legacy rumble fields — used by uinput path callers.
     type: []const u8 = "rumble",
@@ -140,7 +139,7 @@ pub const ForceFeedbackConfig = struct {
     // When true padctl runs a userspace rumble auto-stop scheduler.
     // Set false for firmware that auto-stops internally.
     auto_stop: bool = true,
-    // Wave 6 fields — UHID PID passthrough.
+    // UHID PID passthrough fields.
     backend: []const u8 = "uinput", // "uinput" | "uhid"
     kind: []const u8 = "rumble", // "rumble" | "pid"
     clone_vid_pid: bool = false,
@@ -351,10 +350,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
-    // IMU backend validation (Phase 13 Wave 3 T1c).
-    // ADR-015 §Alternatives forbids "uinput primary + [output.imu] present":
-    // uinput's EVIOCGUNIQ always returns -ENOENT, so SDL's strcmp pairing
-    // check fails on the primary side. Only the "uhid" backend is legal when
+    // IMU backend validation: uinput's EVIOCGUNIQ always returns -ENOENT,
+    // so SDL's uniq-based pairing fails. Only "uhid" is legal when
     // [output.imu] is declared; unknown strings fail closed.
     if (cfg.output) |out| {
         if (out.imu) |imu| {
@@ -368,8 +365,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
-    // Force feedback validate matrix (Phase 13 Wave 6 T5c).
-    // Absent force_feedback is always legal (legacy rumble via UinputDevice).
+    // Force feedback backend/kind matrix. Absent force_feedback is always legal.
     if (cfg.output) |out| {
         if (out.force_feedback) |ffb| {
             const is_uinput = std.mem.eql(u8, ffb.backend, "uinput");
@@ -383,7 +379,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             if (is_uinput and is_pid) return error.InvalidConfig;
             if (is_uhid and is_rumble) return error.InvalidConfig;
 
-            // uhid+pid requires [output.imu] as the UHID routing gate (Wave 3).
+            // uhid+pid requires [output.imu] as the UHID routing gate.
             if (is_uhid and is_pid) {
                 const imu_present = if (out.imu) |_| true else false;
                 if (!imu_present) return error.InvalidConfig;
@@ -840,8 +836,6 @@ test "device: emulate preset: unknown preset returns error" {
     try std.testing.expectError(error.UnknownPreset, parseString(allocator, toml_str));
 }
 
-// T5: config boundary cases
-
 test "device: VID=0 is a valid config value" {
     const allocator = std.testing.allocator;
     const toml_str =
@@ -882,7 +876,7 @@ test "device: empty device name parses and validates without error" {
     try std.testing.expectEqualStrings("", result.value.device.name);
 }
 
-// T4: bits DSL config validation tests
+// bits DSL config validation
 
 test "device: bits field parses and validates" {
     const allocator = std.testing.allocator;
@@ -1225,7 +1219,7 @@ test "device: fuzz parseString: no panic on arbitrary input" {
     }.run, .{});
 }
 
-// Phase 13 Wave 3 T1d: ImuConfig validate cases.
+// ImuConfig validate cases.
 
 test "validate: ImuConfig default (absent) is legal" {
     const allocator = std.testing.allocator;
@@ -1374,7 +1368,7 @@ test "validate: [output.imu] without explicit backend defaults to uhid and passe
     try std.testing.expectEqualStrings("uhid", result.value.output.?.imu.?.backend);
 }
 
-// Phase 13 Wave 6 T5d/T5e: [output.force_feedback] schema validate matrix.
+// [output.force_feedback] schema validate matrix.
 
 const ffb_base_toml =
     \\[device]
@@ -1511,7 +1505,7 @@ test "force_feedback: TOML round-trip" {
     try std.testing.expect(ffb.clone_vid_pid);
 }
 
-// Phase 13 Wave 6 T2d: clone_vid_pid validate tests.
+// clone_vid_pid validate tests.
 
 const ffb_zero_vid_toml =
     \\[device]

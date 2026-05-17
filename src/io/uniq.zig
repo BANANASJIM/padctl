@@ -1,7 +1,7 @@
 //! Pure uniq-string builder for padctl UHID devices.
 //!
-//! ADR-015 Stage 1 (§AC4) requires the primary pad + IMU UHID cards to share
-//! a byte-identical `uhid_create2_req.uniq`. Layout:
+//! The primary pad and IMU UHID cards must share a byte-identical
+//! `uhid_create2_req.uniq` so SDL can pair them via `EVIOCGUNIQ`. Layout:
 //!
 //!   "padctl/<device-id>-<instance>"
 //!

@@ -32,7 +32,7 @@ pub const EVIOCGRAB = IOCTL.IOW('E', 0x90, c_int);
 
 /// Dynamic-size evdev ioctl: kernel copies up to `len` bytes of the device's
 /// uniq attribute (NUL-terminated) into the user buffer. SDL reads this to
-/// pair main-pad and IMU nodes — see ADR-015 §Stage 1 AC.
+/// pair main-pad and IMU nodes.
 pub fn EVIOCGUNIQ(len: u14) u32 {
     const req = IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x08, .size = len };
     return @bitCast(req);
