@@ -89,7 +89,7 @@ invert_y = true
 |-------|------|---------|-------------|
 | `mode` | string | `"off"` | `"off"`, `"mouse"`, or `"joystick"`. In `"joystick"` mode the processed gyro signal is routed to a virtual stick axis instead of mouse `REL_X/Y` events. |
 | `target` | string | `"right_stick"` | `"right_stick"` or `"left_stick"`. Selects which stick axis receives the gyro output. Only used when `mode = "joystick"`. |
-| `activate` | string | — | Button name to hold for activation (e.g. `"LS"`, `"hold_RB"`) |
+| `activate` | string | — | Gate button: bare name (`"LS"`) or `hold_<BTN>` form (`"hold_RB"`) — both are equivalent. For analog triggers (`LT`/`RT`), also set `trigger_threshold`. Omit for always-active. |
 | `sensitivity` | float | — | Overall sensitivity multiplier |
 | `sensitivity_x` | float | — | X-axis sensitivity override |
 | `sensitivity_y` | float | — | Y-axis sensitivity override |

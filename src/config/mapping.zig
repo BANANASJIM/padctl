@@ -2,8 +2,11 @@ const std = @import("std");
 const toml = @import("toml");
 const input_codes = @import("input_codes.zig");
 const remap_mod = @import("../core/remap.zig");
+const state = @import("../core/state.zig");
 pub const MacroStep = @import("../core/macro.zig").MacroStep;
 pub const Macro = @import("../core/macro.zig").Macro;
+
+const ButtonId = state.ButtonId;
 
 // `[remap]` value is either a single string ("KEY_F13", "macro:dodge_roll",
 // "BTN_LEFT", gamepad-button name) or an array of KEY_* strings (chord output).
@@ -359,6 +362,45 @@ fn remapHasTriggerKey(map: *const RemapMap) bool {
     return false;
 }
 
+const valid_gyro_modes = [_][]const u8{ "off", "mouse", "joystick" };
+const valid_gyro_targets = [_][]const u8{ "right_stick", "left_stick" };
+
+fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
+    var mode_ok = false;
+    for (valid_gyro_modes) |v| {
+        if (std.mem.eql(u8, g.mode, v)) {
+            mode_ok = true;
+            break;
+        }
+    }
+    if (!mode_ok) return error.InvalidConfig;
+
+    if (g.target) |t| {
+        var target_ok = false;
+        for (valid_gyro_targets) |v| {
+            if (std.mem.eql(u8, t, v)) {
+                target_ok = true;
+                break;
+            }
+        }
+        if (!target_ok) return error.InvalidConfig;
+    }
+
+    if (g.activate) |spec| {
+        const btn_name = if (std.mem.startsWith(u8, spec, "hold_"))
+            spec["hold_".len..]
+        else
+            spec;
+        if (!std.mem.eql(u8, spec, "always")) {
+            if (std.meta.stringToEnum(ButtonId, btn_name) == null) {
+                std.log.warn("config: gyro activate '{s}' is not a recognized button name — gyro will be disabled", .{spec});
+            } else if ((std.mem.eql(u8, btn_name, "LT") or std.mem.eql(u8, btn_name, "RT")) and trigger_threshold == null) {
+                std.log.warn("config: gyro activate '{s}' uses an analog trigger but trigger_threshold is not set — gate will never fire; add trigger_threshold = 128", .{spec});
+            }
+        }
+    }
+}
+
 // Returns true when LT/RT appear in any remap but trigger_threshold is not set.
 // Exposed for testing; warn at validate time so users see the failure mode before runtime.
 pub fn needsTriggerThresholdWarn(cfg: *const MappingConfig) bool {
@@ -617,6 +659,7 @@ pub fn validate(cfg: *const MappingConfig) !void {
         try checkRemapChords(m);
     }
     if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
+    if (cfg.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
 
     if (needsTriggerThresholdWarn(cfg)) {
         std.log.warn("config: LT/RT used in [remap] or [layer.remap] without trigger_threshold — analog triggers are not synthesized into button events; add trigger_threshold = 128 (or your preferred 0-255 value) to enable", .{});
@@ -654,6 +697,7 @@ pub fn validate(cfg: *const MappingConfig) !void {
             try checkRemapChords(m);
         }
         if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
+        if (layer.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
     }
 }
 
@@ -1609,6 +1653,78 @@ test "chord remap: deriveAuxFromMapping flags needs_keyboard for chord array" {
     const caps = deriveAuxFromMapping(&result.value);
     try std.testing.expect(caps.needs_keyboard);
     try std.testing.expect(caps.needsAux());
+}
+
+// --- validateGyroConfig tests ---
+
+test "validate: gyro mode invalid case returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "Joystick"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro mode unknown string returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "stick"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro target invalid returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\target = "center_stick"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro mode=joystick target=left_stick is valid" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\target = "left_stick"
+    );
+    defer result.deinit();
+    try validate(&result.value);
+}
+
+test "validate: layer gyro mode bogus returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\
+        \\[layer.gyro]
+        \\mode = "bogus"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: layer gyro valid mode passes" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\
+        \\[layer.gyro]
+        \\mode = "mouse"
+    );
+    defer result.deinit();
+    try validate(&result.value);
 }
 
 test "chord remap: layer-level chord too long is rejected by validate" {

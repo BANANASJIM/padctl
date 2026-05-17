@@ -618,11 +618,12 @@ fn buttonBit(name: []const u8) u64 {
 
 fn checkGyroActivate(activate: ?[]const u8, buttons: u64) bool {
     const spec = activate orelse return true;
+    if (std.mem.eql(u8, spec, "always")) return true;
     if (std.mem.startsWith(u8, spec, "hold_")) {
         const btn_name = spec["hold_".len..];
         return buttons & buttonBit(btn_name) != 0;
     }
-    return true; // "always" or unrecognized
+    return buttons & buttonBit(spec) != 0;
 }
 
 // --- tests ---
@@ -1100,6 +1101,151 @@ test "mapper: checkGyroActivate: hold_RB not pressed" {
 
 test "mapper: checkGyroActivate: unknown button name returns false" {
     try testing.expect(!checkGyroActivate("hold_UNKNOWN", 0xFFFFFFFF));
+}
+
+test "mapper: checkGyroActivate: bare LS gates correctly" {
+    const ls_idx: u6 = @intCast(@intFromEnum(ButtonId.LS));
+    const ls_mask: u64 = @as(u64, 1) << ls_idx;
+    // LS bit set → active
+    try testing.expect(checkGyroActivate("LS", ls_mask));
+    // LS bit clear → inactive
+    try testing.expect(!checkGyroActivate("LS", 0));
+    // Other button set, LS clear → inactive
+    const rb_idx: u6 = @intCast(@intFromEnum(ButtonId.RB));
+    try testing.expect(!checkGyroActivate("LS", @as(u64, 1) << rb_idx));
+}
+
+test "mapper: checkGyroActivate: bare LT gates correctly" {
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    try testing.expect(checkGyroActivate("LT", lt_mask));
+    try testing.expect(!checkGyroActivate("LT", 0));
+}
+
+test "mapper: checkGyroActivate: bogus bare name returns false (not true)" {
+    // Regression: before fix this returned true, making gyro always-on.
+    try testing.expect(!checkGyroActivate("BOGUS_NOT_A_BUTTON", 0xFFFFFFFF));
+}
+
+test "e2e: gyro activate bare LS — no output when LS not pressed, output when pressed" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity = 1000.0
+        \\smoothing = 0.0
+        \\activate = "LS"
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const ls_idx: u6 = @intCast(@intFromEnum(ButtonId.LS));
+    const ls_mask: u64 = @as(u64, 1) << ls_idx;
+
+    // LS not pressed → no gyro output
+    const ev_off = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    for (ev_off.aux.slice()) |e| switch (e) {
+        .rel => return error.UnexpectedRelEvent,
+        else => {},
+    };
+
+    // LS pressed → gyro output
+    const ev_on = try m.apply(.{ .buttons = ls_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    var has_rel = false;
+    for (ev_on.aux.slice()) |e| switch (e) {
+        .rel => {
+            has_rel = true;
+        },
+        else => {},
+    };
+    try testing.expect(has_rel);
+
+    // LS released → gyro output stops
+    const ev_off2 = try m.apply(.{ .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    for (ev_off2.aux.slice()) |e| switch (e) {
+        .rel => return error.UnexpectedRelEvent,
+        else => {},
+    };
+}
+
+test "e2e: gyro activate bare LT — gated through trigger_threshold LT synthesis" {
+    // End-to-end: the analog LT axis crossing trigger_threshold synthesizes the
+    // LT button bit, which the bare-name activate gate then consumes.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\trigger_threshold = 128
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity = 1000.0
+        \\smoothing = 0.0
+        \\activate = "LT"
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // LT below threshold → no LT bit synthesized → gyro gated off
+    const ev_off = try m.apply(.{ .lt = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    for (ev_off.aux.slice()) |e| switch (e) {
+        .rel => return error.UnexpectedRelEvent,
+        else => {},
+    };
+
+    // LT above threshold → LT bit synthesized → gyro fires
+    const ev_on = try m.apply(.{ .lt = 200, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    var has_rel = false;
+    for (ev_on.aux.slice()) |e| switch (e) {
+        .rel => {
+            has_rel = true;
+        },
+        else => {},
+    };
+    try testing.expect(has_rel);
+}
+
+test "e2e: gyro activate bogus name — gyro always disabled" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity = 1000.0
+        \\smoothing = 0.0
+        \\activate = "BOGUS_NOT_A_BUTTON"
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Even with all bits set, unknown name resolves to 0 via buttonBit → gyro off
+    const ev = try m.apply(.{ .buttons = 0xFFFFFFFFFFFFFFFF, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    for (ev.aux.slice()) |e| switch (e) {
+        .rel => return error.UnexpectedRelEvent,
+        else => {},
+    };
+}
+
+test "e2e: gyro activate hold_LT no trigger_threshold — LT bit never synthesized, gyro stays off" {
+    // Documents the analog-trigger trap: without trigger_threshold the LT bit is
+    // never set in buttons, so hold_LT (and bare LT) never fires.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity = 1000.0
+        \\smoothing = 0.0
+        \\activate = "hold_LT"
+    , allocator);
+    defer parsed.deinit();
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Simulate LT axis fully pressed (lt=255) but no trigger_threshold → bit never set
+    const ev = try m.apply(.{ .lt = 255, .buttons = 0, .gyro_x = 10000, .gyro_y = 10000 }, 16, 0);
+    for (ev.aux.slice()) |e| switch (e) {
+        .rel => return error.UnexpectedRelEvent,
+        else => {},
+    };
 }
 
 // --- OOM path tests ---

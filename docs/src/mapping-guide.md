@@ -154,6 +154,8 @@ invert_y    = true
 
 Omit `activate` to have gyro always active when mode is `"mouse"`.
 
+`activate` accepts a bare button name (`"LS"`) or the `hold_<BTN>` form (`"hold_RB"`) — both behave identically. For analog triggers (`LT`/`RT`) you must also declare `trigger_threshold` at the top level, otherwise the trigger axis is never converted to a button press and the gyro gate never fires.
+
 #### Joystick mode
 
 Set `mode = "joystick"` to route the gyro signal to a virtual stick axis instead of mouse events. Use `target` to choose which stick receives the output:
