@@ -1,4 +1,4 @@
-//! Wave 6 T3 — Layer 1 tests for UHID_OUTPUT event dispatch.
+//! Layer 1 tests for UHID_OUTPUT event dispatch.
 //!
 //! Verifies that EventLoop correctly drains UHID_OUTPUT events from the
 //! primary UHID fd and invokes the registered callback when the device

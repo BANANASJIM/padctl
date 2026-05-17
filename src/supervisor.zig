@@ -40,7 +40,7 @@ pub const ManagedInstance = struct {
     suspended: bool = false,
     /// CLOCK_MONOTONIC deadline (ns). When non-null and `now >= deadline`,
     /// `gcExpiredGrace()` tears the entry down. Set by `detach()` when
-    /// `suspend_grace_sec > 0`; cleared on successful rebind. Issue #131-A.
+    /// `suspend_grace_sec > 0`; cleared on successful rebind.
     grace_deadline_ns: ?u64 = null,
 };
 
@@ -175,12 +175,10 @@ pub const Supervisor = struct {
     test_switch_mapping_override: ?[]const u8 = null,
     test_default_mapping_override: ?[]const u8 = null,
     test_switch_fail_commit_index: ?usize = null,
-    /// Issue #131-A: `detach()` preserves the virtual uinput for this many
-    /// seconds to survive wireless sleep/wake. Once the deadline passes
-    /// without a matching ADD, `gcExpiredGrace()` fully tears the entry
-    /// down so the uinput fd is not leaked indefinitely (zombie device).
-    /// Set to 0 to disable the grace window and tear down immediately
-    /// (pre-PR-#114 behavior).
+    /// `detach()` preserves the virtual uinput for this many seconds to survive
+    /// wireless sleep/wake. Once the deadline passes without a matching ADD,
+    /// `gcExpiredGrace()` fully tears the entry down so the uinput fd is not
+    /// leaked indefinitely (zombie device). Set to 0 to tear down immediately.
     suspend_grace_sec: u32 = 15,
     /// Timerfd that fires when a grace deadline comes due. Armed by
     /// `detach()`; drained by `drainGraceTimer()`. -1 = unavailable
@@ -196,14 +194,13 @@ pub const Supervisor = struct {
     /// "restart failed after bookkeeping" branch without racing real
     /// thread creation.
     test_fail_rebind_restart: bool = false,
-    /// Phase 13 Wave 3: daemon-wide fallback counter for UHID uniq strings
-    /// when `phys_key` is null (virtual / Bluetooth devices without sysfs
-    /// phys). Passed by pointer into every `DeviceInstance.init` call site;
-    /// see `src/io/uniq.zig`.
+    /// Daemon-wide fallback counter for UHID uniq strings when `phys_key` is
+    /// null (virtual / Bluetooth devices without sysfs phys). Passed by pointer
+    /// into every `DeviceInstance.init` call site; see `src/io/uniq.zig`.
     daemon_uniq_counter: u16 = 1,
-    /// Issue #183: parsed `[chord_switch]` from user_cfg, derived once at
-    /// init/reload. null = feature disabled. Installed onto every newly
-    /// initialised Mapper via `installChordDetector`.
+    /// Parsed `[chord_switch]` from user_cfg, derived once at init/reload.
+    /// null = feature disabled. Installed onto every newly initialised Mapper
+    /// via `installChordDetector`.
     chord_detector_cfg: ?chord_detector_mod.Config = null,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
@@ -232,8 +229,8 @@ pub const Supervisor = struct {
         };
         errdefer if (retry_fd >= 0) posix.close(retry_fd);
 
-        // Issue #131-A: timerfd that fires when a suspended instance's grace
-        // window expires so the main loop can tear the uinput down.
+        // Timerfd that fires when a suspended instance's grace window expires
+        // so the main loop can tear the uinput down.
         const grace_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch blk: {
             std.log.warn("suspend grace timer unavailable", .{});
             break :blk -1;
@@ -352,14 +349,14 @@ pub const Supervisor = struct {
     /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
     pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         if (self.devname_map.contains(devname)) return;
-        // Dedup by phys_key. Race guard for issue #93: when a controller is
-        // unplugged and replugged within the detach-delay window (or a USB
-        // re-enumeration skips the REMOVE uevent entirely), an ADD can reach
-        // this path while a managed, not-yet-suspended instance still holds
-        // the same phys_key. Silently returning in that case leaves the
-        // entry stuck on dead hidraw fds and produces no input until
-        // `padctl reload`. Probe the backing fd liveness; if the fd is dead
-        // force-detach the stale entry and fall through to a fresh attach.
+        // Dedup by phys_key. Race guard: when a controller is unplugged and
+        // replugged within the detach-delay window (or a USB re-enumeration
+        // skips the REMOVE uevent entirely), an ADD can reach this path while
+        // a managed, not-yet-suspended instance still holds the same phys_key.
+        // Silently returning in that case leaves the entry stuck on dead hidraw
+        // fds and produces no input until `padctl reload`. Probe the backing fd
+        // liveness; if the fd is dead force-detach the stale entry and fall
+        // through to a fresh attach.
         var stale_devname_buf: [64]u8 = undefined;
         var stale_devname: ?[]const u8 = null;
         for (self.managed.items) |m| {
@@ -382,7 +379,7 @@ pub const Supervisor = struct {
             break;
         }
         if (stale_devname) |dn| {
-            std.log.info("hotplug: stale entry for phys \"{s}\" has dead fds; force-detaching {s} (race-guard:#93)", .{ phys_key, dn });
+            std.log.info("hotplug: stale entry for phys \"{s}\" has dead fds; force-detaching {s}", .{ phys_key, dn });
             self.detachFull(dn);
         }
         // All fallible bookkeeping must run BEFORE spawnInstance commits
@@ -407,12 +404,11 @@ pub const Supervisor = struct {
     /// references. On reconnect, attachWithRoot() rebinds the new hidraw fds
     /// to the existing instance.
     ///
-    /// Issue #131-A: When `suspend_grace_sec > 0` the entry keeps its uinput
-    /// but is marked with a `grace_deadline_ns`; if no matching ADD arrives
-    /// before the deadline, `gcExpiredGrace()` tears it down so the virtual
-    /// gamepad does not linger forever after a permanent disconnect.
-    /// When `suspend_grace_sec == 0` the entry is torn down immediately
-    /// (pre-PR-#114 semantics).
+    /// When `suspend_grace_sec > 0` the entry keeps its uinput but is marked
+    /// with a `grace_deadline_ns`; if no matching ADD arrives before the
+    /// deadline, `gcExpiredGrace()` tears it down so the virtual gamepad does
+    /// not linger forever after a permanent disconnect. When `suspend_grace_sec
+    /// == 0` the entry is torn down immediately.
     pub fn detach(self: *Supervisor, devname: []const u8) void {
         if (self.suspend_grace_sec == 0) {
             // Grace window disabled: fall through to full teardown so the
@@ -474,15 +470,14 @@ pub const Supervisor = struct {
 
     /// Clear the grace deadline on a managed entry — called by the rebind
     /// path in `attachWithRoot()` when a matching ADD arrives before the
-    /// deadline. Public for tests. Issue #131-A.
+    /// deadline. Public for tests.
     pub fn clearGraceDeadline(_: *Supervisor, m: *ManagedInstance) void {
         m.grace_deadline_ns = null;
     }
 
     /// Iterate the managed list and tear down any suspended entry whose
-    /// grace deadline has passed. Called by the serve loop on
-    /// `grace_timer_fd` fire and exposed to tests for deterministic
-    /// exercise. Issue #131-A.
+    /// grace deadline has passed. Called by the serve loop on `grace_timer_fd`
+    /// fire and exposed to tests for deterministic exercise.
     pub fn gcExpiredGrace(self: *Supervisor, now_ns: u64) void {
         var i: usize = self.managed.items.len;
         while (i > 0) {
@@ -490,7 +485,7 @@ pub const Supervisor = struct {
             const m = &self.managed.items[i];
             const deadline = m.grace_deadline_ns orelse continue;
             if (now_ns < deadline) continue;
-            std.log.info("grace window expired for phys \"{s}\"; tearing down uinput (issue #131-A)", .{m.phys_key});
+            std.log.info("grace window expired for phys \"{s}\"; tearing down uinput", .{m.phys_key});
             // `detach()` has already joined the worker thread and closed
             // the hidraw fds, so `teardownManaged` just frees the uinput
             // + bookkeeping.
@@ -568,7 +563,7 @@ pub const Supervisor = struct {
     /// is what happens after USB removal even if `detach()` has not yet
     /// run. Used by `attachWithInstance` to distinguish a genuine dedup
     /// collision from a race where the ADD uevent for a replug arrives
-    /// before REMOVE drains (issue #93).
+    /// before REMOVE drains.
     fn managedInstanceAlive(m: *const ManagedInstance) bool {
         // A suspended instance is an explicit, structured state: fds are
         // already closed and the entry is reserved for rebind via
@@ -586,7 +581,7 @@ pub const Supervisor = struct {
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         // Install chord detector before spawning the thread so the mapper sees
-        // the cfg from the very first frame (issue #183).
+        // the cfg from the very first frame.
         if (self.chord_detector_cfg) |cfg| {
             if (instance.mapper) |*mp| mp.setChordDetector(cfg);
         }
@@ -647,8 +642,8 @@ pub const Supervisor = struct {
     /// Contract: any failure leaves `m.suspended`, `m.grace_deadline_ns`,
     /// `m.devname`, `m.thread`, and `devname_map` exactly as they were
     /// on entry. The caller's grace-window GC is preserved so the entry
-    /// is still cleaned up on deadline (issue #131-A). On error the
-    /// caller is responsible for `m.instance.closeDeviceIO()`.
+    /// is still cleaned up on deadline. On error the caller is responsible for
+    /// `m.instance.closeDeviceIO()`.
     pub fn finalizeRebind(self: *Supervisor, m: *ManagedInstance, devname: []const u8, phys: []const u8) !void {
         const dn_copy = try self.allocator.dupe(u8, devname);
         errdefer self.allocator.free(dn_copy);
@@ -816,9 +811,9 @@ pub const Supervisor = struct {
         tx.new_mapper = null;
         m.instance.mapping_cfg = &tx.parsed_ptr.?.value;
         self.installChordDetector(m);
-        // issue #142: rebuild AuxDevice when switching mappings so newly
-        // required KEY_* or REL_* capabilities become available. Warn rather
-        // than propagate on failure, matching the reload path (~line 676).
+        // Rebuild AuxDevice when switching mappings so newly required KEY_* or
+        // REL_* capabilities become available. Warn rather than propagate on
+        // failure, matching the reload path.
         m.instance.rebuildAuxIfChanged(
             &tx.parsed_ptr.?.value,
             tx.old_mapping_cfg,
@@ -845,9 +840,9 @@ pub const Supervisor = struct {
             return err;
         };
         m.switch_mapping = tx.parsed_ptr;
-        // Invariant (issue #248): switch_mapping_stem must always be set together
-        // with switch_mapping so handleStatus can report the mapping name. Any new
-        // apply-mapping path must derive and assign switch_mapping_stem here.
+        // switch_mapping_stem must always be set together with switch_mapping so
+        // handleStatus can report the mapping name. Any new apply-mapping path
+        // must derive and assign switch_mapping_stem here.
         m.switch_mapping_stem = tx.path_stem;
         tx.parsed_ptr = null;
         tx.path_stem = null;
@@ -1634,7 +1629,7 @@ pub const Supervisor = struct {
 
     /// Resolve the user-configured default mapping for `device_name` into a
     /// heap-owned ParseResult plus the file stem (used by `handleStatus` when
-    /// the mapping file omits a `name =` field — issue #248). Returns null
+    /// the mapping file omits a `name =` field). Returns null
     /// when no default mapping is configured or it fails to load/allocate;
     /// on null nothing is leaked. Ownership transfers to the caller.
     fn buildDefaultMapping(self: *const Supervisor, device_name: []const u8) ?DefaultMappingPtr {
@@ -1962,9 +1957,9 @@ pub const Supervisor = struct {
             self.allocator.free(new_devices);
             m.instance.rerunInitSequence();
 
-            // Issue #131-A: commit bookkeeping only after every fallible
-            // step succeeds. On failure `m.suspended`/`m.grace_deadline_ns`
-            // stay as-is so the grace-window GC still reclaims the entry.
+            // Commit bookkeeping only after every fallible step succeeds. On
+            // failure `m.suspended`/`m.grace_deadline_ns` stay as-is so the
+            // grace-window GC still reclaims the entry.
             self.finalizeRebind(m, devname, phys) catch |err| {
                 m.instance.closeDeviceIO();
                 std.log.warn("hotplug: suspended instance resume aborted: {}", .{err});
@@ -2185,13 +2180,13 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[1].instance.stopped, .acquire));
 }
 
-test "supervisor: switch to mapping with new aux KEY_* rebuilds aux caps (issue #142)" {
-    // Regression for issue #142: before the fix, commitSwitchTarget swapped
-    // mapper and mapping_cfg but never called rebuildAuxIfChanged. If the
-    // default_mapping loaded at daemon start did not need aux (needs_keyboard
-    // false, no mouse/rel), AuxDevice was created with zero KEY_* caps; then
-    // `padctl switch` to a mapping containing KEY_* remaps left the aux_dev
-    // caps stale and the kernel silently rejected KEY_G emissions.
+test "supervisor: switch to mapping with new aux KEY_* rebuilds aux caps" {
+    // Regression guard: before the fix, commitSwitchTarget swapped mapper and
+    // mapping_cfg but never called rebuildAuxIfChanged. If the default_mapping
+    // loaded at daemon start did not need aux (needs_keyboard false, no
+    // mouse/rel), AuxDevice was created with zero KEY_* caps; then `padctl
+    // switch` to a mapping containing KEY_* remaps left the aux_dev caps stale
+    // and the kernel silently rejected KEY_G emissions.
     //
     // This test uses a device config with no [output] section so
     // rebuildAuxIfChanged short-circuits without touching /dev/uinput, and
@@ -2835,7 +2830,7 @@ test "supervisor: Supervisor: status shows (none) when no mapping loaded" {
     }
 }
 
-test "supervisor: Supervisor: status uses file stem when mapping name field is null (issue #248)" {
+test "supervisor: Supervisor: status uses file stem when mapping name field is null" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -2885,15 +2880,14 @@ test "supervisor: Supervisor: status uses file stem when mapping name field is n
     }
 }
 
-// Issue #248 regression: a mapping applied via the user-config default
-// mapping path (NOT a live `padctl switch`) made `padctl status` print
-// `mapping=(none)` when the mapping file had no `name =` field. PR #252
-// only fixed the `switch_mapping` branch of handleStatus; the
-// `default_mapping_pr` branch had no file-stem fallback. This test drives
-// the REAL production resolver `buildDefaultMapping` (real file read, real
-// TOML parse with no `name=`, real std.fs.path.stem) — it does NOT
-// hand-assign default_mapping_pr / default_mapping_stem.
-test "supervisor: Supervisor: status uses default-mapping file stem when name field is null (issue #248)" {
+// Regression guard: a mapping applied via the user-config default mapping path
+// (NOT a live `padctl switch`) made `padctl status` print `mapping=(none)` when
+// the mapping file had no `name =` field. The `default_mapping_pr` branch had
+// no file-stem fallback. This test drives the REAL production resolver
+// `buildDefaultMapping` (real file read, real TOML parse with no `name=`, real
+// std.fs.path.stem) — it does NOT hand-assign default_mapping_pr /
+// default_mapping_stem.
+test "supervisor: Supervisor: status uses default-mapping file stem when name field is null" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -2971,26 +2965,25 @@ test "supervisor: Supervisor: status uses default-mapping file stem when name fi
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
 }
 
-// Issue #248 regression (second guard): verifies the full config-from-dir path.
+// Regression guard (second guard): verifies the full config-from-dir path.
 // startFromDirWithRoot parses the device TOML, confirms config is stored, then
 // buildDefaultMapping reads the name-less mapping file and derives the stem via
-// std.fs.path.stem — the same computation that line 1797 relies on. handleStatus
-// must return mapping=mypad, not mapping=(none).
+// std.fs.path.stem. handleStatus must return mapping=mypad, not mapping=(none).
 //
-// NOTE: line 1797 (the store inside startFromDirWithRoot) cannot be reached at
-// Layer 0 — discoverAllWithRoot opens real hidraw char devices via ioctl which
-// are unavailable without hardware. This test exercises every other link in the
-// chain: TOML dir scan → config parsed → buildDefaultMapping real file read →
-// stem derived → spawnInstance → handleStatus:1545 stem branch.
+// NOTE: the store inside startFromDirWithRoot cannot be reached at Layer 0 —
+// discoverAllWithRoot opens real hidraw char devices via ioctl which are
+// unavailable without hardware. This test exercises: TOML dir scan → config
+// parsed → buildDefaultMapping real file read → stem derived → spawnInstance
+// → handleStatus stem branch.
 //
 // Falsifiability:
-//   - Reverting handleStatus:1545 `if (m.default_mapping_stem) |s| break :blk s;`
-//     → response contains "mapping=(none)" → test fails.
+//   - Reverting the `if (m.default_mapping_stem) |s| break :blk s;` line in
+//     handleStatus → response contains "mapping=(none)" → test fails.
 //   - Breaking buildDefaultMapping stem extraction (e.g. returning null stem)
 //     → default_dm.?.stem assertion fails → test fails.
 //   - If startFromDirWithRoot silently drops the parsed config
 //     → sup.configs.items.len == 0 assertion fails → test fails.
-test "supervisor: Supervisor: status stem fallback — config parsed from TOML dir, name-less mapping file (issue #248 guard 2)" {
+test "supervisor: Supervisor: status stem fallback — config parsed from TOML dir, name-less mapping file" {
     const allocator = testing.allocator;
 
     // Device TOML dir: one device file that startFromDirWithRoot will parse.
@@ -3320,11 +3313,11 @@ test "supervisor: startFromDirs loads configs from two dirs" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-// Issue #136 regression: padctl switch (no arg) returned "no devices connected" even
-// when a device was active. The fix queries STATUS, extracts the device name, reads
-// default_mapping from config, then calls handleSwitch with the resolved name.
-// This test exercises all three steps without a real daemon process.
-test "supervisor: issue #136: STATUS -> default_mapping lookup -> handleSwitch succeeds" {
+// Regression guard: padctl switch (no arg) returned "no devices connected" even
+// when a device was active. The fix queries STATUS, extracts the device name,
+// reads default_mapping from config, then calls handleSwitch with the resolved
+// name. This test exercises all three steps without a real daemon process.
+test "supervisor: STATUS -> default_mapping lookup -> handleSwitch succeeds" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
@@ -3410,7 +3403,7 @@ test "supervisor: issue #136: STATUS -> default_mapping lookup -> handleSwitch s
     try testing.expectEqualStrings("OK foo\n", resp_buf[0..n]);
 }
 
-// Issue #183 — parseChordSwitchConfig tests.
+// --- parseChordSwitchConfig tests ---
 
 test "supervisor: parseChordSwitchConfig: full schema produces detector cfg" {
     const cs: user_config_mod.ChordSwitchConfig = .{

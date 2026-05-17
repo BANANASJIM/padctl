@@ -81,7 +81,7 @@ pub const ReportGenerator = struct {
 
     /// Transition to Steam mode. After this, `buttonPress` returns reports
     /// with the button bits actually set. Mirrors the effect of sending the
-    /// 0x81 feature report to a real Deck (see issue #126).
+    /// 0x81 feature report to a real Deck.
     pub fn acceptModeSwitch(self: *ReportGenerator) void {
         self.in_steam_mode = true;
     }

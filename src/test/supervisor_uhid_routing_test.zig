@@ -1,12 +1,12 @@
-//! Phase 13 Wave 3 T5f — Layer 1 routing tests.
+//! Layer 1 routing tests for UHID device creation and uniq pairing.
 //!
 //! Drives `DeviceInstance.openUhidDevice` (the routing helper that wraps
 //! `UhidDevice.init` and the test-fd seam) against a pair of `posix.pipe2`
 //! write-ends. The pipe captures the bytes the helper would have written to
 //! `/dev/uhid`: one `UHID_CREATE2` event on construction, one `UHID_DESTROY`
-//! on close. Asserting directly on the wire bytes gives us byte-identical
-//! uniq pairing (ADR-015 Stage 1 AC4) without ever touching a real kernel
-//! fd — the whole test runs with zero privileges on CI.
+//! on close. Asserting directly on the wire bytes verifies byte-identical
+//! uniq pairing without ever touching a real kernel fd — the whole test runs
+//! with zero privileges on CI.
 //!
 //! `UhidSimulator` is NOT used here: it is an input-side harness that
 //! produces a virtual HID node for padctl to consume, not a write-capture
@@ -15,11 +15,10 @@
 //! The final test in this file drives `DeviceInstance.init` end-to-end via
 //! the `InitOptions.test_devices_override` + `test_*_uhid_fd` seams so the
 //! routing switch inside `init` is exercised directly — the prior tests
-//! would stay green even if that switch degenerated to always-uinput (the
-//! root cause of R-C BLOCKING slipping past CI initially). Additional
-//! coverage at the `/dev/uhid` kernel level lives in the Layer 2 integration
-//! tests (`supervisor_uhid_grace_integration_test.zig`, privilege-gated on
-//! `PADCTL_TEST_REQUIRE_UHID`).
+//! would stay green even if that switch degenerated to always-uinput.
+//! Additional coverage at the `/dev/uhid` kernel level lives in the Layer 2
+//! integration tests (`supervisor_uhid_grace_integration_test.zig`,
+//! privilege-gated on `PADCTL_TEST_REQUIRE_UHID`).
 
 const std = @import("std");
 const posix = std.posix;
@@ -279,13 +278,12 @@ const TEST_TOML_UHID_LEGAL =
     \\name = "Routing E2E IMU"
 ;
 
-// End-to-end routing test (CodeRabbit PR #159 #6). Exercises the `use_uhid`
-// switch inside `DeviceInstance.init` directly — the earlier tests go through
-// `openUhidDeviceForTest`, which bypasses the switch and would stay green even
-// if the routing decision regressed to always-uinput (the root cause of R-C
-// BLOCKING initially slipping past CI). Reverse-verification: temporarily
-// forcing `use_uhid = false` in `device_instance.zig` flips `owner` to
-// `.uinput`, which fails the `.uhid` assertions below.
+// Exercises the `use_uhid` switch inside `DeviceInstance.init` directly —
+// the earlier tests go through `openUhidDeviceForTest`, which bypasses the
+// switch and would stay green even if the routing decision regressed to
+// always-uinput. Reverse-verification: temporarily forcing `use_uhid = false`
+// in `device_instance.zig` flips `owner` to `.uinput`, which fails the
+// `.uhid` assertions below.
 test "DeviceInstance.init: backend=uhid TOML routes via InitOptions test seam" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -342,7 +340,7 @@ test "DeviceInstance.init: backend=uhid TOML routes via InitOptions test seam" {
     try testing.expectEqual(@as(u32, 0xC001), primary_ev.payload.product);
 }
 
-// Phase 13 Wave 6 T2 tests: clone_vid_pid routing.
+// clone_vid_pid routing tests.
 
 const TEST_TOML_NO_CLONE =
     \\[device]
@@ -370,7 +368,7 @@ const TEST_TOML_NO_CLONE =
 ;
 
 // clone_vid_pid absent → primary UHID card uses daemon identity 0xFADE:0xC001
-test "T2: clone_vid_pid=false (default) → primary UHID vid=0xFADE pid=0xC001" {
+test "clone_vid_pid=false (default) → primary UHID vid=0xFADE pid=0xC001" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -441,7 +439,7 @@ const TEST_TOML_CLONE =
 ;
 
 // clone_vid_pid=true → primary UHID card uses wheel's real VID/PID
-test "T2: clone_vid_pid=true → primary UHID vid=device.vid pid=device.pid" {
+test "clone_vid_pid=true → primary UHID vid=device.vid pid=device.pid" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 

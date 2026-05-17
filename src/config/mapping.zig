@@ -6,9 +6,9 @@ pub const MacroStep = @import("../core/macro.zig").MacroStep;
 pub const Macro = @import("../core/macro.zig").Macro;
 
 // `[remap]` value is either a single string ("KEY_F13", "macro:dodge_roll",
-// "BTN_LEFT", gamepad-button name) or an array of KEY_* strings (chord output,
-// issue #206). RemapMap below has a `tomlIntoStruct` hook that inspects the
-// raw toml.Value per entry to choose between the two forms.
+// "BTN_LEFT", gamepad-button name) or an array of KEY_* strings (chord output).
+// RemapMap below has a `tomlIntoStruct` hook that inspects the raw toml.Value
+// per entry to choose between the two forms.
 pub const RemapValue = union(enum) {
     string: []const u8,
     chord_names: []const []const u8,
@@ -691,7 +691,7 @@ test "mapping: MappingConfig: empty config" {
     try std.testing.expect(result.value.chord_index == null);
 }
 
-test "mapping: MappingConfig: chord_index parses (issue #183)" {
+test "mapping: MappingConfig: chord_index parses" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator,
         \\name = "fps"
@@ -965,7 +965,7 @@ test "mapping: [[macro]] multi-entry parse: all step primitives correct" {
     try validate(&cfg);
 }
 
-test "mapping: [[macro]] repeat_delay_ms parses; absent stays null (issue #119)" {
+test "mapping: [[macro]] repeat_delay_ms parses; absent stays null" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[macro]]
@@ -1339,7 +1339,7 @@ fn findFinding(items: []const LintFinding, table: []const u8, key: []const u8) ?
     return null;
 }
 
-test "lintUnknownFields: trigger_threshold inside [[layer]] is flagged (issue #163 class)" {
+test "lintUnknownFields: trigger_threshold inside [[layer]] is flagged" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[[layer]]
@@ -1490,7 +1490,7 @@ test "validate: layer tap to gamepad button works (regression)" {
     try validate(&result.value);
 }
 
-// --- chord remap (issue #206) ---
+// --- chord remap ---
 
 test "chord remap: 2-key array parses into chord_names" {
     const allocator = std.testing.allocator;

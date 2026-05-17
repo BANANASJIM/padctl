@@ -1,4 +1,4 @@
-// Phase 2a end-to-end integration tests (L1 — mock timer/vtable, always CI).
+// Mapper end-to-end integration tests (L1 — mock timer/vtable, always CI).
 //
 // All tests drive the Mapper directly; no EventLoop thread is needed.
 // Timer events are injected by calling m.layer.onTriggerPress() / m.layer.onTimerExpired() (LayerState)
@@ -630,7 +630,7 @@ test "e2e: layer active — dpad mode switches to arrows" {
     try testing.expect(found_key_down);
 }
 
-// --- 10. issue #183: chord switch detector wired into Mapper ---
+// --- 10. chord switch detector wired into Mapper ---
 
 const chord_detector_mod = @import("../core/chord_detector.zig");
 
@@ -648,7 +648,7 @@ fn chordCfg() chord_detector_mod.Config {
     };
 }
 
-test "e2e issue #183: chord match — modifier+selector after debounce fires chord_index" {
+test "e2e: chord match — modifier+selector after debounce fires chord_index" {
     const allocator = testing.allocator;
     var ctx = try makeMapper("", allocator);
     defer ctx.deinit();
@@ -663,7 +663,7 @@ test "e2e issue #183: chord match — modifier+selector after debounce fires cho
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
 }
 
-test "e2e issue #183: no chord detector — feature inert, selector passes through" {
+test "e2e: no chord detector — feature inert, selector passes through" {
     const allocator = testing.allocator;
     var ctx = try makeMapper("", allocator);
     defer ctx.deinit();
@@ -675,7 +675,7 @@ test "e2e issue #183: no chord detector — feature inert, selector passes throu
     try testing.expect((ev.gamepad.buttons & btnMask(.A)) != 0);
 }
 
-test "e2e issue #183: partial modifier — only LM held, selector fires as normal input" {
+test "e2e: partial modifier — only LM held, selector fires as normal input" {
     const allocator = testing.allocator;
     var ctx = try makeMapper("", allocator);
     defer ctx.deinit();

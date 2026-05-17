@@ -1,5 +1,5 @@
-//! Permanent canary that proves the test runner discovers tests inside
-//! `testing_support` (the nested struct in src/main.zig).
+//! Proves the test runner discovers tests inside `testing_support` (the
+//! nested struct in src/main.zig).
 //!
 //! Mechanism: this file is registered as `pub const _meta_wiring_check_test = ...`
 //! inside `testing_support`. The test block in src/main.zig calls
@@ -13,7 +13,7 @@
 //!   3. Revert the deliberate failure and confirm CI passes again
 //!   4. Land the discovery-mechanism change with confidence
 //!
-//! See HISTORICAL NOTE on `testing_support` in src/main.zig (PR #213).
+//! See HISTORICAL NOTE on `testing_support` in src/main.zig.
 
 const std = @import("std");
 

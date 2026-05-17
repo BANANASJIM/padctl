@@ -1,8 +1,7 @@
-//! ADR-015 Stage 1 acceptance-criterion test: verify that two UHID-backed
-//! evdev nodes created with the same `uniq` string return byte-identical
-//! values from `EVIOCGUNIQ`. SDL's `GetSensor()` pairs main-pad and IMU by
-//! strcmp-equal uniq strings, so this is the CI-equivalent signal for the
-//! Stage 1 exit condition.
+//! Verify that two UHID-backed evdev nodes created with the same `uniq` string
+//! return byte-identical values from `EVIOCGUNIQ`. SDL's `GetSensor()` pairs
+//! main-pad and IMU by strcmp-equal uniq strings, so this is the CI-level
+//! signal that the pairing contract holds.
 //!
 //! ## Runtime behaviour
 //!
@@ -16,7 +15,7 @@
 //!       `error.UhidAccessRequired` — fails the test so an environment
 //!       that's meant to have /dev/uhid access but doesn't surfaces the
 //!       breakage immediately. Used by post-install verification and
-//!       ADR-015-compliant CI runners.
+//!       CI runners that require UHID access.
 //!
 //! ## Why this can't just silently SkipZigTest
 //!
@@ -47,7 +46,7 @@ fn requireUhid() bool {
 
 fn reportMissingUhid(reason: []const u8) error{ SkipZigTest, UhidAccessRequired } {
     std.log.warn(
-        "uhid_uniq_pairing_test: /dev/uhid unavailable ({s}) — ADR-015 Stage 1 CI signal is SILENT. " ++
+        "uhid_uniq_pairing_test: /dev/uhid unavailable ({s}) — uniq pairing CI signal is SILENT. " ++
             "Install udev rules via 'sudo ./zig-out/bin/padctl install' and reload udev, " ++
             "or set PADCTL_TEST_REQUIRE_UHID=1 to turn this into a hard failure.",
         .{reason},
@@ -142,7 +141,7 @@ fn readUniqFromEvdevPath(path: []const u8) ![]u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 13 Wave 5 canary — kernel-level evdev classification ioctls.
+// Kernel-level evdev classification ioctls.
 //
 // The kernel's generic HID→evdev mapper (`drivers/hid/hid-input.c`) does NOT
 // set `INPUT_PROP_ACCELEROMETER` for our descriptor — that bit is only
@@ -153,11 +152,11 @@ fn readUniqFromEvdevPath(path: []const u8) ![]u8 {
 //   "EV_KEY empty AND ABS_X + ABS_Y + ABS_Z present" → classify as
 //   accelerometer/sensor.
 //
-// The padctl Wave 3 IMU descriptor (`UhidDescriptorBuilder.buildForImu`)
-// emits a Generic-Desktop Multi-axis Controller with Usage X/Y/Z + Rx/Ry/Rz
-// and no Button Page usages, which the kernel maps to ABS_X/Y/Z + ABS_RX/RY/RZ
-// with no EV_KEY bits. This test verifies those kernel-observable signals
-// so any regression (e.g. reintroducing a Button Page) flips red.
+// `UhidDescriptorBuilder.buildForImu` emits a Generic-Desktop Multi-axis
+// Controller with Usage X/Y/Z + Rx/Ry/Rz and no Button Page usages, which
+// the kernel maps to ABS_X/Y/Z + ABS_RX/RY/RZ with no EV_KEY bits. This
+// test verifies those kernel-observable signals so any regression (e.g.
+// reintroducing a Button Page) flips red.
 //
 // The ENV{ID_INPUT_ACCELEROMETER} tag is enforced by the shipped udev rule
 // `/lib/udev/rules.d/90-padctl.rules` (or `/etc/udev/rules.d/` on immutable
@@ -226,16 +225,12 @@ fn printHex(label: []const u8, bytes: []const u8) void {
     std.debug.print("\n", .{});
 }
 
-// A minimal Generic-Desktop Gamepad descriptor for the main-pad fd — the IMU
-// fd now uses the production `UhidDescriptorBuilder.buildForImu` so this AC
-// test evaluates the exact descriptor padctl ships (previously it hard-coded
-// a copy, which let R-C B1's Sensor-page bug escape CI).
-//
-// The Wave 5 canary assertions rely on the primary pad exposing at least one
-// EV_KEY bit (so SDL classifies it as a gamepad). We include one Button Page
+// A minimal Generic-Desktop Gamepad descriptor for the main-pad fd. The IMU
+// fd uses the production `UhidDescriptorBuilder.buildForImu` so the test
+// evaluates the exact descriptor padctl ships. We include one Button Page
 // usage (BTN_SOUTH = button 1) so the kernel's hid-input mapper emits exactly
-// one BTN_* bit on the evdev node. Without this, the EV_KEY control sample
-// would be vacuous.
+// one BTN_* bit on the evdev node — the EV_KEY control sample must be non-zero
+// for SDL to classify the primary pad as a gamepad.
 const MAIN_DESCRIPTOR = [_]u8{
     0x05, 0x01, // Usage Page (Generic Desktop)
     0x09, 0x05, // Usage (Game Pad)
@@ -260,7 +255,7 @@ const MAIN_DESCRIPTOR = [_]u8{
     0xC0, // End Collection
 };
 
-test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR-015 Stage 1 AC)" {
+test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     // Probe /dev/uhid accessibility — if the test host lacks permission,
@@ -323,21 +318,19 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU (ADR
     try testing.expectEqualSlices(u8, main_uniq, imu_uniq);
 
     // -----------------------------------------------------------------------
-    // Wave 5 canary — kernel evdev classification. The heuristic implemented
-    // by systemd-udev's `input_id` builtin AND by SDL's
-    // `SDL_EVDEV_GuessDeviceClass` is: *no EV_KEY bits set* AND
-    // *ABS_X + ABS_Y + ABS_Z present* → accelerometer/sensor. Our Wave 3
-    // `buildForImu` descriptor maps to this exact shape. The primary pad is
-    // the inverse control sample: at least one EV_KEY bit must be set so
-    // SDL classifies it as a gamepad.
+    // Kernel evdev classification. The heuristic used by systemd-udev's
+    // `input_id` builtin and SDL's `SDL_EVDEV_GuessDeviceClass` is:
+    //   *no EV_KEY bits set* AND *ABS_X + ABS_Y + ABS_Z present*
+    //   → accelerometer/sensor.
+    // `buildForImu` maps to this shape. The primary pad is the inverse
+    // control sample: at least one EV_KEY bit must be set so SDL classifies
+    // it as a gamepad.
     //
-    // We deliberately do NOT assert `INPUT_PROP_ACCELEROMETER` on the evdev
-    // node — kernel `hid-input.c` never sets that bit for generic HID (only
-    // hid-sony/hid-nintendo/hid-playstation do, via hard-coded quirks). The
-    // bit is set instead by user-space via our shipped udev rule
-    // `/lib/udev/rules.d/90-padctl.rules`, which tags
-    // `ENV{ID_INPUT_ACCELEROMETER}=1` — that tag is orthogonal to this
-    // kernel-level heuristic test and is validated separately.
+    // We deliberately do NOT assert `INPUT_PROP_ACCELEROMETER` — kernel
+    // `hid-input.c` never sets that bit for generic HID (only device-specific
+    // drivers do, via hard-coded quirks). The bit is set by user-space via
+    // the shipped udev rule `ENV{ID_INPUT_ACCELEROMETER}=1`, validated
+    // separately.
     // -----------------------------------------------------------------------
     const imu_keys = try readKeyBitmap(imu_path[0..imu_path_len]);
     const imu_abs = try readAbsBitmap(imu_path[0..imu_path_len]);

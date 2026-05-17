@@ -84,16 +84,12 @@ pub const io = struct {
 // A file omitted from this namespace will compile but its tests will silently
 // never run under `zig build test`.
 //
-// HISTORICAL NOTE: prior to PR #213, the test block used refAllDecls (non-recursive),
-// which only refs top-level decls of main.zig. It refs the `testing_support` struct
-// as a type but does NOT recurse into its imported test files. As a result, every
-// test file registered ONLY here (without a duplicate explicit `_ = @import(...)`
-// in the test block) was silently dropped from `zig build test`. PR #212 confirmed
-// this by adding a deliberately-failing test inside a registered file and observing
-// CI still report SUCCESS with an unchanged test count.
-//
-// If you change the discovery mechanism, verify it by adding a deliberately-failing
-// test in `src/test/_meta_wiring_check_test.zig` and confirm CI catches it.
+// refAllDeclsRecursive is required here. The non-recursive refAllDecls only refs
+// top-level decls of main.zig — it refs the `testing_support` struct as a type
+// but does NOT recurse into its imported test files. As a result, test files
+// registered only under testing_support are silently dropped from `zig build test`.
+// Verify by adding a deliberately-failing test in
+// `src/test/_meta_wiring_check_test.zig` and confirming CI catches it.
 pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
     pub const mock_output = @import("test/mock_output.zig");
@@ -113,7 +109,7 @@ pub const testing_support = struct {
     pub const bugfix_regression_test = @import("test/bugfix_regression_test.zig");
     pub const event_loop_rumble_test = @import("test/event_loop_rumble_test.zig");
     pub const uhid_output_dispatch_test = @import("test/uhid_output_dispatch_test.zig");
-    pub const wave6_pidff_e2e_test = @import("test/wave6_pidff_e2e_test.zig");
+    pub const pidff_e2e_test = @import("test/pidff_e2e_test.zig");
     pub const chord_output_e2e_test = @import("test/chord_output_e2e_test.zig");
     pub const chord_switch_e2e_test = @import("test/chord_switch_e2e_test.zig");
     pub const interpreter_props = @import("test/properties/interpreter_props.zig");
@@ -138,9 +134,9 @@ pub const testing_support = struct {
     pub const layer_fsm_drt_props = @import("test/properties/layer_fsm_drt_props.zig");
     pub const reference_interp = @import("test/reference_interp.zig");
     pub const gen = @import("test/gen/gen.zig");
-    // Phase 13 Wave 1 T5: surface fixture + simulator harness for unit tests.
-    // Integration test with real /dev/uhid lives in its own build target
-    // (`zig build test-integration` → steam_deck_uhid_e2e_test).
+    // Surface fixture + simulator harness for unit tests. Integration test with
+    // real /dev/uhid lives in its own build target (`zig build test-integration`
+    // → steam_deck_uhid_e2e_test).
     pub const steam_deck_fixture = @import("test/fixtures/steam_deck_reports.zig");
     pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
     pub const uhid_test_cleanup = @import("test/uhid_test_cleanup.zig");
@@ -1084,9 +1080,9 @@ pub fn main() !void {
         break :blk null;
     };
 
-    // Phase 13 Wave 3: one-shot daemon has a single device with no phys_key
-    // probe, so buildUniq falls back to the counter. Starting at 1 keeps the
-    // instance hex "0001" stable across runs for consistent uniq strings.
+    // One-shot daemon has a single device with no phys_key probe, so buildUniq
+    // falls back to the counter. Starting at 1 keeps the instance hex "0001"
+    // stable across runs for consistent uniq strings.
     var main_uniq_counter: u16 = 1;
     var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null, &main_uniq_counter, .{}) catch |err| {
         std.log.err("failed to init device: {}", .{err});
@@ -1100,16 +1096,15 @@ pub fn main() !void {
 test {
     // refAllDeclsRecursive walks nested namespaces (notably `testing_support`)
     // so any `pub const x = @import("test/...")` inside is picked up. Without
-    // the `Recursive` variant, files registered ONLY under testing_support are
-    // silently dropped from `zig build test`. See HISTORICAL NOTE on the
-    // testing_support struct above.
+    // the `Recursive` variant, files registered only under testing_support are
+    // silently dropped from `zig build test`.
     @setEvalBranchQuota(20000);
     std.testing.refAllDeclsRecursive(@This());
     _ = @import("core/rumble_scheduler.zig");
     _ = @import("io/uniq.zig");
     _ = @import("test/bugfix_regression_test.zig");
     // uhid_uniq_pairing_test is EXCLUDED: it opens /dev/uhid and triggers
-    // hid_hw_open in the kernel, which can deadlock under SIGKILL/OOM (Wave A4
+    // hid_hw_open in the kernel, which can deadlock under SIGKILL/OOM (the
     // SIGTERM handler has no SIGKILL path). Run via: zig build test-uhid
     _ = @import("test/macro_gamepad_button_test.zig");
     _ = @import("test/macro_e2e_test.zig");
@@ -1582,7 +1577,7 @@ test "main: parseDeviceFromStatus: old 'active=' format returns null (regression
     try testing.expectEqual(@as(?[]const u8, null), parseDeviceFromStatus("STATUS device=Some Pad active=true\n"));
 }
 
-test "main: parseDeviceFromStatus + findDefaultMapping resolves no-arg switch (issue #136)" {
+test "main: parseDeviceFromStatus + findDefaultMapping resolves no-arg switch" {
     const allocator = std.testing.allocator;
     const user_config_mod = @import("config/user_config.zig");
     const toml = @import("toml");
@@ -1607,7 +1602,7 @@ test "main: parseDeviceFromStatus + findDefaultMapping resolves no-arg switch (i
     try testing.expectEqualStrings("fps", mapping.?);
 }
 
-test "main: parseDeviceFromStatus + findDefaultMapping: no default_mapping returns null (issue #136 negative)" {
+test "main: parseDeviceFromStatus + findDefaultMapping: no default_mapping returns null" {
     const allocator = std.testing.allocator;
     const user_config_mod = @import("config/user_config.zig");
     const toml = @import("toml");

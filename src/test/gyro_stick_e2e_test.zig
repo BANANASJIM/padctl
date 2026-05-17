@@ -1,4 +1,4 @@
-// Phase 2b end-to-end integration tests (L0/L1).
+// Gyro-stick end-to-end integration tests (L0/L1).
 // All tests drive Mapper directly; no real fds or devices needed.
 
 const std = @import("std");

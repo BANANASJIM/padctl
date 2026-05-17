@@ -1,5 +1,4 @@
 // CLI E2E tests: install paths, XDG resolution, scan output/matching, config subcommands.
-// Split from phase6_e2e_test.zig (non-validate sections).
 
 const std = @import("std");
 const testing = std.testing;

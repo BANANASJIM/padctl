@@ -139,11 +139,11 @@ test "boundary: chain deadzone(1000), scale(-32768, 32767)" {
     }
 }
 
-// issue #215 / ADR-017: production negate/abs MUST match the Lean oracle's
-// single-point saturation at the type-min boundary `val == -(t_max+1) -> t_max`.
+// Production negate/abs MUST match the Lean oracle's single-point saturation
+// at the type-min boundary: `val == -(t_max+1) -> t_max`.
 // Asserted directly via runTransformChain (DRT-independent). Reverting the
 // single-point guard in interpreter.zig makes this test FAIL.
-test "issue215: negate/abs single-point saturation matches Lean oracle" {
+test "negate/abs single-point saturation matches Lean oracle" {
     // i8: t_max = 127, type-min = -(127+1) = -128.
     {
         var neg = interpreter.compileTransformChain("negate", .i8);

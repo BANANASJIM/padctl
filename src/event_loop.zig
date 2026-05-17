@@ -43,7 +43,7 @@ pub const Slots = struct {
 };
 
 // signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces;
-// plus 1 uinput FF slot and 1 UHID output slot (Wave 6 PID FFB) appended after device fds.
+// plus 1 uinput FF slot and 1 UHID output slot appended after device fds.
 pub const FIXED_SLOT_COUNT: usize = 5;
 pub const MAX_DEVICE_INTERFACES: usize = 6;
 pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 2;
@@ -227,7 +227,7 @@ pub fn disarmTimer(fd: posix.fd_t) void {
     }
 }
 
-/// Issue #183: fire a CHORD_SWITCH command at the daemon's own control socket.
+/// Fire a CHORD_SWITCH command at the daemon's own control socket.
 /// Best-effort, fire-and-forget — runs on the device thread, the supervisor
 /// performs the actual mapping switch on its own thread. Failure to connect
 /// or send is logged at debug only; chord state is reset every modifier
@@ -250,10 +250,9 @@ pub const EventLoopContext = struct {
     mapper: ?*mapper_mod.Mapper = null,
     aux_output: ?AuxOutputDevice = null,
     touchpad_output: ?TouchpadOutputDevice = null,
-    /// Phase 13 Wave 3: optional IMU companion output. Populated when the
-    /// UHID backend is active and `[output.imu]` is present. `emit` receives
-    /// the same `GamepadState` as the primary — the IMU encoder reads only
-    /// accel/gyro axes and ignores the rest.
+    /// Optional IMU companion output. Populated when the UHID backend is active
+    /// and `[output.imu]` is present. `emit` receives the same `GamepadState`
+    /// as the primary — the IMU encoder reads only accel/gyro axes.
     imu_output: ?OutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
@@ -265,7 +264,7 @@ pub const EventLoopContext = struct {
     generic_output: ?GenericOutputDevice = null,
     /// Device name for log correlation (set from device_config.device.name).
     device_tag: []const u8 = "unknown",
-    /// Wave 6 T3: primary UHID device to drain for UHID_OUTPUT events.
+    /// Primary UHID device to drain for UHID_OUTPUT events.
     /// Set when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     uhid_primary: ?*UhidDevice = null,
 };
@@ -358,7 +357,7 @@ pub const EventLoop = struct {
     /// to fire a stop frame. See src/core/rumble_scheduler.zig.
     rumble_scheduler: RumbleScheduler,
     uinput_ff_slot: ?usize,
-    /// Slot for the primary UHID fd polled for UHID_OUTPUT events (Wave 6 FFB).
+    /// Slot for the primary UHID fd polled for UHID_OUTPUT events.
     uhid_output_slot: ?usize,
     disconnected: bool,
     running: bool,
@@ -460,7 +459,7 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
-    /// Register the primary UHID fd for `UHID_OUTPUT` polling (Wave 6 PID FFB).
+    /// Register the primary UHID fd for `UHID_OUTPUT` polling.
     /// Only called when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     pub fn addUhidOutput(self: *EventLoop, fd: posix.fd_t) !void {
         const slot = self.fd_count;
@@ -530,7 +529,7 @@ pub const EventLoop = struct {
             }
 
             // Layer timerfd (slot 2) is handled inline; macro timerfd (slot 4) is
-            // drained after the device fd loop below — see issue #79.
+            // drained after the device fd loop below.
 
             // Check rumble auto-stop timerfd (slot 3).
             if (self.pollfds[Slots.rumble_stop].revents & posix.POLL.IN != 0) {
@@ -645,8 +644,8 @@ pub const EventLoop = struct {
                 }
             }
 
-            // Drain UHID_OUTPUT events (Wave 6 PID FFB passthrough).
-            // Only active when uhid_output_slot is set (backend=uhid, kind=pid).
+            // Drain UHID_OUTPUT events. Only active when uhid_output_slot is set
+            // (backend=uhid, kind=pid).
             if (self.uhid_output_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
                     if (ctx.uhid_primary) |uhid_dev| {
@@ -772,11 +771,10 @@ pub const EventLoop = struct {
                 }
             }
 
-            // Layer timerfd (slot 2): drained after device fds so an
-            // on-wakeup tap release reaches apply() before PENDING is
-            // promoted to ACTIVE (issue #79). Routes to the layer-only
-            // expiry handler so a concurrent macro fd expiry on slot 4
-            // does not cause the layer half to run twice.
+            // Layer timerfd (slot 2): drained after device fds so an on-wakeup
+            // tap release reaches apply() before PENDING is promoted to ACTIVE.
+            // Routes to the layer-only expiry handler so a concurrent macro fd
+            // expiry on slot 4 does not cause the layer half to run twice.
             if (self.pollfds[Slots.layer_timer].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
@@ -789,9 +787,9 @@ pub const EventLoop = struct {
             }
 
             // Macro timerfd (slot 4): separate fd so macro delays cannot be
-            // clobbered by layer-hold arm/disarm (issue #72). Routes to the
-            // macro-only expiry handler — must not promote a PENDING layer
-            // when a macro `delay` shorter than hold_timeout fires.
+            // clobbered by layer-hold arm/disarm. Routes to the macro-only
+            // expiry handler — must not promote a PENDING layer when a macro
+            // `delay` shorter than hold_timeout fires.
             if (self.pollfds[Slots.macro_timer].revents & posix.POLL.IN != 0) {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.macro_timer_fd, &expiry) catch {};
@@ -1163,7 +1161,7 @@ test "event_loop: EventLoop mini: device frame dispatched to interpreter and out
     try testing.expectEqual(@as(?i16, 500), out.diffs.items[0].ax);
 }
 
-// --- T8/T9: Adaptive trigger tests ---
+// --- Adaptive trigger tests ---
 
 const mapping_mod = @import("config/mapping.zig");
 

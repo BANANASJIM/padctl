@@ -8,9 +8,8 @@
 // Mutation that triggers failure: delete the `tracker.mark(.gyro_deactivated)` line
 // in transition_id.zig → test prints "missing classes (1): gyro_deactivated" and fails.
 //
-// This file is intentionally separate from generative_mapper_props.zig to avoid
-// merge conflicts with PR #242 (branch fix/test-f1-f4-generative-drt), which is
-// concurrently rewriting that file.
+// This file is intentionally separate from generative_mapper_props.zig to keep
+// coverage assertions isolated from the generative property infrastructure.
 
 const std = @import("std");
 const testing = std.testing;

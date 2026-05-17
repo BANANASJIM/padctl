@@ -234,7 +234,7 @@ pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64
         // at the single type-min point `val == Int.negSucc tMax` (= -(t_max+1))
         // to t_max, otherwise raw -val / natAbs. This is a SINGLE-POINT guard,
         // not a range clamp — broadening it would clamp scale→negate stick
-        // values to ±t_max (severe real-device regression). See ADR-017.
+        // values to ±t_max (severe real-device regression).
         const type_min: i64 = -(t_max + 1);
         val = switch (tr.op) {
             .negate => if (val == type_min) t_max else if (val == std.math.minInt(i64)) std.math.maxInt(i64) else -val,
@@ -1438,7 +1438,7 @@ test "interpreter: checksum crc32 with seed" {
     try testing.expectEqual(@as(?u64, null), delta.buttons);
 }
 
-// T3: boundary reports
+// --- boundary report tests ---
 
 test "interpreter: empty report (0 bytes) returns null without panic" {
     const allocator = testing.allocator;
@@ -1518,7 +1518,7 @@ test "interpreter: field at last valid offset (offset = size - 1) reads correctl
     try testing.expectEqual(@as(?u8, 0xAB), delta.lt);
 }
 
-// T4: extractBits unit tests
+// --- extractBits unit tests ---
 
 test "interpreter: extractBits single byte, low nibble" {
     const raw = [_]u8{0xAB}; // 0b10101011
@@ -1588,7 +1588,7 @@ test "interpreter: signExtend 1-bit" {
     try testing.expectEqual(@as(i32, -1), signExtend(1, 1));
 }
 
-// T4: interpreter round-trip with bits DSL
+// --- interpreter round-trip with bits DSL ---
 
 const bits_toml =
     \\[device]
@@ -1710,7 +1710,7 @@ test "interpreter: FieldTag.dpad: hat switch values 0-7 decode correctly" {
     }
 }
 
-// T5: mutation audit — each test proves the suite can catch a specific mutation
+// --- mutation audit: each test proves the suite can catch a specific mutation ---
 
 // Mutation 1: readFieldByTag offset off-by-one (raw[off+1] instead of raw[off])
 // If the offset were incremented by 1, a field declared at offset=3 would read

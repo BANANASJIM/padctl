@@ -1,6 +1,4 @@
-//! Phase 13 Wave 6 T6 — Layer 1 e2e integration tests.
-//!
-//! Covers the full FFB passthrough chain:
+//! Layer 1 e2e integration tests for the FFB passthrough chain:
 //!   UHID_OUTPUT injection → FfbForwarder → physical hidraw write.
 //!
 //! All tests use pipe2 fixtures — no /dev/uhid, no /dev/hidraw, zero privilege.
@@ -160,11 +158,11 @@ fn drainAndForward(
     return count;
 }
 
-// TP30: Full chain round-trip — UHID_OUTPUT → FfbForwarder → physical hidraw.
+// Full chain round-trip — UHID_OUTPUT → FfbForwarder → physical hidraw.
 // Uses UhidDevice.initWithFd directly with the pipe read-end (same as T3
 // dispatch tests) so the test can both inject events and assert hidraw writes.
 // FfbForwarder and UhidDevice are wired manually without running the event loop.
-test "wave6_pidff: end-to-end UHID_OUTPUT → hidraw forward (Set Effect / Effect Op / Device Control)" {
+test "pidff: end-to-end UHID_OUTPUT → hidraw forward (Set Effect / Effect Op / Device Control)" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -228,10 +226,10 @@ test "wave6_pidff: end-to-end UHID_OUTPUT → hidraw forward (Set Effect / Effec
     try testing.expectEqual(@as(u64, 0), fwd.drops_eagain);
 }
 
-// TP31: buildForPid emits all 8 PID Usages required by kernel
+// buildForPid emits all 8 PID Usages required by kernel
 // pidff_find_reports (drivers/hid/usbhid/hid-pidff.c). Kernel matches by
 // HID Usage on PID Usage Page 0x0F, NOT by Report ID.
-test "wave6_pidff: PID descriptor exposes all 8 kernel-required Usages" {
+test "pidff: PID descriptor exposes all 8 kernel-required Usages" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -271,8 +269,8 @@ test "wave6_pidff: PID descriptor exposes all 8 kernel-required Usages" {
     );
 }
 
-// TP34 (from test-plan): clone_vid_pid=true passes real VID/PID to UHID_CREATE2.
-test "wave6_pidff: VID/PID clone passes through to UHID_CREATE2" {
+// clone_vid_pid=true passes real VID/PID to UHID_CREATE2.
+test "pidff: VID/PID clone passes through to UHID_CREATE2" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -321,8 +319,8 @@ test "wave6_pidff: VID/PID clone passes through to UHID_CREATE2" {
     try testing.expectEqual(@as(u32, 0x1211), primary_ev.payload.product);
 }
 
-// TP32: EAGAIN on physical hidraw increments drops_eagain without panicking.
-test "wave6_pidff: physical hidraw EAGAIN → drops_eagain incremented" {
+// EAGAIN on physical hidraw increments drops_eagain without panicking.
+test "pidff: physical hidraw EAGAIN → drops_eagain incremented" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -367,8 +365,8 @@ test "wave6_pidff: physical hidraw EAGAIN → drops_eagain incremented" {
     try testing.expectEqual(.active, fwd.state);
 }
 
-// TP33: Closing the physical hidraw write-end transitions forwarder to disabled.
-test "wave6_pidff: physical hidraw close → forwarder disabled" {
+// Closing the physical hidraw write-end transitions forwarder to disabled.
+test "pidff: physical hidraw close → forwarder disabled" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -417,10 +415,10 @@ test "wave6_pidff: physical hidraw close → forwarder disabled" {
     try testing.expectEqual(.disabled, fwd.state);
 }
 
-// TP35: No [output.force_feedback] block → ffb_forwarder must remain null after init.
+// No [output.force_feedback] block → ffb_forwarder must remain null after init.
 // Gating condition for the FFB path: ensures non-PID devices never get a forwarder wired,
 // preventing arbitrary UHID_OUTPUT bytes from leaking into the wrong hidraw fd.
-test "wave6_pidff: no force_feedback block → no FfbForwarder wired (TP35)" {
+test "pidff: no force_feedback block → no FfbForwarder wired" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 
@@ -481,8 +479,8 @@ test "wave6_pidff: no force_feedback block → no FfbForwarder wired (TP35)" {
     try testing.expectEqual(null, inst.ffb_forwarder);
 }
 
-// TP34 (second part): clone_vid_pid=false uses daemon identity 0xFADE:0xC001.
-test "wave6_pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
+// clone_vid_pid=false uses daemon identity 0xFADE:0xC001.
+test "pidff: clone_vid_pid=false uses daemon identity (0xFADE:0xC001)" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = testing.allocator;
 

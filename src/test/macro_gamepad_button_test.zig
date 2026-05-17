@@ -1,9 +1,6 @@
-// Regression tests for issue #99: macro steps must emit gamepad_button and
-// mouse_button targets in addition to keyboard keys.
-//
-// Before the fix, src/core/macro_player.zig:resolveKeyCode dropped any
-// RemapTargetResolved variant other than .key. `{ down = "LT" }` / `{ tap = "A" }`
-// inside a [[macro]] produced no output.
+// Macro steps must emit gamepad_button and mouse_button targets in addition to
+// keyboard keys. MacroPlayer.resolveKeyCode must handle all RemapTargetResolved
+// variants; dropping non-.key variants produces no output for those steps.
 //
 // These tests verify:
 //   1. `{ tap = "LT" }` sets the LT bit then clears it next frame.
@@ -34,7 +31,7 @@ fn btnBit(id: ButtonId) u64 {
     return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
 }
 
-test "macro #99: tap LT sets LT bit and schedules release next frame" {
+test "macro: tap LT sets LT bit and schedules release next frame" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{.{ .tap = "LT" }};
     const m = Macro{ .name = "t", .steps = &steps };
@@ -57,7 +54,7 @@ test "macro #99: tap LT sets LT bit and schedules release next frame" {
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.LT));
 }
 
-test "macro #99: down A then up A toggles A bit" {
+test "macro: down A then up A toggles A bit" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .{ .down = "A" }, .{ .up = "A" } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -76,7 +73,7 @@ test "macro #99: down A then up A toggles A bit" {
     try testing.expectEqual(@as(u64, 0), tap_release);
 }
 
-test "macro #99: down A with delay holds A bit between frames" {
+test "macro: down A with delay holds A bit between frames" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .{ .down = "A" }, .{ .delay = 10 }, .{ .up = "A" } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -93,14 +90,14 @@ test "macro #99: down A with delay holds A bit between frames" {
     try testing.expectEqual(btnBit(.A), injected & btnBit(.A));
 
     aux = .{};
-    // issue #72: now_ns must clear the 10ms delay deadline before step advances.
+    // now_ns must advance past the 10ms delay deadline before the step proceeds.
     const after_delay: i128 = 10 * std.time.ns_per_ms + 1;
     const done2 = try player.step(&aux, &q, &injected, &tap_release, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.A));
 }
 
-test "macro #99: down RT then cancel clears RT via emitPendingReleases" {
+test "macro: down RT then cancel clears RT via emitPendingReleases" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{ .{ .down = "RT" }, .{ .delay = 100 } };
     const m = Macro{ .name = "t", .steps = &steps };
@@ -123,7 +120,7 @@ test "macro #99: down RT then cancel clears RT via emitPendingReleases" {
     try testing.expectEqual(@as(usize, 0), aux2.len);
 }
 
-test "macro #99: tap mouse_left emits mouse_button aux events" {
+test "macro: tap mouse_left emits mouse_button aux events" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{.{ .tap = "mouse_left" }};
     const m = Macro{ .name = "t", .steps = &steps };
@@ -152,7 +149,7 @@ test "macro #99: tap mouse_left emits mouse_button aux events" {
     try testing.expectEqual(@as(u64, 0), injected);
 }
 
-test "macro #99: unknown target name silently skipped" {
+test "macro: unknown target name silently skipped" {
     const allocator = testing.allocator;
     const steps = [_]MacroStep{
         .{ .down = "NOT_A_REAL_THING" },
@@ -177,7 +174,7 @@ test "macro #99: unknown target name silently skipped" {
 // Integration-level test: full mapper path with a macro that emits a gamepad
 // button. Verifies the mapper correctly merges macro-injected bits into the
 // output GamepadState and clears tap bits on the next frame.
-test "macro #99 integration: macro:boost triggers LT via tap on output state" {
+test "macro integration: macro:boost triggers LT via tap on output state" {
     const allocator = testing.allocator;
 
     var ctx = try h.makeMapper(

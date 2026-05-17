@@ -284,7 +284,7 @@ pub fn planSystemctlUser(uid: std.posix.uid_t, sudo_user: ?[]const u8, sudo_uid:
 
 /// Decide whether this `install` invocation will ultimately start a user-scope
 /// padctl.service — and therefore must pre-create the XDG parent dirs so
-/// systemd v254+ does not auto-create the legacy-migration symlink. Issue #139.
+/// systemd v254+ does not auto-create the legacy-migration symlink.
 pub fn installWillStartUserService(
     is_root: bool,
     user_service_opt: ?bool,
@@ -320,8 +320,8 @@ pub const EnvSnapshot = struct {
 /// Single source of truth for every decision `install.run()` makes before it
 /// starts touching the filesystem. All derived axes are computed exactly once
 /// in `compute()` so later phases read a plain struct instead of re-deriving.
-/// Addresses the PR #148 gate bug where `effective_user_service` was re-tested
-/// at the wrong call site.
+/// All derived axes are computed exactly once so later phases read a plain
+/// struct instead of re-deriving, preventing decision drift between call sites.
 pub const InstallPlan = struct {
     // --- inputs (captured, not re-derived) ---
     opts: InstallOptions,

@@ -10,9 +10,11 @@
 //!     discovered `/dev/hidrawN` path.
 //!   - `injectReport(bytes)` sends a `UHID_INPUT2` with a caller-supplied
 //!     payload; padctl's hidraw reader observes it unchanged.
-//!   - `onFeatureReport(callback)` is a Wave 1 stub — wire with real
-//!     `UHID_FEATURE` kernel → userspace handling in Wave 3 when routing
-//!     switches land (see issue #126 for the 0x81 Steam-mode switch).
+//!   - `onFeatureReport(callback)` registers a callback invoked when the
+//!     caller's event loop receives a `UHID_FEATURE` request from the kernel
+//!     (e.g. a 0x81 Steam-mode switch query). The slot stores the callback
+//!     but does NOT deliver events automatically — the caller must poll the
+//!     UHID fd and dispatch `UHID_FEATURE` events to the callback manually.
 //!   - `destroy()` ships `UHID_DESTROY` and closes the fd.
 //!
 //! CI posture: every method gracefully skips when `/dev/uhid` is absent or
@@ -52,9 +54,10 @@ pub const CreateOptions = struct {
     hidraw_timeout_ms: u32 = 500,
 };
 
-/// Callback type for `onFeatureReport`. Wave 1 does not deliver events; the
-/// callback slot is preserved so Wave 3 routing can wire real kernel events
-/// without changing the test surface.
+/// Callback type for `onFeatureReport`. The slot stores a callback for
+/// UHID_FEATURE events received from the kernel. The callback is NOT invoked
+/// automatically — the caller must poll the UHID fd and dispatch UHID_FEATURE
+/// events explicitly.
 pub const FeatureCallback = *const fn (report_id: u8, data: []const u8) void;
 
 pub const UhidSimulator = struct {
@@ -127,9 +130,9 @@ pub const UhidSimulator = struct {
         };
     }
 
-    /// Register a feature-report callback for Wave 3 routing tests. Wave 1
-    /// stores the callback without invoking it — pair with the production
-    /// UHID event loop once wave 3 ships.
+    /// Register a callback for UHID_FEATURE events. The callback is stored
+    /// but not automatically invoked — the caller must poll the UHID fd and
+    /// dispatch UHID_FEATURE events to this slot.
     pub fn onFeatureReport(self: *UhidSimulator, cb: FeatureCallback) void {
         self.feature_cb = cb;
     }

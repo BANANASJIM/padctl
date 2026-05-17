@@ -57,7 +57,7 @@ pub fn sentinelPath(allocator: std.mem.Allocator, destdir: []const u8) ![]u8 {
 /// Proactive unbind / sentinel write is performed only when this install
 /// actually enables and starts a runnable user service. Pure predicate so
 /// tests can table-drive it; the absence of the sentinel is what makes the
-/// generated udev rule fail-safe (issue #137).
+/// generated udev rule fail-safe: absent sentinel ⇒ xpad keeps the device.
 pub fn shouldProactiveUnbind(plan: *const InstallPlan) bool {
     return plan.do_enable_systemctl and !plan.opts.no_enable;
 }
@@ -291,7 +291,7 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
     // udevadm trigger only sends add events; bind rules fire on the next
     // plug cycle. Proactively writing to sysfs unbind covers devices that
     // are already claimed by a blocking driver at install time — but only
-    // when this install actually starts a runnable service (issue #137),
+    // when this install actually starts a runnable service,
     // otherwise an unbound device would be left ownerless.
     if (!plan.staging_mode and plan.is_root and shouldProactiveUnbind(plan)) {
         probeAndUnbindDrivers(allocator, entries, "");
@@ -415,7 +415,7 @@ pub fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []con
     try buf.appendSlice(allocator, "\nSUBSYSTEM==\"misc\", KERNEL==\"uinput\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
     try buf.appendSlice(allocator, "SUBSYSTEM==\"misc\", KERNEL==\"uhid\",   TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n");
 
-    // Per-VID/PID udev rules for cloned UHID cards (clone_vid_pid=true, Wave 6 PID FFB).
+    // Per-VID/PID udev rules for cloned UHID cards (clone_vid_pid=true).
     // hid-universal-pidff binds by modalias on the cloned VID/PID; uaccess must
     // follow so the user session retains access to the resulting hidraw node.
     for (entries) |e| {
@@ -464,7 +464,7 @@ pub fn generateDriverBlockRulesFromEntries(allocator: std.mem.Allocator, entries
             // Unbind only when the service-enabled sentinel exists. If padctl
             // is not deployed/enabled the sentinel is absent, `test -e` fails,
             // `&&` short-circuits, and xpad keeps the device so the controller
-            // still works as a plain kernel gamepad (issue #137 fail-safe).
+            // still works as a plain kernel gamepad (fail-safe: absent sentinel → skip unbind).
             const line = try std.fmt.allocPrint(
                 allocator,
                 "ACTION==\"add|bind\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", DRIVER==\"{s}\", RUN+=\"/bin/sh -c 'test -e {s} && echo %k > /sys/bus/usb/drivers/{s}/unbind'\"\n# {s}\n",

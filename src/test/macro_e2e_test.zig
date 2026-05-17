@@ -1,4 +1,4 @@
-// Phase 2c end-to-end integration tests (T7: L0/L1).
+// Macro end-to-end integration tests (L0/L1).
 // Covers: multi-device parallel, macro playback, pause_for_release, hot-reload, layer macro cleanup.
 
 const std = @import("std");
@@ -84,7 +84,7 @@ fn testInstance(
     };
 }
 
-// --- T7.1-2: Multi-device parallel (L1) ---
+// --- Multi-device parallel (L1) ---
 
 test "macro: multi-device — stop(A) does not affect B" {
     const allocator = testing.allocator;
@@ -147,7 +147,7 @@ test "macro: multi-device — independent write sinks" {
     try testing.expectEqual(@as(usize, 0), mock_b.write_log.items.len);
 }
 
-// --- T7.3-5: Macro playback (L0) ---
+// --- Macro playback (L0) ---
 
 test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
     const allocator = testing.allocator;
@@ -191,7 +191,7 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
     var aux2 = AuxEventList{};
     var injected2: u64 = 0;
     var tap_rel2: u64 = 0;
-    // issue #72: advance now_ns past the 50ms delay deadline.
+    // Advance now_ns past the 50ms delay deadline so the step can proceed.
     const after_delay: i128 = 50 * std.time.ns_per_ms + 1;
     const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, after_delay);
     try testing.expect(done2);
@@ -266,7 +266,7 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
     }
 }
 
-// --- T7.6: Layer switch clears active macros (L0) ---
+// --- Layer switch clears active macros (L0) ---
 
 test "macro: layer switch while macro active — held keys released, macros cleared" {
     const allocator = testing.allocator;
@@ -296,7 +296,7 @@ test "macro: layer switch while macro active — held keys released, macros clea
     _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
 
-    // Press LT — PENDING entry alone must not clear macros (issue #79 fix).
+    // Press LT — PENDING entry alone must not clear macros.
     const lt_mask = btnMask(.LT);
     _ = try m.apply(.{ .buttons = m1_mask | lt_mask }, 16, 0);
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
@@ -322,7 +322,7 @@ test "macro: layer switch while macro active — held keys released, macros clea
     try testing.expect(found_shift_release);
 }
 
-// --- T7.7: Hot-reload — mapping replaced, new mapping effective (L0) ---
+// --- Hot-reload — mapping replaced, new mapping effective (L0) ---
 
 test "macro: hot-reload — updateMapping swaps config; next apply uses new mapping" {
     const allocator = testing.allocator;
@@ -483,7 +483,7 @@ test "macro: mapper macro trigger — no second player on held button (no re-tri
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
 
-// --- Issue #72 regression: delay must yield frame ---
+// --- delay must yield frame ---
 //
 // Reporter @xl666: with steps [down=Home, delay=100, tap=A, delay=100, up=Home]
 // every poll-frame `Mapper.apply` resumes the player, so subsequent steps fire
@@ -559,7 +559,7 @@ test "macro #72: delay must gate subsequent steps until timer expiry" {
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
 
-// --- Issue #119: repeat_delay_ms — turbo / combo while-held ---
+// --- repeat_delay_ms — turbo / combo while-held ---
 //
 // Reporter @VaisVaisov: bind a macro to RM, enable repeat. While the trigger is
 // held the macro restarts after repeat_delay_ms; releasing the trigger lets the

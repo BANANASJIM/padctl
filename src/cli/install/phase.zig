@@ -52,7 +52,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     try ensureDirAll(allocator, plan.share_dir);
     try ensureDirAll(allocator, plan.udev_dir);
 
-    // PR #148 v3 sudo_hop XDG seeding — gate must cover root+SUDO_USER path.
+    // Gate must cover root+SUDO_USER path (sudo_hop) for XDG dir seeding.
     if (plan.do_xdg_dirs) {
         const home = try migration.resolveTargetHome(allocator);
         defer allocator.free(home);
@@ -84,8 +84,8 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         mapping_failed = mapping_failed or binding_failed;
     }
 
-    // Sentinel gates the conditional driver-block udev rule (issue #137):
-    // present ⇒ unbind fires as before; absent ⇒ xpad keeps the device so a
+    // Sentinel gates the conditional driver-block udev rule:
+    // present ⇒ unbind fires; absent ⇒ xpad keeps the device so a
     // non-enabled install never leaves the controller ownerless. Always
     // clear it on the non-enable path so a re-install with --no-enable over
     // a previously-enabled install does not leave a stale sentinel.
@@ -229,7 +229,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         }
     }
 
-    // PR #145: cover both /lib/systemd/user/padctl.service and
+    // Cover both /lib/systemd/user/padctl.service and
     // /etc/systemd/user/padctl.service across upgrade paths.
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  info: removing legacy padctl-resume.service files if present\n") catch {};
     const files = [_][]const u8{
@@ -257,12 +257,12 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
-    // issue #137: drop the service-enabled sentinel so a future replug of a
+    // Drop the service-enabled sentinel so a future replug of a
     // block_kernel_drivers device is not unbound by a stale udev rule.
     udev.removeServiceSentinel(allocator, destdir);
 
-    // issue #137: the 61-padctl-driver-block rule + sentinel are now gone, so a
-    // controller that is still plugged in and currently unbound from xpad would
+    // The 61-padctl-driver-block rule + sentinel are now gone, so a
+    // controller still plugged in and currently unbound from xpad would
     // otherwise stay unbound until a physical replug (the REMOVE-side modprobe
     // only fires on a real `remove` uevent). Actively rebind it to the kernel
     // driver. Only on a live root uninstall (a destdir staging uninstall has no

@@ -80,7 +80,7 @@ test "regression: all corpus cases pass" {
 
 // --- targeted regression cases (do not fit the plain-frames corpus shape) ---
 
-test "regression targeted: issue #79 — tap-on-layer at hold_timeout-5ms emits tap" {
+test "regression targeted: tap-on-layer at hold_timeout-5ms emits tap" {
     // Pre-fix repro: apply() re-read CLOCK_MONOTONIC internally after the
     // timer handler ran; physical release at press+195ms drifted past the
     // 200ms hold_timeout, losing the tap. The fix threads a single
