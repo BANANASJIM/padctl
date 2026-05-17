@@ -30,7 +30,7 @@ const Cli = struct {
     device: ?[]const u8 = null,
     vid: ?u16 = null,
     pid: ?u16 = null,
-    interface_id: u8 = 0,
+    interface_id: ?u8 = null,
     duration_s: u32 = 30,
     output: ?[]const u8 = null,
     config_path: ?[]const u8 = null,
@@ -53,7 +53,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             cli.pid = try std.fmt.parseInt(u16, s, 0);
         } else if (std.mem.eql(u8, arg, "--interface")) {
             const s = args.next() orelse return error.MissingArgValue;
-            cli.interface_id = try std.fmt.parseInt(u8, s, 10);
+            cli.interface_id = try std.fmt.parseInt(u8, s, 10); // explicit override
         } else if (std.mem.eql(u8, arg, "--duration")) {
             const s = args.next() orelse return error.MissingArgValue;
             const trimmed = if (std.mem.endsWith(u8, s, "s")) s[0 .. s.len - 1] else s;
@@ -79,7 +79,8 @@ fn printHelp() void {
         \\
         \\Device selection (one required):
         \\  --device /dev/hidrawN    Open specific hidraw node
-        \\  --vid 0xVVVV --pid 0xPPPP [--interface N]  Discover by VID/PID
+        \\  --vid 0xVVVV --pid 0xPPPP   Discover by VID/PID (first matching interface)
+        \\  --interface N               Restrict discovery to interface N
         \\
         \\Init:
         \\  --config <path>          Device TOML config; runs [device.init] before recording
@@ -254,8 +255,9 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Resolve device path
+    // Resolve device path; also track the resolved interface for TOML output.
     var path_buf: [128]u8 = undefined;
+    var resolved_interface_id: u8 = 0;
     const device_path: []const u8 = if (cli.device) |d|
         d
     else blk: {
@@ -273,6 +275,7 @@ pub fn main() !void {
             std.process.exit(1);
         };
         defer allocator.free(p);
+        resolved_interface_id = hidraw_mod.readInterfaceId(p) orelse 0;
         break :blk try std.fmt.bufPrint(&path_buf, "{s}", .{p});
     };
 
@@ -330,7 +333,7 @@ pub fn main() !void {
         .name = dev_name,
         .vid = vid,
         .pid = pid,
-        .interface_id = cli.interface_id,
+        .interface_id = resolved_interface_id,
     };
 
     // Emit TOML

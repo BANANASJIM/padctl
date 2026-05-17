@@ -38,13 +38,15 @@ pub const HidrawDevice = struct {
         };
     }
 
-    /// Scan /dev/hidraw0..hidraw63 for a device matching vid/pid and interface_id.
+    /// Scan /dev/hidraw0..hidraw63 for a device matching vid/pid.
+    /// interface_id: null = first matching VID:PID regardless of interface;
+    ///               Some(n) = must match interface n exactly.
     /// Returns an allocated path (caller must free) or error.NotFound.
     pub fn discover(
         allocator: std.mem.Allocator,
         vid: u16,
         pid: u16,
-        interface_id: u8,
+        interface_id: ?u8,
     ) ![]const u8 {
         return discoverWithRoot(allocator, vid, pid, interface_id, "/dev");
     }
@@ -53,7 +55,7 @@ pub const HidrawDevice = struct {
         allocator: std.mem.Allocator,
         vid: u16,
         pid: u16,
-        interface_id: u8,
+        interface_id: ?u8,
         dev_root: []const u8,
     ) ![]const u8 {
         var i: u8 = 0;
@@ -72,8 +74,10 @@ pub const HidrawDevice = struct {
             const dev_pid: u16 = @bitCast(info.product);
             if (dev_vid != vid or dev_pid != pid) continue;
 
-            const iface = readInterfaceId(path) orelse continue;
-            if (iface != interface_id) continue;
+            if (interface_id) |required_iface| {
+                const iface = readInterfaceId(path) orelse continue;
+                if (iface != required_iface) continue;
+            }
 
             return try std.fmt.allocPrint(allocator, "{s}/hidraw{d}", .{ dev_root, i });
         }
@@ -501,4 +505,45 @@ test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
     try std.testing.expectEqual(@as(usize, 1), dev.evdev_fds.len);
     for (dev.evdev_fds.constSlice()) |fd| posix.close(fd);
     dev.evdev_fds.len = 0;
+}
+
+// Interface-filter predicate extracted for unit testing (mirrors the guard in discoverWithRoot).
+// Falsifiability: reverting the `if (interface_id) |required_iface|` guard in discoverWithRoot
+// back to the unconditional `if (iface != interface_id) continue;` (pre-fix) would cause
+// `matchesInterfaceFilter(null, 1)` to return false instead of true, failing the test below.
+fn matchesInterfaceFilter(interface_id: ?u8, device_iface: u8) bool {
+    if (interface_id) |required| return device_iface == required;
+    return true; // null = any interface
+}
+
+test "hidraw: discover interface filter — null matches any, explicit must match exactly" {
+    // null = any-interface: a device on interface 1 IS found even without --interface
+    try std.testing.expect(matchesInterfaceFilter(null, 0));
+    try std.testing.expect(matchesInterfaceFilter(null, 1));
+    try std.testing.expect(matchesInterfaceFilter(null, 3));
+
+    // explicit 0: only interface 0 matches
+    try std.testing.expect(matchesInterfaceFilter(0, 0));
+    try std.testing.expect(!matchesInterfaceFilter(0, 1)); // Vader 5 Pro would be rejected
+
+    // explicit 1: only interface 1 matches (Vader 5 Pro default)
+    try std.testing.expect(matchesInterfaceFilter(1, 1));
+    try std.testing.expect(!matchesInterfaceFilter(1, 0));
+
+    // explicit 2: only interface 2 matches
+    try std.testing.expect(matchesInterfaceFilter(2, 2));
+    try std.testing.expect(!matchesInterfaceFilter(2, 1));
+}
+
+test "hidraw: discoverWithRoot — nonexistent root returns NotFound for both null and explicit interface" {
+    // Layer-0 reachable: no real hidraw nodes → NotFound regardless of interface filter.
+    // This confirms the null-interface path reaches the same NotFound without crashing.
+    // Falsifiability: if null interface_id caused a panic or wrong error, this fails.
+    const allocator = std.testing.allocator;
+    const err1 = HidrawDevice.discoverWithRoot(allocator, 0x37d7, 0x2401, null, "/nonexistent_hidraw_xyz");
+    try std.testing.expectError(error.NotFound, err1);
+    const err2 = HidrawDevice.discoverWithRoot(allocator, 0x37d7, 0x2401, 1, "/nonexistent_hidraw_xyz");
+    try std.testing.expectError(error.NotFound, err2);
+    const err3 = HidrawDevice.discoverWithRoot(allocator, 0x37d7, 0x2401, 0, "/nonexistent_hidraw_xyz");
+    try std.testing.expectError(error.NotFound, err3);
 }

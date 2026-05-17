@@ -75,8 +75,22 @@ The node that produces continuous output when you press buttons or move sticks i
 
 ### Method 1: padctl-capture (recommended)
 
+Discover by VID:PID — padctl-capture automatically picks the first matching interface:
+
 ```bash
-padctl-capture --device /dev/hidraw3 --duration 30 --output capture.bin
+sudo padctl-capture --vid 0x054c --pid 0x0ce6 --duration 30 --output capture.toml
+```
+
+Or open a specific node directly:
+
+```bash
+padctl-capture --device /dev/hidraw3 --duration 30 --output capture.toml
+```
+
+If a device exposes multiple HID interfaces and you want to target a specific one, use `--interface N`:
+
+```bash
+sudo padctl-capture --vid 0x054c --pid 0x0ce6 --interface 3 --duration 30 --output capture.toml
 ```
 
 While capturing, do each action one at a time with a pause between:
