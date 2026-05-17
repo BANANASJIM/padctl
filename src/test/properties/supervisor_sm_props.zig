@@ -292,7 +292,7 @@ test "SM: attach two devices → detach one → count still 2, one suspended" {
     sup.stopAll();
 }
 
-// --- regression: issue #93 — ADD before REMOVE drained ------------------
+// --- regression: ADD before REMOVE drained ------------------
 
 test "regression-93: ADD before REMOVE completes must not silent-drop" {
     // Scenario (Harbdrain, 2026-04-22): controller unplugged and re-plugged
@@ -450,17 +450,17 @@ test "regression-93: orphan managed entry (devname==null) with matching phys_key
     sup.stopAll();
 }
 
-// --- regression: issue #131-A — zombie uinput after permanent disconnect ---
+// --- regression: zombie uinput after permanent disconnect ---
 
-test "issue-131-A: suspend grace window expires → managed instance torn down if no ADD within grace_sec" {
-    // Scenario: PR #114 introduced `detach()` → `suspended = true` to survive
-    // wireless sleep/wake without losing the virtual gamepad. But if the
-    // physical device is gone permanently (battery dead, cable unplugged)
-    // the managed entry lingers forever → zombie uinput node.
+test "suspend grace window expires → managed instance torn down if no ADD within grace_sec" {
+    // Scenario: `detach()` → `suspended = true` lets the virtual gamepad
+    // survive wireless sleep/wake. But if the physical device is gone
+    // permanently (battery dead, cable unplugged) the managed entry lingers
+    // forever → zombie uinput node.
     //
-    // Fix: `suspend_grace_sec` schedules a deadline at detach time; when
+    // `suspend_grace_sec` schedules a deadline at detach time; when
     // `gcExpiredGrace(now_ns)` runs past the deadline the managed entry is
-    // fully torn down (equivalent to pre-#114 `detachFull`).
+    // fully torn down.
 
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);
@@ -627,19 +627,18 @@ test "issue-131-A: suspend_grace_sec=0 disables grace window (legacy pre-#114 be
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
-// --- regression: PR #134 B1 — rebind failure paths must not corrupt state ---
+// --- regression: rebind failure paths must not corrupt state ---
 
 test "T-B1a: rebind dupe OOM preserves suspended + grace_deadline (no zombie join)" {
-    // PR #134 review BLOCKING B1: the original rebind block flipped
-    // `m.suspended = false` + cleared `grace_deadline_ns` before the
-    // three `dupe` calls. An OOM mid-sequence left `suspended=false`
-    // with a detached (already-joined) thread handle, so any later
-    // `stopAll` / `reload` would double-join → pthread_join UB.
+    // The original rebind block flipped `m.suspended = false` + cleared
+    // `grace_deadline_ns` before the three `dupe` calls. An OOM mid-sequence
+    // left `suspended=false` with a detached (already-joined) thread handle,
+    // so any later `stopAll` / `reload` would double-join → pthread_join UB.
     //
-    // Fix: `finalizeRebind` only commits state after every fallible op
-    // succeeds. This test injects a FailingAllocator so the first dupe
-    // OOMs and asserts the invariants: suspended still true,
-    // grace_deadline_ns still set, and GC still reclaims the entry.
+    // `finalizeRebind` must only commit state after every fallible op succeeds.
+    // This test injects a FailingAllocator so the first dupe OOMs and asserts
+    // the invariants: suspended still true, grace_deadline_ns still set, and
+    // GC still reclaims the entry.
 
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);
@@ -680,16 +679,15 @@ test "T-B1a: rebind dupe OOM preserves suspended + grace_deadline (no zombie joi
 }
 
 test "T-B1b: rebind restart failure preserves suspended + grace_deadline" {
-    // Second half of B1: the original restart-failure branch flipped
-    // `m.suspended` back to true but left `grace_deadline_ns = null`,
-    // so `gcExpiredGrace` (`deadline orelse continue`) skipped the
-    // entry forever — a permanent zombie, which is the exact bug
-    // PR #134 claims to fix.
+    // The original restart-failure branch flipped `m.suspended` back to true
+    // but left `grace_deadline_ns = null`, so `gcExpiredGrace`
+    // (`deadline orelse continue`) skipped the entry forever — a permanent
+    // zombie uinput node.
     //
-    // Fix: `finalizeRebind` errors out before touching any commit
-    // field. This test forces the restart failure via
-    // `test_fail_rebind_restart` and asserts both `suspended` and
-    // `grace_deadline_ns` survive, so the grace GC still fires.
+    // `finalizeRebind` must error out before touching any commit field. This
+    // test forces the restart failure via `test_fail_rebind_restart` and
+    // asserts both `suspended` and `grace_deadline_ns` survive so the grace
+    // GC still fires.
 
     const allocator = testing.allocator;
     const parsed = try device_mod.parseString(allocator, minimal_toml);

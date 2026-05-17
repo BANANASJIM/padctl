@@ -16,7 +16,7 @@ const DeviceInfo = toml_gen_mod.DeviceInfo;
 const GamepadState = state_mod.GamepadState;
 const ButtonId = state_mod.ButtonId;
 
-// --- T1: capture analyse ---
+// --- capture analyse ---
 
 test "capture: 32-byte frames — magic prefix detected" {
     const allocator = testing.allocator;
@@ -136,7 +136,7 @@ test "capture: button detection — bit 3 of byte 11, 6 toggles, high confidence
     try testing.expect(found);
 }
 
-// --- T2: TOML skeleton generation ---
+// --- TOML skeleton generation ---
 
 test "capture: emitToml — contains [device], [[report]], [report.fields]" {
     const allocator = testing.allocator;
@@ -173,7 +173,7 @@ test "capture: emitToml — contains [device], [[report]], [report.fields]" {
     try testing.expect(std.mem.indexOf(u8, out, "\"u8\"") != null);
 }
 
-// --- T3: debug render ---
+// --- debug render ---
 
 test "capture: renderFrame — ANSI sequences present" {
     var buf: [8192]u8 = undefined;
@@ -215,7 +215,7 @@ test "capture: renderFrame — pressed button differs from released" {
     try testing.expect(!std.mem.eql(u8, fbs_on.getWritten(), fbs_off.getWritten()));
 }
 
-// --- T4: #264 --device / --vid:pid interface resolution ---
+// --- --device / --vid:pid interface resolution ---
 //
 // Falsifiability (re-derive): the production line under test is in
 // src/capture/resolve.zig:

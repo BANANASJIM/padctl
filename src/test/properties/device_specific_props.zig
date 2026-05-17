@@ -84,7 +84,7 @@ const cases = [_]DeviceCase{
     },
     .{
         .path = "devices/valve/steam-deck.toml",
-        .iface = 2, // Wired interface 2 per hid-steam kernel driver (see PR #122)
+        .iface = 2, // Wired interface 2 per hid-steam kernel driver
         .match_offset = 2, // report_type byte in envelope (0x01 0x00 0x09 0x40...)
         .match_byte = 0x09,
         .size = 64,

@@ -1,6 +1,4 @@
 // Validate E2E tests: device config validation, emulate presets, docgen, parseFile.
-// Merged from phase4_e2e_test.zig (validate/emulate/docgen/parseFile) and
-// phase6_e2e_test.zig (validate section).
 
 const std = @import("std");
 const testing = std.testing;

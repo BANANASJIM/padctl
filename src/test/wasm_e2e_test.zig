@@ -1,5 +1,4 @@
 // WASM E2E tests: mock plugin processReport modes, load error propagation.
-// Split from phase4_e2e_test.zig (WASM section).
 
 const std = @import("std");
 const testing = std.testing;

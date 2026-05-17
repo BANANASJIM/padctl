@@ -4,9 +4,9 @@
 //!
 //! 1. `steam_deck_fixture_round_trip` — uses the fixture generator directly
 //!    against the interpreter, no UHID involved. Proves that the synthetic
-//!    0x09 envelope matches the TOML (Phase 13 Wave 1 regression: if the
-//!    fixture drifts away from `devices/valve/steam-deck.toml`, this test
-//!    fails even on unprivileged CI runners).
+//!    0x09 envelope matches the TOML. If the fixture drifts away from
+//!    `devices/valve/steam-deck.toml`, this test fails even on unprivileged
+//!    CI runners.
 //!
 //! 2. `steam_deck_uhid_end_to_end` — uses `UhidSimulator` to stand up a real
 //!    kernel hidraw node, reads bytes back out through it, then feeds them
@@ -14,9 +14,8 @@
 //!    or an explicit udev rule). Skips cleanly everywhere else.
 //!
 //! Guardrail: the fixture scenario asserts on `delta.ax` / `delta.buttons`
-//! so anyone who changes the TOML in a way that breaks Wave 3 routing (bit
-//! indices, match offset, stick offsets) discovers it here rather than on
-//! hardware.
+//! so anyone who changes the TOML in a way that breaks routing (bit indices,
+//! match offset, stick offsets) discovers it here rather than on hardware.
 //!
 //! Interface id: Steam Deck declares `[[device.interface]] id = 2` and the
 //! 0x09 input report is scoped to `interface = 2` in the TOML. The

@@ -105,7 +105,7 @@ fn splitLayerFsmRow(line: []const u8) [4][]const u8 {
 // The arity-defensive parser below accepts BOTH the current 4-field form
 // (hex_bytes omitted) and a future 5-field form (hex_bytes populated), and
 // FAILS LOUDLY with the row index on any other arity, so a future populated
-// column can never silently shift `expected` to the wrong column (#237-trap).
+// column can never silently shift `expected` to the wrong column.
 //
 // Production mapping note: production maps a source bit to a `ButtonId`
 // enum, and the decoded bitset sets bit `@intFromEnum(ButtonId)`. The Lean

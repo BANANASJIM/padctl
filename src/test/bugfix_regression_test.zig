@@ -9,8 +9,6 @@ const armTimer = @import("../event_loop.zig").armTimer;
 const helpers = @import("helpers.zig");
 const layer_mod = @import("../core/layer.zig");
 
-// -- Test 1: renderFrame with empty raw slice --
-
 test "renderFrame: empty raw slice does not panic" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -18,8 +16,6 @@ test "renderFrame: empty raw slice does not panic" {
     try render.renderFrame(fbs.writer(), &gs, &.{}, false, .{}, .raw);
     try render.renderFrame(fbs.writer(), &gs, &[_]u8{0x42}, true, .{}, .raw);
 }
-
-// -- Test 2: stripInputSuffix strips /inputN --
 
 test "stripInputSuffix: strips trailing /inputN" {
     try testing.expectEqualStrings("usb-0000:00:14.0-8", hidraw.stripInputSuffix("usb-0000:00:14.0-8/input1"));
@@ -44,7 +40,6 @@ test "stripInputSuffix: same base path deduplicates" {
     try testing.expectEqualStrings(a, b);
 }
 
-// -- Test 3 (issue #64): isTransientOpenError classifies errors correctly --
 // Regression: previously only error.AccessDenied was retried; EPERM/ENODEV/ENOENT
 // caused a silent drop (bare `return`), losing the hotplug attach forever.
 
@@ -62,7 +57,6 @@ test "isTransientOpenError: fatal errors are not retried" {
     try testing.expect(!Supervisor.isTransientOpenError(error.Unexpected));
 }
 
-// -- Test 4 (issue #64): attachWithRoot maps any transient open error to HotplugTransient --
 // Regression: previously EPERM/ENODEV/ENOENT were normalized to error.AccessDenied,
 // making it impossible for callers to distinguish the retry sentinel from a real EACCES.
 
@@ -75,8 +69,6 @@ test "attachWithRoot: missing device returns HotplugTransient, not AccessDenied"
     const result = sup.attachWithRoot("hidraw99", "/dev/nonexistent_root_for_test");
     try testing.expectError(error.HotplugTransient, result);
 }
-
-// -- Test 5: directory walker finds .toml in subdirectories --
 
 test "walker: finds toml files in subdirectories" {
     var tmp = testing.tmpDir(.{});
@@ -107,14 +99,13 @@ test "walker: finds toml files in subdirectories" {
     try testing.expectEqual(@as(usize, 3), toml_count);
 }
 
-// -- Test 6 (issue #72): macro timer and layer hold timer are independent fds --
 // Regression: both MacroPlayer delay and layer hold-trigger used the same timerfd.
 // A layer-hold arm/disarm after apply() would silently overwrite the macro delay,
 // causing { delay = N } steps to never fire and subsequent macro steps to be skipped.
-// Fix: EventLoop.macro_timer_fd is a dedicated timerfd for TimerQueue; timer_fd is
-// layer-hold only.  The two fds never share a timerfd_settime call path.
+// EventLoop.macro_timer_fd is a dedicated timerfd for TimerQueue; timer_fd is
+// layer-hold only. The two fds must never share a timerfd_settime call path.
 
-test "issue #72: macro_timer_fd and timer_fd are independent — layer arm does not clobber macro delay" {
+test "macro_timer_fd and timer_fd are independent — layer arm does not clobber macro delay" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
@@ -131,14 +122,13 @@ test "issue #72: macro_timer_fd and timer_fd are independent — layer arm does 
     try testing.expectEqual(@as(usize, 1), ready);
 }
 
-// -- Test 7 (PR #171 follow-up): timer expiry handlers must be split per slot --
 // Regression: Mapper.onTimerExpired ran self.layer.onTimerExpired() unconditionally,
-// promoting any PENDING layer to ACTIVE regardless of which timerfd fired. PR #171
-// only separated the arm path; the expiry handlers still routed through one entry,
-// so a macro `delay` shorter than hold_timeout collapsed the layer hold timing to
-// the macro deadline.
+// promoting any PENDING layer to ACTIVE regardless of which timerfd fired.
+// Separating the arm path alone is insufficient — expiry handlers must also be
+// split per slot, otherwise a macro `delay` shorter than hold_timeout collapses
+// the layer hold timing to the macro deadline.
 
-test "macro timer expiry must NOT promote PENDING layer (PR #171 follow-up)" {
+test "macro timer expiry must NOT promote PENDING layer" {
     const allocator = testing.allocator;
 
     var ctx = try helpers.makeMapper(
@@ -191,7 +181,7 @@ test "macro timer expiry must NOT promote PENDING layer (PR #171 follow-up)" {
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 }
 
-test "layer timer expiry must NOT drain macro queue (PR #171 follow-up)" {
+test "layer timer expiry must NOT drain macro queue" {
     const allocator = testing.allocator;
 
     var ctx = try helpers.makeMapper(

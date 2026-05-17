@@ -8,9 +8,8 @@ const device_mod = src.config.device;
 const interpreter_mod = src.core.interpreter;
 const Interpreter = interpreter_mod.Interpreter;
 
-// UHID UAPI bindings moved to `src/io/uhid.zig` in Phase 13 Wave 1 T1. This
-// test file used to duplicate them; now it imports the shared helpers via
-// `src.io.uhid` so the test bodies below are unchanged.
+// UHID UAPI bindings live in `src/io/uhid.zig`. Imported via the `src` barrel
+// so the test bodies below share the production types unchanged.
 const uhid = src.io.uhid;
 const openUhid = uhid.openUhid;
 const uhidCreate = uhid.uhidCreate;

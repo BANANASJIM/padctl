@@ -110,11 +110,11 @@ test "prop: layer tap fires reliably under hold_timeout via .pending branch — 
     // for #79. Each iter releases the trigger while the hold timer is STILL
     // PENDING (onLayerTimerExpired is NEVER called) — the real #79 race path
     // through onTriggerRelease's `.pending` branch. A parallel macro:hold_x
-    // keeps the X gamepad bit held across the race window. With PR #231's fix
-    // the PENDING-press frame does not signal active_changed, so the macro
-    // survives and the tap fires every iteration. With the mutation re-added
-    // the press-frame reset cancels the macro and drops X, and `tap_and_macro`
-    // counts < 1000 → test fails.
+    // keeps the X gamepad bit held across the race window. The PENDING-press
+    // frame must not signal active_changed, so the macro survives and the tap
+    // fires every iteration. If active_changed fires spuriously during the
+    // PENDING-press frame, the macro is cancelled, X is dropped, and
+    // `tap_and_macro` counts < 1000 → test fails.
     const allocator = testing.allocator;
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
@@ -180,9 +180,9 @@ test "prop: layer tap NOT fired when held past hold_timeout, macro survives PEND
     // path), so the held-past case never emits a tap — that is the boundary
     // invariant. Independently, the #79 falsifiability observable is checked
     // BEFORE the timer fires: a parallel macro:hold_x must survive the
-    // PENDING-press frame. With PR #231's fix it does; with the mutation
-    // re-added the press-frame active_changed reset cancels the macro and
-    // drops X → macro_survived_count < 1000 → test fails.
+    // PENDING-press frame. The macro must survive that frame; if
+    // active_changed fires spuriously on PENDING-press, the macro is
+    // cancelled, X is dropped → macro_survived_count < 1000 → test fails.
     const allocator = testing.allocator;
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));

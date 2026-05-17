@@ -1,5 +1,4 @@
 // Supervisor E2E tests: uevent parsing, attach/detach lifecycle.
-// Split from phase3_e2e_test.zig (T4-T5).
 
 const std = @import("std");
 const testing = std.testing;
@@ -13,7 +12,7 @@ const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
 const DeviceIO = @import("../io/device_io.zig").DeviceIO;
 const Supervisor = @import("../supervisor.zig").Supervisor;
 
-// --- T4: uevent parsing ---
+// --- uevent parsing ---
 
 test "supervisor: parseUevent — add hidraw3" {
     const msg = "add@/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/0003:37D7:2401.0001/hidraw/hidraw3\x00SUBSYSTEM=hidraw\x00DEVNAME=hidraw3\x00";
@@ -51,7 +50,7 @@ test "supervisor: parseUevent — no SUBSYSTEM key" {
     try testing.expectEqualStrings("hidraw5", ev.devname.?);
 }
 
-// --- T5: Supervisor attach/detach lifecycle ---
+// --- Supervisor attach/detach lifecycle ---
 
 const minimal_device_toml =
     \\[device]
