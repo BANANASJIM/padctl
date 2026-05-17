@@ -38,6 +38,6 @@ pub fn resolveCaptureTarget(
     };
     errdefer allocator.free(path);
 
-    const interface_id: u8 = deps.read_interface_id(path) orelse 0;
+    const interface_id: u8 = explicit_interface orelse 0;
     return .{ .path = path, .interface_id = interface_id };
 }
