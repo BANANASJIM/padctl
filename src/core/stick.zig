@@ -176,7 +176,7 @@ test "stick: dt=0: mouse delta is zero" {
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
 
-// T4: extreme parameter values
+// --- extreme parameter value tests ---
 
 test "stick: sensitivity=0 produces zero mouse output" {
     var sp = StickProcessor{};
@@ -211,7 +211,7 @@ test "stick: dt_ms=100 integrates without overflow" {
     try testing.expect(!std.math.isInf(sp.mouse_accum_x));
 }
 
-// T10: REL_HWHEEL tests
+// --- REL_HWHEEL tests ---
 
 test "stick: scroll mode X axis produces hwheel" {
     var sp = StickProcessor{};

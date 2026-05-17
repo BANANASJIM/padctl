@@ -44,7 +44,7 @@ pub const LayerState = struct {
 
     /// Returns the active LayerConfig by priority:
     /// 1. Hold ACTIVE (tap_hold != null and layer_activated == true)
-    /// 2. First toggled layer in declaration order (ADR-004)
+    /// 2. First toggled layer in declaration order (mutual exclusion: first match wins)
     /// 3. null (base layer)
     pub fn getActive(
         self: *const LayerState,
@@ -73,8 +73,8 @@ pub const LayerState = struct {
     }
 
     /// Per-frame dispatch: converts button edges into layer activation/deactivation.
-    /// Implements ADR-004 mutual exclusion: while any layer is ACTIVE or PENDING,
-    /// new Hold presses are silently ignored; new Toggle-on is blocked until getActive() == null.
+    /// Mutual exclusion: while any layer is ACTIVE or PENDING, new Hold presses
+    /// are silently ignored; new Toggle-on is blocked until getActive() == null.
     pub fn processLayerTriggers(
         self: *LayerState,
         configs: []const LayerConfig,
@@ -232,7 +232,7 @@ test "layer: getActive: hold ACTIVE takes priority over toggled" {
     try testing.expectEqualStrings("aim", active.?.name);
 }
 
-test "layer: getActive: multiple toggled layers — declaration order wins (ADR-004)" {
+test "layer: getActive: multiple toggled layers — declaration order wins" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     try ls.toggled.put("aim", {});
@@ -273,7 +273,7 @@ test "layer: getActive: empty configs always returns null" {
     try testing.expect(ls.getActive(&.{}) == null);
 }
 
-// --- T4: tap-hold state machine tests ---
+// --- tap-hold state machine tests ---
 
 test "layer: tap-hold: press → PENDING, arm_timer_ms set" {
     var ls = LayerState.init(testing.allocator);
@@ -342,7 +342,7 @@ test "layer: tap-hold: ACTIVE + release (past timeout) → IDLE, no tap" {
     try testing.expect(ls.tap_hold == null);
 }
 
-test "layer: tap-hold: ACTIVE + release within timeout (race) → tap emitted (#79)" {
+test "layer: tap-hold: ACTIVE + release within timeout (race) → tap emitted" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const press_time: i128 = 1_000_000_000;
@@ -356,10 +356,9 @@ test "layer: tap-hold: ACTIVE + release within timeout (race) → tap emitted (#
     try testing.expect(ls.tap_hold == null);
 }
 
-test "layer: tap-hold: ACTIVE + release at hold_timeout - 5ms → tap emitted (#79 boundary)" {
-    // Release physically happens at press+195ms (just below 200ms
-    // hold_timeout). The fix ensures the caller's ppoll-wakeup snapshot
-    // reaches onTriggerRelease unmodified — see issue #79.
+test "layer: tap-hold: ACTIVE + release at hold_timeout - 5ms → tap emitted (boundary)" {
+    // Release physically happens at press+195ms (just below 200ms hold_timeout).
+    // The caller's ppoll-wakeup snapshot must reach onTriggerRelease unmodified.
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const press_time: i128 = 1_000_000_000;
@@ -417,7 +416,7 @@ test "layer: tap-hold: ACTIVE re-press same trigger → ignored" {
     try testing.expectEqual(TapHoldPhase.active, ls.tap_hold.?.phase);
 }
 
-// --- T5: processLayerTriggers tests ---
+// --- processLayerTriggers tests ---
 
 const hold_aim = LayerConfig{ .name = "aim", .trigger = "LT", .activation = "hold" };
 const hold_fn = LayerConfig{ .name = "fn", .trigger = "RB", .activation = "hold" };
@@ -450,7 +449,7 @@ test "layer: hold PENDING entry does not signal active_changed" {
     // Regression: PENDING entry must not trigger mapper's active_changed reset
     // path (gyro/stick reset + macro release emission). Only real transitions
     // (PENDING→ACTIVE, ACTIVE→IDLE, tap-resolve, toggle) signal active_changed.
-    // Candidate root cause for issue #79.
+    // PENDING entry must not signal active_changed.
     const hold_cfg = LayerConfig{ .name = "aim", .trigger = "LM", .activation = "hold", .hold_timeout = 200 };
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
@@ -477,19 +476,15 @@ test "layer: hold PENDING -> ACTIVE transition signals active_changed" {
 }
 
 test "mutation audit: layer — active_changed PENDING gate must be killable" {
-    // Mutation audit (TP1, design/testing.md):
-    // Re-adding `action.active_changed = true;` at processLayerTriggers
-    // Hold-press branch (formerly src/core/layer.zig:103 pre-PR #231)
-    // makes the assertion below fail.
+    // Mutation audit: re-adding `action.active_changed = true;` in the Hold-press
+    // branch of processLayerTriggers makes the assertion below fail.
     //
-    // Verification: directly edit the Hold-press branch of processLayerTriggers,
-    // re-add `action.active_changed = true;`, run `zig build test` — the
-    // `try testing.expect(!action.active_changed)` below fires.  Revert the edit.
-    // NOTE: `git revert 924cef0` is NOT a viable mutation vehicle — it also removes
-    // the companion regression tests at layer.zig:449/:465 (circular dependency).
+    // Verification: edit the Hold-press branch of processLayerTriggers, re-add
+    // `action.active_changed = true;`, run `zig build test` — the
+    // `try testing.expect(!action.active_changed)` below fires. Revert the edit.
     //
-    // Companion regression guards: layer.zig:449 (PENDING does NOT signal)
-    // and :465 (PENDING→ACTIVE DOES signal).
+    // Companion regression guards are the two preceding tests in this file
+    // (PENDING does NOT signal; PENDING→ACTIVE DOES signal).
     const hold_cfg = LayerConfig{ .name = "aim", .trigger = "LM", .activation = "hold", .hold_timeout = 200 };
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
@@ -545,7 +540,7 @@ test "layer: processLayerTriggers: Hold PENDING release → tap event + disarm" 
     try testing.expect(ls.tap_hold == null);
 }
 
-test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while PENDING" {
+test "layer: processLayerTriggers: mutual exclusion — second Hold press ignored while PENDING" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{ hold_aim, hold_fn };
@@ -561,7 +556,7 @@ test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold pres
     try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 }
 
-test "layer: processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while ACTIVE" {
+test "layer: processLayerTriggers: mutual exclusion — second Hold press ignored while ACTIVE" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const configs = [_]LayerConfig{ hold_aim, hold_fn };
@@ -636,7 +631,7 @@ test "layer: processLayerTriggers: Toggle + Hold coexist, Hold takes priority in
     try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
 }
 
-test "layer: processLayerTriggers: multiple Toggles on — declaration order wins (ADR-004)" {
+test "layer: processLayerTriggers: multiple Toggles on — declaration order wins" {
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();
     const tog_a = LayerConfig{ .name = "a", .trigger = "LB", .activation = "toggle" };

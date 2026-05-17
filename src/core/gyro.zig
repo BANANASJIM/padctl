@@ -185,7 +185,7 @@ test "gyro: EMA smoothing: consecutive frames converge" {
     try testing.expect(g.ema_x > 90.0);
 }
 
-// T4: extreme parameter values
+// --- extreme parameter value tests ---
 
 test "gyro: sensitivity=0 produces zero output" {
     var g = GyroProcessor{};
@@ -222,16 +222,13 @@ test "gyro: sensitivity=0 and deadzone=32767 combination yields zero" {
     try testing.expectEqual(@as(i32, 0), out.rel_y);
 }
 
-// T11: gyro curve normalization (vader5 parity)
+// --- gyro curve normalization tests ---
 
 test "gyro: full deflection sensitivity=1 yields ~1 unit/frame" {
     var g = GyroProcessor{};
     const cfg = GyroConfig{ .mode = "mouse", .smoothing = 0.0, .curve = 1.0, .sensitivity_x = 1.0, .sensitivity_y = 1.0 };
     _ = g.process(&cfg, 32767, 32767, 0);
-    // total motion (emitted + residual) should be ~1.0
-    const total_x = @as(f32, @floatFromInt(0)) + g.accum_x; // dx=0 since accum < 1 initially? no...
     // normalized=1.0, curved=1.0, sensitivity=1.0 → scaled=1.0 → dx=1, accum=0
-    _ = total_x;
     try testing.expect(g.accum_x >= 0.0 and g.accum_x < 1.0);
 }
 
@@ -256,7 +253,7 @@ test "gyro: custom max_val clips normalization ceiling" {
     try testing.expect(g.accum_x >= 0.0 and g.accum_x < 1.0);
 }
 
-// T6: axis orientation regression — pitch(gx)→REL_Y, yaw(gy)→REL_X
+// --- axis orientation tests: pitch(gx)→REL_Y, yaw(gy)→REL_X ---
 
 test "gyro: pitch-only input (gx nonzero, gy=0) produces only rel_y" {
     var g = GyroProcessor{};

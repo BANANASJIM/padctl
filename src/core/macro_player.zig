@@ -17,17 +17,17 @@ pub const MacroPlayer = struct {
     timer_token: u32,
     trigger_src_idx: u6,
     held_gamepad_buttons: u64,
-    // issue #72: deadline at which the next step becomes eligible. While now_ns
-    // is below this, step() must yield the frame so per-poll Mapper.apply calls
-    // do not race past delay= boundaries.
+    // Deadline at which the next step becomes eligible. While now_ns is below
+    // this, step() must yield the frame so per-poll Mapper.apply calls do not
+    // race past delay= boundaries.
     next_step_eligible_at_ns: i128,
-    // issue #119: repeat-macro trigger-held flag, refreshed by Mapper each frame
-    // before invoking step(). step() consults this when reaching end-of-steps to
-    // decide whether to schedule a restart. A falling edge stops further repeats.
+    // Repeat-macro trigger-held flag, refreshed by Mapper each frame before
+    // invoking step(). step() consults this when reaching end-of-steps to decide
+    // whether to schedule a restart. A falling edge stops further repeats.
     trigger_held: bool,
-    // issue #119: when non-null, the macro has finished its current iteration and
-    // is waiting for now_ns to reach this deadline before restarting from
-    // step_index = 0. Same gating mechanism as next_step_eligible_at_ns.
+    // When non-null, the macro has finished its current iteration and is waiting
+    // for now_ns to reach this deadline before restarting from step_index = 0.
+    // Same gating mechanism as next_step_eligible_at_ns.
     awaiting_restart_at_ns: ?i128,
 
     pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
@@ -60,12 +60,12 @@ pub const MacroPlayer = struct {
         now_ns: i128,
     ) !bool {
         if (self.waiting_for_release) return false;
-        // issue #72: prevent same-frame double-emit — only the macro timerfd
-        // expiry advances state past a delay boundary.
+        // Prevent same-frame double-emit — only the macro timerfd expiry
+        // advances state past a delay boundary.
         if (now_ns < self.next_step_eligible_at_ns) return false;
 
-        // issue #119: gate restart on trigger_held — released triggers stop
-        // further iterations even after the restart timer fires.
+        // Gate restart on trigger_held — released triggers stop further
+        // iterations even after the restart timer fires.
         if (self.awaiting_restart_at_ns) |deadline| {
             if (now_ns < deadline) return false;
             self.awaiting_restart_at_ns = null;
@@ -102,8 +102,8 @@ pub const MacroPlayer = struct {
             }
         }
 
-        // issue #119: end of steps. Schedule restart if repeat_delay_ms set and
-        // trigger still held; otherwise legacy single-shot completion.
+        // End of steps. Schedule restart if repeat_delay_ms is set and trigger
+        // still held; otherwise single-shot completion.
         if (self.macro.repeat_delay_ms) |delay_ms| {
             if (self.trigger_held) {
                 const deadline = now_ns + @as(i128, delay_ms) * std.time.ns_per_ms;
@@ -115,8 +115,8 @@ pub const MacroPlayer = struct {
         return true;
     }
 
-    // issue #119: refreshed each Mapper.apply frame for repeat-mode macros so
-    // step() can decide at end-of-steps whether to schedule another iteration.
+    // Refreshed each Mapper.apply frame for repeat-mode macros so step() can
+    // decide at end-of-steps whether to schedule another iteration.
     pub fn setTriggerHeld(self: *MacroPlayer, held: bool) void {
         self.trigger_held = held;
     }
@@ -265,7 +265,7 @@ test "macro_player: delay arms timer queue returns not-done" {
     try testing.expectEqual(@as(usize, 1), ctx.queue.heap.count());
 
     ctx.aux = .{};
-    // issue #72: must advance now_ns past the delay deadline before step resumes.
+    // now_ns must be past the delay deadline before step resumes.
     const after_delay: i128 = 50 * std.time.ns_per_ms + 1;
     const done2 = try player.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, after_delay);
     try testing.expect(done2);
@@ -359,7 +359,7 @@ test "macro_player: two players advance step_index independently" {
     try testing.expectEqual(@as(usize, 2), ctx_b.aux.len);
 }
 
-// --- issue #119: repeat_delay_ms ---
+// --- repeat_delay_ms tests ---
 
 test "macro_player: repeat_delay_ms — held trigger reschedules; release stops" {
     const allocator = testing.allocator;

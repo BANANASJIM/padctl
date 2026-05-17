@@ -12,9 +12,8 @@ pub const RemapTargetResolved = union(enum) {
     gamepad_button: ButtonId,
     disabled: void,
     macro: []const u8,
-    // Chord output: 2..=4 evdev key codes (issue #206). Codes are owned by the
-    // Mapper allocator (allocated in precomputeRemap, freed in Mapper.deinit).
-    // Dispatch implementation lands in PR B-2.
+    // Chord output: 2..=4 evdev key codes. Codes are owned by the Mapper
+    // allocator (allocated in precomputeRemap, freed in Mapper.deinit).
     chord: []const u16,
 };
 
@@ -67,7 +66,6 @@ pub fn applyTarget(
                 },
             }
         },
-        // chord dispatch lands in PR B-2 (issue #206)
         .disabled, .macro, .chord => {},
     }
 }

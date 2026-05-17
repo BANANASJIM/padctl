@@ -45,18 +45,15 @@ pub const TimerQueue = struct {
     }
 
     pub fn cancel(self: *TimerQueue, token: u32, now_ns: i128) void {
-        // Rebuild heap minus matching token.
         var tmp = std.PriorityQueue(Deadline, void, deadlineOrder).init(
             self.heap.allocator,
             {},
         );
         defer tmp.deinit();
-        // Drain all into tmp, skip the cancelled token.
         while (self.heap.removeOrNull()) |d| {
             if (d.token == token) continue;
             tmp.add(d) catch {};
         }
-        // Swap back.
         while (tmp.removeOrNull()) |d| {
             self.heap.add(d) catch {};
         }

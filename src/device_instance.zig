@@ -93,13 +93,12 @@ pub const Owner = union(enum) {
 /// (matching what `init` would have sent to `/dev/uhid`). Production call
 /// sites leave both fields null so the normal `openUhid` path runs.
 ///
-/// `test_devices_override` (CodeRabbit PR #159 #6) skips the interface-
-/// opening loop entirely and installs the caller-provided `DeviceIO` slice.
-/// Needed so a Layer 1 test can drive `DeviceInstance.init` end-to-end
-/// without a real `/dev/hidraw*` node — otherwise `HidrawDevice.discover`
-/// would retry for ~7s and fail in CI before the routing switch is reached.
-/// The slice is consumed (stored in `DeviceInstance.devices`) and freed by
-/// `deinit`; caller must not free it.
+/// `test_devices_override` skips the interface-opening loop entirely and
+/// installs the caller-provided `DeviceIO` slice. Needed so a Layer 1 test
+/// can drive `DeviceInstance.init` end-to-end without a real `/dev/hidraw*`
+/// node — otherwise `HidrawDevice.discover` would retry for ~7s and fail in
+/// CI before the routing switch is reached. The slice is consumed (stored in
+/// `DeviceInstance.devices`) and freed by `deinit`; caller must not free it.
 pub const InitOptions = struct {
     test_primary_uhid_fd: ?posix.fd_t = null,
     test_imu_uhid_fd: ?posix.fd_t = null,
@@ -169,11 +168,10 @@ pub const DeviceInstance = struct {
     pending_mapping: ?*MappingConfig,
     stopped: bool,
     poll_timeout_ms: ?u32 = null,
-    /// Wave 6 T4: active only when force_feedback.backend="uhid" + kind="pid".
+    /// Active only when force_feedback.backend="uhid" + kind="pid".
     ffb_forwarder: ?FfbForwarder = null,
-    // Test-only observability hook for issue #142 regression: counts
-    // rebuildAuxIfChanged invocations so tests can verify the switch path
-    // actually rebuilds aux caps without relying on /dev/uinput.
+    // Test-only: counts rebuildAuxIfChanged invocations so tests can verify
+    // the switch path rebuilds aux caps without relying on /dev/uinput.
     rebuild_aux_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
@@ -249,8 +247,8 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
-            // Enter UHID path when IMU backend=uhid (ADR-015 gamepad+IMU) OR
-            // when force_feedback.backend=uhid (Wave 6 racing wheel PID FFB).
+            // Enter UHID path when IMU backend=uhid (gamepad+IMU pair) OR
+            // when force_feedback.backend=uhid (racing wheel PID FFB).
             const use_uhid = blk: {
                 if (imu_cfg_opt) |imu_cfg| {
                     if (std.mem.eql(u8, imu_cfg.backend, "uhid")) break :blk true;
@@ -262,9 +260,9 @@ pub const DeviceInstance = struct {
             };
 
             if (use_uhid) {
-                // ADR-015 Stage 1: primary + IMU cards share a byte-identical
-                // uniq. Snapshot the counter once, bump only if the counter
-                // branch was taken (phys_key == null).
+                // Primary + IMU cards share a byte-identical uniq. Snapshot the
+                // counter once, bump only if the counter branch was taken
+                // (phys_key == null).
                 const counter_snapshot: u16 = uniq_counter.*;
                 const uniq_z = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
                 defer allocator.free(uniq_z);
@@ -340,22 +338,20 @@ pub const DeviceInstance = struct {
                     imu_output = imu_uhid.outputDevice();
                 }
 
-                // Wire FfbForwarder when backend=uhid + kind=pid (Wave 6 PID FFB).
-                // Callback registration is deferred to run() so the pointer
-                // to ffb_forwarder is stable (DeviceInstance is heap-allocated
-                // by the Supervisor before run() is called).
+                // Wire FfbForwarder when backend=uhid + kind=pid. Callback
+                // registration is deferred to run() so the pointer to
+                // ffb_forwarder is stable (DeviceInstance is heap-allocated by
+                // the Supervisor before run() is called).
                 if (out_cfg.force_feedback) |pid_ffb| {
                     if (std.mem.eql(u8, pid_ffb.backend, "uhid") and
                         std.mem.eql(u8, pid_ffb.kind, "pid"))
                     {
-                        // TODO(wave6-T7): devices[0] is a heuristic — it is correct
-                        // for single-interface wheels but may select the wrong
-                        // interface on multi-interface devices (e.g. wheels with a
-                        // separate HID++ control interface at index 0 and the FFB
-                        // interface at index 1). T7 will surface real cases; for
-                        // now, warn at startup when >1 interface is present.
+                        // TODO: devices[0] is a heuristic — correct for single-interface
+                        // wheels but may select the wrong interface on multi-interface
+                        // devices (e.g. a separate HID++ control interface at index 0
+                        // and the FFB interface at index 1).
                         if (devices.len > 1) {
-                            std.log.warn("wave6 PID FFB: {d} interfaces found; using devices[0] as hidraw fd — may be wrong for multi-interface wheels (T7 follow-up)", .{devices.len});
+                            std.log.warn("PID FFB: {d} interfaces found; using devices[0] as hidraw fd — may be wrong for multi-interface wheels", .{devices.len});
                         }
                         const phys_fd = opts.test_physical_hidraw_fd orelse
                             if (devices.len > 0) devices[0].pollfd().fd else -1;
