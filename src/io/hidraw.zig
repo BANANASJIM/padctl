@@ -266,9 +266,14 @@ pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const
 
 /// Read the interface number from sysfs uevent HID_PHYS for a hidraw node.
 pub fn readInterfaceId(path: []const u8) ?u8 {
+    return readInterfaceIdWithRoot(path, "/sys");
+}
+
+/// Root-injectable variant of readInterfaceId for Layer-0 tests.
+pub fn readInterfaceIdWithRoot(path: []const u8, sys_root: []const u8) ?u8 {
     const basename_s = std.fs.path.basename(path);
     var path_buf: [256]u8 = undefined;
-    const sysfs_path = std.fmt.bufPrint(&path_buf, "/sys/class/hidraw/{s}/device/uevent", .{basename_s}) catch return null;
+    const sysfs_path = std.fmt.bufPrint(&path_buf, "{s}/class/hidraw/{s}/device/uevent", .{ sys_root, basename_s }) catch return null;
     const fd = std.fs.openFileAbsolute(sysfs_path, .{}) catch return null;
     defer fd.close();
     var buf: [1024]u8 = undefined;
@@ -280,12 +285,12 @@ pub fn readInterfaceId(path: []const u8) ?u8 {
             return parseInterfaceId(line["HID_PHYS=".len..]);
         }
     }
-    return readInterfaceIdFromSysfs(basename_s);
+    return readInterfaceIdFromSysfs(basename_s, sys_root);
 }
 
-fn readInterfaceIdFromSysfs(basename_s: []const u8) ?u8 {
+fn readInterfaceIdFromSysfs(basename_s: []const u8, sys_root: []const u8) ?u8 {
     var pb: [256]u8 = undefined;
-    const p = std.fmt.bufPrint(&pb, "/sys/class/hidraw/{s}/device/..", .{basename_s}) catch return null;
+    const p = std.fmt.bufPrint(&pb, "{s}/class/hidraw/{s}/device/..", .{ sys_root, basename_s }) catch return null;
     var dir = std.fs.openDirAbsolute(p, .{}) catch return null;
     defer dir.close();
     const f = dir.openFile("bInterfaceNumber", .{}) catch return null;
@@ -507,10 +512,7 @@ test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
     dev.evdev_fds.len = 0;
 }
 
-// Interface-filter predicate extracted for unit testing (mirrors the guard in discoverWithRoot).
-// Falsifiability: reverting the `if (interface_id) |required_iface|` guard in discoverWithRoot
-// back to the unconditional `if (iface != interface_id) continue;` (pre-fix) would cause
-// `matchesInterfaceFilter(null, 1)` to return false instead of true, failing the test below.
+// Mirrors the interface guard in discoverWithRoot; null = any-interface.
 fn matchesInterfaceFilter(interface_id: ?u8, device_iface: u8) bool {
     if (interface_id) |required| return device_iface == required;
     return true; // null = any interface

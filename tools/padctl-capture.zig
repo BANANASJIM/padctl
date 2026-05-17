@@ -5,6 +5,7 @@ const linux = std.os.linux;
 const analyse_mod = @import("analyse");
 const toml_gen = @import("toml_gen");
 const hidraw_mod = @import("hidraw_mod");
+const resolve_mod = @import("capture_resolve");
 const toml = @import("toml");
 
 // Minimal structs for parsing [device.init] from a device TOML config.
@@ -79,8 +80,8 @@ fn printHelp() void {
         \\
         \\Device selection (one required):
         \\  --device /dev/hidrawN    Open specific hidraw node
-        \\  --vid 0xVVVV --pid 0xPPPP   Discover by VID/PID (first matching interface)
-        \\  --interface N               Restrict discovery to interface N
+        \\  --vid 0xVVVV --pid 0xPPPP   Discover by VID/PID (first matching hidraw node)
+        \\  --interface N               Force a specific interface number
         \\
         \\Init:
         \\  --config <path>          Device TOML config; runs [device.init] before recording
@@ -244,6 +245,10 @@ fn runInitFromConfig(allocator: std.mem.Allocator, fd: posix.fd_t, config_path: 
     std.log.info("init: sent {d} commands", .{init_cfg.commands.len + @as(usize, if (init_cfg.enable != null) 1 else 0)});
 }
 
+fn discoverAdapter(allocator: std.mem.Allocator, vid: u16, pid: u16, iface: ?u8) anyerror![]const u8 {
+    return hidraw_mod.HidrawDevice.discover(allocator, vid, pid, iface);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -255,28 +260,30 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Resolve device path; interface_id is read from sysfs after path is final (both paths).
-    var path_buf: [128]u8 = undefined;
-    const device_path: []const u8 = if (cli.device) |d|
-        d
-    else blk: {
-        const vid = cli.vid orelse {
-            std.log.err("--device or --vid/--pid required", .{});
-            printHelp();
-            std.process.exit(1);
-        };
-        const pid = cli.pid orelse {
-            std.log.err("--pid required when --vid is specified", .{});
-            std.process.exit(1);
-        };
-        const p = hidraw_mod.HidrawDevice.discover(allocator, vid, pid, cli.interface_id) catch |err| {
-            std.log.err("device 0x{x:0>4}:0x{x:0>4} not found: {}", .{ vid, pid, err });
-            std.process.exit(1);
-        };
-        defer allocator.free(p);
-        break :blk try std.fmt.bufPrint(&path_buf, "{s}", .{p});
+    // Resolve device path + interface_id (both selection modes; see resolve.zig).
+    if (cli.device == null and cli.vid == null) {
+        std.log.err("--device or --vid/--pid required", .{});
+        printHelp();
+        std.process.exit(1);
+    }
+    if (cli.vid != null and cli.pid == null) {
+        std.log.err("--pid required when --vid is specified", .{});
+        std.process.exit(1);
+    }
+    const target = resolve_mod.resolveCaptureTarget(
+        allocator,
+        .{ .discover = discoverAdapter, .read_interface_id = hidraw_mod.readInterfaceId },
+        cli.device,
+        cli.vid,
+        cli.pid,
+        cli.interface_id,
+    ) catch |err| {
+        std.log.err("device resolution failed: {}", .{err});
+        std.process.exit(1);
     };
-    const resolved_interface_id: u8 = hidraw_mod.readInterfaceId(device_path) orelse 0;
+    defer allocator.free(target.path);
+    const device_path = target.path;
+    const resolved_interface_id = target.interface_id;
 
     const accmode: posix.ACCMODE = if (cli.config_path != null) .RDWR else .RDONLY;
     const fd = posix.open(device_path, .{ .ACCMODE = accmode, .NONBLOCK = true }, 0) catch |err| {

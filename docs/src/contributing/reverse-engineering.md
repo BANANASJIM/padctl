@@ -75,7 +75,10 @@ The node that produces continuous output when you press buttons or move sticks i
 
 ### Method 1: padctl-capture (recommended)
 
-Discover by VID:PID — padctl-capture automatically picks the first matching interface:
+Discover by VID:PID — padctl-capture picks the first matching VID:PID hidraw
+node (by ascending node index, regardless of interface number). For a
+composite device whose interface-0 node is not the lowest hidraw index this may
+select a different interface; pass `--interface N` to force a specific one:
 
 ```bash
 sudo padctl-capture --vid 0x054c --pid 0x0ce6 --duration 30 --output capture.toml

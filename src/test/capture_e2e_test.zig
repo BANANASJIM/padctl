@@ -1,5 +1,4 @@
-// Capture E2E tests: analyse, TOML skeleton generation, debug render.
-// Split from phase3_e2e_test.zig (T1-T3).
+// Capture E2E tests: analyse, TOML gen, render, and #264 --device resolution.
 
 const std = @import("std");
 const testing = std.testing;
@@ -9,6 +8,7 @@ const toml_gen_mod = @import("toml_gen");
 const render_mod = @import("../debug/render.zig");
 const state_mod = @import("../core/state.zig");
 const hidraw_mod = @import("../io/hidraw.zig");
+const resolve_mod = @import("capture_resolve");
 
 const Frame = analyse_mod.Frame;
 const AnalysisResult = analyse_mod.AnalysisResult;
@@ -215,34 +215,100 @@ test "capture: renderFrame — pressed button differs from released" {
     try testing.expect(!std.mem.eql(u8, fbs_on.getWritten(), fbs_off.getWritten()));
 }
 
-// --- T4: --device interface resolution (regression for #264 --device path) ---
+// --- T4: #264 --device / --vid:pid interface resolution ---
+//
+// Falsifiability (re-derive): the production line under test is in
+// src/capture/resolve.zig:
+//     const interface_id: u8 = deps.read_interface_id(path) orelse 0;
+// applied unconditionally to BOTH the --device and the --vid/--pid branch.
+// Pre-#264 the --device branch instead used `cli.interface_id orelse 0`
+// (ignoring the node's real interface). If resolveCaptureTarget is reverted so
+// the --device branch returns `explicit_interface orelse 0`, then the
+// "--device hidraw1 (no --interface)" assertion below (interface_id == 1)
+// drops to 0 and the test fails. The interface number is read by the REAL
+// hidraw_mod.readInterfaceIdWithRoot against a tmp sysfs fixture, so the test
+// links the production resolution + sysfs-parse path, not a stub.
 
-// Falsifiability: reverting the unconditional `readInterfaceId(device_path)` call in
-// tools/padctl-capture.zig (making it vid/pid-branch-only again) leaves the --device
-// path with interface_id = 0, breaking Vader 5 Pro (interface 1) device configs.
-// This test exercises the same parseInterfaceId logic that readInterfaceId uses,
-// verifying that a Vader 5 Pro HID_PHYS string resolves to interface 1, and that
-// interface 1 is faithfully emitted in the TOML [[device.interface]] block.
+var g_test_sys_root: []const u8 = "/sys";
 
-test "capture: --device path interface resolution — Vader5Pro phys input1 yields id=1 in TOML" {
+fn testReadInterfaceId(path: []const u8) ?u8 {
+    return hidraw_mod.readInterfaceIdWithRoot(path, g_test_sys_root);
+}
+
+fn mockDiscover(allocator: std.mem.Allocator, vid: u16, pid: u16, iface: ?u8) anyerror![]const u8 {
+    _ = vid;
+    _ = pid;
+    // hidraw0 = interface 0, hidraw1 = interface 1 in the fixture below.
+    const node = if (iface) |n| n else 1; // null: first VID:PID match (hidraw1)
+    return std.fmt.allocPrint(allocator, "/dev/hidraw{d}", .{node});
+}
+
+test "capture: #264 --device hidraw1 resolves real interface 1, not 0" {
     const allocator = testing.allocator;
 
-    // Simulate the sysfs HID_PHYS value seen on a Vader 5 Pro hidraw1 node.
-    // readInterfaceId() parses this via parseInterfaceId; the result is assigned
-    // unconditionally to resolved_interface_id for both --device and --vid/--pid paths.
-    const phys = "usb-xhci_hcd.0.auto-1/input1";
-    const iface = hidraw_mod.parseInterfaceId(phys);
-    try testing.expectEqual(@as(?u8, 1), iface);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
 
-    // Verify emitToml propagates the interface into both [[device.interface]] id and
-    // [[report]] interface fields.
+    // hidraw0 → interface 0, hidraw1 → interface 1 (Vader 5 Pro layout).
+    try tmp.dir.makePath("class/hidraw/hidraw0/device");
+    try tmp.dir.writeFile(.{
+        .sub_path = "class/hidraw/hidraw0/device/uevent",
+        .data = "HID_PHYS=usb-xhci_hcd.0.auto-1/input0\n",
+    });
+    try tmp.dir.makePath("class/hidraw/hidraw1/device");
+    try tmp.dir.writeFile(.{
+        .sub_path = "class/hidraw/hidraw1/device/uevent",
+        .data = "HID_PHYS=usb-xhci_hcd.0.auto-1/input1\n",
+    });
+
+    g_test_sys_root = tmp_path;
+    defer g_test_sys_root = "/sys";
+    const deps = resolve_mod.Deps{ .discover = mockDiscover, .read_interface_id = testReadInterfaceId };
+
+    // (a) #264 core: --device /dev/hidraw1, NO --interface → must read node's
+    //     real interface (1), NOT default 0.
+    {
+        const t = try resolve_mod.resolveCaptureTarget(allocator, deps, "/dev/hidraw1", null, null, null);
+        defer allocator.free(t.path);
+        try testing.expectEqualStrings("/dev/hidraw1", t.path);
+        try testing.expectEqual(@as(u8, 1), t.interface_id);
+    }
+
+    // (b) --vid/--pid (no --interface) → discover picks hidraw1, real iface = 1.
+    {
+        const t = try resolve_mod.resolveCaptureTarget(allocator, deps, null, 0x3537, 0x1012, null);
+        defer allocator.free(t.path);
+        try testing.expectEqualStrings("/dev/hidraw1", t.path);
+        try testing.expectEqual(@as(u8, 1), t.interface_id);
+    }
+
+    // (c) explicit --interface 0 → discover narrows to hidraw0, real iface = 0.
+    {
+        const t = try resolve_mod.resolveCaptureTarget(allocator, deps, null, 0x3537, 0x1012, 0);
+        defer allocator.free(t.path);
+        try testing.expectEqualStrings("/dev/hidraw0", t.path);
+        try testing.expectEqual(@as(u8, 0), t.interface_id);
+    }
+
+    // (d) --device /dev/hidraw0 → real iface = 0.
+    {
+        const t = try resolve_mod.resolveCaptureTarget(allocator, deps, "/dev/hidraw0", null, null, null);
+        defer allocator.free(t.path);
+        try testing.expectEqual(@as(u8, 0), t.interface_id);
+    }
+}
+
+test "capture: emitToml propagates resolved interface 1 into TOML" {
+    const allocator = testing.allocator;
     const result = AnalysisResult{
         .report_size = 64,
         .magic = &[_]analyse_mod.MagicByte{},
         .buttons = &[_]analyse_mod.ButtonCandidate{},
         .axes = &[_]analyse_mod.AxisCandidate{},
     };
-    const info = DeviceInfo{ .name = "Vader 5 Pro", .vid = 0x3537, .pid = 0x1012, .interface_id = iface.? };
+    const info = DeviceInfo{ .name = "Vader 5 Pro", .vid = 0x3537, .pid = 0x1012, .interface_id = 1 };
 
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(allocator);

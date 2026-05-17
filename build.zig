@@ -79,6 +79,12 @@ pub fn build(b: *std.Build) void {
     });
     capture_toml_gen_mod.addImport("analyse", capture_analyse_mod);
 
+    const capture_resolve_mod = b.createModule(.{
+        .root_source_file = b.path("src/capture/resolve.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const io_hidraw_mod = b.createModule(.{
         .root_source_file = b.path("src/io/hidraw.zig"),
         .target = target,
@@ -96,6 +102,7 @@ pub fn build(b: *std.Build) void {
     capture_mod.addImport("analyse", capture_analyse_mod);
     capture_mod.addImport("toml_gen", capture_toml_gen_mod);
     capture_mod.addImport("hidraw_mod", io_hidraw_mod);
+    capture_mod.addImport("capture_resolve", capture_resolve_mod);
     capture_mod.addImport("toml", toml_mod);
     const capture_exe = b.addExecutable(.{ .name = "padctl-capture", .root_module = capture_mod });
     capture_exe.linkLibC();
@@ -112,6 +119,7 @@ pub fn build(b: *std.Build) void {
     unit_mod.addImport("toml", toml_mod);
     unit_mod.addImport("analyse", capture_analyse_mod);
     unit_mod.addImport("toml_gen", capture_toml_gen_mod);
+    unit_mod.addImport("capture_resolve", capture_resolve_mod);
     unit_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, unit_mod, wasm3_c_flags);
     const unit_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
@@ -137,6 +145,7 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addImport("toml", toml_mod);
     tsan_mod.addImport("analyse", capture_analyse_mod);
     tsan_mod.addImport("toml_gen", capture_toml_gen_mod);
+    tsan_mod.addImport("capture_resolve", capture_resolve_mod);
     tsan_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, tsan_mod, wasm3_c_flags);
     const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
@@ -159,6 +168,7 @@ pub fn build(b: *std.Build) void {
     safe_mod.addImport("toml", toml_mod);
     safe_mod.addImport("analyse", capture_analyse_mod);
     safe_mod.addImport("toml_gen", capture_toml_gen_mod);
+    safe_mod.addImport("capture_resolve", capture_resolve_mod);
     safe_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, safe_mod, wasm3_c_flags);
     const safe_tests = b.addTest(.{ .root_module = safe_mod });
