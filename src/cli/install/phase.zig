@@ -12,6 +12,7 @@ const detectImmutableOs = plan_mod.detectImmutableOs;
 const shouldAbortForImmutable = plan_mod.shouldAbortForImmutable;
 const ensureDirAll = plan_mod.ensureDirAll;
 const userInGroup = plan_mod.userInGroup;
+const hostHasInputGroup = plan_mod.hostHasInputGroup;
 const runCmd = plan_mod.runCmd;
 
 pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
@@ -179,8 +180,14 @@ fn printCompletionHint(plan: *const InstallPlan) void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
 }
 
+/// Returns true when the hint should be printed: the host has an input group
+/// but the current user is not yet a member. Exposed for testing.
+pub fn inputGroupHintNeeded(has_group: bool, in_group: bool) bool {
+    return has_group and !in_group;
+}
+
 fn printInputGroupHint() void {
-    if (userInGroup("input")) return;
+    if (!inputGroupHintNeeded(hostHasInputGroup(), userInGroup("input"))) return;
     _ = std.posix.write(std.posix.STDOUT_FILENO,
         \\
         \\[padctl] Note: /dev/uhid and /dev/uinput now grant rw to 'input' group members.

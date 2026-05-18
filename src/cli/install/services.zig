@@ -401,7 +401,7 @@ pub fn installServiceFiles(allocator: std.mem.Allocator, plan: *const InstallPla
     // Probe once: distros using uaccess/ACL (e.g. Bazzite/Fedora) have no
     // 'input' unix group. Emitting SupplementaryGroups=input on those systems
     // causes systemd EXIT_GROUP (216) and a restart loop (#279).
-    const has_input_group = plan_mod.groupGid("input") != null;
+    const has_input_group = plan_mod.hostHasInputGroup();
     // Always use the user-service template. Even on immutable-root installs,
     // the service file is placed under /etc/systemd/user/ so systemd discovers
     // it as a user unit and each user's systemd instance runs its own copy.

@@ -236,6 +236,11 @@ pub fn groupGid(name: []const u8) ?std.os.linux.gid_t {
     return null;
 }
 
+/// Returns true if the host has the named group defined in /etc/group.
+pub fn hostHasInputGroup() bool {
+    return groupGid("input") != null;
+}
+
 /// Returns true if the current process is a member of the named group.
 pub fn userInGroup(name: []const u8) bool {
     const target_gid = groupGid(name) orelse return false;

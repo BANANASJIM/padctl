@@ -76,6 +76,8 @@ const PromptResult = mappings_mod.PromptResult;
 // phase.zig
 const run = phase_mod.run;
 const uninstall = phase_mod.uninstall;
+const inputGroupHintNeeded = phase_mod.inputGroupHintNeeded;
+const hostHasInputGroup = plan_mod.hostHasInputGroup;
 
 // stdout silencer used by tests that exercise live install/uninstall paths.
 const SilencedStdout = struct {
@@ -620,6 +622,28 @@ test "install: generateSystemServiceContent omits SupplementaryGroups=input when
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "SupplementaryGroups=input") == null);
     try testing.expect(std.mem.indexOf(u8, content, "DeviceAllow=/dev/uhid rw") != null);
+}
+
+test "install: inputGroupHintNeeded suppressed when host has no input group" {
+    // Falsifiability: remove the has_group guard in inputGroupHintNeeded → this fails.
+    // Distros without an input group (e.g. Bazzite/Fedora) must not show usermod advice.
+    try std.testing.expect(!inputGroupHintNeeded(false, false));
+    try std.testing.expect(!inputGroupHintNeeded(false, true));
+}
+
+test "install: inputGroupHintNeeded shown only when group exists and user not yet a member" {
+    // Falsifiability: remove the !in_group guard → second case fails.
+    try std.testing.expect(inputGroupHintNeeded(true, false));
+    try std.testing.expect(!inputGroupHintNeeded(true, true));
+}
+
+test "install: hostHasInputGroup returns bool (smoke — value is host-dependent)" {
+    // Falsifiability: if hostHasInputGroup always panics, this fails.
+    // We cannot assert the value — it's host-dependent — but we confirm the
+    // function is callable and consistent with groupGid("input").
+    const has = hostHasInputGroup();
+    const gid = plan_mod.groupGid("input");
+    try std.testing.expectEqual(gid != null, has);
 }
 
 test "install: parseYesNoDefaultYes empty input is yes (default-yes)" {
