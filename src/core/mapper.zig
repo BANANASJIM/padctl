@@ -1663,8 +1663,8 @@ test "mapper: gyro blend_stick=true: output equals clamp(physical + gyro, -32767
     const parsed = try makeMapping(
         \\[gyro]
         \\mode = "joystick"
-        \\sensitivity_x = 1000.0
-        \\sensitivity_y = 1000.0
+        \\sensitivity_x = 1.0
+        \\sensitivity_y = 1.0
         \\smoothing = 0.0
         \\blend_stick = true
     , allocator);
@@ -1674,8 +1674,8 @@ test "mapper: gyro blend_stick=true: output equals clamp(physical + gyro, -32767
     const parsed_no_blend = try makeMapping(
         \\[gyro]
         \\mode = "joystick"
-        \\sensitivity_x = 1000.0
-        \\sensitivity_y = 1000.0
+        \\sensitivity_x = 1.0
+        \\sensitivity_y = 1.0
         \\smoothing = 0.0
         \\blend_stick = false
     , allocator);
@@ -1686,9 +1686,11 @@ test "mapper: gyro blend_stick=true: output equals clamp(physical + gyro, -32767
     var m_no = try makeMapper(&parsed_no_blend.value, allocator);
     defer m_no.deinit();
 
+    // sensitivity 1.0 * gyro 10000 -> gyro_joy ~= 6103 (non-saturated), so
+    // physical +/-1000 + gyro_joy stays in range and differs from gyro_joy alone.
     const physical_rx: i16 = 1000;
     const physical_ry: i16 = -1000;
-    const delta: GamepadStateDelta = .{ .gyro_x = 5000, .gyro_y = 5000, .rx = physical_rx, .ry = physical_ry };
+    const delta: GamepadStateDelta = .{ .gyro_x = 10000, .gyro_y = 10000, .rx = physical_rx, .ry = physical_ry };
 
     const ev_blend = try m.apply(delta, 16, 0);
     const ev_override = try m_no.apply(delta, 16, 0);
