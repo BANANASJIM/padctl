@@ -295,6 +295,7 @@ pub const Mapper = struct {
         var suppress_left_stick_gyro: bool = false;
         var gyro_joy_x: ?i16 = null;
         var gyro_joy_y: ?i16 = null;
+        var gyro_blend_stick: bool = false;
         {
             const gcfg = self.effectiveGyroConfig();
             const activate_spec = blk: {
@@ -309,6 +310,7 @@ pub const Mapper = struct {
                     if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = gout.rel_x } }) catch {};
                     if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = REL_Y, .value = gout.rel_y } }) catch {};
                 } else if (std.mem.eql(u8, gcfg.mode, "joystick")) {
+                    gyro_blend_stick = gcfg.blend_stick;
                     if (gout.joy_x) |jx| {
                         gyro_joy_x = jx;
                         switch (gcfg.target) {
@@ -472,14 +474,26 @@ pub const Mapper = struct {
             emit_state.dpad_y = 0;
         }
 
-        // gyro joystick mode: override stick axes, suppress originals
+        // gyro joystick mode: override or blend stick axes, suppress originals
         if (suppress_right_stick_gyro) {
-            if (gyro_joy_x) |jx| emit_state.rx = jx;
-            if (gyro_joy_y) |jy| emit_state.ry = jy;
+            if (gyro_joy_x) |jx| emit_state.rx = if (gyro_blend_stick)
+                @as(i16, @intCast(std.math.clamp(@as(i32, emit_state.rx) + @as(i32, jx), -32767, 32767)))
+            else
+                jx;
+            if (gyro_joy_y) |jy| emit_state.ry = if (gyro_blend_stick)
+                @as(i16, @intCast(std.math.clamp(@as(i32, emit_state.ry) + @as(i32, jy), -32767, 32767)))
+            else
+                jy;
         }
         if (suppress_left_stick_gyro) {
-            if (gyro_joy_x) |jx| emit_state.ax = jx;
-            if (gyro_joy_y) |jy| emit_state.ay = jy;
+            if (gyro_joy_x) |jx| emit_state.ax = if (gyro_blend_stick)
+                @as(i16, @intCast(std.math.clamp(@as(i32, emit_state.ax) + @as(i32, jx), -32767, 32767)))
+            else
+                jx;
+            if (gyro_joy_y) |jy| emit_state.ay = if (gyro_blend_stick)
+                @as(i16, @intCast(std.math.clamp(@as(i32, emit_state.ay) + @as(i32, jy), -32767, 32767)))
+            else
+                jy;
         }
 
         // suppress stick axes when mode != gamepad
@@ -700,6 +714,7 @@ fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
         .invert_x = mc.invert_x orelse false,
         .invert_y = mc.invert_y orelse false,
         .target = if (mc.target) |t| (if (std.mem.eql(u8, t, "left_stick")) .left_stick else .right_stick) else .right_stick,
+        .blend_stick = mc.blend_stick orelse false,
     };
 }
 
@@ -1608,6 +1623,113 @@ test "mapper: gyro mouse mode: joy_x/y do not affect emit_state axes" {
     // mouse mode: rx/ry must be untouched (suppress_right_stick_gyro stays false)
     try testing.expectEqual(@as(i16, 999), ev.gamepad.rx);
     try testing.expectEqual(@as(i16, 888), ev.gamepad.ry);
+}
+
+test "mapper: gyro blend_stick=false: output equals pure gyro value (zero-regression)" {
+    // Falsifiable: would FAIL if the default (override) path were replaced with additive logic.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+        \\blend_stick = false
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const physical_rx: i16 = 5000;
+    const physical_ry: i16 = -3000;
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = physical_rx, .ry = physical_ry }, 16, 0);
+
+    // With blend_stick=false the gyro value must completely replace the physical value.
+    // Result must differ from physical (gyro overrides) and must not equal physical+gyro (no addition).
+    try testing.expect(ev.gamepad.rx != physical_rx);
+    try testing.expect(ev.gamepad.ry != physical_ry);
+    // The output must equal what the same config without blend_stick produces (same function).
+    var m2 = try makeMapper(&parsed.value, allocator);
+    defer m2.deinit();
+    const ev2 = try m2.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = physical_rx, .ry = physical_ry }, 16, 0);
+    try testing.expectEqual(ev2.gamepad.rx, ev.gamepad.rx);
+    try testing.expectEqual(ev2.gamepad.ry, ev.gamepad.ry);
+}
+
+test "mapper: gyro blend_stick=true: output equals clamp(physical + gyro, -32767, 32767)" {
+    // Falsifiable: would FAIL if blend_stick were not applied (pure override gives a different value).
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+        \\blend_stick = true
+    , allocator);
+    defer parsed.deinit();
+
+    // Also get the override (blend=false) result so we can assert blend != override.
+    const parsed_no_blend = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+        \\blend_stick = false
+    , allocator);
+    defer parsed_no_blend.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+    var m_no = try makeMapper(&parsed_no_blend.value, allocator);
+    defer m_no.deinit();
+
+    const physical_rx: i16 = 1000;
+    const physical_ry: i16 = -1000;
+    const delta: GamepadStateDelta = .{ .gyro_x = 5000, .gyro_y = 5000, .rx = physical_rx, .ry = physical_ry };
+
+    const ev_blend = try m.apply(delta, 16, 0);
+    const ev_override = try m_no.apply(delta, 16, 0);
+
+    // Blend output must differ from pure override (gyro value alone).
+    try testing.expect(ev_blend.gamepad.rx != ev_override.gamepad.rx);
+    // Blend output = clamp(physical + gyro_joy).  gyro_joy == ev_override result.
+    const expected_rx = @as(i16, @intCast(std.math.clamp(
+        @as(i32, physical_rx) + @as(i32, ev_override.gamepad.rx),
+        -32767,
+        32767,
+    )));
+    const expected_ry = @as(i16, @intCast(std.math.clamp(
+        @as(i32, physical_ry) + @as(i32, ev_override.gamepad.ry),
+        -32767,
+        32767,
+    )));
+    try testing.expectEqual(expected_rx, ev_blend.gamepad.rx);
+    try testing.expectEqual(expected_ry, ev_blend.gamepad.ry);
+}
+
+test "mapper: gyro blend_stick=true: full-deflection clamp boundary" {
+    // Falsifiable: would FAIL if saturation clamp were absent (overflow or wrong value).
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+        \\blend_stick = true
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // physical = +32767 (full deflection), positive gyro → sum exceeds i16 max → must clamp to 32767.
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 32767, .ry = 32767 }, 16, 0);
+    try testing.expectEqual(@as(i16, 32767), ev.gamepad.rx);
+    try testing.expectEqual(@as(i16, 32767), ev.gamepad.ry);
 }
 
 test "mapper: layer switch resets gyro EMA and accumulators" {

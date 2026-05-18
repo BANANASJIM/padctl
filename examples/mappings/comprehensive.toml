@@ -55,6 +55,7 @@ mode = "off"   # "off" | "mouse" | "joystick"
 # mode   = "joystick"
 # deadzone    = 200
 # sensitivity = 1.5
+# blend_stick = true        # add gyro onto physical stick instead of replacing it
 
 # --- Macros (referenced by "macro:<name>" in remap values) ---
 

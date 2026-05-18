@@ -13,6 +13,7 @@ pub const GyroConfig = struct {
     max_val: f32 = 32767.0,
     invert_x: bool = false,
     invert_y: bool = false,
+    blend_stick: bool = false,
 };
 
 pub const GyroOutput = struct {

@@ -256,6 +256,7 @@ pub const GyroConfig = struct {
     max_val: ?f64 = null,
     invert_x: ?bool = null,
     invert_y: ?bool = null,
+    blend_stick: ?bool = null,
 };
 
 pub const StickConfig = struct {
