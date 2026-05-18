@@ -133,6 +133,7 @@ invert_y = true
 | `max_val` | float | — | Maximum output value cap |
 | `invert_x` | bool | — | Invert X axis |
 | `invert_y` | bool | — | Invert Y axis |
+| `blend_stick` | bool | `false` | When `true`, gyro joystick output is **added** to the physical stick value (`clamp(physical + gyro, -32767..32767)`) instead of replacing it. Only applies when `mode = "joystick"`. Ignored for `mode = "mouse"`. |
 
 ## `[stick.left]` / `[stick.right]`
 
