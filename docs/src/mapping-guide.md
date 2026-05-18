@@ -194,6 +194,25 @@ smoothing   = 0.3
 
 This is useful for games that read the right stick for camera control but do not natively support gyro input. All other `[gyro]` fields (`sensitivity`, `deadzone`, `smoothing`, `curve`, `invert_x`, `invert_y`) apply in joystick mode the same way as in mouse mode.
 
+#### Blending gyro with the physical stick (`blend_stick`)
+
+By default, gyro joystick output **replaces** the physical stick value while gyro is active. Set `blend_stick = true` to **add** the gyro signal on top of the physical stick instead:
+
+```toml
+[gyro]
+mode        = "joystick"
+target      = "right_stick"
+activate    = "LS"
+sensitivity = 1.5
+deadzone    = 200
+smoothing   = 0.3
+blend_stick = true          # add gyro onto physical stick instead of replacing it
+```
+
+This lets the physical stick handle coarse movement while the gyro provides fine aim adjustment simultaneously — useful for aim-assist workflows. The combined value is clamped to the valid axis range (`-32767..32767`).
+
+> **Note:** when the physical stick is already at full deflection (±32767), the gyro contribution is clamped out entirely. `blend_stick` has no effect when `mode = "mouse"`.
+
 ### Sticks (`[stick.left]` / `[stick.right]`)
 
 Three modes:
