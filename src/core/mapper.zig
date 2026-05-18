@@ -1684,6 +1684,55 @@ test "mapper: gyro blend_stick=false: output equals pure gyro value (zero-regres
     try testing.expect(ev.gamepad.ry != physical_ry);
 }
 
+test "mapper: gyro blend_stick omitted(null) == explicit false (ADR-018 absent invariant)" {
+    // Pins the `mc.blend_stick orelse false` default contract: a [gyro] config with NO
+    // blend_stick line (TOML omits it -> null) must behave byte-identically to explicit
+    // blend_stick = false. Falsifiable: would FAIL if the default were `orelse true`
+    // (omitted path would then blend physical+gyro and diverge from explicit-false override).
+    const allocator = testing.allocator;
+    const parsed_false = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1.0
+        \\sensitivity_y = 1.0
+        \\smoothing = 0.0
+        \\blend_stick = false
+    , allocator);
+    defer parsed_false.deinit();
+
+    // Identical [gyro] config but with the blend_stick line entirely OMITTED -> null.
+    const parsed_omitted = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1.0
+        \\sensitivity_y = 1.0
+        \\smoothing = 0.0
+    , allocator);
+    defer parsed_omitted.deinit();
+
+    var m_false = try makeMapper(&parsed_false.value, allocator);
+    defer m_false.deinit();
+    var m_omitted = try makeMapper(&parsed_omitted.value, allocator);
+    defer m_omitted.deinit();
+
+    // Non-saturating gyro + non-zero physical so blend (if wrongly defaulted true) would
+    // produce clamp(physical + gyro) != pure-gyro override, making the paths distinguishable.
+    const physical_rx: i16 = 5000;
+    const physical_ry: i16 = -3000;
+    const delta: GamepadStateDelta = .{ .gyro_x = 10000, .gyro_y = 10000, .rx = physical_rx, .ry = physical_ry };
+
+    const ev_false = try m_false.apply(delta, 16, 0);
+    const ev_omitted = try m_omitted.apply(delta, 16, 0);
+
+    // Sanity: explicit-false is the pure-gyro override (discards physical, non-saturating).
+    try testing.expect(ev_false.gamepad.rx != 0 and ev_false.gamepad.rx != 32767 and ev_false.gamepad.rx != -32767);
+    try testing.expect(ev_false.gamepad.rx != physical_rx and ev_false.gamepad.ry != physical_ry);
+
+    // The null-default contract: omitted blend_stick == explicit false, byte-identical.
+    try testing.expectEqual(ev_false.gamepad.rx, ev_omitted.gamepad.rx);
+    try testing.expectEqual(ev_false.gamepad.ry, ev_omitted.gamepad.ry);
+}
+
 test "mapper: gyro blend_stick=true: output equals clamp(physical + gyro, -32767, 32767)" {
     // Falsifiable: would FAIL if blend_stick were not applied (pure override gives a different value).
     const allocator = testing.allocator;
