@@ -1627,12 +1627,14 @@ test "mapper: gyro mouse mode: joy_x/y do not affect emit_state axes" {
 
 test "mapper: gyro blend_stick=false: output equals pure gyro value (zero-regression)" {
     // Falsifiable: would FAIL if the default (override) path were replaced with additive logic.
+    // Non-saturating constants (sensitivity 1.0, gyro 10000) so pure-gyro and physical+gyro
+    // are numerically distinct (neither clamped to 32767), mirroring the fixed blend_stick=true test.
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[gyro]
         \\mode = "joystick"
-        \\sensitivity_x = 1000.0
-        \\sensitivity_y = 1000.0
+        \\sensitivity_x = 1.0
+        \\sensitivity_y = 1.0
         \\smoothing = 0.0
         \\blend_stick = false
     , allocator);
@@ -1645,16 +1647,41 @@ test "mapper: gyro blend_stick=false: output equals pure gyro value (zero-regres
     const physical_ry: i16 = -3000;
     const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = physical_rx, .ry = physical_ry }, 16, 0);
 
-    // With blend_stick=false the gyro value must completely replace the physical value.
-    // Result must differ from physical (gyro overrides) and must not equal physical+gyro (no addition).
+    // Derive the pure gyro_joy value from a second mapper fed ZERO physical rx/ry but the
+    // same gyro input: with no physical contribution its output IS the pure gyro joystick value.
+    var m_pure = try makeMapper(&parsed.value, allocator);
+    defer m_pure.deinit();
+    const ev_pure = try m_pure.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 0, .ry = 0 }, 16, 0);
+    const gyro_joy_x = ev_pure.gamepad.rx;
+    const gyro_joy_y = ev_pure.gamepad.ry;
+
+    // Pure-gyro must be non-saturating and non-zero, else the override/additive distinction
+    // would be vacuous (both would clamp to the same value).
+    try testing.expect(gyro_joy_x != 0 and gyro_joy_x != 32767 and gyro_joy_x != -32767);
+    try testing.expect(gyro_joy_y != 0 and gyro_joy_y != 32767 and gyro_joy_y != -32767);
+
+    // blend_stick=false must override: output == pure gyro_joy exactly, discarding physical.
+    try testing.expectEqual(gyro_joy_x, ev.gamepad.rx);
+    try testing.expectEqual(gyro_joy_y, ev.gamepad.ry);
+
+    // And it must NOT be the additive (blend) result clamp(physical + gyro_joy).
+    const additive_rx = @as(i16, @intCast(std.math.clamp(
+        @as(i32, physical_rx) + @as(i32, gyro_joy_x),
+        -32767,
+        32767,
+    )));
+    const additive_ry = @as(i16, @intCast(std.math.clamp(
+        @as(i32, physical_ry) + @as(i32, gyro_joy_y),
+        -32767,
+        32767,
+    )));
+    try testing.expect(additive_rx != gyro_joy_x);
+    try testing.expect(additive_ry != gyro_joy_y);
+    try testing.expect(ev.gamepad.rx != additive_rx);
+    try testing.expect(ev.gamepad.ry != additive_ry);
+    // Override discards physical entirely, so output must also differ from physical.
     try testing.expect(ev.gamepad.rx != physical_rx);
     try testing.expect(ev.gamepad.ry != physical_ry);
-    // The output must equal what the same config without blend_stick produces (same function).
-    var m2 = try makeMapper(&parsed.value, allocator);
-    defer m2.deinit();
-    const ev2 = try m2.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = physical_rx, .ry = physical_ry }, 16, 0);
-    try testing.expectEqual(ev2.gamepad.rx, ev.gamepad.rx);
-    try testing.expectEqual(ev2.gamepad.ry, ev.gamepad.ry);
 }
 
 test "mapper: gyro blend_stick=true: output equals clamp(physical + gyro, -32767, 32767)" {
