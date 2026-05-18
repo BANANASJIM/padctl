@@ -298,6 +298,51 @@ test "install: generateServiceContent omits SupplementaryGroups=input when input
     try testing.expect(std.mem.indexOf(u8, content, "WantedBy=default.target") != null);
 }
 
+test "install: generateServiceContent group-present output == group-absent + single inserted line" {
+    // Pins the exact byte layout: the only difference between the two cases
+    // must be one inserted "SupplementaryGroups=input\n" line, immediately
+    // after "ExecStart=...\n". A single shared template guarantees this; this
+    // test catches any future divergence between the two cases.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const with_group = try generateServiceContent(allocator, "/usr", true);
+    defer allocator.free(with_group);
+    const without_group = try generateServiceContent(allocator, "/usr", false);
+    defer allocator.free(without_group);
+
+    const marker = "ExecStart=/usr/bin/padctl\n";
+    const idx = std.mem.indexOf(u8, without_group, marker).?;
+    const insert_at = idx + marker.len;
+    const reconstructed = try std.fmt.allocPrint(allocator, "{s}SupplementaryGroups=input\n{s}", .{
+        without_group[0..insert_at],
+        without_group[insert_at..],
+    });
+    defer allocator.free(reconstructed);
+    try testing.expectEqualStrings(reconstructed, with_group);
+}
+
+test "install: generateSystemServiceContent group-present output == group-absent + single inserted line" {
+    // Pins the exact byte layout for the legacy system unit: the only
+    // difference must be one "SupplementaryGroups=input\n" line, immediately
+    // after "StateDirectory=padctl\n".
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const with_group = try generateSystemServiceContent(allocator, "/usr", true);
+    defer allocator.free(with_group);
+    const without_group = try generateSystemServiceContent(allocator, "/usr", false);
+    defer allocator.free(without_group);
+
+    const marker = "StateDirectory=padctl\n";
+    const idx = std.mem.indexOf(u8, without_group, marker).?;
+    const insert_at = idx + marker.len;
+    const reconstructed = try std.fmt.allocPrint(allocator, "{s}SupplementaryGroups=input\n{s}", .{
+        without_group[0..insert_at],
+        without_group[insert_at..],
+    });
+    defer allocator.free(reconstructed);
+    try testing.expectEqualStrings(reconstructed, with_group);
+}
+
 test "install: generateUdevRules produces valid output" {
     const testing = std.testing;
     const allocator = testing.allocator;

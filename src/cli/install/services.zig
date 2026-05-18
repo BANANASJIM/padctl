@@ -16,52 +16,29 @@ pub fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8, 
         try std.fmt.allocPrint(allocator, "{s}/bin/padctl --config-dir {s}/share/padctl/devices", .{ prefix, prefix });
     defer allocator.free(exec_start);
 
-    if (has_input_group) {
-        return std.fmt.allocPrint(allocator,
-            \\[Unit]
-            \\Description=padctl gamepad compatibility daemon
-            \\After=graphical-session.target
-            \\
-            \\[Service]
-            \\Type=simple
-            \\ExecStart={s}
-            \\SupplementaryGroups=input
-            \\Restart=on-failure
-            \\RestartSec=3
-            \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,
-            \\# /var/lib/padctl on system services. systemd pre-creates it with
-            \\# the right perms, exports $STATE_DIRECTORY, and auto-whitelists
-            \\# the path through read-only home/system protections applied via
-            \\# drop-ins so the daemon can always write its dump log there.
-            \\StateDirectory=padctl
-            \\
-            \\[Install]
-            \\WantedBy=default.target
-            \\
-        , .{exec_start});
-    } else {
-        return std.fmt.allocPrint(allocator,
-            \\[Unit]
-            \\Description=padctl gamepad compatibility daemon
-            \\After=graphical-session.target
-            \\
-            \\[Service]
-            \\Type=simple
-            \\ExecStart={s}
-            \\Restart=on-failure
-            \\RestartSec=3
-            \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,
-            \\# /var/lib/padctl on system services. systemd pre-creates it with
-            \\# the right perms, exports $STATE_DIRECTORY, and auto-whitelists
-            \\# the path through read-only home/system protections applied via
-            \\# drop-ins so the daemon can always write its dump log there.
-            \\StateDirectory=padctl
-            \\
-            \\[Install]
-            \\WantedBy=default.target
-            \\
-        , .{exec_start});
-    }
+    const group_line: []const u8 = if (has_input_group) "SupplementaryGroups=input\n" else "";
+
+    return std.fmt.allocPrint(allocator,
+        \\[Unit]
+        \\Description=padctl gamepad compatibility daemon
+        \\After=graphical-session.target
+        \\
+        \\[Service]
+        \\Type=simple
+        \\ExecStart={s}
+        \\{s}Restart=on-failure
+        \\RestartSec=3
+        \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,
+        \\# /var/lib/padctl on system services. systemd pre-creates it with
+        \\# the right perms, exports $STATE_DIRECTORY, and auto-whitelists
+        \\# the path through read-only home/system protections applied via
+        \\# drop-ins so the daemon can always write its dump log there.
+        \\StateDirectory=padctl
+        \\
+        \\[Install]
+        \\WantedBy=default.target
+        \\
+    , .{ exec_start, group_line });
 }
 
 pub const immutable_dropin_content =
@@ -124,58 +101,32 @@ pub fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []cons
         try std.fmt.allocPrint(allocator, "{s}/bin/padctl --config-dir {s}/share/padctl/devices", .{ prefix, prefix });
     defer allocator.free(exec_start);
 
-    if (has_input_group) {
-        return std.fmt.allocPrint(allocator,
-            \\[Unit]
-            \\Description=padctl gamepad compatibility daemon
-            \\After=local-fs.target
-            \\
-            \\[Service]
-            \\Type=simple
-            \\ExecStart={s}
-            \\Restart=on-failure
-            \\RestartSec=3
-            \\ProtectSystem=strict
-            \\ProtectHome=true
-            \\PrivateTmp=true
-            \\RuntimeDirectory=padctl
-            \\StateDirectory=padctl
-            \\SupplementaryGroups=input
-            \\DeviceAllow=/dev/hidraw* rw
-            \\DeviceAllow=/dev/uinput rw
-            \\DeviceAllow=/dev/uhid rw
-            \\DeviceAllow=char-input rw
-            \\
-            \\[Install]
-            \\WantedBy=multi-user.target
-            \\
-        , .{exec_start});
-    } else {
-        return std.fmt.allocPrint(allocator,
-            \\[Unit]
-            \\Description=padctl gamepad compatibility daemon
-            \\After=local-fs.target
-            \\
-            \\[Service]
-            \\Type=simple
-            \\ExecStart={s}
-            \\Restart=on-failure
-            \\RestartSec=3
-            \\ProtectSystem=strict
-            \\ProtectHome=true
-            \\PrivateTmp=true
-            \\RuntimeDirectory=padctl
-            \\StateDirectory=padctl
-            \\DeviceAllow=/dev/hidraw* rw
-            \\DeviceAllow=/dev/uinput rw
-            \\DeviceAllow=/dev/uhid rw
-            \\DeviceAllow=char-input rw
-            \\
-            \\[Install]
-            \\WantedBy=multi-user.target
-            \\
-        , .{exec_start});
-    }
+    const group_line: []const u8 = if (has_input_group) "SupplementaryGroups=input\n" else "";
+
+    return std.fmt.allocPrint(allocator,
+        \\[Unit]
+        \\Description=padctl gamepad compatibility daemon
+        \\After=local-fs.target
+        \\
+        \\[Service]
+        \\Type=simple
+        \\ExecStart={s}
+        \\Restart=on-failure
+        \\RestartSec=3
+        \\ProtectSystem=strict
+        \\ProtectHome=true
+        \\PrivateTmp=true
+        \\RuntimeDirectory=padctl
+        \\StateDirectory=padctl
+        \\{s}DeviceAllow=/dev/hidraw* rw
+        \\DeviceAllow=/dev/uinput rw
+        \\DeviceAllow=/dev/uhid rw
+        \\DeviceAllow=char-input rw
+        \\
+        \\[Install]
+        \\WantedBy=multi-user.target
+        \\
+    , .{ exec_start, group_line });
 }
 
 /// Update any legacy system service files left behind by pre-user-service
