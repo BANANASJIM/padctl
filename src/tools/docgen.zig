@@ -26,8 +26,7 @@ pub fn generateDevicePage(
                     const s = try std.fmt.bufPrint(&buf, "{d}", .{ep});
                     break :blk s;
                 } else "—",
-                if (iface.ep_out) |ep|
-                blk: {
+                if (iface.ep_out) |ep| blk: {
                     var buf: [8]u8 = undefined;
                     const s = try std.fmt.bufPrint(&buf, "{d}", .{ep});
                     break :blk s;
