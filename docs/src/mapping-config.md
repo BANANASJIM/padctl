@@ -53,11 +53,24 @@ Use `padctl dump enable` to observe raw LT / RT axis readings and dial in the th
 
 **Jitter:** If the axis hovers around the threshold and produces rapid press/release bursts, raise the threshold by 10–20.
 
-Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not participate in `[remap]` or layer trigger matching.
+Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not participate in `[remap]` or layer trigger matching. This also means `[gyro] activate = "hold_LT"` / `"hold_RT"` will never fire unless `trigger_threshold` is set.
 
 ## `[remap]`
 
-Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
+Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, chord arrays, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
+
+> **`BTN_*` values route to the mouse device, not the gamepad.** Any value starting with `BTN_` (e.g. `BTN_SELECT`, `BTN_START`) produces a mouse button event. To remap to a gamepad button use the friendly ButtonId name (`"Select"`, `"Start"`, etc.).
+
+**Chord output (array of `KEY_*` strings):** a remap value can be a TOML array of 2–4 `KEY_*` strings to emit a chord: on press, key-down events are emitted in declaration order; on release, key-up events in reverse order. Example:
+
+```toml
+[remap]
+A = ["KEY_LEFTMETA", "KEY_1"]       # Super+1
+B = ["KEY_LEFTCTRL", "KEY_C"]       # Ctrl+C
+X = ["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_S"]  # Ctrl+Shift+S
+```
+
+> **PREVIEW:** Chord output parses and validates, and the source button is suppressed, but key dispatch is not yet wired. Buttons remapped to chord arrays currently emit nothing on press. See `examples/mappings/chord-output.toml`.
 
 ```toml
 [remap]
@@ -70,12 +83,13 @@ M4 = "macro:dodge_roll"
 
 ## `[gyro]`
 
-Global gyro-to-mouse configuration.
+Global gyro configuration. Supports mouse and joystick output modes.
 
 ```toml
 [gyro]
 mode = "mouse"
-activate = "LS"
+activate = "hold_RB"   # hold RB to enable; omit or "always" for always-on
+target = "right_stick" # joystick mode: "right_stick" (default) or "left_stick"
 sensitivity = 2.0
 deadzone = 300
 smoothing = 0.4
@@ -85,8 +99,9 @@ invert_y = true
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | `"off"` | `"off"` or `"mouse"` |
-| `activate` | string | — | Button name to hold for activation (e.g. `"LS"`, `"hold_RB"`) |
+| `mode` | string | `"off"` | `"off"`, `"mouse"`, or `"joystick"` |
+| `activate` | string | — | Use `"hold_<ButtonId>"` (e.g. `"hold_RB"`, `"hold_LS"`) for hold-to-enable. Use `"always"` or omit to make gyro always active. Any value without the `hold_` prefix is treated as always-on. |
+| `target` | string | `"right_stick"` | Which stick the gyro overrides in `"joystick"` mode (and suppresses in `"mouse"` mode). Accepted values: `"right_stick"`, `"left_stick"`. |
 | `sensitivity` | float | — | Overall sensitivity multiplier |
 | `sensitivity_x` | float | — | X-axis sensitivity override |
 | `sensitivity_y` | float | — | Y-axis sensitivity override |
@@ -96,6 +111,8 @@ invert_y = true
 | `max_val` | float | — | Maximum output value cap |
 | `invert_x` | bool | — | Invert X axis |
 | `invert_y` | bool | — | Invert Y axis |
+
+> **Note:** `activate = "hold_LT"` / `"hold_RT"` only works when `trigger_threshold` is set at the top level of the mapping file. LT and RT are analog axes; without `trigger_threshold` the LT/RT button bit is never synthesized, so hold_LT/hold_RT activation will silently never fire.
 
 ## `[stick.left]` / `[stick.right]`
 
@@ -154,7 +171,7 @@ hold_timeout = 200
 | `trigger` | string | yes | Button name that activates this layer |
 | `activation` | string | no | `"hold"` (default) or `"toggle"` |
 | `tap` | string | no | Button/key emitted on short press (when using hold activation). May be a `ButtonId`, `KEY_*`, `mouse_*`, or `disabled`. **Cannot be `macro:<name>`** — the layer tap dispatch path does not run macros, so `tap = "macro:foo"` is rejected at validate time (`error.LayerTapCannotBeMacro`). Use `macro:<name>` from `[remap]` / `[layer.remap]` instead. |
-| `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000) |
+| `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000). Default: 200 ms. |
 
 ### `[layer.remap]`
 

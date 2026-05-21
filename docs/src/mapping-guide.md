@@ -106,7 +106,7 @@ Mapping configs are validated at daemon startup. Errors are written to the journ
 journalctl -u padctl.service -n 30
 ```
 
-Note: `padctl --validate` is for device configs only.
+Note: `padctl --validate` validates both device and mapping configs. The schema is auto-detected by scanning for a `[device]` section — files with `[device]` are validated as device configs; all others are validated as mapping configs.
 
 ## Configuration Sections
 
@@ -129,30 +129,40 @@ Available target types:
 
 | Value | Effect |
 |-------|--------|
-| `"A"`, `"B"`, `"LB"`, … | Remap to another gamepad button |
+| `"A"`, `"B"`, `"LB"`, … | Remap to another gamepad button (use ButtonId names — see list below) |
 | `"KEY_*"` | Emit a Linux keyboard key (e.g. `"KEY_F13"`, `"KEY_LEFTSHIFT"`) |
+| `["KEY_A", "KEY_B"]` | Emit a key chord (2–4 `KEY_*` strings; see note below) |
 | `"mouse_left"` / `"mouse_right"` / `"mouse_middle"` / `"mouse_side"` / `"mouse_extra"` | Emit a mouse button |
 | `"mouse_forward"` / `"mouse_back"` | Emit mouse forward/back (button 4/5) |
 | `"disabled"` | Suppress the button entirely |
 | `"macro:<name>"` | Run a named macro sequence |
 
-Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `LS`, `RS`, `M1`, `M2`, `M3`, `M4`, `LM`, `RM`, `C`, `Z`
+> **`BTN_*` values route to the mouse device, not the gamepad.** `BTN_SELECT`, `BTN_START`, and other `BTN_*` names always produce mouse button events. To remap a button to another gamepad button use the friendly ButtonId name (`"Select"`, `"Start"`, etc.), not the `BTN_*` Linux code.
+
+> **Chord output (`["KEY_A", "KEY_B", ...]`) is a preview feature.** The array syntax parses and validates, and the source button is suppressed, but key dispatch is not yet wired. Buttons remapped to chord arrays currently emit nothing on press. See `examples/mappings/chord-output.toml`.
+
+Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `Home`, `Capture`, `LS`, `RS`, `DPadUp`, `DPadDown`, `DPadLeft`, `DPadRight`, `M1`, `M2`, `M3`, `M4`, `Paddle1`, `Paddle2`, `Paddle3`, `Paddle4`, `TouchPad`, `Mic`, `C`, `Z`, `LM`, `RM`, `O`
 
 ### Gyroscope (`[gyro]`)
 
-Translates gyroscope motion to mouse movement. Off by default.
+Translates gyroscope motion to mouse or joystick output. Off by default.
 
 ```toml
 [gyro]
 mode        = "mouse"
-activate    = "LS"      # hold left stick click to enable gyro
+activate    = "hold_LS"  # hold left stick click to enable gyro
+target      = "right_stick"  # joystick mode: which stick gyro overrides
 sensitivity = 2.0
-deadzone    = 300       # raw gyro units; filters small wobble
-smoothing   = 0.4       # 0–1; higher = smoother but more latency
+deadzone    = 300         # raw gyro units; filters small wobble
+smoothing   = 0.4         # 0–1; higher = smoother but more latency
 invert_y    = true
 ```
 
-Omit `activate` to have gyro always active when mode is `"mouse"`.
+Omit `activate` (or set `activate = "always"`) to have gyro always active when mode is `"mouse"` or `"joystick"`.
+
+The `activate` field requires the `hold_<ButtonId>` prefix for hold-to-enable behavior (e.g. `"hold_LS"`, `"hold_RB"`). Any value without this prefix (including bare button names like `"LS"`) is treated as always-on.
+
+> **Note:** `activate = "hold_LT"` / `"hold_RT"` only works when `trigger_threshold` is set at the top level of the mapping file. LT and RT are analog axes; without `trigger_threshold` the LT/RT button bit is never synthesized, so gyro activation via hold_LT/hold_RT will silently never fire.
 
 ### Sticks (`[stick.left]` / `[stick.right]`)
 

@@ -4,7 +4,9 @@
 # Every major feature is shown here with a one-line explanation.
 # Remove or comment out any section your device does not need.
 #
-# Button names: A B X Y  LB RB LT RT  Start Select  LS RS  M1 M2 M3 M4  LM RM  C Z
+# Button names: A B X Y  LB RB LT RT  Start Select Home Capture  LS RS
+#               DPadUp DPadDown DPadLeft DPadRight  M1 M2 M3 M4
+#               Paddle1 Paddle2 Paddle3 Paddle4  TouchPad Mic  C Z  LM RM  O
 
 name = "comprehensive-example"
 
