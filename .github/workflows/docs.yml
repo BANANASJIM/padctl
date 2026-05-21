@@ -15,17 +15,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # GitHub Actions cannot read a file inside a `container:` expression, so the
+  # tag is computed once here and consumed via needs.image-ref.outputs.ref.
+  # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
+  # of truth for the Zig version.
+  image-ref:
+    name: image-ref
+    runs-on: ubuntu-22.04
+    outputs:
+      ref: ${{ steps.img.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve image reference
+        id: img
+        run: |
+          set -euo pipefail
+          ver="$(head -n1 .zigversion | tr -d '[:space:]')"
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
+  build:
+    runs-on: ubuntu-22.04
+    needs: [image-ref]
+    # Run inside the canonical build image (ADR-019): Zig + libusb + kernel
+    # headers are baked in, so no setup-zig step or apt install is needed.
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install mdbook
         run: |

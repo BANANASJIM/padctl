@@ -6,20 +6,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e:
+  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # GitHub Actions cannot read a file inside a `container:` expression, so the
+  # tag is computed once here and consumed via needs.image-ref.outputs.ref.
+  # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
+  # of truth for the Zig version.
+  image-ref:
+    name: image-ref
     runs-on: ubuntu-22.04
+    outputs:
+      ref: ${{ steps.img.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+      - name: Resolve image reference
+        id: img
+        run: |
+          set -euo pipefail
+          ver="$(head -n1 .zigversion | tr -d '[:space:]')"
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    runs-on: ubuntu-22.04
+    needs: [image-ref]
+    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # in. --privileged is required so the UHID L2/L3 tests can load the uhid
+    # kernel module and access /dev/uhid from inside the container.
+    container:
+      image: ${{ needs.image-ref.outputs.ref }}
+      options: --privileged -v /dev:/dev
+    # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
       - name: Enable UHID/uinput (best-effort)
         run: |
-          sudo modprobe uhid uinput 2>/dev/null || true
-          sudo chmod 666 /dev/uhid /dev/uinput 2>/dev/null || true
+          modprobe uhid uinput 2>/dev/null || true
+          chmod 666 /dev/uhid /dev/uinput 2>/dev/null || true
       - name: Probe /dev/uhid accessibility
         id: uhid_probe
         run: |
