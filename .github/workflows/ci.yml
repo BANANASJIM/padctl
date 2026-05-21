@@ -317,3 +317,32 @@ jobs:
               padctl scan --help > /dev/null
               padctl --validate /devices/sony/dualsense.toml
             "
+
+  # Drift-guard (ADR-019): the migrated workflows must build/test only inside
+  # the canonical image. Fail if `mlugg/setup-zig` or a `zig-version:` input is
+  # reintroduced into any of them. coverage.yml (kcov) and lean.yml are
+  # intentionally not migrated and are deliberately excluded from this check.
+  drift-guard:
+    name: drift-guard
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: No setup-zig in migrated workflows
+        run: |
+          set -euo pipefail
+          migrated="ci.yml e2e.yml validate.yml docs.yml release.yml install-flow.yml"
+          status=0
+          for wf in $migrated; do
+            path=".github/workflows/$wf"
+            # Strip comment lines so prose mentioning the action does not trip
+            # the guard; match the action ref and the setup-zig input key.
+            if grep -nE '^[^#]*(mlugg/setup-zig|zig-version:)' "$path"; then
+              echo "ERROR: $path reintroduced a hardcoded Zig toolchain (ADR-019)." >&2
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "Migrated workflows must run inside ghcr.io/.../padctl-build (.zigversion)." >&2
+            exit 1
+          fi
+          echo "drift-guard: all migrated workflows use the canonical image."

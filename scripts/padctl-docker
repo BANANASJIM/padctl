@@ -105,7 +105,8 @@ cmd_canary() {
   cmd_image
   [ -e /dev/uhid ] || die "/dev/uhid missing on host — run: sudo modprobe uhid"
   # --privileged + devtmpfs remount makes UHID-born evdev nodes visible inside
-  # the container; see scripts/wave5-canary-docker.sh for the rationale.
+  # the container: Docker's default /dev is a sanitised tmpfs that does not
+  # reflect input nodes the kernel creates from UHID_CREATE2.
   docker run --rm \
     --privileged \
     --device /dev/uhid \

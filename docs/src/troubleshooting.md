@@ -93,7 +93,7 @@ zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
 The resulting binary is fully static and works on any Linux distribution regardless of glibc
 version. This is the same target used for official padctl release tarballs.
 
-Alternatively, use the provided `Dockerfile.wave5` (Debian bookworm + Zig 0.15.2, glibc 2.36)
-for reproducible builds.
+Alternatively, build inside the canonical Docker image (`./scripts/padctl-docker build`,
+Debian bookworm + glibc 2.36) for a reproducible build environment.
 
 Reference: [issue #147](https://github.com/BANANASJIM/padctl/issues/147)

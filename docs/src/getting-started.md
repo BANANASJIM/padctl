@@ -47,8 +47,9 @@ Optional build flags:
 > **GCC 15 build failure (issue #147):** Arch Linux and similar distros with **glibc 2.43+** may
 > hit `error: relocation R_X86_64_PC64 in .sframe section is unsupported` — glibc 2.43 adds
 > `.sframe` sections to `crt1.o` startup objects, which Zig 0.15.x's linker does not yet handle.
-> This is an upstream Zig limitation, not a padctl bug. Use `Dockerfile.wave5` (Debian bookworm +
-> Zig 0.15.2 tarball, glibc 2.36) or install Zig 0.15.2 from the
+> This is an upstream Zig limitation, not a padctl bug. Build inside the canonical Docker image
+> (`./scripts/padctl-docker build`, Debian bookworm + glibc 2.36) — see [Build with Docker](#build-with-docker)
+> below — or install Zig 0.15.2 from the
 > [official tarball](https://ziglang.org/download/) on a system with glibc ≤ 2.41 (Debian 12,
 > Ubuntu 22.04/24.04 all work; Arch with glibc 2.43+ does NOT).
 > Upstream fix: [ziglang/zig#31272](https://codeberg.org/ziglang/zig/issues/31272).
