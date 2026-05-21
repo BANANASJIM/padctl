@@ -186,6 +186,18 @@ This is an upstream Zig limitation, not a padctl bug. Workarounds:
 2. **Install Zig 0.15.2 from the official tarball** (`https://ziglang.org/download/`) on a system with **glibc ≤ 2.41** (Debian 12 = glibc 2.36, Ubuntu 22.04 = glibc 2.35, Ubuntu 24.04 = glibc 2.39 all work; Arch with glibc 2.43+ does NOT).
 3. Track upstream fix progress at [ziglang/zig#31272](https://codeberg.org/ziglang/zig/issues/31272).
 
+## Build with Docker
+
+If you cannot install Zig locally — or hit the glibc 2.43+ linker error above — build padctl inside the canonical Docker image instead. It pins the exact Zig version from `.zigversion` against Debian bookworm (glibc 2.36), so it matches the CI build environment.
+
+```sh
+./scripts/padctl-docker build      # zig build inside the image
+./scripts/padctl-docker test       # zig build test inside the image
+./scripts/padctl-docker shell      # interactive shell for debugging
+```
+
+The first invocation builds the image (`padctl-build:<zig-version>`); later runs reuse it. The repository is bind-mounted at `/src`, so build output lands in your working tree as usual. Requires only Docker — no local Zig toolchain.
+
 ## Bazzite / Immutable Distros
 
 On immutable distributions (Bazzite, Fedora Atomic, etc.) where `/usr` is read-only, use the bootstrap script for a complete one-command setup:

@@ -11,6 +11,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Build and publish the canonical padctl build image (ADR-019) to GHCR.
+  # The image is tagged with the Zig version read from .zigversion. On a
+  # push event the job builds and pushes only when that version tag is not
+  # already in the registry (manifest-inspect cache check); on a fork
+  # pull_request it cannot push, so it builds locally for verification.
+  # This job is currently additive — no other job consumes the image yet.
+  build-image:
+    name: build-image
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image reference
+        id: img
+        run: |
+          set -euo pipefail
+          ver="$(head -n1 .zigversion | tr -d '[:space:]')"
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+      - name: Look up Zig SHA256
+        id: sha
+        run: |
+          set -euo pipefail
+          amd64="$(scripts/padctl-docker --print-sha amd64)"
+          test -n "$amd64"
+          echo "amd64=${amd64}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check whether image tag already exists
+        id: exists
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "${{ steps.img.outputs.ref }}" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push canonical image
+        if: steps.exists.outputs.found == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.img.outputs.ref }}
+          build-args: |
+            ZIG_VERSION=${{ steps.img.outputs.version }}
+            ZIG_SHA256=${{ steps.sha.outputs.amd64 }}
+            TARGETARCH=amd64
+
   # Build the Lean formal-spec oracle once and publish it as an artifact.
   # The interactive-Lean-oracle DRT suite in src/test/properties/drt_props.zig
   # only runs when formal/lean/.lake/build/bin/oracle exists; without this job

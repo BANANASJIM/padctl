@@ -53,6 +53,18 @@ Optional build flags:
 > Ubuntu 22.04/24.04 all work; Arch with glibc 2.43+ does NOT).
 > Upstream fix: [ziglang/zig#31272](https://codeberg.org/ziglang/zig/issues/31272).
 
+## Build with Docker
+
+If you do not have Zig installed — or hit the glibc 2.43+ linker error above — build inside the canonical Docker image. It pins the Zig version from `.zigversion` against Debian bookworm (glibc 2.36) and matches the CI build environment, so it needs only Docker:
+
+```sh
+./scripts/padctl-docker build      # zig build inside the image
+./scripts/padctl-docker test       # zig build test inside the image
+./scripts/padctl-docker shell      # interactive shell for debugging
+```
+
+The first run builds the image (`padctl-build:<zig-version>`) and later runs reuse it. The repository is bind-mounted at `/src`, so `zig-out/` appears in your working tree as with a native build.
+
 ## Install
 
 ```sh

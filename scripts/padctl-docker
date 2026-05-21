@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# padctl-docker — single entry point for the canonical Docker build image (ADR-019).
+#
+# Subcommands:
+#   image    build (or reuse) the canonical build image for the pinned Zig version
+#   build    run `zig build` inside the image
+#   test     run `zig build test` inside the image
+#   canary   run the UHID L2 privileged tests against the host /dev/uhid
+#   shell    open an interactive shell inside the image
+#
+# The Zig version is read from .zigversion; its SHA256 is looked up in the
+# table below. A version/arch combination missing from the table is a hard
+# error — there is no fallback to an unverified download.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# SHA256 of the official ziglang.org tarballs, keyed by "<version>-<arch>".
+# Source: https://ziglang.org/download/index.json
+# On a Zig upgrade, add both the amd64 and arm64 entries for the new version.
+declare -A SHA256_TABLE=(
+  ["0.15.2-amd64"]="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
+  ["0.15.2-arm64"]="958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f"
+)
+
+die() {
+  echo "padctl-docker: $*" >&2
+  exit 1
+}
+
+zig_version() {
+  local f="${REPO_ROOT}/.zigversion"
+  [ -f "$f" ] || die ".zigversion not found at ${f}"
+  local v
+  v="$(head -n1 "$f" | tr -d '[:space:]')"
+  [ -n "$v" ] || die ".zigversion is empty"
+  printf '%s' "$v"
+}
+
+# Map `uname -m` to the Docker TARGETARCH value used by the Dockerfile.
+host_arch() {
+  case "$(uname -m)" in
+    x86_64) printf 'amd64' ;;
+    aarch64 | arm64) printf 'arm64' ;;
+    *) die "unsupported host arch: $(uname -m)" ;;
+  esac
+}
+
+sha256_for() {
+  local version="$1" arch="$2" key sha
+  key="${version}-${arch}"
+  sha="${SHA256_TABLE[$key]:-}"
+  [ -n "$sha" ] || die "no SHA256 for ${key} — add it to SHA256_TABLE in $0"
+  printf '%s' "$sha"
+}
+
+# Build the canonical image locally if the version tag is not already present.
+cmd_image() {
+  local version arch sha tag
+  version="$(zig_version)"
+  arch="$(host_arch)"
+  sha="$(sha256_for "$version" "$arch")"
+  tag="padctl-build:${version}"
+
+  if docker image inspect "$tag" >/dev/null 2>&1; then
+    echo "padctl-docker: reusing existing image ${tag}"
+    return 0
+  fi
+
+  echo "padctl-docker: building ${tag} (zig ${version}, ${arch})"
+  docker buildx build \
+    --build-arg "ZIG_VERSION=${version}" \
+    --build-arg "ZIG_SHA256=${sha}" \
+    --build-arg "TARGETARCH=${arch}" \
+    --load \
+    -t "$tag" \
+    -f "${REPO_ROOT}/Dockerfile" \
+    "${REPO_ROOT}"
+}
+
+image_tag() {
+  printf 'padctl-build:%s' "$(zig_version)"
+}
+
+# Run a command inside the canonical image with the repo bind-mounted at /src.
+run_in_image() {
+  cmd_image
+  docker run --rm \
+    -v "${REPO_ROOT}:/src" \
+    -w /src \
+    "$(image_tag)" \
+    "$@"
+}
+
+cmd_build() {
+  run_in_image zig build "$@"
+}
+
+cmd_test() {
+  run_in_image zig build test "$@"
+}
+
+cmd_canary() {
+  cmd_image
+  [ -e /dev/uhid ] || die "/dev/uhid missing on host — run: sudo modprobe uhid"
+  # --privileged + devtmpfs remount makes UHID-born evdev nodes visible inside
+  # the container; see scripts/wave5-canary-docker.sh for the rationale.
+  docker run --rm \
+    --privileged \
+    --device /dev/uhid \
+    -v "${REPO_ROOT}:/src" \
+    -w /src \
+    "$(image_tag)" \
+    bash -c '
+      set -euo pipefail
+      mount -t devtmpfs devtmpfs /dev
+      PADCTL_TEST_REQUIRE_UHID=1 zig build test-uhid-uniq -Dlibusb=false
+    '
+}
+
+cmd_shell() {
+  cmd_image
+  docker run --rm -it \
+    -v "${REPO_ROOT}:/src" \
+    -w /src \
+    "$(image_tag)" \
+    bash
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: padctl-docker <image|build|test|canary|shell> [args...]
+
+  image           build or reuse the canonical build image
+  build [args]    run `zig build [args]` inside the image
+  test  [args]    run `zig build test [args]` inside the image
+  canary          run the UHID L2 privileged tests (needs /dev/uhid)
+  shell           open an interactive shell inside the image
+EOF
+  exit 2
+}
+
+# Print the SHA256 for the pinned Zig version and the given arch (amd64|arm64).
+# Used by the CI build-image job so the checksum has a single source of truth.
+cmd_print_sha() {
+  [ $# -eq 1 ] || die "--print-sha needs one arg: amd64 or arm64"
+  sha256_for "$(zig_version)" "$1"
+  echo
+}
+
+main() {
+  [ $# -ge 1 ] || usage
+  local sub="$1"
+  shift
+  case "$sub" in
+    image) cmd_image "$@" ;;
+    build) cmd_build "$@" ;;
+    test) cmd_test "$@" ;;
+    canary) cmd_canary "$@" ;;
+    shell) cmd_shell "$@" ;;
+    --print-sha) cmd_print_sha "$@" ;;
+    -h | --help | help) usage ;;
+    *) die "unknown subcommand: ${sub}" ;;
+  esac
+}
+
+main "$@"
