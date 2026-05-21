@@ -426,6 +426,85 @@ jobs:
           fi
           echo "PASS: no incompatible hardening directives"
 
+      - name: Verify no SupplementaryGroups in user unit (issues #287/#288)
+        run: |
+          set -euo pipefail
+          # A systemd --user manager runs unprivileged (no CAP_SETGID) and cannot
+          # apply SupplementaryGroups=; the directive aborts startup with
+          # status=216/GROUP. It must never appear in the user unit.
+          if grep -E "^SupplementaryGroups=" /tmp/padctl.service; then
+            echo "FAIL: SupplementaryGroups in user unit causes status=216/GROUP (issues #287/#288)"
+            exit 1
+          fi
+          echo "PASS: no SupplementaryGroups in user unit"
+
+      - name: Start generated user unit under a real --user manager (issues #287/#288)
+        run: |
+          set -euo pipefail
+          # Boot systemd in a container, install the GENERATED user unit into a
+          # test user's manager, start it, and assert it does NOT fail with
+          # status=216/GROUP. Runtime counterpart to the static grep check
+          # above and the Zig generation test. The container is started
+          # detached with systemd as PID 1 — a backgrounded systemd inside a
+          # bash -c does not reliably reach a running state.
+          docker build -t padctl-sd-runtime - <<'DOCKERFILE'
+          FROM debian:12
+          RUN apt-get update -qq \
+           && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                systemd systemd-sysv dbus libpam-systemd procps \
+           && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+
+          docker run -d --name sd-runtime --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock \
+            -v /sys/fs/cgroup:/sys/fs/cgroup \
+            -v /tmp/padctl.service:/tmp/in.service:ro \
+            -e container=docker \
+            padctl-sd-runtime /lib/systemd/systemd
+
+          for i in $(seq 1 30); do
+            S=$(docker exec sd-runtime systemctl is-system-running 2>/dev/null || true)
+            echo "${S}" | grep -qE "running|degraded" && break
+            sleep 1
+          done
+
+          docker exec sd-runtime /bin/bash -euo pipefail -c '
+            # Arch-shape host: the input group EXISTS — exactly the #288
+            # scenario where the PR #280 conditional still wrote the line.
+            groupadd input
+            useradd -m -s /bin/bash tu
+            UID_TU=$(id -u tu)
+            cp /bin/sh /usr/bin/padctl
+            mkdir -p /home/tu/.config/systemd/user
+            # The generated unit uses ExecStart=/usr/bin/padctl; swap to a
+            # long-running stub so the only failure mode under test is GROUP.
+            sed "s#^ExecStart=.*#ExecStart=/bin/sleep 600#" /tmp/in.service \
+              > /home/tu/.config/systemd/user/padctl.service
+            chown -R tu:tu /home/tu
+            loginctl enable-linger tu
+            sleep 3
+            su - tu -c "XDG_RUNTIME_DIR=/run/user/${UID_TU} systemctl --user daemon-reload"
+            su - tu -c "XDG_RUNTIME_DIR=/run/user/${UID_TU} systemctl --user start padctl.service" || true
+            sleep 2
+            STATUS=$(su - tu -c "XDG_RUNTIME_DIR=/run/user/${UID_TU} systemctl --user show -p ExecMainStatus --value padctl.service")
+            ACTIVE=$(su - tu -c "XDG_RUNTIME_DIR=/run/user/${UID_TU} systemctl --user is-active padctl.service" || true)
+            echo "ExecMainStatus=${STATUS} ActiveState=${ACTIVE}"
+            su - tu -c "XDG_RUNTIME_DIR=/run/user/${UID_TU} systemctl --user --no-pager status padctl.service" || true
+            if [ "${STATUS}" = "216" ]; then
+              echo "FAIL: user unit exited status=216/GROUP (issues #287/#288)"
+              exit 1
+            fi
+            if [ "${ACTIVE}" != "active" ]; then
+              echo "FAIL: user unit did not reach active state"
+              exit 1
+            fi
+            echo "PASS: generated user unit reaches active state, no 216/GROUP"
+          '
+
+      - name: Tear down systemd runtime container
+        if: always()
+        run: docker rm -f sd-runtime 2>/dev/null || true
+
       - name: systemd-analyze verify in Ubuntu 26.04 (systemd 259)
         run: |
           set -euo pipefail
