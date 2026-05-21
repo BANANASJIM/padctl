@@ -71,6 +71,26 @@ jobs:
             ZIG_VERSION=${{ steps.img.outputs.version }}
             ZIG_SHA256=${{ steps.sha.outputs.amd64 }}
 
+  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # GitHub Actions cannot read a file inside a `container:` expression, so the
+  # tag is computed once here and consumed via needs.image-ref.outputs.ref.
+  # Mirrors the build-image job's "Resolve image reference" step — .zigversion
+  # stays the single source of truth for the Zig version.
+  image-ref:
+    name: image-ref
+    runs-on: ubuntu-22.04
+    outputs:
+      ref: ${{ steps.img.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image reference
+        id: img
+        run: |
+          set -euo pipefail
+          ver="$(head -n1 .zigversion | tr -d '[:space:]')"
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
+
   # Build the Lean formal-spec oracle once and publish it as an artifact.
   # The interactive-Lean-oracle DRT suite in src/test/properties/drt_props.zig
   # only runs when formal/lean/.lake/build/bin/oracle exists; without this job
@@ -104,7 +124,15 @@ jobs:
   check-matrix:
     name: check / ${{ matrix.os }} / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    needs: [lean-oracle]
+    needs: [lean-oracle, image-ref, build-image]
+    # Run inside the canonical build image (ADR-019): Zig + libusb + kernel
+    # headers are baked in, so no setup-zig step or apt install is needed.
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash so run: steps
+    # keep their `set -o pipefail` and `| tee` pipelines.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -124,13 +152,6 @@ jobs:
       PADCTL_TEST_REQUIRE_LEAN: "1"
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - name: Install system dependencies
-        if: matrix.name != 'libusb-false'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
       - name: Download Lean oracle artifact
         uses: actions/download-artifact@v4
         with:
@@ -175,14 +196,18 @@ jobs:
   tsan:
     name: tsan / ubuntu-22.04
     runs-on: ubuntu-22.04
+    needs: [image-ref, build-image]
+    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # in. gdb is only needed by the failure-only diagnostics step below and is
+    # installed there to keep the happy path free of an apt install.
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash so run: steps
+    # keep their `set -o pipefail`, `| tee` and `bash -lc` usage.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev gdb
       - name: Run TSAN tests
         run: |
           set -o pipefail
@@ -193,6 +218,7 @@ jobs:
         if: failure()
         run: |
           set -euo pipefail
+          apt-get update && apt-get install -y --no-install-recommends gdb
           echo "==== TSAN summary from build log ===="
           grep -nE "ThreadSanitizer|data race|thread leak|SUMMARY|signal [0-9]+|terminated with signal|error: while executing test" tsan-build.log || true
           FAILED_CMD="$(grep -E '^\.?/?\.zig-cache/o/.+/test --cache-dir=' tsan-build.log | tail -n 1 || true)"
