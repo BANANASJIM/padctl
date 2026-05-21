@@ -249,61 +249,57 @@ jobs:
             tsan-gdb.log
             tsan*
 
+  # Compile the musl-static padctl binary once inside the canonical build
+  # image (ADR-019) and publish it as an artifact. The distro-check matrix
+  # then `docker run`s this binary on pristine debian:12 / fedora:41 images,
+  # which stay free of any padctl toolchain so the smoke test reflects a real
+  # end-user environment.
+  distro-musl-build:
+    name: distro-musl-build
+    runs-on: ubuntu-22.04
+    needs: [image-ref, build-image]
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build musl-static padctl
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
+      - name: Upload musl binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: distro-musl-bin
+          path: zig-out/bin/padctl
+          if-no-files-found: error
+          retention-days: 1
+
   distro-check:
     name: distro-check / ${{ matrix.name }}
     runs-on: ubuntu-22.04
+    # The musl-static binary is built once in the canonical image (ADR-019);
+    # this job only `docker run`s it on pristine distros, so it cannot itself
+    # be a `container:` job and instead depends on the distro-musl-build
+    # artifact.
+    needs: [distro-musl-build]
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: debian-12
             image: debian:12
-            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl xz-utils gcc g++ make pkg-config linux-libc-dev
           - name: fedora-41
             image: fedora:41
-            setup: dnf install -y ca-certificates curl xz gcc gcc-c++ make pkgconf-pkg-config kernel-headers glibc-headers glibc-devel
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig (host)
-        uses: mlugg/setup-zig@v2
+      - name: Download musl binary
+        uses: actions/download-artifact@v4
         with:
-          version: 0.15.2
-      - name: Stage host Zig for container
-        run: |
-          set -e
-          HOST_ZIG=$(which zig)
-          HOST_ZIG_DIR=$(dirname "$HOST_ZIG")
-          cp -a "$HOST_ZIG_DIR" /tmp/zig-host
-          /tmp/zig-host/zig version
-      - name: Run check-all in container
-        env:
-          DISTRO_IMAGE: ${{ matrix.image }}
-          DISTRO_SETUP: ${{ matrix.setup }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -v "$PWD:/work" \
-            -v /tmp/zig-host:/opt/zig:ro \
-            -w /work \
-            "$DISTRO_IMAGE" \
-            /bin/sh -lc "
-              set -eu
-              ${DISTRO_SETUP}
-              timeout 600 /opt/zig/zig build -Dlibusb=false test --summary all
-              timeout 600 /opt/zig/zig build -Dlibusb=false test-safe --summary all
-              timeout 600 /opt/zig/zig build -Dlibusb=false check-fmt
-            " 2>&1 | tee distro-check.log
-      # The container above runs as root (apt-get/dnf require it), so any
-      # .zig-cache / zig-out files it writes are root-owned on the host.
-      # The subsequent host build step and the setup-zig post-job cache-save
-      # trim both run as the unprivileged `runner` user; root-owned files make
-      # the post-job `unlink` trim fail with EACCES once the cache exceeds the
-      # 2 GiB limit. Reclaim ownership so runner-side steps can manage them.
-      - name: Reclaim container-written cache ownership
-        if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" .zig-cache zig-out 2>/dev/null || true
-      - name: Build musl binary (host)
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
+          name: distro-musl-bin
+          path: zig-out/bin
+      - name: Restore binary executable bit
+        run: chmod +x zig-out/bin/padctl
       - name: Smoke-test musl binary in container
         # Verifies the musl-static binary actually executes on minimal debian/fedora — catches packaging/loader regressions that zig build test (host-glibc) misses
         env:

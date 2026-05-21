@@ -7,19 +7,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # GitHub Actions cannot read a file inside a `container:` expression, so the
+  # tag is computed once here and consumed via needs.image-ref.outputs.ref.
+  # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
+  # of truth for the Zig version.
+  image-ref:
+    name: image-ref
+    runs-on: ubuntu-22.04
+    outputs:
+      ref: ${{ steps.img.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image reference
+        id: img
+        run: |
+          set -euo pipefail
+          ver="$(head -n1 .zigversion | tr -d '[:space:]')"
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
+
+  # Compile the padctl binary once inside the canonical build image (ADR-019)
+  # and publish it as an artifact. The downstream install/pkg/systemd jobs run
+  # on the bare runner so they can `docker run` pristine distro images, which
+  # is not possible from inside a `container:` job. A musl-static binary is
+  # built so the same artifact runs unchanged on the runner host (older glibc)
+  # and inside debian:12 / ubuntu:26.04 test targets.
+  build-binary:
+    name: build-binary
+    runs-on: ubuntu-22.04
+    needs: [image-ref]
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build padctl (musl-static, no libusb)
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
+      - name: Upload padctl binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: padctl-bin
+          path: zig-out/bin/
+          if-no-files-found: error
+          retention-days: 1
+
   install-sandbox:
     name: install / rootless-docker sandbox
     runs-on: ubuntu-22.04
+    needs: [build-binary]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
+      - name: Download padctl binary
+        uses: actions/download-artifact@v4
         with:
-          version: 0.15.2
+          name: padctl-bin
+          path: zig-out/bin
 
-      - name: Build padctl (no libusb — install flow only needs the static binary)
-        run: zig build -Dlibusb=false
+      - name: Restore binary executable bit
+        run: chmod +x zig-out/bin/padctl
 
       - name: Run install-flow sandbox
         run: |
@@ -227,15 +276,18 @@ jobs:
   pkg-deb-smoke:
     name: pkg / deb structure invariants
     runs-on: ubuntu-22.04
+    needs: [build-binary]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      - name: Download padctl binary
+        uses: actions/download-artifact@v4
         with:
-          version: 0.15.2
+          name: padctl-bin
+          path: zig-out/bin
 
-      - name: Build static padctl (musl)
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
+      - name: Restore binary executable bit
+        run: chmod +x zig-out/bin/padctl* 2>/dev/null || true
 
       - name: Stage release tarball (mirror release.yml build job)
         run: |
@@ -396,15 +448,18 @@ jobs:
   systemd-hardening:
     name: systemd / unit hardening compat (Ubuntu 26.04 + systemd 259)
     runs-on: ubuntu-22.04
+    needs: [build-binary]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      - name: Download padctl binary
+        uses: actions/download-artifact@v4
         with:
-          version: 0.15.2
+          name: padctl-bin
+          path: zig-out/bin
 
-      - name: Build padctl
-        run: zig build -Dlibusb=false
+      - name: Restore binary executable bit
+        run: chmod +x zig-out/bin/padctl
 
       - name: Generate user unit from installed binary
         run: |
