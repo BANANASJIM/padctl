@@ -106,7 +106,7 @@ Mapping configs are validated at daemon startup. Errors are written to the journ
 journalctl -u padctl.service -n 30
 ```
 
-Note: `padctl --validate` is for device configs only.
+Mapping configs can also be validated with `padctl --validate`; the flag auto-detects device vs mapping schema by scanning for a `[device]` table.
 
 ## Configuration Sections
 
@@ -136,7 +136,9 @@ Available target types:
 | `"disabled"` | Suppress the button entirely |
 | `"macro:<name>"` | Run a named macro sequence |
 
-Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `LS`, `RS`, `M1`, `M2`, `M3`, `M4`, `LM`, `RM`, `C`, `Z`
+> **Note:** `BTN_*` values (e.g. `"BTN_SOUTH"`) are routed to the virtual **mouse** device, not the gamepad. To remap to a gamepad button use a friendly `ButtonId` name (`"A"`, `"Select"`, etc.) instead.
+
+Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `Home`, `Capture`, `LS`, `RS`, `DPadUp`, `DPadDown`, `DPadLeft`, `DPadRight`, `M1`, `M2`, `M3`, `M4`, `Paddle1`, `Paddle2`, `Paddle3`, `Paddle4`, `TouchPad`, `Mic`, `C`, `Z`, `LM`, `RM`, `O`
 
 #### Tap / hold / double-press on one button
 

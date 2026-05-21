@@ -9,7 +9,6 @@
 # arrays in this file currently emit nothing on press; do not deploy this
 # example as your daily mapping.
 
-[meta]
 name = "chord-output-demo"
 
 # Chord output: array of KEY_* strings (length 2..=4, no duplicates).
