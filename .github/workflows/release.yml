@@ -9,6 +9,27 @@ permissions:
   contents: write
 
 jobs:
+  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # GitHub Actions cannot read a file inside a `container:` expression, so the
+  # tag is computed once here and consumed via needs.image-ref.outputs.ref.
+  # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
+  # of truth for the Zig version. The image is published by ci.yml's
+  # build-image job on push to main, so a release-time pull just works.
+  image-ref:
+    name: image-ref
+    runs-on: ubuntu-22.04
+    outputs:
+      ref: ${{ steps.img.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image reference
+        id: img
+        run: |
+          set -euo pipefail
+          ver="$(head -n1 .zigversion | tr -d '[:space:]')"
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
+
   create-release:
     runs-on: ubuntu-latest
     steps:
@@ -55,19 +76,25 @@ jobs:
           fi
 
   gen-install-artifacts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    needs: [image-ref]
+    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # in, so no setup-zig step is needed.
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
 
       - name: Build native (musl to avoid glibc errno gaps)
         run: zig build -Doptimize=ReleaseSafe -Dlibusb=false -Dtarget=x86_64-linux-musl
 
       - name: Generate install artifacts
-        run: sudo ./zig-out/bin/padctl install --destdir "$PWD/staging" --prefix /usr --no-enable --no-start
+        # The container runs as root, so the previous `sudo` prefix is both
+        # unnecessary and unavailable (sudo is not in the canonical image).
+        run: ./zig-out/bin/padctl install --destdir "$PWD/staging" --prefix /usr --no-enable --no-start
 
       - name: Upload install artifacts
         uses: actions/upload-artifact@v4
@@ -76,8 +103,16 @@ jobs:
           path: staging/
 
   build:
-    needs: [create-release, gen-install-artifacts]
-    runs-on: ubuntu-latest
+    needs: [image-ref, create-release, gen-install-artifacts]
+    runs-on: ubuntu-22.04
+    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # in, so no setup-zig step is needed. `gh` is not in the canonical image
+    # and is installed below for the release-upload step.
+    container: ${{ needs.image-ref.outputs.ref }}
+    # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         target: [x86_64-linux-musl, aarch64-linux-musl]
@@ -85,9 +120,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
+      - name: Install GitHub CLI
+        # gh is required by the "Upload tarball" step but is not in the
+        # canonical image; install it from GitHub's apt repository.
+        run: |
+          set -euo pipefail
+          mkdir -p -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
 
       - name: Download install artifacts
         uses: actions/download-artifact@v4
