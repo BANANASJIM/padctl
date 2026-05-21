@@ -70,7 +70,6 @@ jobs:
           build-args: |
             ZIG_VERSION=${{ steps.img.outputs.version }}
             ZIG_SHA256=${{ steps.sha.outputs.amd64 }}
-            TARGETARCH=amd64
 
   # Build the Lean formal-spec oracle once and publish it as an artifact.
   # The interactive-Lean-oracle DRT suite in src/test/properties/drt_props.zig

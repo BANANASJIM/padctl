@@ -8,11 +8,13 @@
 # ZIG_VERSION and ZIG_SHA256 are mandatory build-args with NO defaults: a bare
 # `docker build .` fails by design. Builds must go through scripts/padctl-docker
 # so the Zig version and its verified checksum stay in sync with .zigversion.
-ARG TARGETARCH
 FROM debian:bookworm-slim
 
 ARG ZIG_VERSION
 ARG ZIG_SHA256
+# TARGETARCH is a predefined build arg populated by BuildKit from --platform;
+# it must be re-declared inside the stage to be visible to RUN.
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libusb-1.0-0-dev \
