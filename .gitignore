@@ -7,12 +7,15 @@ zig-cache/
 zig-pkg/
 *.o
 *.a
+*.deb
 kcov-output/
 .worktrees/
 
 # OpenPlan framework (development governance, not public)
 bin/
 openplan.jsonc
+CLAUDE.md
+deviations/
 .claude/
 openspec/
 _skills/
