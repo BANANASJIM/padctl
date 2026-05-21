@@ -138,7 +138,6 @@ Available target types:
 | `"macro:<name>"` | Run a named macro sequence |
 
 > **`BTN_*` values route to the mouse device, not the gamepad.** `BTN_SELECT`, `BTN_START`, and other `BTN_*` names always produce mouse button events. To remap a button to another gamepad button use the friendly ButtonId name (`"Select"`, `"Start"`, etc.), not the `BTN_*` Linux code.
-
 > **Chord output (`["KEY_A", "KEY_B", ...]`) is a preview feature.** The array syntax parses and validates, and the source button is suppressed, but key dispatch is not yet wired. Buttons remapped to chord arrays currently emit nothing on press. See `examples/mappings/chord-output.toml`.
 
 Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `Home`, `Capture`, `LS`, `RS`, `DPadUp`, `DPadDown`, `DPadLeft`, `DPadRight`, `M1`, `M2`, `M3`, `M4`, `Paddle1`, `Paddle2`, `Paddle3`, `Paddle4`, `TouchPad`, `Mic`, `C`, `Z`, `LM`, `RM`, `O`
