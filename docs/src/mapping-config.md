@@ -59,6 +59,8 @@ Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not
 
 Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_extra`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
 
+> **Note:** `BTN_*` values (e.g. `"BTN_SOUTH"`) are routed to the virtual **mouse** device, not the gamepad. To target a gamepad button use a friendly `ButtonId` name (`"A"`, `"Select"`, etc.) instead.
+
 ```toml
 [remap]
 M1 = "KEY_F13"
@@ -192,7 +194,7 @@ hold_timeout = 200
 | `trigger` | string | yes | Button name that activates this layer |
 | `activation` | string | no | `"hold"` (default) or `"toggle"` |
 | `tap` | string | no | Button/key emitted on short press (when using hold activation). May be a `ButtonId`, `KEY_*`, `mouse_*`, or `disabled`. **Cannot be `macro:<name>`** — the layer tap dispatch path does not run macros, so `tap = "macro:foo"` is rejected at validate time (`error.LayerTapCannotBeMacro`). Use `macro:<name>` from `[remap]` / `[layer.remap]` instead. |
-| `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000) |
+| `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000); default 200 |
 
 ### `[layer.remap]`
 
