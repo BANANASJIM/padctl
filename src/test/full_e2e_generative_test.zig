@@ -36,6 +36,7 @@ const DeviceIO = src.io.device_io.DeviceIO;
 const EventLoop = src.event_loop.EventLoop;
 const ioctl_consts = src.io.ioctl_constants;
 const helpers = src.testing_support.helpers;
+const aux_drt = src.testing_support.aux_drt;
 const config_gen = src.testing_support.gen.config_gen;
 const sequence_gen = src.testing_support.gen.sequence_gen;
 const oracle_mod = src.testing_support.gen.mapper_oracle;
@@ -663,6 +664,57 @@ fn hasKeyEvent(events: []const InputEvent, code: u16, pressed: bool) bool {
     return false;
 }
 
+fn auxOracleIsExact(cfg: *const mapping_mod.MappingConfig) bool {
+    if (cfg.layer) |layers| {
+        if (layers.len != 0) return false;
+    }
+    if (cfg.macro) |macros| {
+        if (macros.len != 0) return false;
+    }
+    if (cfg.remap) |rm| {
+        var it = rm.map.iterator();
+        while (it.next()) |entry| {
+            switch (entry.value_ptr.*) {
+                .chord_names, .gesture => return false,
+                .string => |s| {
+                    const target = mapper_mod.resolveTarget(s) catch continue;
+                    switch (target) {
+                        .key, .mouse_button, .gamepad_button, .disabled => {},
+                        .macro, .chord, .gesture => return false,
+                    }
+                },
+            }
+        }
+    }
+    return true;
+}
+
+fn hasDeterministicAuxEvent(events: []const AuxEvent, expected: AuxEvent) bool {
+    for (events) |got| {
+        switch (expected) {
+            .key => |k| switch (got) {
+                .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) return true,
+                else => {},
+            },
+            .mouse_button => |mb| switch (got) {
+                .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) return true,
+                else => {},
+            },
+            .rel => return true,
+        }
+    }
+    return false;
+}
+
+fn compareExpectedDeterministicAux(expected: []const AuxEvent, captured: []const AuxEvent) aux_drt.CompareError!void {
+    for (expected) |ev| {
+        switch (ev) {
+            .key, .mouse_button => if (!hasDeterministicAuxEvent(captured, ev)) return error.MissingAuxEvent,
+            .rel => {},
+        }
+    }
+}
+
 fn getAbsValue(events: []const InputEvent, code: u16) ?i32 {
     for (eventSlice(events)) |ev| {
         if (ev.type == EV_ABS and ev.code == code) return ev.value;
@@ -734,6 +786,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
             return err;
         };
         defer mapping_parsed.deinit();
+        const exact_aux_oracle = auxOracleIsExact(&mapping_parsed.value);
 
         // Use unique VID/PID per device to avoid collisions
         const test_vid: u16 = 0xFA00 | @as(u16, @truncate(std.hash.Adler32.hash(config_path) & 0xFF));
@@ -891,7 +944,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         var prev_oracle_gs = oracle_state.gs;
         var frames_verified: usize = 0;
         var events_received: usize = 0;
-        var press_misses: usize = 0;
+        var deterministic_mismatches: usize = 0;
 
         var frame_err: ?anyerror = null;
         for (frames[0..N_FRAMES]) |frame| {
@@ -957,7 +1010,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                     // M2: if oracle says pressed (transition from 0→1), verify press event present
                     if (oracle_pressed and !was_pressed and ev_slice.len > 0) {
                         if (!hasKeyEvent(ev_slice, code, true)) {
-                            press_misses += 1;
+                            deterministic_mismatches += 1;
                         }
                     }
                 }
@@ -1018,42 +1071,19 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                 }
             }
 
-            // DRT 3: aux key/mouse_button events — oracle-predicted events must be captured
+            // DRT 3: exact aux compare only when the oracle models the mapping shape.
             {
                 var aux_buf: [64]AuxEvent = undefined;
                 const n = aux_capture.drain(&aux_buf);
                 const captured = aux_buf[0..n];
-                for (oracle_out.aux.slice()) |expected| {
-                    switch (expected) {
-                        .key => |k| {
-                            var found = false;
-                            for (captured) |got| {
-                                switch (got) {
-                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) {
-                                        found = true;
-                                        break;
-                                    },
-                                    else => {},
-                                }
-                            }
-                            if (!found) press_misses += 1;
-                        },
-                        .mouse_button => |mb| {
-                            var found = false;
-                            for (captured) |got| {
-                                switch (got) {
-                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) {
-                                        found = true;
-                                        break;
-                                    },
-                                    else => {},
-                                }
-                            }
-                            if (!found) press_misses += 1;
-                        },
-                        .rel => {}, // not compared (floating-point subsystems)
-                    }
-                }
+                const cmp = if (exact_aux_oracle)
+                    aux_drt.compareDeterministicAux(oracle_out.aux.slice(), captured)
+                else
+                    compareExpectedDeterministicAux(oracle_out.aux.slice(), captured);
+                cmp catch |err| {
+                    std.debug.print("AUX DRT FAIL [{s}] frame={d}: {}\n", .{ config_path, frames_verified, err });
+                    deterministic_mismatches += 1;
+                };
             }
 
             prev_oracle_gs = oracle_out.gamepad;
@@ -1079,9 +1109,10 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
             continue;
         }
 
-        // M2: button press completeness — all expected presses must arrive
-        if (press_misses > 0) {
-            std.debug.print("FAIL [{s}] button press misses: {d}\n", .{ config_path, press_misses });
+        // M2: deterministic exactness — expected events must arrive, and no
+        // unpredicted KEY_*/mouse-button aux events may appear.
+        if (deterministic_mismatches > 0) {
+            std.debug.print("FAIL [{s}] deterministic DRT mismatches: {d}\n", .{ config_path, deterministic_mismatches });
             return error.TestUnexpectedResult;
         }
 
@@ -1172,6 +1203,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             continue;
         };
         defer map_parsed.deinit();
+        const exact_aux_oracle = auxOracleIsExact(&map_parsed.value);
 
         // Use first compiled report
         const cr = &interp.compiled[0];
@@ -1323,7 +1355,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         var prev_oracle_gs = oracle_state.gs;
         var frames_verified: usize = 0;
         var events_received: usize = 0;
-        var press_misses: usize = 0;
+        var deterministic_mismatches: usize = 0;
 
         // 8. Inject frames and verify
         // Use a local interpreter to re-derive the actual delta from each packet,
@@ -1387,7 +1419,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                     }
                     if (oracle_pressed and !was_pressed and ev_slice.len > 0) {
                         if (!hasKeyEvent(ev_slice, code, true)) {
-                            press_misses += 1;
+                            deterministic_mismatches += 1;
                         }
                     }
                 }
@@ -1448,42 +1480,19 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                 }
             }
 
-            // DRT 3: aux key/mouse_button events — oracle-predicted events must be captured
+            // DRT 3: exact aux compare only when the oracle models the mapping shape.
             {
                 var aux_buf: [64]AuxEvent = undefined;
                 const n = aux_capture2.drain(&aux_buf);
                 const captured = aux_buf[0..n];
-                for (oracle_out.aux.slice()) |expected| {
-                    switch (expected) {
-                        .key => |k| {
-                            var found = false;
-                            for (captured) |got| {
-                                switch (got) {
-                                    .key => |gk| if (gk.code == k.code and gk.pressed == k.pressed) {
-                                        found = true;
-                                        break;
-                                    },
-                                    else => {},
-                                }
-                            }
-                            if (!found) press_misses += 1;
-                        },
-                        .mouse_button => |mb| {
-                            var found = false;
-                            for (captured) |got| {
-                                switch (got) {
-                                    .mouse_button => |gm| if (gm.code == mb.code and gm.pressed == mb.pressed) {
-                                        found = true;
-                                        break;
-                                    },
-                                    else => {},
-                                }
-                            }
-                            if (!found) press_misses += 1;
-                        },
-                        .rel => {},
-                    }
-                }
+                const cmp = if (exact_aux_oracle)
+                    aux_drt.compareDeterministicAux(oracle_out.aux.slice(), captured)
+                else
+                    compareExpectedDeterministicAux(oracle_out.aux.slice(), captured);
+                cmp catch |err| {
+                    std.debug.print("AUX DRT FAIL [gen-ci={d}] frame={d}: {}\n", .{ ci, frames_verified, err });
+                    deterministic_mismatches += 1;
+                };
             }
 
             prev_oracle_gs = oracle_out.gamepad;
@@ -1508,9 +1517,9 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
             return error.TestUnexpectedResult;
         }
 
-        // M2: button press completeness — soft for random configs (timing, transforms)
-        if (press_misses > 0) {
-            std.debug.print("WARN [gen-ci={d}] button press misses: {d}\n", .{ ci, press_misses });
+        // M2: deterministic exactness — soft for random configs (timing, transforms)
+        if (deterministic_mismatches > 0) {
+            std.debug.print("WARN [gen-ci={d}] deterministic DRT mismatches: {d}\n", .{ ci, deterministic_mismatches });
         }
 
         total_frames += frames_verified;

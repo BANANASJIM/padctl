@@ -95,6 +95,7 @@ pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
     pub const mock_output = @import("test/mock_output.zig");
     pub const helpers = @import("test/helpers.zig");
+    pub const aux_drt = @import("test/aux_drt.zig");
     pub const interpreter_e2e_test = @import("test/interpreter_e2e_test.zig");
     pub const mapper_e2e_test = @import("test/mapper_e2e_test.zig");
     pub const gyro_stick_e2e_test = @import("test/gyro_stick_e2e_test.zig");

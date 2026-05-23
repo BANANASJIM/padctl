@@ -498,9 +498,14 @@ pub const DeviceInstance = struct {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
                 const old_mcfg: ?*const MappingConfig = if (self.mapper) |*m| m.config else self.mapping_cfg;
-                if (Mapper.init(new, self.loop.macro_timer_fd, self.allocator)) |nm| {
-                    if (self.mapper) |*m| m.deinit();
-                    self.mapper = nm;
+                if (Mapper.init(new, self.loop.macro_timer_fd, self.allocator)) |created| {
+                    var new_mapper = created;
+                    if (self.mapper) |*old| {
+                        self.releaseMapperAux(old);
+                        old.deinit();
+                    }
+                    new_mapper.seedInputState(self.loop.gamepad_state);
+                    self.mapper = new_mapper;
                     self.mapping_cfg = new;
                 } else |err| {
                     std.log.err("mapping hot-swap failed: {}", .{err});
@@ -626,6 +631,16 @@ pub const DeviceInstance = struct {
     pub fn updateMapping(self: *DeviceInstance, new: *MappingConfig) void {
         @atomicStore(?*MappingConfig, &self.pending_mapping, new, .release);
         self.loop.stop();
+    }
+
+    pub fn releaseMapperAux(self: *DeviceInstance, mapper: *Mapper) void {
+        const releases = mapper.releaseHeldAux();
+        if (releases.len == 0) return;
+        if (self.aux_dev) |*aux| {
+            aux.emitAux(releases.slice()) catch |err| {
+                std.log.warn("aux release during mapping swap failed: {}", .{err});
+            };
+        }
     }
 };
 

@@ -53,6 +53,11 @@ const ResolvedRemap = struct {
     suppress: u64,
 };
 
+const AuxDownTarget = union(enum) {
+    key: u16,
+    mouse_button: u16,
+};
+
 const GESTURE_TOKEN_SLOTS = gesture_mod.GESTURE_SLOTS * 2;
 
 const GestureTokenEntry = struct {
@@ -102,6 +107,10 @@ pub const Mapper = struct {
     stick_right: stick.StickProcessor,
     suppressed_buttons: u64,
     injected_buttons: u64,
+    // Buttons already held when this mapper was seeded; ignore their edges until release.
+    seeded_buttons: u64,
+    aux_down_targets: [BUTTON_COUNT]?AuxDownTarget,
+    gesture_aux_down_targets: [BUTTON_COUNT]?AuxDownTarget,
     pending_tap_release: ?u64,
     // Gamepad-button taps emitted by macro timer expiry need one apply() cycle
     // to reach output before pending_tap_release fires; staged here, promoted
@@ -157,6 +166,9 @@ pub const Mapper = struct {
             .stick_right = .{},
             .suppressed_buttons = 0,
             .injected_buttons = 0,
+            .seeded_buttons = 0,
+            .aux_down_targets = [_]?AuxDownTarget{null} ** BUTTON_COUNT,
+            .gesture_aux_down_targets = [_]?AuxDownTarget{null} ** BUTTON_COUNT,
             .pending_tap_release = null,
             .macro_timer_tap_pending = 0,
             .gesture_engine = .{},
@@ -188,6 +200,70 @@ pub const Mapper = struct {
         self.chord_detector = ChordDetector.init(cfg);
     }
 
+    pub fn seedInputState(self: *Mapper, current: GamepadState) void {
+        var seeded = current;
+        self.applyTriggerThreshold(&seeded);
+        self.state = seeded;
+        self.prev = seeded;
+        self.seeded_buttons = seeded.buttons;
+    }
+
+    fn applyTriggerThreshold(self: *const Mapper, gs: *GamepadState) void {
+        if (self.config.trigger_threshold) |threshold| {
+            const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+            const rt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.RT));
+            if (gs.lt > threshold) {
+                gs.buttons |= lt_bit;
+            } else {
+                gs.buttons &= ~lt_bit;
+            }
+            if (gs.rt > threshold) {
+                gs.buttons |= rt_bit;
+            } else {
+                gs.buttons &= ~rt_bit;
+            }
+        }
+    }
+
+    pub fn releaseHeldAux(self: *Mapper) AuxEventList {
+        var aux = AuxEventList{};
+        for (&self.aux_down_targets) |*target| {
+            if (target.*) |down| {
+                emitAuxDownRelease(down, &aux);
+                target.* = null;
+            }
+        }
+
+        var injected: u64 = 0;
+        for (self.active_macros.items) |*player| {
+            player.emitPendingReleases(&aux, &injected);
+        }
+        self.active_macros.clearRetainingCapacity();
+
+        for (&self.gesture_aux_down_targets) |*target| {
+            if (target.*) |down| {
+                emitAuxDownRelease(down, &aux);
+                target.* = null;
+            }
+        }
+        return aux;
+    }
+
+    fn suppressSeededEdges(self: *Mapper) void {
+        if (self.seeded_buttons == 0) return;
+
+        const still_held = self.seeded_buttons & self.state.buttons;
+        const released = self.seeded_buttons & ~self.state.buttons;
+        var suppress_release = released;
+        for (self.aux_down_targets, 0..) |target, i| {
+            if (target != null) {
+                suppress_release &= ~(@as(u64, 1) << @as(u6, @intCast(i)));
+            }
+        }
+        self.prev.buttons = (self.prev.buttons | still_held) & ~suppress_release;
+        self.seeded_buttons = still_held;
+    }
+
     // `now_ns` is the ppoll-wakeup CLOCK_MONOTONIC snapshot from the caller;
     // must match the value passed to onMacroTimerExpired() in the same wakeup so
     // tap/hold boundary decisions see a single timeline.
@@ -201,22 +277,8 @@ pub const Mapper = struct {
         }
 
         self.state.applyDelta(delta);
-
-        // Synthesize LT/RT as digital buttons when trigger_threshold is configured.
-        if (self.config.trigger_threshold) |threshold| {
-            const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
-            const rt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.RT));
-            if (self.state.lt > threshold) {
-                self.state.buttons |= lt_bit;
-            } else {
-                self.state.buttons &= ~lt_bit;
-            }
-            if (self.state.rt > threshold) {
-                self.state.buttons |= rt_bit;
-            } else {
-                self.state.buttons &= ~rt_bit;
-            }
-        }
+        self.applyTriggerThreshold(&self.state);
+        self.suppressSeededEdges();
 
         const configs = self.config.layer orelse &.{};
         const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons, now_ns);
@@ -379,10 +441,17 @@ pub const Mapper = struct {
         }
 
         for (0..BUTTON_COUNT) |i| {
-            const target = per_src_inject[i] orelse continue;
             const src_mask: u64 = @as(u64, 1) << @as(u6, @intCast(i));
             const pressed = (self.state.buttons & src_mask) != 0;
             const prev_pressed = (self.prev.buttons & src_mask) != 0;
+            if (!pressed and prev_pressed) {
+                if (self.aux_down_targets[i]) |down| {
+                    emitAuxDownRelease(down, &aux);
+                    self.aux_down_targets[i] = null;
+                }
+            }
+
+            const target = per_src_inject[i] orelse continue;
             switch (target) {
                 .macro => |name| {
                     if (pressed and !prev_pressed) {
@@ -407,10 +476,10 @@ pub const Mapper = struct {
                     if (pressed) remap_mod.applyTarget(target, .press, &aux, &self.injected_buttons, null, null);
                 },
                 .key, .mouse_button => {
-                    if (pressed and !prev_pressed)
+                    if (pressed and !prev_pressed) {
                         remap_mod.applyTarget(target, .press, &aux, &self.injected_buttons, null, null);
-                    if (!pressed and prev_pressed)
-                        remap_mod.applyTarget(target, .release, &aux, &self.injected_buttons, null, null);
+                        self.aux_down_targets[i] = auxDownTarget(target);
+                    }
                 },
                 .disabled => {},
                 // Chord source button is suppressed via precomputeRemap; chord
@@ -593,6 +662,13 @@ pub const Mapper = struct {
                         .release => .release,
                         .tap => .tap,
                     };
+                    if (auxDownTarget(em.target)) |down| {
+                        switch (em.action) {
+                            .press => self.gesture_aux_down_targets[src_idx] = down,
+                            .release => self.gesture_aux_down_targets[src_idx] = null,
+                            .tap => {},
+                        }
+                    }
                     remap_mod.applyTarget(em.target, act, aux, &self.injected_buttons, null, null);
                 },
             }
@@ -738,6 +814,21 @@ fn freeResolvedRemap(allocator: std.mem.Allocator, r: ResolvedRemap) void {
     }
 }
 
+fn auxDownTarget(target: RemapTargetResolved) ?AuxDownTarget {
+    return switch (target) {
+        .key => |code| .{ .key = code },
+        .mouse_button => |code| .{ .mouse_button = code },
+        else => null,
+    };
+}
+
+fn emitAuxDownRelease(target: AuxDownTarget, aux: *AuxEventList) void {
+    switch (target) {
+        .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
+        .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
+    }
+}
+
 fn precomputeRemap(allocator: std.mem.Allocator, remap_map: mapping.RemapMap) !ResolvedRemap {
     var result = ResolvedRemap{
         .inject = [_]?RemapTargetResolved{null} ** BUTTON_COUNT,
@@ -871,6 +962,28 @@ test "mapper: base remap key: source -> KEY_F13 aux event" {
         },
         else => return error.WrongEventType,
     }
+}
+
+test "mapper: releaseHeldAux releases old trigger-threshold aux down" {
+    const allocator = testing.allocator;
+    const old_parsed = try makeMapping(
+        \\trigger_threshold = 128
+        \\
+        \\[remap]
+        \\LT = "KEY_F13"
+    , allocator);
+    defer old_parsed.deinit();
+
+    var old = try makeMapper(&old_parsed.value, allocator);
+    defer old.deinit();
+    const down = try old.apply(.{ .lt = 200 }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), down.aux.len);
+    try testing.expect(down.aux.get(0).key.pressed);
+
+    const release = old.releaseHeldAux();
+    try testing.expectEqual(@as(usize, 1), release.len);
+    try testing.expectEqual(@as(u16, 183), release.get(0).key.code);
+    try testing.expect(!release.get(0).key.pressed);
 }
 
 test "mapper: base remap gamepad_button: A -> B" {

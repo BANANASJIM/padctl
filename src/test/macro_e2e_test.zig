@@ -12,6 +12,7 @@ const state_mod = @import("../core/state.zig");
 const macro_mod = @import("../core/macro.zig");
 const macro_player_mod = @import("../core/macro_player.zig");
 const timer_queue_mod = @import("../core/timer_queue.zig");
+const aux_drt = @import("aux_drt.zig");
 const device_mod = @import("../config/device.zig");
 const EventLoop = @import("../event_loop.zig").EventLoop;
 const DeviceInstance = @import("../device_instance.zig").DeviceInstance;
@@ -27,6 +28,7 @@ const MacroPlayer = macro_player_mod.MacroPlayer;
 const TimerQueue = timer_queue_mod.TimerQueue;
 
 const KEY_B = h.KEY_B;
+const KEY_F13 = h.KEY_F13;
 const KEY_LEFT = h.KEY_LEFT;
 const KEY_LEFTSHIFT = h.KEY_LEFTSHIFT;
 
@@ -431,6 +433,131 @@ test "macro: hot-reload — updateMapping swaps config; next apply uses new mapp
         }
     }
     try testing.expect(found_key_a);
+}
+
+test "macro: hot-reload — held remap source does not synthesize a new aux edge" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    const parsed_initial = try mapping.parseString(allocator, "");
+    defer parsed_initial.deinit();
+
+    const new_toml =
+        \\[remap]
+        \\M1 = "KEY_F13"
+    ;
+    var parsed_new = try mapping.parseString(allocator, new_toml);
+    defer parsed_new.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const devices = try allocator.alloc(@import("../io/device_io.zig").DeviceIO, 1);
+    devices[0] = mock.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = @import("../core/interpreter.zig").Interpreter.init(&parsed_dev.value),
+        .mapper = try Mapper.init(&parsed_initial.value, loop.macro_timer_fd, allocator),
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed_dev.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+    defer {
+        inst.mapper.?.deinit();
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    const m1_mask = btnMask(.M1);
+    _ = try inst.mapper.?.apply(.{ .buttons = m1_mask }, 16, 0);
+    inst.loop.gamepad_state.buttons = m1_mask;
+
+    const RunFn = struct {
+        fn run(i: *DeviceInstance) !void {
+            try i.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, RunFn.run, .{&inst});
+
+    try h.waitRunning(&inst.loop);
+    inst.updateMapping(&parsed_new.value);
+    var w: usize = 0;
+    while (w < 1000) : (w += 1) {
+        if (@atomicLoad(?*mapping.MappingConfig, &inst.pending_mapping, .acquire) == null) break;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    inst.stop();
+    thread.join();
+
+    var m = &inst.mapper.?;
+    const held_after_swap = try m.apply(.{ .buttons = m1_mask }, 16, 1);
+    try aux_drt.compareDeterministicAux(&.{}, held_after_swap.aux.slice());
+
+    const release_after_swap = try m.apply(.{ .buttons = 0 }, 16, 2);
+    try aux_drt.compareDeterministicAux(&.{}, release_after_swap.aux.slice());
+
+    const real_press = try m.apply(.{ .buttons = m1_mask }, 16, 3);
+    const expected_press = [_]aux_drt.AuxEvent{.{ .key = .{ .code = KEY_F13, .pressed = true } }};
+    try aux_drt.compareDeterministicAux(&expected_press, real_press.aux.slice());
+}
+
+test "macro: releaseHeldAux releases held remap target before reset" {
+    const allocator = testing.allocator;
+
+    var ctx = try makeMapper(
+        \\[remap]
+        \\M1 = "KEY_F13"
+    , allocator);
+    defer ctx.deinit();
+
+    const m1_mask = btnMask(.M1);
+    const expected_press = [_]aux_drt.AuxEvent{.{ .key = .{ .code = KEY_F13, .pressed = true } }};
+    const old_press = try ctx.mapper.apply(.{ .buttons = m1_mask }, 16, 0);
+    try aux_drt.compareDeterministicAux(&expected_press, old_press.aux.slice());
+
+    const release = ctx.mapper.releaseHeldAux();
+    const expected_release = [_]aux_drt.AuxEvent{.{ .key = .{ .code = KEY_F13, .pressed = false } }};
+    try aux_drt.compareDeterministicAux(&expected_release, release.slice());
+}
+
+test "macro: releaseHeldAux releases macro-held aux before reset" {
+    const allocator = testing.allocator;
+
+    var old_ctx = try makeMapper(
+        \\[[macro]]
+        \\name = "hold_shift"
+        \\steps = [{ down = "KEY_LEFTSHIFT" }, { delay = 1000 }]
+        \\
+        \\[remap]
+        \\M1 = "macro:hold_shift"
+    , allocator);
+    defer old_ctx.deinit();
+
+    const m1_mask = btnMask(.M1);
+    const old_press = try old_ctx.mapper.apply(.{ .buttons = m1_mask }, 16, 0);
+    const expected_press = [_]aux_drt.AuxEvent{.{ .key = .{ .code = KEY_LEFTSHIFT, .pressed = true } }};
+    try aux_drt.compareDeterministicAux(&expected_press, old_press.aux.slice());
+
+    const release = old_ctx.mapper.releaseHeldAux();
+    const expected_release = [_]aux_drt.AuxEvent{.{ .key = .{ .code = KEY_LEFTSHIFT, .pressed = false } }};
+    try aux_drt.compareDeterministicAux(&expected_release, release.slice());
 }
 
 // --- L0: macro trigger via Mapper.apply (regression guard) ---

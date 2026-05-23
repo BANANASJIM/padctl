@@ -754,6 +754,24 @@ test "e2e gesture: hold key fires at deadline and releases on button up" {
     try testing.expect(!auxHasKey(ev_rel, keyCode("KEY_X"), true));
 }
 
+test "e2e gesture: releaseHeldAux releases held key before reset" {
+    const allocator = testing.allocator;
+    var old_ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y", hold_ms = 300 }
+    , allocator);
+    defer old_ctx.deinit();
+    var old = &old_ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    _ = try old.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    _ = old.onMacroTimerExpired(t0 + 300 * std.time.ns_per_ms);
+
+    const release = old.releaseHeldAux();
+    const wrapper = mapper_mod.OutputEvents{ .gamepad = .{}, .prev = .{}, .aux = release };
+    try testing.expect(auxHasKey(wrapper, keyCode("KEY_Y"), false));
+}
+
 test "e2e gesture: double fires on second press inside window" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(

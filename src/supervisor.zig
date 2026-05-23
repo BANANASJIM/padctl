@@ -699,6 +699,7 @@ pub const Supervisor = struct {
             m.instance.stop();
             m.thread.join();
             if (m.instance.mapper) |*cur| {
+                m.instance.releaseMapperAux(cur);
                 cur.deinit();
                 m.instance.mapper = null;
             }
@@ -807,6 +808,12 @@ pub const Supervisor = struct {
             return error.SwitchFailed;
         }
 
+        if (tx.new_mapper) |*new_mapper| {
+            if (tx.old_mapper) |*old_mapper| {
+                m.instance.releaseMapperAux(old_mapper);
+            }
+            new_mapper.seedInputState(m.instance.loop.gamepad_state);
+        }
         m.instance.mapper = tx.new_mapper.?;
         tx.new_mapper = null;
         m.instance.mapping_cfg = &tx.parsed_ptr.?.value;
@@ -965,10 +972,13 @@ pub const Supervisor = struct {
                 // Stop-Swap-Restart: stop thread before touching arena
                 m.instance.stop();
                 m.thread.join();
-                self.clearSwitchMapping(m);
 
                 var old_mapper = m.instance.mapper;
                 const old_mapping_cfg = m.instance.mapping_cfg;
+                if (old_mapper) |*mapper| {
+                    m.instance.releaseMapperAux(mapper);
+                }
+                self.clearSwitchMapping(m);
                 _ = m.mapping_arena.reset(.retain_capacity);
                 const arena_alloc = m.mapping_arena.allocator();
                 const map_copy = try arena_alloc.create(MappingConfig);
@@ -977,6 +987,7 @@ pub const Supervisor = struct {
                 // Rebuild the mapper so layer state/timers do not keep slices into
                 // the old mapping arena after the reset above.
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.macro_timer_fd, self.allocator);
+                new_mapper.seedInputState(m.instance.loop.gamepad_state);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
                 self.installChordDetector(m);
@@ -998,12 +1009,13 @@ pub const Supervisor = struct {
                 if (m.suspended) continue;
                 m.instance.stop();
                 m.thread.join();
-                self.clearSwitchMapping(m);
-                _ = m.mapping_arena.reset(.retain_capacity);
                 if (m.instance.mapper) |*mapper| {
+                    m.instance.releaseMapperAux(mapper);
                     mapper.deinit();
                     m.instance.mapper = null;
                 }
+                self.clearSwitchMapping(m);
+                _ = m.mapping_arena.reset(.retain_capacity);
                 m.instance.mapping_cfg = null;
                 try restartManagedThread(m);
             }
