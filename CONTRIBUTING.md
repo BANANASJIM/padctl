@@ -83,7 +83,11 @@ To enable repository git hooks locally:
 git config core.hooksPath hooks
 ```
 
-With hooks enabled, `pre-push` runs `zig build test-tsan` before push.
+With hooks enabled, `pre-push` runs `zig build test-tsan` before push. On
+systems whose libc startup objects trigger Zig's known `.sframe` linker issue,
+the hook runs `test-tsan` in the canonical Docker build image instead, using
+`PADCTL_DOCKER_NETWORK=host`. Docker build/test commands run as your UID/GID so
+generated cache files remain writable.
 
 ### Code Style
 

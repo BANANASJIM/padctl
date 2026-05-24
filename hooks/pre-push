@@ -5,17 +5,76 @@
 # that touches UHID paths: PADCTL_TEST_REQUIRE_UHID=1 zig build test-uhid
 set -e
 
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+run_docker_tsan() {
+    PADCTL_DOCKER_NETWORK="${PADCTL_DOCKER_NETWORK:-host}" ./scripts/padctl-docker build test-tsan --summary all
+}
+
+host_has_zig_sframe_linker_issue() {
+    command -v zig >/dev/null 2>&1 || return 1
+    command -v gcc >/dev/null 2>&1 || return 1
+    command -v readelf >/dev/null 2>&1 || return 1
+
+    case "$(zig version 2>/dev/null)" in
+        0.15.*) ;;
+        *) return 1 ;;
+    esac
+
+    for obj in "$(gcc -print-file-name=Scrt1.o)" "$(gcc -print-file-name=crt1.o)"; do
+        [ -r "$obj" ] || continue
+        if readelf -r "$obj" 2>/dev/null | grep -q '[.]rela[.]sframe' &&
+            readelf -r "$obj" 2>/dev/null | grep -q 'R_X86_64_PC64'; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 if [ "$SKIP_TSAN" = "1" ]; then
     echo "pre-push: SKIP_TSAN=1 set, skipping zig build test-tsan"
     exit 0
 fi
 
-echo "pre-push: running zig build test-tsan..."
-if ! zig build test-tsan; then
-    echo "ERROR: zig build test-tsan failed. Push aborted."
-    echo "Hint: run 'zig build test-tsan' locally to inspect failures."
-    echo "If you must bypass temporarily: SKIP_TSAN=1 git push"
-    exit 1
+if ! command -v zig >/dev/null 2>&1; then
+    echo "pre-push: zig not found, running test-tsan in the canonical Docker build image..."
+    run_docker_tsan
+    echo "pre-push: Docker test-tsan passed."
+    exit 0
 fi
 
-echo "pre-push: test-tsan passed."
+if host_has_zig_sframe_linker_issue; then
+    echo "pre-push: Zig 0.15.x cannot link this host's .sframe startup objects."
+    echo "pre-push: running test-tsan in the canonical Docker build image..."
+    run_docker_tsan
+    echo "pre-push: Docker test-tsan passed."
+    exit 0
+fi
+
+echo "pre-push: running zig build test-tsan..."
+tsan_log="${TMPDIR:-/tmp}/padctl-pre-push-tsan.$$"
+trap 'rm -f "$tsan_log"' EXIT HUP INT TERM
+if zig build test-tsan >"$tsan_log" 2>&1; then
+    cat "$tsan_log"
+    echo "pre-push: test-tsan passed."
+    exit 0
+fi
+
+cat "$tsan_log"
+
+if grep -Eq 'fatal linker error|relocation .*unsupported|unhandled relocation' "$tsan_log" &&
+    grep -q 'R_X86_64_PC64' "$tsan_log" &&
+    grep -q '[.]sframe' "$tsan_log"; then
+    echo "pre-push: native Zig hit known glibc .sframe linker incompatibility."
+    echo "pre-push: retrying test-tsan in the canonical Docker build image..."
+    run_docker_tsan
+    echo "pre-push: Docker test-tsan passed."
+    exit 0
+fi
+
+echo "ERROR: zig build test-tsan failed. Push aborted."
+echo "Hint: run 'zig build test-tsan' locally to inspect failures."
+echo "If you must bypass temporarily: SKIP_TSAN=1 git push"
+exit 1

@@ -55,6 +55,18 @@ sha256_for() {
   printf '%s' "$sha"
 }
 
+docker_network_args() {
+  if [ -n "${PADCTL_DOCKER_NETWORK:-}" ]; then
+    printf '%s\n' --network "$PADCTL_DOCKER_NETWORK"
+  fi
+}
+
+docker_user_args() {
+  if [ "$(id -u)" -ne 0 ]; then
+    printf '%s\n' --user "$(id -u):$(id -g)"
+  fi
+}
+
 # Build the canonical image locally if the version tag is not already present.
 cmd_image() {
   local version arch sha tag
@@ -69,14 +81,27 @@ cmd_image() {
   fi
 
   echo "padctl-docker: building ${tag} (zig ${version}, ${arch})"
-  docker buildx build \
-    --build-arg "ZIG_VERSION=${version}" \
-    --build-arg "ZIG_SHA256=${sha}" \
-    --build-arg "TARGETARCH=${arch}" \
-    --load \
-    -t "$tag" \
-    -f "${REPO_ROOT}/Dockerfile" \
-    "${REPO_ROOT}"
+  if docker buildx version >/dev/null 2>&1; then
+    docker buildx build \
+      $(docker_network_args) \
+      --build-arg "ZIG_VERSION=${version}" \
+      --build-arg "ZIG_SHA256=${sha}" \
+      --build-arg "TARGETARCH=${arch}" \
+      --load \
+      -t "$tag" \
+      -f "${REPO_ROOT}/Dockerfile" \
+      "${REPO_ROOT}"
+  else
+    echo "padctl-docker: docker buildx not found, falling back to docker build"
+    docker build \
+      $(docker_network_args) \
+      --build-arg "ZIG_VERSION=${version}" \
+      --build-arg "ZIG_SHA256=${sha}" \
+      --build-arg "TARGETARCH=${arch}" \
+      -t "$tag" \
+      -f "${REPO_ROOT}/Dockerfile" \
+      "${REPO_ROOT}"
+  fi
 }
 
 image_tag() {
@@ -87,6 +112,10 @@ image_tag() {
 run_in_image() {
   cmd_image
   docker run --rm \
+    $(docker_network_args) \
+    $(docker_user_args) \
+    -e HOME=/tmp \
+    -e ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
     -v "${REPO_ROOT}:/src" \
     -w /src \
     "$(image_tag)" \
@@ -109,6 +138,7 @@ cmd_canary() {
   # reflect input nodes the kernel creates from UHID_CREATE2.
   docker run --rm \
     --privileged \
+    $(docker_network_args) \
     --device /dev/uhid \
     -v "${REPO_ROOT}:/src" \
     -w /src \
@@ -123,6 +153,10 @@ cmd_canary() {
 cmd_shell() {
   cmd_image
   docker run --rm -it \
+    $(docker_network_args) \
+    $(docker_user_args) \
+    -e HOME=/tmp \
+    -e ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
     -v "${REPO_ROOT}:/src" \
     -w /src \
     "$(image_tag)" \
@@ -138,6 +172,10 @@ usage: padctl-docker <image|build|test|canary|shell> [args...]
   test  [args]    run `zig build test [args]` inside the image
   canary          run the UHID L2 privileged tests (needs /dev/uhid)
   shell           open an interactive shell inside the image
+
+Set PADCTL_DOCKER_NETWORK=host to pass --network host to docker build/run.
+Build, test, and shell run as the current UID/GID with HOME=/tmp so cache files
+remain writable.
 EOF
   exit 2
 }
