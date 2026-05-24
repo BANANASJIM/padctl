@@ -144,8 +144,8 @@ fn selectTiltAxis(axis: GyroAxis, ax: i16, ay: i16, az: i16) ?f32 {
     const radians_to_degrees: f32 = 180.0 / std.math.pi;
     return switch (axis) {
         .none => null,
-        .pitch => std.math.atan2(-fx, @sqrt(fy * fy + fz * fz)) * radians_to_degrees,
-        .roll => std.math.atan2(fy, fz) * radians_to_degrees,
+        .pitch => std.math.atan2(fy, @sqrt(fx * fx + fz * fz)) * radians_to_degrees,
+        .roll => std.math.atan2(-fx, @sqrt(fy * fy + fz * fz)) * radians_to_degrees,
         .yaw => 0.0,
     };
 }
@@ -198,8 +198,12 @@ test "gyro: joystick tilt response maps roll degrees to stick position" {
         .sensitivity_x = 1.0,
     };
 
-    // atan2(5735, 8192) is approximately 35 degrees, so it should be full X deflection.
-    const out = g.processMotion(&cfg, 0, 0, 0, 0, 5735, 8192);
+    // Forward/back pitch must not drive roll.
+    const pitch_only = g.processMotion(&cfg, 0, 0, 0, 0, 5735, 8192);
+    try testing.expectEqual(@as(i16, 0), pitch_only.joy_x.?);
+
+    // Roll is left/right tilt, reported through accel_x. atan2(5735, 8192) is approximately 35 degrees.
+    const out = g.processMotion(&cfg, 0, 0, 0, -5735, 0, 8192);
     try testing.expect(out.joy_x != null);
     try testing.expect(out.joy_y == null);
     try testing.expect(out.joy_x.? > 32000);
@@ -218,9 +222,31 @@ test "gyro: joystick tilt response supports invert and negative roll" {
         .invert_x = true,
     };
 
-    const out = g.processMotion(&cfg, 0, 0, 0, 0, -5735, 8192);
+    const out = g.processMotion(&cfg, 0, 0, 0, 5735, 0, 8192);
     try testing.expect(out.joy_x != null);
     try testing.expect(out.joy_x.? > 32000);
+}
+
+test "gyro: joystick tilt response maps pitch degrees independently of roll" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .tilt,
+        .axis_x = .pitch,
+        .axis_y = .none,
+        .degrees_full = 35.0,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+    };
+
+    // Pitch is forward/back tilt, reported through accel_y; accel_x-only roll must not drive it.
+    const roll_only = g.processMotion(&cfg, 0, 0, 0, -5735, 0, 8192);
+    try testing.expectEqual(@as(i16, 0), roll_only.joy_x.?);
+
+    const pitch = g.processMotion(&cfg, 0, 0, 0, 0, 5735, 8192);
+    try testing.expect(pitch.joy_x != null);
+    try testing.expect(pitch.joy_y == null);
+    try testing.expect(pitch.joy_x.? > 32000);
 }
 
 test "gyro: joystick tilt response ignores missing accelerometer vector" {

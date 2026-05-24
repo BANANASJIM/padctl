@@ -271,7 +271,11 @@ test "e2e: gyro joystick tilt — roll can drive left stick X by degrees" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .accel_y = 5735, .accel_z = 8192, .ax = 111, .ay = -222 }, 16, 0);
+    const pitch_only = try m.apply(.{ .accel_y = 5735, .accel_z = 8192, .ax = 111, .ay = -222 }, 16, 0);
+    try testing.expectEqual(@as(i16, 0), pitch_only.gamepad.ax);
+    try testing.expectEqual(@as(i16, -222), pitch_only.gamepad.ay);
+
+    const ev = try m.apply(.{ .accel_x = -5735, .accel_y = 0, .accel_z = 8192, .ax = 111, .ay = -222 }, 16, 16_000_000);
 
     try testing.expect(ev.gamepad.ax > 32000);
     try testing.expectEqual(@as(i16, -222), ev.gamepad.ay);
@@ -294,8 +298,32 @@ test "e2e: gyro joystick tilt — default X axis is roll" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .accel_y = 5735, .accel_z = 8192 }, 16, 0);
+    const ev = try m.apply(.{ .accel_x = -5735, .accel_z = 8192 }, 16, 0);
     try testing.expect(ev.gamepad.ax > 32000);
+}
+
+test "e2e: gyro joystick tilt — pitch can drive X from forward/back tilt" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\target = "left_stick"
+        \\axis_x = "pitch"
+        \\axis_y = "none"
+        \\degrees_full = 35.0
+        \\sensitivity_x = 1.0
+        \\smoothing = 0.0
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const roll_only = try m.apply(.{ .accel_x = -5735, .accel_y = 0, .accel_z = 8192 }, 16, 0);
+    try testing.expectEqual(@as(i16, 0), roll_only.gamepad.ax);
+
+    const pitch = try m.apply(.{ .accel_x = 0, .accel_y = 5735, .accel_z = 8192 }, 16, 16_000_000);
+    try testing.expect(pitch.gamepad.ax > 32000);
+    try testing.expectEqual(@as(i16, 0), pitch.gamepad.ay);
 }
 
 test "e2e: gyro joystick tilt — missing accel does not suppress physical stick" {
