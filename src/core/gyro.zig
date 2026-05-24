@@ -1,10 +1,16 @@
 const std = @import("std");
 
 pub const GyroTarget = enum { right_stick, left_stick };
+pub const GyroResponse = enum { rate, tilt };
+pub const GyroAxis = enum { none, pitch, yaw, roll };
 
 pub const GyroConfig = struct {
     mode: []const u8 = "off", // "off" | "mouse" | "joystick"
     target: GyroTarget = .right_stick,
+    response: GyroResponse = .rate,
+    axis_x: GyroAxis = .yaw,
+    axis_y: GyroAxis = .pitch,
+    degrees_full: f32 = 35.0,
     sensitivity_x: f32 = 1.5,
     sensitivity_y: f32 = 1.5,
     deadzone: i16 = 0,
@@ -30,19 +36,43 @@ pub const GyroProcessor = struct {
     accum_y: f32 = 0,
 
     pub fn process(self: *GyroProcessor, cfg: *const GyroConfig, gx: i16, gy: i16, gz: i16) GyroOutput {
-        _ = gz;
+        return self.processMotion(cfg, gx, gy, gz, 0, 0, 0);
+    }
+
+    pub fn processMotion(
+        self: *GyroProcessor,
+        cfg: *const GyroConfig,
+        gx: i16,
+        gy: i16,
+        gz: i16,
+        accel_x: i16,
+        accel_y: i16,
+        accel_z: i16,
+    ) GyroOutput {
         if (!std.mem.eql(u8, cfg.mode, "mouse") and !std.mem.eql(u8, cfg.mode, "joystick")) {
             return .{ .rel_x = 0, .rel_y = 0, .joy_x = null, .joy_y = null };
         }
 
-        // gyro_x = pitch (up/down tilt) → REL_Y; gyro_y = yaw (left/right rotation) → REL_X
-        // [1] deadzone
-        const fyaw: f32 = if (@abs(@as(i32, gy)) < cfg.deadzone) 0.0 else @floatFromInt(gy);
-        const fpitch: f32 = if (@abs(@as(i32, gx)) < cfg.deadzone) 0.0 else @floatFromInt(gx);
+        if (std.mem.eql(u8, cfg.mode, "joystick") and cfg.response == .tilt) {
+            return self.processTilt(cfg, accel_x, accel_y, accel_z);
+        }
 
-        // [2] EMA smoothing (ema_x tracks yaw→REL_X, ema_y tracks pitch→REL_Y)
-        self.ema_x = self.ema_x * cfg.smoothing + fyaw * (1.0 - cfg.smoothing);
-        self.ema_y = self.ema_y * cfg.smoothing + fpitch * (1.0 - cfg.smoothing);
+        const raw_x = selectRateAxis(cfg.axis_x, gx, gy, gz);
+        const raw_y = selectRateAxis(cfg.axis_y, gx, gy, gz);
+
+        // [1] deadzone
+        const fsrc_x: f32 = if (raw_x) |v|
+            if (@abs(@as(i32, v)) < cfg.deadzone) 0.0 else @floatFromInt(v)
+        else
+            0.0;
+        const fsrc_y: f32 = if (raw_y) |v|
+            if (@abs(@as(i32, v)) < cfg.deadzone) 0.0 else @floatFromInt(v)
+        else
+            0.0;
+
+        // [2] EMA smoothing (ema_x tracks source->X, ema_y tracks source->Y)
+        self.ema_x = self.ema_x * cfg.smoothing + fsrc_x * (1.0 - cfg.smoothing);
+        self.ema_y = self.ema_y * cfg.smoothing + fsrc_y * (1.0 - cfg.smoothing);
 
         // [3] normalized curve (vader5): normalize [deadzone,max_val]→[0,1], apply pow, sensitivity scale
         const scaled_x = applyCurve(self.ema_x, cfg) * cfg.sensitivity_x;
@@ -53,8 +83,8 @@ pub const GyroProcessor = struct {
         const final_y = if (cfg.invert_y) -scaled_y else scaled_y;
 
         if (std.mem.eql(u8, cfg.mode, "joystick")) {
-            const jx: i16 = @intFromFloat(std.math.clamp(final_x * 20000.0, -32767.0, 32767.0));
-            const jy: i16 = @intFromFloat(std.math.clamp(final_y * 20000.0, -32767.0, 32767.0));
+            const jx: ?i16 = if (raw_x != null) @intFromFloat(std.math.clamp(final_x * 20000.0, -32767.0, 32767.0)) else null;
+            const jy: ?i16 = if (raw_y != null) @intFromFloat(std.math.clamp(final_y * 20000.0, -32767.0, 32767.0)) else null;
             return .{ .rel_x = 0, .rel_y = 0, .joy_x = jx, .joy_y = jy };
         }
 
@@ -69,6 +99,24 @@ pub const GyroProcessor = struct {
         return .{ .rel_x = dx, .rel_y = dy, .joy_x = null, .joy_y = null };
     }
 
+    fn processTilt(self: *GyroProcessor, cfg: *const GyroConfig, accel_x: i16, accel_y: i16, accel_z: i16) GyroOutput {
+        const angle_x = selectTiltAxis(cfg.axis_x, accel_x, accel_y, accel_z);
+        const angle_y = selectTiltAxis(cfg.axis_y, accel_x, accel_y, accel_z);
+
+        if (angle_x) |a| self.ema_x = self.ema_x * cfg.smoothing + a * (1.0 - cfg.smoothing);
+        if (angle_y) |a| self.ema_y = self.ema_y * cfg.smoothing + a * (1.0 - cfg.smoothing);
+
+        const jx: ?i16 = if (angle_x != null)
+            angleToStick(self.ema_x, cfg.degrees_full, cfg.curve, cfg.sensitivity_x, cfg.deadzone, cfg.invert_x)
+        else
+            null;
+        const jy: ?i16 = if (angle_y != null)
+            angleToStick(self.ema_y, cfg.degrees_full, cfg.curve, cfg.sensitivity_y, cfg.deadzone, cfg.invert_y)
+        else
+            null;
+        return .{ .rel_x = 0, .rel_y = 0, .joy_x = jx, .joy_y = jy };
+    }
+
     pub fn reset(self: *GyroProcessor) void {
         self.ema_x = 0;
         self.ema_y = 0;
@@ -76,6 +124,42 @@ pub const GyroProcessor = struct {
         self.accum_y = 0;
     }
 };
+
+fn selectRateAxis(axis: GyroAxis, gx: i16, gy: i16, gz: i16) ?i16 {
+    return switch (axis) {
+        .none => null,
+        .pitch => gx,
+        .yaw => gy,
+        .roll => gz,
+    };
+}
+
+fn selectTiltAxis(axis: GyroAxis, ax: i16, ay: i16, az: i16) ?f32 {
+    if (axis == .none) return null;
+    const fx: f32 = @floatFromInt(ax);
+    const fy: f32 = @floatFromInt(ay);
+    const fz: f32 = @floatFromInt(az);
+    if (fx == 0.0 and fy == 0.0 and fz == 0.0) return null;
+
+    const radians_to_degrees: f32 = 180.0 / std.math.pi;
+    return switch (axis) {
+        .none => null,
+        .pitch => std.math.atan2(-fx, @sqrt(fy * fy + fz * fz)) * radians_to_degrees,
+        .roll => std.math.atan2(fy, fz) * radians_to_degrees,
+        .yaw => 0.0,
+    };
+}
+
+fn angleToStick(angle_degrees: f32, degrees_full: f32, curve: f32, sensitivity: f32, deadzone: i16, invert: bool) i16 {
+    const full = @max(degrees_full, 0.001);
+    var normalized = std.math.clamp(angle_degrees / full, -1.0, 1.0);
+    normalized = std.math.copysign(std.math.pow(f32, @abs(normalized), curve), normalized);
+
+    var value = std.math.clamp(normalized * sensitivity * 32767.0, -32767.0, 32767.0);
+    if (@abs(value) < @as(f32, @floatFromInt(deadzone))) value = 0.0;
+    if (invert) value = -value;
+    return @intFromFloat(value);
+}
 
 fn applyCurve(ema: f32, cfg: *const GyroConfig) f32 {
     const dz: f32 = @floatFromInt(cfg.deadzone);
@@ -99,6 +183,77 @@ test "gyro: mode=off: zero output" {
     try testing.expectEqual(@as(i32, 0), out.rel_x);
     try testing.expectEqual(@as(i32, 0), out.rel_y);
     try testing.expect(out.joy_x == null);
+    try testing.expect(out.joy_y == null);
+}
+
+test "gyro: joystick tilt response maps roll degrees to stick position" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .tilt,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .degrees_full = 35.0,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+    };
+
+    // atan2(5735, 8192) is approximately 35 degrees, so it should be full X deflection.
+    const out = g.processMotion(&cfg, 0, 0, 0, 0, 5735, 8192);
+    try testing.expect(out.joy_x != null);
+    try testing.expect(out.joy_y == null);
+    try testing.expect(out.joy_x.? > 32000);
+}
+
+test "gyro: joystick tilt response supports invert and negative roll" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .tilt,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .degrees_full = 35.0,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+        .invert_x = true,
+    };
+
+    const out = g.processMotion(&cfg, 0, 0, 0, 0, -5735, 8192);
+    try testing.expect(out.joy_x != null);
+    try testing.expect(out.joy_x.? > 32000);
+}
+
+test "gyro: joystick tilt response ignores missing accelerometer vector" {
+    var g = GyroProcessor{ .ema_x = 12.0, .ema_y = -8.0 };
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .tilt,
+        .axis_x = .roll,
+        .axis_y = .pitch,
+        .smoothing = 0.0,
+    };
+
+    const out = g.processMotion(&cfg, 0, 0, 0, 0, 0, 0);
+    try testing.expect(out.joy_x == null);
+    try testing.expect(out.joy_y == null);
+    try testing.expectEqual(@as(f32, 12.0), g.ema_x);
+    try testing.expectEqual(@as(f32, -8.0), g.ema_y);
+}
+
+test "gyro: joystick rate response can route roll gyro to X axis" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .rate,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+    };
+
+    const out = g.process(&cfg, 0, 0, 10000);
+    try testing.expect(out.joy_x != null);
+    try testing.expect(out.joy_x.? > 0);
     try testing.expect(out.joy_y == null);
 }
 

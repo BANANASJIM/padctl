@@ -194,7 +194,32 @@ sensitivity = 1.5
 smoothing   = 0.3
 ```
 
-This is useful for games that read the right stick for camera control but do not natively support gyro input. All other `[gyro]` fields (`sensitivity`, `deadzone`, `smoothing`, `curve`, `invert_x`, `invert_y`) apply in joystick mode the same way as in mouse mode.
+This is useful for games that read the right stick for camera control but do not natively support gyro input. In the default `response = "rate"` mode, the usual gyro fields (`sensitivity`, `deadzone`, `smoothing`, `curve`, `invert_x`, `invert_y`) apply in joystick mode the same way as in mouse mode.
+
+For racing games, `response = "tilt"` maps controller tilt to an absolute stick
+position instead of treating gyro motion like stick velocity. `degrees_full`
+controls how far the controller must be tilted for full stick deflection, and
+`axis_x` / `axis_y` choose which motion axis drives each virtual stick axis:
+
+```toml
+[gyro]
+mode = "joystick"
+response = "tilt"
+target = "left_stick"
+axis_x = "roll"          # steer by rolling the controller left/right
+axis_y = "none"          # leave the Y stick axis unchanged
+degrees_full = 35.0      # +/-35 degrees maps to full stick deflection
+smoothing = 0.2
+```
+
+`response = "tilt"` uses the accelerometer to estimate `roll` and `pitch`, so
+it gives a stable absolute stick position without gyro integration drift. `yaw`
+does not have an absolute tilt estimate and resolves to neutral in tilt mode.
+When `response = "tilt"`, the default X source is `roll`; in the default
+`response = "rate"` mode, X still uses `yaw`. If a device has not reported a
+non-zero accelerometer vector yet, tilt mode leaves the physical stick axes
+unchanged for that frame. In tilt mode, `deadzone` is applied after converting
+tilt to virtual stick output rather than to raw gyro units.
 
 #### Blending gyro with the physical stick (`blend_stick`)
 

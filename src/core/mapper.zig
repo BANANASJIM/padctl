@@ -367,7 +367,15 @@ pub const Mapper = struct {
                 break :blk if (self.config.gyro) |g| g.activate else null;
             };
             if (checkGyroActivate(activate_spec, self.state.buttons)) {
-                const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
+                const gout = self.gyro_proc.processMotion(
+                    &gcfg,
+                    self.state.gyro_x,
+                    self.state.gyro_y,
+                    self.state.gyro_z,
+                    self.state.accel_x,
+                    self.state.accel_y,
+                    self.state.accel_z,
+                );
                 if (std.mem.eql(u8, gcfg.mode, "mouse")) {
                     if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = gout.rel_x } }) catch {};
                     if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = REL_Y, .value = gout.rel_y } }) catch {};
@@ -779,8 +787,13 @@ fn resolveGyroConfig(config: *const MappingConfig) gyro.GyroConfig {
 }
 
 fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
+    const response = resolveGyroResponse(mc.response);
     return .{
         .mode = mc.mode,
+        .response = response,
+        .axis_x = resolveGyroAxis(mc.axis_x, if (response == .tilt) .roll else .yaw),
+        .axis_y = resolveGyroAxis(mc.axis_y, .pitch),
+        .degrees_full = if (mc.degrees_full) |v| @floatCast(v) else 35.0,
         .sensitivity_x = if (mc.sensitivity_x) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
         .sensitivity_y = if (mc.sensitivity_y) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
         .deadzone = if (mc.deadzone) |v| @intCast(v) else 0,
@@ -792,6 +805,21 @@ fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
         .target = if (mc.target) |t| (if (std.mem.eql(u8, t, "left_stick")) .left_stick else .right_stick) else .right_stick,
         .blend_stick = mc.blend_stick orelse false,
     };
+}
+
+fn resolveGyroResponse(response: ?[]const u8) gyro.GyroResponse {
+    const r = response orelse return .rate;
+    if (std.mem.eql(u8, r, "tilt")) return .tilt;
+    return .rate;
+}
+
+fn resolveGyroAxis(axis: ?[]const u8, default: gyro.GyroAxis) gyro.GyroAxis {
+    const a = axis orelse return default;
+    if (std.mem.eql(u8, a, "none")) return .none;
+    if (std.mem.eql(u8, a, "pitch")) return .pitch;
+    if (std.mem.eql(u8, a, "roll")) return .roll;
+    if (std.mem.eql(u8, a, "yaw")) return .yaw;
+    return default;
 }
 
 fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {

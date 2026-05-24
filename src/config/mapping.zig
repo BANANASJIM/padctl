@@ -246,6 +246,10 @@ pub fn buildAuxKeyCodes(caps: DerivedAuxCaps, buf: []u16) []u16 {
 pub const GyroConfig = struct {
     mode: []const u8 = "off",
     target: ?[]const u8 = null, // "right_stick" (default) or "left_stick"
+    response: ?[]const u8 = null, // "rate" (default) or "tilt"
+    axis_x: ?[]const u8 = null, // "yaw" in rate, "roll" in tilt, "pitch", or "none"
+    axis_y: ?[]const u8 = null, // "pitch" (default), "yaw", "roll", or "none"
+    degrees_full: ?f64 = null, // tilt degrees that map to full stick deflection
     activate: ?[]const u8 = null,
     sensitivity: ?f64 = null,
     sensitivity_x: ?f64 = null,
@@ -450,6 +454,8 @@ fn remapHasTriggerKey(map: *const RemapMap) bool {
 
 const valid_gyro_modes = [_][]const u8{ "off", "mouse", "joystick" };
 const valid_gyro_targets = [_][]const u8{ "right_stick", "left_stick" };
+const valid_gyro_responses = [_][]const u8{ "rate", "tilt" };
+const valid_gyro_axes = [_][]const u8{ "none", "pitch", "yaw", "roll" };
 
 fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
     var mode_ok = false;
@@ -472,6 +478,29 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
         if (!target_ok) return error.InvalidConfig;
     }
 
+    if (g.response) |r| {
+        var response_ok = false;
+        for (valid_gyro_responses) |v| {
+            if (std.mem.eql(u8, r, v)) {
+                response_ok = true;
+                break;
+            }
+        }
+        if (!response_ok) return error.InvalidConfig;
+        if (std.mem.eql(u8, r, "tilt") and !std.mem.eql(u8, g.mode, "joystick")) return error.InvalidConfig;
+    }
+
+    if (g.axis_x) |axis| {
+        if (!gyroAxisValid(axis)) return error.InvalidConfig;
+    }
+    if (g.axis_y) |axis| {
+        if (!gyroAxisValid(axis)) return error.InvalidConfig;
+    }
+
+    if (g.degrees_full) |v| {
+        if (v <= 0.0 or v > 180.0) return error.InvalidConfig;
+    }
+
     if (g.activate) |spec| {
         const btn_name = if (std.mem.startsWith(u8, spec, "hold_"))
             spec["hold_".len..]
@@ -485,6 +514,13 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
             }
         }
     }
+}
+
+fn gyroAxisValid(axis: []const u8) bool {
+    for (valid_gyro_axes) |v| {
+        if (std.mem.eql(u8, axis, v)) return true;
+    }
+    return false;
 }
 
 // Returns true when LT/RT appear in any remap but trigger_threshold is not set.
@@ -1785,6 +1821,75 @@ test "validate: gyro mode=joystick target=left_stick is valid" {
     );
     defer result.deinit();
     try validate(&result.value);
+}
+
+test "validate: gyro joystick tilt response and axes are valid" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\axis_x = "roll"
+        \\axis_y = "none"
+        \\degrees_full = 35.0
+    );
+    defer result.deinit();
+    try validate(&result.value);
+    try std.testing.expectEqualStrings("tilt", result.value.gyro.?.response.?);
+    try std.testing.expectEqualStrings("roll", result.value.gyro.?.axis_x.?);
+    try std.testing.expectEqual(@as(?f64, 35.0), result.value.gyro.?.degrees_full);
+}
+
+test "validate: layer gyro joystick tilt response is valid" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "race"
+        \\trigger = "LB"
+        \\
+        \\[layer.gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\axis_x = "roll"
+        \\axis_y = "none"
+        \\degrees_full = 30.0
+    );
+    defer result.deinit();
+    try validate(&result.value);
+}
+
+test "validate: gyro tilt response requires joystick mode" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "mouse"
+        \\response = "tilt"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro axis invalid returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\axis_x = "diagonal"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro degrees_full must be positive" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\degrees_full = 0.0
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
 test "validate: layer gyro mode bogus returns error" {

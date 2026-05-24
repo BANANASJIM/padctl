@@ -255,6 +255,84 @@ test "e2e: gyro joystick target=right_stick (explicit) — same as default" {
     try testing.expectEqual(@as(i16, 4321), ev.gamepad.ay);
 }
 
+test "e2e: gyro joystick tilt — roll can drive left stick X by degrees" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\target = "left_stick"
+        \\axis_x = "roll"
+        \\axis_y = "none"
+        \\degrees_full = 35.0
+        \\sensitivity_x = 1.0
+        \\smoothing = 0.0
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .accel_y = 5735, .accel_z = 8192, .ax = 111, .ay = -222 }, 16, 0);
+
+    try testing.expect(ev.gamepad.ax > 32000);
+    try testing.expectEqual(@as(i16, -222), ev.gamepad.ay);
+    try testing.expectEqual(@as(i16, 0), ev.gamepad.rx);
+    try testing.expectEqual(@as(i16, 0), ev.gamepad.ry);
+}
+
+test "e2e: gyro joystick tilt — default X axis is roll" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\target = "left_stick"
+        \\axis_y = "none"
+        \\degrees_full = 35.0
+        \\sensitivity_x = 1.0
+        \\smoothing = 0.0
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .accel_y = 5735, .accel_z = 8192 }, 16, 0);
+    try testing.expect(ev.gamepad.ax > 32000);
+}
+
+test "e2e: gyro joystick tilt — missing accel does not suppress physical stick" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\response = "tilt"
+        \\target = "left_stick"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .ax = 1234, .ay = -4321, .accel_x = 0, .accel_y = 0, .accel_z = 0 }, 16, 0);
+    try testing.expectEqual(@as(i16, 1234), ev.gamepad.ax);
+    try testing.expectEqual(@as(i16, -4321), ev.gamepad.ay);
+}
+
+test "e2e: gyro joystick rate — roll axis can drive right stick X" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[gyro]
+        \\mode = "joystick"
+        \\axis_x = "roll"
+        \\axis_y = "none"
+        \\sensitivity_x = 1.0
+        \\smoothing = 0.0
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const ev = try m.apply(.{ .gyro_z = 10000, .rx = 1234, .ry = -4321 }, 16, 0);
+
+    try testing.expect(ev.gamepad.rx > 0);
+    try testing.expectEqual(@as(i16, -4321), ev.gamepad.ry);
+}
+
 // --- Layer switch reset (L0) ---
 
 test "e2e: layer switch resets gyro EMA — no jump after activation" {
