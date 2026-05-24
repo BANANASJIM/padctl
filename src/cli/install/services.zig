@@ -84,13 +84,49 @@ pub fn generateReconnectScript(allocator: std.mem.Allocator, prefix: []const u8)
         \\sleep 1
         \\
         \\# Re-apply mapping after hotplug (device reconnects in passthrough mode).
-        \\# Apply the first mapping found (sorted for deterministic selection).
+        \\# Prefer config.toml's default_mapping; fall back to explicit mapping files.
         \\# /etc/padctl/mappings is the FHS sysconfdir — fixed at /etc regardless
         \\# of --prefix. systemConfigDir() in src/config/paths.zig is the SSOT.
         \\sleep 2
+        \\padctl_bin="{s}/bin/padctl"
+        \\
+        \\run_padctl_switch() {{
+        \\    local sock="$1"
+        \\    shift
+        \\
+        \\    if [[ "$sock" == /run/user/*/padctl.sock ]]; then
+        \\        local uid passwd user home
+        \\        uid="$(stat -c %u "$sock" 2>/dev/null)" || return 1
+        \\        passwd="$(getent passwd "$uid")" || return 1
+        \\        IFS=: read -r user _ _ _ _ home _ <<< "$passwd"
+        \\        [ -n "$user" ] && [ -n "$home" ] || return 1
+        \\        command -v runuser >/dev/null 2>&1 || return 1
+        \\        runuser -u "$user" -- env -u XDG_CONFIG_HOME HOME="$home" USER="$user" LOGNAME="$user" XDG_RUNTIME_DIR="/run/user/$uid" "$padctl_bin" switch "$@" --socket "$sock"
+        \\        return $?
+        \\    fi
+        \\
+        \\    "$padctl_bin" switch "$@" --socket "$sock"
+        \\}}
+        \\
+        \\sockets=()
+        \\for sock in /run/user/*/padctl.sock; do
+        \\    [ -S "$sock" ] && sockets+=("$sock")
+        \\done
+        \\[ -S /run/padctl/padctl.sock ] && sockets+=("/run/padctl/padctl.sock")
+        \\[ ${{#sockets[@]}} -eq 0 ] && exit 0
+        \\
+        \\fallback_mapping=""
         \\for f in $(ls /etc/padctl/mappings/*.toml 2>/dev/null | sort); do
         \\    [ -f "$f" ] || continue
-        \\    {s}/bin/padctl switch "$f" --socket /run/padctl/padctl.sock 2>/dev/null && break
+        \\    fallback_mapping="$f"
+        \\    break
+        \\done
+        \\
+        \\applied=0
+        \\for sock in "${{sockets[@]}}"; do
+        \\    run_padctl_switch "$sock" 2>/dev/null && applied=1 && continue
+        \\    [ -n "$fallback_mapping" ] || continue
+        \\    run_padctl_switch "$sock" "$fallback_mapping" 2>/dev/null && applied=1
         \\done
         \\
     , .{prefix});

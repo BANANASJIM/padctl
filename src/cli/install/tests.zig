@@ -901,8 +901,68 @@ test "install: generateReconnectScript has required commands" {
     // Must NOT use systemctl (user service is managed by user, not udev)
     try testing.expect(std.mem.indexOf(u8, script, "systemctl") == null);
     // Must re-apply mapping on hotplug
-    try testing.expect(std.mem.indexOf(u8, script, "/usr/local/bin/padctl switch") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "padctl_bin=\"/usr/local/bin/padctl\"") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "\"$padctl_bin\" switch") != null);
     try testing.expect(std.mem.indexOf(u8, script, "/etc/padctl/mappings/") != null);
+}
+
+test "install: generateReconnectScript targets user-service sockets before system fallback" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    const user_sock = std.mem.indexOf(u8, script, "/run/user/*/padctl.sock") orelse return error.MissingUserSocketGlob;
+    const system_sock = std.mem.indexOf(u8, script, "/run/padctl/padctl.sock") orelse return error.MissingSystemSocketFallback;
+    try testing.expect(user_sock < system_sock);
+    try testing.expect(std.mem.indexOf(u8, script, "--socket \"$sock\"") != null);
+}
+
+test "install: generateReconnectScript does not hard-code only the system socket" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    try testing.expect(std.mem.indexOf(u8, script, "--socket /run/padctl/padctl.sock") == null);
+    try testing.expect(std.mem.indexOf(u8, script, "sockets+=(\"/run/padctl/padctl.sock\")") != null);
+}
+
+test "install: generateReconnectScript runs user-socket switches as socket owner" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    try testing.expect(std.mem.indexOf(u8, script, "uid=\"$(stat -c %u \"$sock\" 2>/dev/null)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "passwd=\"$(getent passwd \"$uid\")\"") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "runuser -u \"$user\" -- env -u XDG_CONFIG_HOME HOME=\"$home\" USER=\"$user\" LOGNAME=\"$user\" XDG_RUNTIME_DIR=\"/run/user/$uid\"") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "XDG_CONFIG_HOME=\"$home/.config\"") == null);
+    try testing.expect(std.mem.indexOf(u8, script, "\"$padctl_bin\" switch --socket \"$sock\"") == null);
+}
+
+test "install: generateReconnectScript uses default mapping before mapping-file fallback" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    const default_switch = std.mem.indexOf(u8, script, "run_padctl_switch \"$sock\" 2>/dev/null") orelse return error.MissingDefaultSwitch;
+    const fallback_switch = std.mem.indexOf(u8, script, "run_padctl_switch \"$sock\" \"$fallback_mapping\" 2>/dev/null") orelse return error.MissingMappingFallbackSwitch;
+    try testing.expect(default_switch < fallback_switch);
+}
+
+test "install: generateReconnectScript falls back per socket without stopping early" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    try testing.expect(std.mem.indexOf(u8, script, "run_padctl_switch \"$sock\" 2>/dev/null && exit 0") == null);
+    try testing.expect(std.mem.indexOf(u8, script, "run_padctl_switch \"$sock\" \"$fallback_mapping\" 2>/dev/null && exit 0") == null);
+    const default_switch = std.mem.indexOf(u8, script, "run_padctl_switch \"$sock\" 2>/dev/null && applied=1 && continue") orelse return error.MissingPerSocketDefault;
+    const fallback_switch = std.mem.indexOf(u8, script, "run_padctl_switch \"$sock\" \"$fallback_mapping\" 2>/dev/null && applied=1") orelse return error.MissingPerSocketFallback;
+    try testing.expect(default_switch < fallback_switch);
 }
 
 test "services: generateReconnectScript embeds correct mappings dir for prefix=/usr/local" {

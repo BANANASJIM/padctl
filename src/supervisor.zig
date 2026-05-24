@@ -344,11 +344,23 @@ pub const Supervisor = struct {
         self.devname_map.deinit();
     }
 
-    /// Attach a pre-constructed instance under a given devname / phys_key.
-    /// Returns without error if devname already tracked (dedup guard).
-    /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
-    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
-        if (self.devname_map.contains(devname)) return;
+    fn hasLiveDuplicate(self: *Supervisor, devname: []const u8, phys_key: []const u8, cfg: *const DeviceConfig) bool {
+        if (self.devname_map.contains(devname)) return true;
+        for (self.managed.items) |m| {
+            if (!std.mem.eql(u8, m.phys_key, phys_key)) continue;
+            if (m.instance.device_cfg.device.vid != cfg.device.vid or
+                m.instance.device_cfg.device.pid != cfg.device.pid)
+            {
+                continue;
+            }
+            if (m.suspended) continue;
+            if (managedInstanceAlive(&m)) return true;
+        }
+        return false;
+    }
+
+    fn attachWithInstanceResult(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !bool {
+        if (self.devname_map.contains(devname)) return false;
         // Dedup by phys_key. Race guard: when a controller is unplugged and
         // replugged within the detach-delay window (or a USB re-enumeration
         // skips the REMOVE uevent entirely), an ADD can reach this path while
@@ -361,7 +373,7 @@ pub const Supervisor = struct {
         var stale_devname: ?[]const u8 = null;
         for (self.managed.items) |m| {
             if (!std.mem.eql(u8, m.phys_key, phys_key)) continue;
-            if (managedInstanceAlive(&m)) return;
+            if (managedInstanceAlive(&m)) return false;
             // Dead fds. Capture devname for detachFull (detach frees it).
             if (m.devname) |dn| {
                 const n = @min(dn.len, stale_devname_buf.len);
@@ -374,7 +386,7 @@ pub const Supervisor = struct {
                 // original silent-return dedup invariant — falling through
                 // would spawn a second ManagedInstance with the same
                 // phys_key.
-                return;
+                return false;
             }
             break;
         }
@@ -397,6 +409,14 @@ pub const Supervisor = struct {
         errdefer _ = self.devname_map.fetchRemove(dev_copy);
         try self.spawnInstance(phys_key, instance, default_pr);
         self.managed.items[self.managed.items.len - 1].devname = dn_copy;
+        return true;
+    }
+
+    /// Attach a pre-constructed instance under a given devname / phys_key.
+    /// Returns without error if devname already tracked (dedup guard).
+    /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
+    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
+        _ = try self.attachWithInstanceResult(devname, phys_key, instance, default_pr);
     }
 
     /// Stop and suspend the instance attached under devname. The uinput fds
@@ -1052,6 +1072,9 @@ pub const Supervisor = struct {
 
     fn enqueueHotplugRetry(self: *Supervisor, devname: []const u8) void {
         if (self.hotplug_retry_fd < 0) return;
+        for (self.hotplug_pending.items) |pending| {
+            if (std.mem.eql(u8, pending.devname[0..pending.len], devname)) return;
+        }
         var entry: HotplugPending = undefined;
         const n = @min(devname.len, entry.devname.len);
         @memcpy(entry.devname[0..n], devname[0..n]);
@@ -1063,6 +1086,30 @@ pub const Supervisor = struct {
             .it_interval = .{ .sec = 0, .nsec = 0 },
         };
         _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+    }
+
+    fn enqueueHotplugRetryForPath(self: *Supervisor, path: []const u8) void {
+        self.enqueueHotplugRetry(std.fs.path.basename(path));
+    }
+
+    fn isHidrawDevname(name: []const u8) bool {
+        if (!std.mem.startsWith(u8, name, "hidraw")) return false;
+        if (name.len == "hidraw".len) return false;
+        for (name["hidraw".len..]) |c| {
+            if (!std.ascii.isDigit(c)) return false;
+        }
+        return true;
+    }
+
+    fn enqueueColdScanRetriesForDevRoot(self: *Supervisor, dev_root: []const u8) void {
+        var dir = std.fs.openDirAbsolute(dev_root, .{ .iterate = true }) catch return;
+        defer dir.close();
+
+        var it = dir.iterate();
+        while (it.next() catch return) |entry| {
+            if (!isHidrawDevname(entry.name)) continue;
+            self.enqueueHotplugRetry(entry.name);
+        }
     }
 
     fn drainHotplugRetry(self: *Supervisor) void {
@@ -1707,6 +1754,7 @@ pub const Supervisor = struct {
                 std.log.debug("config loaded for {s} (VID={x:0>4} PID={x:0>4}), no device online", .{
                     cfg_ptr.value.device.name, vid, pid,
                 });
+                self.enqueueColdScanRetriesForDevRoot(dev_root);
                 try self.configs.append(self.allocator, cfg_ptr);
                 continue;
             }
@@ -1715,7 +1763,11 @@ pub const Supervisor = struct {
 
             var spawned: usize = 0;
             for (paths) |hidraw_path| {
-                const iface_id = readInterfaceId(hidraw_path) orelse continue;
+                const iface_id = readInterfaceId(hidraw_path) orelse {
+                    std.log.debug("cold scan: {s} sysfs not ready, will retry via hotplug path", .{hidraw_path});
+                    self.enqueueHotplugRetryForPath(hidraw_path);
+                    continue;
+                };
                 {
                     var declared = false;
                     for (cfg_ifaces) |ci| {
@@ -1756,6 +1808,7 @@ pub const Supervisor = struct {
                 const inst_ptr = try self.allocator.create(DeviceInstance);
                 inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
+                    if (isTransientOpenError(err)) self.enqueueHotplugRetryForPath(hidraw_path);
                     self.allocator.destroy(inst_ptr);
                     if (default_pr_ptr) |p| {
                         p.deinit();
@@ -1882,6 +1935,9 @@ pub const Supervisor = struct {
             error.DeviceBusy,
             error.FileNotFound,
             error.NoDevice,
+            error.NotFound,
+            error.Disconnected,
+            error.Io,
             => true,
             else => false,
         };
@@ -1901,7 +1957,10 @@ pub const Supervisor = struct {
         defer posix.close(fd);
 
         var info: ioctl.HidrawDevinfo = undefined;
-        if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) return;
+        if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) {
+            std.log.debug("hotplug: {s} rawinfo unavailable, will retry", .{path});
+            return error.HotplugTransient;
+        }
         const vid: u16 = @bitCast(info.vendor);
         const pid: u16 = @bitCast(info.product);
 
@@ -1982,13 +2041,14 @@ pub const Supervisor = struct {
             return;
         }
 
+        if (self.hasLiveDuplicate(devname, phys, cfg.?)) return;
+
         const default_dm = self.buildDefaultMapping(cfg.?.device.name);
         const default_pr_ptr: ?*mapping_cfg.ParseResult = if (default_dm) |d| d.pr else null;
         const default_stem: ?[]u8 = if (default_dm) |d| d.stem else null;
         const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
-        errdefer self.allocator.destroy(inst_ptr);
         inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
@@ -1997,10 +2057,10 @@ pub const Supervisor = struct {
                 self.allocator.destroy(p);
             }
             if (default_stem) |s| self.allocator.free(s);
+            if (isTransientOpenError(err)) return error.HotplugTransient;
             return;
         };
-        const managed_len_before = self.managed.items.len;
-        self.attachWithInstance(devname, phys, inst_ptr, default_pr_ptr) catch |err| {
+        const attached = self.attachWithInstanceResult(devname, phys, inst_ptr, default_pr_ptr) catch |err| {
             inst_ptr.deinit();
             self.allocator.destroy(inst_ptr);
             if (default_pr_ptr) |p| {
@@ -2010,15 +2070,18 @@ pub const Supervisor = struct {
             if (default_stem) |s| self.allocator.free(s);
             return err;
         };
-        if (default_stem) |s| {
-            // attachWithInstance may early-return without spawning (devname
-            // already tracked / live dup). Only attribute the stem to the
-            // tail item when a new instance was actually appended.
-            if (self.managed.items.len > managed_len_before) {
-                self.managed.items[self.managed.items.len - 1].default_mapping_stem = s;
-            } else {
-                self.allocator.free(s);
+        if (!attached) {
+            inst_ptr.deinit();
+            self.allocator.destroy(inst_ptr);
+            if (default_pr_ptr) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
             }
+            if (default_stem) |s| self.allocator.free(s);
+            return;
+        }
+        if (default_stem) |s| {
+            self.managed.items[self.managed.items.len - 1].default_mapping_stem = s;
         }
         std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
         // Log FF config for rumble diagnostics.
@@ -2121,6 +2184,184 @@ fn makeControlSocket(allocator: std.mem.Allocator, tmp_path: []const u8) !Contro
     var sock_path_buf: [256]u8 = undefined;
     const sock_path = try std.fmt.bufPrint(&sock_path_buf, "{s}/ctrl.sock", .{tmp_path});
     return ControlSocket.init(allocator, sock_path);
+}
+
+test "supervisor: cold-scan retry queues hidraw basename" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    sup.enqueueHotplugRetryForPath("/tmp/fake-dev/hidraw2");
+    sup.enqueueHotplugRetryForPath("/another-root/hidraw2");
+
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+    const item = sup.hotplug_pending.items[0];
+    try testing.expectEqualStrings("hidraw2", item.devname[0..item.len]);
+}
+
+test "supervisor: cold-scan retry is inert when retry timer is unavailable" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    sup.enqueueHotplugRetryForPath("/tmp/fake-dev/hidraw2");
+
+    try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
+}
+
+test "supervisor: cold scan queues unidentified hidraw candidates for retry" {
+    const allocator = testing.allocator;
+
+    var cfg_dir = testing.tmpDir(.{});
+    defer cfg_dir.cleanup();
+    try cfg_dir.dir.writeFile(.{ .sub_path = "device.toml", .data = minimal_device_toml });
+    const cfg_dir_path = try cfg_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(cfg_dir_path);
+
+    var dev_dir = testing.tmpDir(.{});
+    defer dev_dir.cleanup();
+    try dev_dir.dir.writeFile(.{ .sub_path = "hidraw3", .data = "not a real hidraw node" });
+    const dev_root = try dev_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dev_root);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    try sup.startFromDirWithRoot(cfg_dir_path, dev_root);
+
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+    const item = sup.hotplug_pending.items[0];
+    try testing.expectEqualStrings("hidraw3", item.devname[0..item.len]);
+}
+
+test "supervisor: cold scan does not queue retry without hidraw candidates" {
+    const allocator = testing.allocator;
+
+    var cfg_dir = testing.tmpDir(.{});
+    defer cfg_dir.cleanup();
+    try cfg_dir.dir.writeFile(.{ .sub_path = "device.toml", .data = minimal_device_toml });
+    const cfg_dir_path = try cfg_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(cfg_dir_path);
+
+    var dev_dir = testing.tmpDir(.{});
+    defer dev_dir.cleanup();
+    const dev_root = try dev_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dev_root);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    try sup.startFromDirWithRoot(cfg_dir_path, dev_root);
+
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+    try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
+}
+
+test "supervisor: hotplug rawinfo failure is transient" {
+    const allocator = testing.allocator;
+
+    var dev_dir = testing.tmpDir(.{});
+    defer dev_dir.cleanup();
+    try dev_dir.dir.writeFile(.{ .sub_path = "hidraw7", .data = "not a real hidraw node" });
+    const dev_root = try dev_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dev_root);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    try testing.expectError(error.HotplugTransient, sup.attachWithRoot("hidraw7", dev_root));
+}
+
+test "supervisor: attachWithInstanceResult reports duplicate devname without taking instance" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst_a, null));
+
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    defer {
+        inst_b.deinit();
+        allocator.destroy(inst_b);
+    }
+
+    try testing.expect(!try sup.attachWithInstanceResult("hidraw0", "phys1", inst_b, null));
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expectEqualStrings("phys0", sup.devname_map.get("hidraw0").?);
+    try testing.expect(!sup.devname_map.contains("hidraw1"));
+}
+
+test "supervisor: attachWithInstanceResult reports live phys duplicate without taking instance" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst_a, null));
+
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    defer {
+        inst_b.deinit();
+        allocator.destroy(inst_b);
+    }
+
+    try testing.expect(!try sup.attachWithInstanceResult("hidraw1", "phys0", inst_b, null));
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expectEqualStrings("phys0", sup.devname_map.get("hidraw0").?);
+    try testing.expect(!sup.devname_map.contains("hidraw1"));
+}
+
+test "supervisor: hotplug duplicate precheck catches active devname and live phys" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst, null));
+
+    try testing.expect(sup.hasLiveDuplicate("hidraw0", "phys1", &parsed_dev.value));
+    try testing.expect(sup.hasLiveDuplicate("hidraw1", "phys0", &parsed_dev.value));
+    try testing.expect(!sup.hasLiveDuplicate("hidraw1", "phys1", &parsed_dev.value));
 }
 
 test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {

@@ -49,6 +49,9 @@ test "isTransientOpenError: transient errors are retried" {
     try testing.expect(Supervisor.isTransientOpenError(error.DeviceBusy));
     try testing.expect(Supervisor.isTransientOpenError(error.FileNotFound));
     try testing.expect(Supervisor.isTransientOpenError(error.NoDevice));
+    try testing.expect(Supervisor.isTransientOpenError(error.NotFound));
+    try testing.expect(Supervisor.isTransientOpenError(error.Disconnected));
+    try testing.expect(Supervisor.isTransientOpenError(error.Io));
 }
 
 test "isTransientOpenError: fatal errors are not retried" {
