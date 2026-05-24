@@ -13,18 +13,18 @@ Without a mapping config, padctl passes all inputs through unchanged as a standa
 
 ### Create a mapping
 
-Copy the example and edit it:
+Use the interactive creator:
 
 ```sh
 mkdir -p ~/.config/padctl/mappings/
-cp /usr/share/padctl/config/example-mapping.toml ~/.config/padctl/mappings/my-config.toml
-$EDITOR ~/.config/padctl/mappings/my-config.toml
+padctl config init --preset xbox-360
 ```
 
-Or use the interactive creator:
+Or, from a source checkout, copy the repository example and edit it:
 
 ```sh
-padctl config init
+cp config/example-mapping.toml ~/.config/padctl/mappings/my-config.toml
+$EDITOR ~/.config/padctl/mappings/my-config.toml
 ```
 
 ### XDG Search Paths
@@ -103,7 +103,7 @@ padctl --mapping ~/.config/padctl/mappings/my-config.toml
 Mapping configs are validated at daemon startup. Errors are written to the journal:
 
 ```sh
-journalctl -u padctl.service -n 30
+journalctl --user -u padctl.service -n 30
 ```
 
 Mapping configs can also be validated with `padctl --validate`; the flag auto-detects device vs mapping schema by scanning for a `[device]` table.

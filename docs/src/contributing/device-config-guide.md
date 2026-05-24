@@ -125,7 +125,7 @@ You need separate `[[report]]` blocks for each. See `devices/sony/dualsense.toml
 
 ```bash
 # Parse check — does the config load without errors?
-padctl-debug devices/vendor/model.toml
+padctl-debug --config devices/vendor/model.toml
 
 # Live test — run padctl and verify with evtest
 padctl --config devices/vendor/model.toml &

@@ -53,8 +53,8 @@ The `padctl install --immutable` flag changes where system files are placed:
 | File | Standard (`/usr`) | Immutable (`--immutable`) |
 |------|-------------------|---------------------------|
 | Binaries | `/usr/bin/` | `/usr/local/bin/` |
-| Service file | `/usr/lib/systemd/system/` | `/etc/systemd/system/` |
-| Service drop-in | *(not created)* | `/etc/systemd/system/padctl.service.d/immutable.conf` |
+| Service file | `/usr/lib/systemd/user/` | `/etc/systemd/user/` |
+| Service drop-in | *(not created)* | `/etc/systemd/user/padctl.service.d/immutable.conf` |
 | udev rules | `/usr/lib/udev/rules.d/` | `/etc/udev/rules.d/` |
 | Device configs | `/usr/share/padctl/devices/` | `/usr/local/share/padctl/devices/` |
 
@@ -64,16 +64,22 @@ Files in `/etc/` persist across system updates on immutable distros.
 
 ### The `immutable.conf` Drop-in
 
-The immutable install creates a systemd drop-in override with these changes:
+The immutable install creates a systemd user-service drop-in override with these changes:
 
 | Directive | Purpose |
 |-----------|---------|
-| `DeviceAllow=` | Resets device allowlist to permit all device access (see security note below) |
+| `DeviceAllow=` | Clears any inherited device allowlist so libusb can open USB bus nodes when permissions allow it |
 | `ProtectHome=read-only` | Allows reading user mapping configs from `~/.config/padctl/mappings/` |
+| `ReadWritePaths=/run/user/%U` | Keeps the daemon socket writable when `ProtectHome=read-only` also covers runtime paths |
 | `TimeoutStopSec=3` | Short stop timeout for processes stuck in uninterruptible I/O |
 | `KillMode=mixed` | SIGTERM to main process + SIGKILL to stuck worker threads |
 
-**Security note on `DeviceAllow=`:** The base service restricts device access to `hidraw`, `uinput`, and `input` devices. The immutable drop-in clears this allowlist because libusb needs USB bus nodes (`/dev/bus/usb/`) for vendor-specific control transfers (init commands, rumble, LED control). The specific `char-usb_device` cgroup class was tested and does not provide sufficient access. Standard (non-immutable) installs are not affected and retain the restrictive allowlist.
+**Security note on `DeviceAllow=`:** The immutable drop-in does not grant file
+permissions by itself. Device access still comes from the installed udev rules,
+desktop `uaccess` ACLs, or input-group membership for headless sessions. Clearing
+the systemd device allowlist is needed so libusb can use USB bus nodes
+(`/dev/bus/usb/`) for vendor-specific control transfers once normal file
+permissions allow access.
 
 ## Managing Mappings
 
@@ -124,4 +130,4 @@ This copies your user mapping and config to `/etc/padctl/` via sudo, so the chan
 sudo padctl uninstall --immutable --prefix /usr/local --mapping vader5
 ```
 
-This removes all installed files including the `/etc/` service files and the specified mapping. User configs in `~/.config/padctl/` are never touched.
+This removes all installed files including the `/etc/systemd/user/` service files and the specified mapping. User configs in `~/.config/padctl/` are never touched.

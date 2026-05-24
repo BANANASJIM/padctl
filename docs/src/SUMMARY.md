@@ -25,5 +25,7 @@
 - [Contributing](contributing/README.md)
   - [Device Config Guide](contributing/device-config-guide.md)
   - [HID Reverse Engineering Guide](contributing/reverse-engineering.md)
+  - [Device TOML from InputPlumber](contributing/device-toml-from-inputplumber.md)
   - [Reference Tables](contributing/reference-tables.md)
   - [Code Contributions](contributing/code-contributions.md)
+  - [Release Process](contributing/release-process.md)

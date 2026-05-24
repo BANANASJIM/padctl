@@ -82,7 +82,9 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 
 ## Supported Devices
 
-Ships with configs for **12 devices** across 8 vendors:
+Ships with production configs for **12 supported device families** across 8
+vendors. `devices/` also contains a Flydigi DInput/2.4G compatibility variant
+plus example/test fixtures, so the raw TOML file count is higher:
 
 **Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (2) · **HORI** (1) · **Lenovo** (2)
 
@@ -111,6 +113,14 @@ curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_a
 sudo dpkg -i padctl_arm64.deb
 ```
 
+After installing via a package manager, enable the user service from your normal
+login session:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now padctl.service
+```
+
 ### From Source
 
 See [Quick Start](#quick-start) below. For other distros, see [CONTRIBUTING.md](CONTRIBUTING.md#packaging).
@@ -119,14 +129,20 @@ See [Quick Start](#quick-start) below. For other distros, see [CONTRIBUTING.md](
 
 ```sh
 zig build                                             # build from source
-sudo zig-out/bin/padctl install                       # install binary, udev rules; writes user service unit
-systemctl --user enable --now padctl.service          # start the user service
-padctl config init                                    # create a mapping in ~/.config/padctl/mappings/ interactively
+sudo zig-out/bin/padctl install                       # install binary, udev rules, service; starts user service when run via sudo
 padctl status                                         # check daemon and detected devices
+padctl config init                                    # create a mapping in ~/.config/padctl/mappings/ interactively
+padctl list-mappings                                  # show generated and installed mapping profiles
 padctl switch <name>                                  # switch mapping profile without restart
 ```
 
-padctl runs as a **systemd user service** (`~/.config/systemd/user/padctl.service`). The binary and udev rules still require root to install, but the service runs as your own user — no `User=` directive or `ProtectHome` needed.
+padctl runs as a **systemd user service**. The default root install writes the
+system-wide user unit under `/usr/lib/systemd/user/` and enables/starts it for
+the invoking user via `systemctl --user`; immutable and custom-prefix installs
+may use `/etc/systemd/user/`. The binary and udev rules still require root to
+install, but the daemon runs as your own user. Run
+`systemctl --user enable --now padctl.service` manually only if install was run
+with `--no-enable`, `--no-start`, or without a discoverable `SUDO_USER`.
 
 To auto-start at boot without an active login session (headless setups, Steam Deck game mode):
 

@@ -8,7 +8,7 @@ No source code changes needed — no test files, no registration, no build syste
 1. **Capture**: Run `padctl-capture` against the target device to produce a TOML skeleton.
 
    ```
-   sudo ./zig-out/bin/padctl-capture /dev/hidraw0 > devices/<vendor>/<model>.toml
+   sudo ./zig-out/bin/padctl-capture --device /dev/hidraw0 --duration 30 --output devices/<vendor>/<model>.toml
    ```
 
 2. **Complete**: Fill in field names, button names, transform chains, and the `[output]` section.

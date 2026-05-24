@@ -347,6 +347,7 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/padctl-bin.git /tmp/padctl-bin
           cd /tmp/padctl-bin
 
+          cp "${GITHUB_WORKSPACE}/contrib/aur/padctl-bin/PKGBUILD" PKGBUILD
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
           sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
           sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${X86_HASH}')/" PKGBUILD

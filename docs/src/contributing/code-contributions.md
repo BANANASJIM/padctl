@@ -21,8 +21,11 @@ zig build check-fmt
 # Run all tests (Layer 0+1, no privileges required)
 zig build test
 
-# Run all checks (test + tsan + safe + fmt)
+# Run all checks (test + safe + fmt)
 zig build check-all
+
+# Run ThreadSanitizer tests explicitly; the pre-push hook runs this by default.
+zig build test-tsan
 ```
 
 ## Build Flags

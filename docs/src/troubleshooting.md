@@ -4,6 +4,111 @@ Common runtime failures that have generated repeat issue reports, with diagnosti
 
 ---
 
+## `padctl status` says it cannot connect to the daemon
+
+**Symptoms:**
+
+- `padctl status` exits non-zero or reports that the daemon socket is unreachable.
+- `padctl switch <name>` cannot apply a mapping.
+
+**Check the user service:**
+
+```sh
+systemctl --user status padctl.service
+journalctl --user -u padctl.service -n 80
+```
+
+**Common causes:**
+
+- `padctl install` was run with `--no-enable` or `--no-start`.
+- `padctl install` was run as root without `SUDO_USER`, so it could not locate the real user's systemd user manager.
+- The user has not logged in since install, or headless boot needs linger.
+
+**Fix:**
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now padctl.service
+```
+
+For headless setups or boot-before-login:
+
+```sh
+sudo loginctl enable-linger $USER
+```
+
+---
+
+## Permission denied opening `hidraw`, `uinput`, or `uhid`
+
+**Symptoms:**
+
+- The daemon starts but logs `PermissionDenied`, `AccessDenied`, or open failures
+  for `/dev/hidraw*`, `/dev/uinput`, or `/dev/uhid`.
+- `padctl scan` sees the controller but the daemon cannot manage it.
+
+**Fix:**
+
+```sh
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+systemctl --user restart padctl.service
+```
+
+Then unplug and replug the controller. Graphical sessions normally receive access
+through `TAG+="uaccess"` ACLs. SSH/headless sessions may also need input-group
+membership:
+
+```sh
+sudo usermod -aG input $USER
+```
+
+Log out and back in after changing groups.
+
+---
+
+## Controller is visible but no matching config is found
+
+**Symptoms:**
+
+- `padctl scan` lists the HID device but says no config matched.
+- The daemon log says no devices were found in config dirs.
+
+**Check installed configs:**
+
+```sh
+find /usr/share/padctl/devices -name '*.toml' | sort
+padctl --validate /usr/share/padctl/devices/sony/dualsense.toml
+```
+
+If `/usr/share/padctl/devices` is missing or empty, reinstall the current package.
+If your device is not listed, capture it and open a device-config contribution.
+
+---
+
+## Kernel driver or another mapper still owns the controller
+
+**Symptoms:**
+
+- The physical controller continues to appear directly in games while padctl is running.
+- padctl cannot exclusively grab the device, or duplicate inputs appear.
+- Xbox-compatible devices still bind to `xpad` even though their device TOML sets
+  `block_kernel_drivers`.
+
+**Fix:**
+
+```sh
+sudo padctl install
+sudo udevadm trigger
+systemctl --user restart padctl.service
+```
+
+Then unplug and replug the controller. For devices with `block_kernel_drivers`,
+the installer writes driver-block udev rules and also tries to unbind already
+attached matching devices during install.
+
+---
+
 ## `padctl install` warns "source 'devices/' directory not found"
 
 **Symptoms:**

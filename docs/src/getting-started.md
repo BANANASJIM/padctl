@@ -24,6 +24,14 @@ curl -fLO https://github.com/BANANASJIM/padctl/releases/latest/download/padctl_a
 sudo dpkg -i padctl_arm64.deb
 ```
 
+Package installs place the binary, udev rules, and system-wide user unit on disk.
+Enable the service from your normal login session:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now padctl.service
+```
+
 ## Prerequisites
 
 - **Zig 0.15+** (build from source)
@@ -84,7 +92,7 @@ sudo ./zig-out/bin/padctl install --prefix /usr --destdir "$DESTDIR"
 
 `padctl install` also sets up the following on all systems:
 
-- **`padctl-reconnect`** — A hotplug script triggered by udev when a controller is plugged in. It starts the daemon if not running, restarts it if failed, and re-applies the active mapping. After suspend/resume the kernel re-emits udev events for re-enumerated devices, so the same hook handles post-wake reconnect — no separate resume unit is needed.
+- **`padctl-reconnect`** — A hotplug script triggered by udev when a controller is plugged in. It re-applies the active mapping through any running padctl daemon socket. It does not start or restart the daemon; `padctl install` enables/starts `padctl.service` unless you pass `--no-enable` or `--no-start`. After suspend/resume the kernel re-emits udev events for re-enumerated devices, so the same hook handles post-wake reconnect — no separate resume unit is needed.
 - **Driver conflict rules** — Auto-generated udev rules that unbind conflicting kernel drivers (e.g., `xpad`) from devices that padctl manages. Configured per-device via `block_kernel_drivers` in device TOML configs. When run as root, `padctl install` also walks `/sys/bus/usb/drivers/<driver>/unbind` for matching VID:PID pairs immediately, so already-bound devices are evicted without waiting for replug (issue #162).
 
 ### Install a Mapping
@@ -101,15 +109,19 @@ When `--mapping` is given, the installer also writes a device-to-mapping binding
 
 > **Bazzite / immutable distros:** See the [Bazzite / Immutable Distros guide](immutable-install.md) for special installation steps.
 
-> **Install problems?** See [Troubleshooting](troubleshooting.md) for the `devices/` warning, systemd 257+ `status=218/CAPABILITIES`, and the Arch glibc 2.43 build failure.
+> **Install problems?** See [Troubleshooting](troubleshooting.md) for daemon/socket checks, udev permission issues, missing device configs, and known build failures.
 
 ## Verify
 
 ```sh
+padctl status
 padctl scan
+padctl list-mappings
 ```
 
-Lists all connected HID devices and shows whether a matching device config was found for each.
+`padctl status` verifies the user service socket is reachable. `padctl scan`
+lists connected HID devices and shows whether a matching device config was found
+for each. `padctl list-mappings` verifies the mapping search paths are readable.
 
 ## Run as Service
 
@@ -224,7 +236,7 @@ See the [Diagnostic Logging guide](diagnostic-logging.md) for the full `padctl d
 
 ## udev Permissions
 
-padctl needs access to `/dev/hidraw*`, `/dev/uinput`, and `/dev/uhid`. The first two are standard for HID gamepad daemons; `/dev/uhid` is required for the SDL3-visible IMU pairing path (per ADR-015) — `padctl install` writes the necessary udev rule (`60-padctl.rules`) and a `DeviceAllow=/dev/uhid rw` entry in the systemd unit automatically.
+padctl needs access to `/dev/hidraw*`, `/dev/uinput`, and `/dev/uhid`. The first two are standard for HID gamepad daemons; `/dev/uhid` is required for the SDL3-visible IMU pairing path (per ADR-015). `padctl install` writes the necessary udev rules (`60-padctl.rules`) automatically.
 
 The `padctl install` command generates and installs udev rules automatically from device configs.
 
@@ -234,4 +246,7 @@ If you need to regenerate rules after adding custom device configs:
 sudo padctl install
 ```
 
-The udev rules use `TAG+="uaccess"` to grant the logged-in user access to supported devices without requiring root.
+The udev rules use `TAG+="uaccess"` to grant the active graphical user access
+without requiring root. For SSH, headless, or test sessions without desktop ACLs,
+the rules also grant `GROUP="input", MODE="0660"`; add your user to the `input`
+group and log in again if those sessions need direct device access.
