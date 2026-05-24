@@ -69,10 +69,10 @@ jobs:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${TAG}" >/dev/null 2>&1; then
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "release ${TAG} already exists — skipping create (idempotent re-run)"
           else
-            gh release create "${TAG}" --title "${TAG}" --notes-file CHANGELOG.md --draft=false
+            gh release create "${TAG}" --title "${TAG}" --notes-file CHANGELOG.md --draft=false --repo "${{ github.repository }}"
           fi
 
   gen-install-artifacts:
@@ -166,7 +166,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${TAG}" "${{ env.ARCHIVE }}" --clobber
+        run: gh release upload "${TAG}" "${{ env.ARCHIVE }}" --clobber --repo "${{ github.repository }}"
 
       - name: Upload artifact for checksums
         uses: actions/upload-artifact@v4
@@ -240,9 +240,9 @@ jobs:
           DEB_ARCH: ${{ matrix.deb_arch }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${TAG}" "${{ env.DEB }}" --clobber
+          gh release upload "${TAG}" "${{ env.DEB }}" --clobber --repo "${{ github.repository }}"
           cp "${{ env.DEB }}" "padctl_${DEB_ARCH}.deb"
-          gh release upload "${TAG}" "padctl_${DEB_ARCH}.deb" --clobber
+          gh release upload "${TAG}" "padctl_${DEB_ARCH}.deb" --clobber --repo "${{ github.repository }}"
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
