@@ -63,7 +63,52 @@ const AuxDownTarget = union(enum) {
     mouse_button: u16,
 };
 
+const AUX_TAP_RELEASE_DELAY_NS: i128 = 30 * std.time.ns_per_ms;
+const AUX_TAP_RELEASE_TOKEN_SLOTS = BUTTON_COUNT;
 const GESTURE_TOKEN_SLOTS = gesture_mod.GESTURE_SLOTS * 2;
+
+const AuxTapReleaseTokenEntry = struct {
+    token: u32,
+    target: AuxDownTarget,
+};
+
+const AuxTapReleaseTokenTable = struct {
+    entries: [AUX_TAP_RELEASE_TOKEN_SLOTS]?AuxTapReleaseTokenEntry = [_]?AuxTapReleaseTokenEntry{null} ** AUX_TAP_RELEASE_TOKEN_SLOTS,
+
+    fn put(self: *AuxTapReleaseTokenTable, token: u32, target: AuxDownTarget) bool {
+        for (&self.entries) |*e| {
+            if (e.* == null) {
+                e.* = .{ .token = token, .target = target };
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn take(self: *AuxTapReleaseTokenTable, token: u32) ?AuxDownTarget {
+        for (&self.entries) |*e| {
+            if (e.*) |v| {
+                if (v.token == token) {
+                    e.* = null;
+                    return v.target;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn takeTarget(self: *AuxTapReleaseTokenTable, target: AuxDownTarget) ?AuxTapReleaseTokenEntry {
+        for (&self.entries) |*e| {
+            if (e.*) |v| {
+                if (auxDownTargetEql(v.target, target)) {
+                    e.* = null;
+                    return v;
+                }
+            }
+        }
+        return null;
+    }
+};
 
 const GestureTokenEntry = struct {
     token: u32,
@@ -117,6 +162,7 @@ pub const Mapper = struct {
     aux_down_targets: [BUTTON_COUNT]?AuxDownTarget,
     gesture_aux_down_targets: [BUTTON_COUNT]?AuxDownTarget,
     pending_tap_release: ?u64,
+    aux_tap_release_tokens: AuxTapReleaseTokenTable,
     // Gamepad-button taps emitted by macro timer expiry need one apply() cycle
     // to reach output before pending_tap_release fires; staged here, promoted
     // to injected+pending_tap_release at the next apply.
@@ -175,6 +221,7 @@ pub const Mapper = struct {
             .aux_down_targets = [_]?AuxDownTarget{null} ** BUTTON_COUNT,
             .gesture_aux_down_targets = [_]?AuxDownTarget{null} ** BUTTON_COUNT,
             .pending_tap_release = null,
+            .aux_tap_release_tokens = .{},
             .macro_timer_tap_pending = 0,
             .gesture_engine = .{},
             .gesture_tokens = .{},
@@ -251,6 +298,7 @@ pub const Mapper = struct {
                 target.* = null;
             }
         }
+        releasePendingAuxTapReleases(self, &aux, null);
         return aux;
     }
 
@@ -494,7 +542,7 @@ pub const Mapper = struct {
         self.injected_buttons |= self.gesture_held_gamepad;
 
         if (action.tap_event) |tap| {
-            emitTapEvent(tap, &aux, &self.injected_buttons, &self.pending_tap_release);
+            emitTapEvent(self, tap, &aux, now_ns);
         }
 
         var macro_tap_release: u64 = 0;
@@ -620,6 +668,7 @@ pub const Mapper = struct {
         // Cancel in-flight macros; emit releases for any held keys/buttons.
         for (self.active_macros.items) |*p| p.emitPendingReleases(aux, &self.injected_buttons);
         self.active_macros.clearRetainingCapacity();
+        releasePendingAuxTapReleases(self, aux, now_ns);
         // Discard tap bits staged from a cancelled macro's timer expiry.
         self.macro_timer_tap_pending = 0;
         // Cancel in-flight gestures; mirror the macro-cancel above.
@@ -776,6 +825,7 @@ pub const Mapper = struct {
                             .tap => {},
                         }
                     }
+                    if (em.action == .tap and emitDelayedAuxTap(self, em.target, aux, now_ns)) continue;
                     remap_mod.applyTarget(em.target, act, aux, &self.injected_buttons, null, null);
                 },
             }
@@ -796,6 +846,10 @@ pub const Mapper = struct {
         var buf: [16]timer_queue_mod.Deadline = undefined;
         const expired = self.timer_queue.drainExpired(now_ns, &buf);
         for (expired) |d| {
+            if (self.aux_tap_release_tokens.take(d.token)) |target| {
+                emitAuxDownRelease(target, &aux);
+                continue;
+            }
             if (self.gesture_tokens.take(d.token)) |ge| {
                 const src_bit = @as(u64, 1) << ge.src_idx;
                 const held = (self.state.buttons & src_bit) != 0;
@@ -949,11 +1003,75 @@ fn auxDownTarget(target: RemapTargetResolved) ?AuxDownTarget {
     };
 }
 
+fn auxDownTargetEql(a: AuxDownTarget, b: AuxDownTarget) bool {
+    return switch (a) {
+        .key => |a_code| switch (b) {
+            .key => |b_code| a_code == b_code,
+            else => false,
+        },
+        .mouse_button => |a_code| switch (b) {
+            .mouse_button => |b_code| a_code == b_code,
+            else => false,
+        },
+    };
+}
+
+fn emitAuxDownPress(target: AuxDownTarget, aux: *AuxEventList) bool {
+    switch (target) {
+        .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch return false,
+        .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch return false,
+    }
+    return true;
+}
+
 fn emitAuxDownRelease(target: AuxDownTarget, aux: *AuxEventList) void {
     switch (target) {
         .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
         .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
     }
+}
+
+fn releasePendingAuxTapReleases(self: *Mapper, aux: *AuxEventList, now_ns: ?i128) void {
+    for (&self.aux_tap_release_tokens.entries) |*entry| {
+        if (entry.*) |e| {
+            if (now_ns) |now| self.timer_queue.cancel(e.token, now);
+            emitAuxDownRelease(e.target, aux);
+            entry.* = null;
+        }
+    }
+}
+
+fn emitDelayedAuxTap(self: *Mapper, target: RemapTargetResolved, aux: *AuxEventList, now_ns: i128) bool {
+    const down = auxDownTarget(target) orelse return false;
+    if (self.aux_tap_release_tokens.takeTarget(down)) |prior| {
+        self.timer_queue.cancel(prior.token, now_ns);
+        emitAuxDownRelease(prior.target, aux);
+    }
+
+    const token = self.next_token;
+    self.next_token +%= 1;
+    if (!self.aux_tap_release_tokens.put(token, down)) {
+        remap_mod.applyTarget(target, .tap, aux, &self.injected_buttons, null, null);
+        return true;
+    }
+    if (!emitAuxDownPress(down, aux)) {
+        _ = self.aux_tap_release_tokens.take(token);
+        return true;
+    }
+    self.timer_queue.arm(now_ns + AUX_TAP_RELEASE_DELAY_NS, token, now_ns) catch |err| {
+        _ = self.aux_tap_release_tokens.take(token);
+        std.log.warn("aux tap release timer arm failed: {}", .{err});
+        emitAuxDownRelease(down, aux);
+    };
+    return true;
+}
+
+fn emitTapEvent(self: *Mapper, target: RemapTargetResolved, aux: *AuxEventList, now_ns: i128) void {
+    if (emitDelayedAuxTap(self, target, aux, now_ns)) return;
+
+    var local_pending: u64 = self.pending_tap_release orelse 0;
+    remap_mod.applyTarget(target, .tap, aux, &self.injected_buttons, &local_pending, null);
+    if (local_pending != 0) self.pending_tap_release = local_pending;
 }
 
 fn precomputeRemap(allocator: std.mem.Allocator, remap_map: mapping.RemapMap) !ResolvedRemap {
@@ -994,17 +1112,6 @@ fn precomputeRemap(allocator: std.mem.Allocator, remap_map: mapping.RemapMap) !R
         result.inject[@intCast(src_idx)] = target;
     }
     return result;
-}
-
-fn emitTapEvent(
-    target: RemapTargetResolved,
-    aux: *AuxEventList,
-    injected_buttons: *u64,
-    pending_tap_release: *?u64,
-) void {
-    var local_pending: u64 = pending_tap_release.* orelse 0;
-    remap_mod.applyTarget(target, .tap, aux, injected_buttons, &local_pending, null);
-    if (local_pending != 0) pending_tap_release.* = local_pending;
 }
 
 fn buttonBit(name: []const u8) u64 {

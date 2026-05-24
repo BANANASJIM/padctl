@@ -14,6 +14,7 @@ const state_mod = @import("../core/state.zig");
 
 const Mapper = mapper_mod.Mapper;
 const AuxEvent = mapper_mod.AuxEvent;
+const AuxEventList = mapper_mod.AuxEventList;
 const ButtonId = state_mod.ButtonId;
 const GamepadStateDelta = state_mod.GamepadStateDelta;
 
@@ -110,6 +111,49 @@ test "e2e: layer tap — quick release emits tap event" {
         .mouse_button => |code| try testing.expectEqual(BTN_LEFT, code),
         else => return error.WrongTapEventType,
     }
+}
+
+fn auxListMouseCount(list: *const AuxEventList, code: u16, pressed: bool) usize {
+    var count: usize = 0;
+    for (list.slice()) |e| {
+        switch (e) {
+            .mouse_button => |b| {
+                if (b.code == code and b.pressed == pressed) count += 1;
+            },
+            else => {},
+        }
+    }
+    return count;
+}
+
+fn auxMouseCount(ev: anytype, code: u16, pressed: bool) usize {
+    return auxListMouseCount(&ev.aux, code, pressed);
+}
+
+test "e2e: layer tap mouse delays aux release" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\tap = "mouse_left"
+        \\hold_timeout = 200
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = 1_000_000_000;
+    const ev_press = try m.apply(.{ .buttons = btnMask(.LT) }, 16, t0);
+    try testing.expectEqual(@as(usize, 0), ev_press.aux.len);
+
+    const ev_release = try m.apply(.{ .buttons = 0 }, 16, t0 + 50 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxMouseCount(ev_release, BTN_LEFT, true));
+    try testing.expectEqual(@as(usize, 0), auxMouseCount(ev_release, BTN_LEFT, false));
+
+    const aux_release = m.onMacroTimerExpired(t0 + 90 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxListMouseCount(&aux_release, BTN_LEFT, false));
+    try testing.expectEqual(@as(usize, 0), auxListMouseCount(&aux_release, BTN_LEFT, true));
 }
 
 test "e2e: layer tap — no tap after timeout (ACTIVE release)" {
@@ -696,16 +740,39 @@ fn keyCode(name: []const u8) u16 {
 }
 
 fn auxHasKey(ev: anytype, code: u16, pressed: bool) bool {
-    for (ev.aux.slice()) |e| {
+    return auxListHasKey(&ev.aux, code, pressed);
+}
+
+fn auxListKeyCount(list: *const AuxEventList, code: u16, pressed: bool) usize {
+    var count: usize = 0;
+    for (list.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == code and k.pressed == pressed) return true,
+            .key => |k| {
+                if (k.code == code and k.pressed == pressed) count += 1;
+            },
             else => {},
         }
     }
-    return false;
+    return count;
 }
 
-test "e2e gesture: tap-only key emits press+release on release (no double, zero latency)" {
+fn auxKeyCount(ev: anytype, code: u16, pressed: bool) usize {
+    return auxListKeyCount(&ev.aux, code, pressed);
+}
+
+fn auxListHasKey(list: *const AuxEventList, code: u16, pressed: bool) bool {
+    return auxListKeyCount(list, code, pressed) != 0;
+}
+
+fn auxHasAnyKey(ev: anytype, code: u16) bool {
+    return auxHasKey(ev, code, true) or auxHasKey(ev, code, false);
+}
+
+fn auxListHasAnyKey(list: *const AuxEventList, code: u16) bool {
+    return auxListHasKey(list, code, true) or auxListHasKey(list, code, false);
+}
+
+test "e2e gesture: tap-only key delays aux release" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(
         \\[remap]
@@ -722,7 +789,41 @@ test "e2e gesture: tap-only key emits press+release on release (no double, zero 
 
     const ev_rel = try m.apply(.{ .buttons = 0 }, 16, t0 + 30 * std.time.ns_per_ms);
     try testing.expect(auxHasKey(ev_rel, keyCode("KEY_X"), true));
-    try testing.expect(auxHasKey(ev_rel, keyCode("KEY_X"), false));
+    try testing.expect(!auxHasKey(ev_rel, keyCode("KEY_X"), false));
+
+    const aux_release = m.onMacroTimerExpired(t0 + 70 * std.time.ns_per_ms);
+    try testing.expect(auxListHasKey(&aux_release, keyCode("KEY_X"), false));
+    try testing.expect(!auxListHasKey(&aux_release, keyCode("KEY_X"), true));
+}
+
+test "e2e gesture: repeated same key tap refreshes delayed aux release" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_J" }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const key_j = keyCode("KEY_J");
+    const t0: i128 = 1_000_000_000;
+
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    const first_release = try m.apply(.{ .buttons = 0 }, 16, t0 + 10 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxKeyCount(first_release, key_j, true));
+    try testing.expectEqual(@as(usize, 0), auxKeyCount(first_release, key_j, false));
+
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0 + 20 * std.time.ns_per_ms);
+    const second_release = try m.apply(.{ .buttons = 0 }, 16, t0 + 25 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxKeyCount(second_release, key_j, false));
+    try testing.expectEqual(@as(usize, 1), auxKeyCount(second_release, key_j, true));
+
+    const old_release_deadline = m.onMacroTimerExpired(t0 + 45 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 0), old_release_deadline.len);
+
+    const final_release = m.onMacroTimerExpired(t0 + 60 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxListKeyCount(&final_release, key_j, false));
+    try testing.expectEqual(@as(usize, 0), auxListKeyCount(&final_release, key_j, true));
 }
 
 test "e2e gesture: hold key fires at deadline and releases on button up" {
@@ -752,6 +853,37 @@ test "e2e gesture: hold key fires at deadline and releases on button up" {
     try testing.expect(auxHasKey(ev_rel, keyCode("KEY_Y"), false));
     // tap must NOT fire when hold consumed the gesture
     try testing.expect(!auxHasKey(ev_rel, keyCode("KEY_X"), true));
+}
+
+test "e2e gesture regression: tap+hold KEY_J release is delayed to timer tick" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_J", hold = "KEY_K", hold_ms = 300 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const key_j = keyCode("KEY_J");
+    const key_k = keyCode("KEY_K");
+    const t0: i128 = 1_000_000_000;
+
+    const ev_press = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    try testing.expectEqual(@as(usize, 0), ev_press.aux.len);
+    try testing.expectEqual(@as(u64, 0), ev_press.gamepad.buttons & btnMask(.A));
+
+    const ev_release = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxKeyCount(ev_release, key_j, true));
+    try testing.expectEqual(@as(usize, 0), auxKeyCount(ev_release, key_j, false));
+    try testing.expect(!auxHasAnyKey(ev_release, key_k));
+
+    const early_timer = m.onMacroTimerExpired(t0 + 60 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 0), early_timer.len);
+
+    const aux_release = m.onMacroTimerExpired(t0 + 80 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxListKeyCount(&aux_release, key_j, false));
+    try testing.expectEqual(@as(usize, 0), auxListKeyCount(&aux_release, key_j, true));
+    try testing.expect(!auxListHasAnyKey(&aux_release, key_k));
 }
 
 test "e2e gesture: releaseHeldAux releases held key before reset" {
@@ -789,7 +921,11 @@ test "e2e gesture: double fires on second press inside window" {
 
     const ev_p2 = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0 + 100 * std.time.ns_per_ms);
     try testing.expect(auxHasKey(ev_p2, keyCode("KEY_Z"), true));
-    try testing.expect(auxHasKey(ev_p2, keyCode("KEY_Z"), false));
+    try testing.expect(!auxHasKey(ev_p2, keyCode("KEY_Z"), false));
+
+    const aux_release = m.onMacroTimerExpired(t0 + 140 * std.time.ns_per_ms);
+    try testing.expect(auxListHasKey(&aux_release, keyCode("KEY_Z"), false));
+    try testing.expect(!auxListHasKey(&aux_release, keyCode("KEY_Z"), true));
 }
 
 test "e2e gesture: double-window timeout collapses to single tap" {
@@ -814,6 +950,41 @@ test "e2e gesture: double-window timeout collapses to single tap" {
         else => {},
     };
     try testing.expect(saw_tap_press);
+    try testing.expect(!auxListHasKey(&aux_exp, keyCode("KEY_X"), false));
+
+    const aux_release = m.onMacroTimerExpired(t0 + 340 * std.time.ns_per_ms);
+    try testing.expect(auxListHasKey(&aux_release, keyCode("KEY_X"), false));
+    try testing.expect(!auxListHasKey(&aux_release, keyCode("KEY_X"), true));
+}
+
+test "e2e gesture regression: tap+double KEY_J timeout release is delayed to timer tick" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "KEY_J", double = "KEY_K", double_ms = 250 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const key_j = keyCode("KEY_J");
+    const key_k = keyCode("KEY_K");
+    const t0: i128 = 1_000_000_000;
+
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    const ev_release = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 0), auxKeyCount(ev_release, key_j, true));
+    try testing.expectEqual(@as(usize, 0), auxKeyCount(ev_release, key_j, false));
+    try testing.expect(!auxHasAnyKey(ev_release, key_k));
+
+    const aux_timeout = m.onMacroTimerExpired(t0 + 300 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxListKeyCount(&aux_timeout, key_j, true));
+    try testing.expectEqual(@as(usize, 0), auxListKeyCount(&aux_timeout, key_j, false));
+    try testing.expect(!auxListHasAnyKey(&aux_timeout, key_k));
+
+    const aux_release = m.onMacroTimerExpired(t0 + 340 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), auxListKeyCount(&aux_release, key_j, false));
+    try testing.expectEqual(@as(usize, 0), auxListKeyCount(&aux_release, key_j, true));
+    try testing.expect(!auxListHasAnyKey(&aux_release, key_k));
 }
 
 test "e2e gesture: timer-context gamepad tap stages full press one frame before release" {
