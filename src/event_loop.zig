@@ -779,9 +779,14 @@ pub const EventLoop = struct {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
                 if (ctx.mapper) |m| {
-                    const aux = m.onLayerTimerExpired();
-                    if (aux.len > 0) {
-                        if (ctx.aux_output) |ao| ao.emitAux(aux.slice()) catch {};
+                    const events = m.onLayerTimerExpiredAt(now);
+                    if (events.gamepad) |gamepad| {
+                        ctx.output.emit(gamepad) catch |err| {
+                            std.log.err("output.emit failed: {}", .{err});
+                        };
+                    }
+                    if (events.aux.len > 0) {
+                        if (ctx.aux_output) |ao| ao.emitAux(events.aux.slice()) catch {};
                     }
                 }
             }

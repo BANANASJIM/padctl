@@ -795,7 +795,8 @@ pub fn validate(cfg: *const MappingConfig) !void {
 
     for (layers) |*layer| {
         if (!std.mem.eql(u8, layer.activation, "hold") and
-            !std.mem.eql(u8, layer.activation, "toggle"))
+            !std.mem.eql(u8, layer.activation, "toggle") and
+            !std.mem.eql(u8, layer.activation, "hold_toggle"))
             return error.InvalidConfig;
 
         if (layer.hold_timeout) |t| {
@@ -1045,6 +1046,22 @@ test "mapping: validate: invalid activation value returns error" {
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "mapping: validate: hold_toggle activation value is valid" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "race"
+        \\trigger = "LM"
+        \\activation = "hold_toggle"
+        \\tap = "LM"
+        \\hold_timeout = 300
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try validate(&result.value);
+    try std.testing.expectEqualStrings("hold_toggle", result.value.layer.?[0].activation);
 }
 
 test "mapping: validate: duplicate layer name returns error" {

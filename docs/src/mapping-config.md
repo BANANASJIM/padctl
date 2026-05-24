@@ -196,8 +196,8 @@ hold_timeout = 200
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique layer identifier |
 | `trigger` | string | yes | Button name that activates this layer |
-| `activation` | string | no | `"hold"` (default) or `"toggle"` |
-| `tap` | string | no | Button/key emitted on short press (when using hold activation). May be a `ButtonId`, `KEY_*`, `mouse_*`, or `disabled`. **Cannot be `macro:<name>`** — the layer tap dispatch path does not run macros, so `tap = "macro:foo"` is rejected at validate time (`error.LayerTapCannotBeMacro`). Use `macro:<name>` from `[remap]` / `[layer.remap]` instead. |
+| `activation` | string | no | `"hold"` (default), `"toggle"`, or `"hold_toggle"`. `hold_toggle` starts like `hold`, but holding past `hold_timeout` toggles the layer sticky on/off instead of making it momentary. |
+| `tap` | string | no | Button/key emitted on short press (when using `hold` or `hold_toggle` activation). May be a `ButtonId`, `KEY_*`, `mouse_*`, or `disabled`. **Cannot be `macro:<name>`** — the layer tap dispatch path does not run macros, so `tap = "macro:foo"` is rejected at validate time (`error.LayerTapCannotBeMacro`). Use `macro:<name>` from `[remap]` / `[layer.remap]` instead. |
 | `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000); default 200 |
 
 ### `[layer.remap]`

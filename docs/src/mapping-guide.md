@@ -272,10 +272,11 @@ Default is `"gamepad"`. Set to `"arrows"` to make the d-pad behave as arrow keys
 
 Layers are the most powerful feature. A layer is a context-sensitive override: while active, its remap/gyro/stick/dpad settings replace the base config.
 
-Two activation modes:
+Three activation modes:
 
 - `"hold"` — active while the trigger button is held
 - `"toggle"` — press once to enter, press again to exit
+- `"hold_toggle"` — short press fires `tap`; holding past `hold_timeout` toggles the layer on or off
 
 The `tap` + `hold_timeout` combination lets a button do double duty: if released before `hold_timeout` ms, it fires `tap` instead of activating the layer.
 
@@ -330,6 +331,26 @@ A = "KEY_F1"
 B = "KEY_F2"
 X = "KEY_F3"
 Y = "KEY_F4"
+```
+
+Hold-to-toggle example — hold LM to keep a racing layer enabled, hold it again
+to disable it. A short press still emits `tap`:
+
+```toml
+[[layer]]
+name         = "race"
+trigger      = "LM"
+activation   = "hold_toggle"
+hold_timeout = 300
+tap          = "LM"
+
+[layer.gyro]
+mode = "joystick"
+response = "tilt"
+target = "left_stick"
+axis_x = "roll"
+axis_y = "none"
+degrees_full = 35.0
 ```
 
 Layers are evaluated in declaration order. Only one layer is active at a time.
@@ -443,7 +464,7 @@ See [Mapping Config Reference — chord_switch](mapping-config.md#chord_switch--
 
 ## Full Example
 
-A copy-paste-ready example covering every major feature is included in the repository at [`examples/mappings/comprehensive.toml`](https://github.com/BANANASJIM/padctl/blob/main/examples/mappings/comprehensive.toml). It covers base remaps, two layers (hold + toggle), macros, stick modes, and gyro.
+A copy-paste-ready example covering every major feature is included in the repository at [`examples/mappings/comprehensive.toml`](https://github.com/BANANASJIM/padctl/blob/main/examples/mappings/comprehensive.toml). It covers base remaps, hold/toggle/hold-toggle layers, macros, stick modes, and gyro.
 
 ## Reference
 

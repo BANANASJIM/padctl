@@ -122,3 +122,23 @@ A = "KEY_F1"
 B = "KEY_F2"
 X = "KEY_F3"
 Y = "KEY_F4"
+
+# --- Layer 3: hold RM to sticky-toggle a racing tilt layer (hold_toggle activation) ---
+#
+# Short press RM passes through as RM. Holding past hold_timeout toggles the
+# layer on; holding RM again toggles it off.
+
+[[layer]]
+name         = "race"
+trigger      = "RM"
+activation   = "hold_toggle"
+hold_timeout = 300
+tap          = "RM"
+
+[layer.gyro]
+mode = "joystick"
+response = "tilt"
+target = "left_stick"
+axis_x = "roll"
+axis_y = "none"
+degrees_full = 35.0
