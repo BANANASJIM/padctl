@@ -654,6 +654,13 @@ pub const Supervisor = struct {
         m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
     }
 
+    fn rerunInitAfterRebind(m: *ManagedInstance) !void {
+        m.instance.rerunInitSequence() catch |err| {
+            m.instance.closeDeviceIO();
+            return err;
+        };
+    }
+
     /// Commit bookkeeping for a suspended instance whose device fds have
     /// just been rebound by `attachWithRoot()`. Allocates the devname /
     /// phys slices, updates `devname_map`, restarts the worker thread,
@@ -2026,7 +2033,11 @@ pub const Supervisor = struct {
 
             m.instance.rebindDeviceIO(new_devices);
             self.allocator.free(new_devices);
-            m.instance.rerunInitSequence();
+            rerunInitAfterRebind(m) catch |err| {
+                std.log.warn("hotplug: suspended instance resume aborted: re-init failed: {}", .{err});
+                if (isTransientOpenError(err)) return error.HotplugTransient;
+                return;
+            };
 
             // Commit bookkeeping only after every fallible step succeeds. On
             // failure `m.suspended`/`m.grace_deadline_ns` stay as-is so the
@@ -2124,6 +2135,78 @@ const minimal_device_toml =
     \\[report.fields]
     \\left_x = { offset = 1, type = "i16le" }
 ;
+
+const init_device_toml =
+    \\[device]
+    \\name = "InitDevice"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 0
+    \\commands = ["0101"]
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+;
+
+const feature_init_device_toml =
+    \\[device]
+    \\name = "FeatureInitDevice"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 0
+    \\feature_report = [0x81, 0, 0]
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+;
+
+const FailWriteDeviceIO = struct {
+    pub fn deviceIO(self: *FailWriteDeviceIO) DeviceIO {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = DeviceIO.VTable{
+        .read = read,
+        .write = write,
+        .feature_report = featureReport,
+        .pollfd = pollfd,
+        .close = close,
+    };
+
+    fn read(_: *anyopaque, _: []u8) DeviceIO.ReadError!usize {
+        return DeviceIO.ReadError.Again;
+    }
+
+    fn write(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+        return DeviceIO.WriteError.Io;
+    }
+
+    fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+        return DeviceIO.WriteError.Io;
+    }
+
+    fn pollfd(_: *anyopaque) posix.pollfd {
+        return .{ .fd = -1, .events = 0, .revents = 0 };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
 
 fn makeTestInstance(
     inst_alloc: std.mem.Allocator,
@@ -2938,6 +3021,78 @@ test "supervisor: Supervisor: suspend preserves instance, resume rebinds device 
         sup.stopAll();
         sup.deinit();
     }
+}
+
+test "supervisor: failed re-init after suspended rebind preserves grace state" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, init_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    sup.suspend_grace_sec = 5;
+    sup.test_now_override_ns = 10 * std.time.ns_per_s;
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var failing = FailWriteDeviceIO{};
+    var new_devs = [_]DeviceIO{failing.deviceIO()};
+    const m = &sup.managed.items[0];
+    m.instance.rebindDeviceIO(&new_devs);
+    try testing.expectError(DeviceIO.WriteError.Io, Supervisor.rerunInitAfterRebind(m));
+
+    try testing.expect(m.suspended);
+    try testing.expectEqual(original_deadline, m.grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), m.devname);
+    try testing.expect(!sup.devname_map.contains("hidraw3"));
+    try testing.expectEqual(@as(posix.fd_t, -1), m.instance.devices[0].pollfd().fd);
+}
+
+test "supervisor: failed feature-report re-init after suspended rebind preserves grace state" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, feature_init_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    sup.suspend_grace_sec = 5;
+    sup.test_now_override_ns = 10 * std.time.ns_per_s;
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var failing = FailWriteDeviceIO{};
+    var new_devs = [_]DeviceIO{failing.deviceIO()};
+    const m = &sup.managed.items[0];
+    m.instance.rebindDeviceIO(&new_devs);
+    try testing.expectError(DeviceIO.WriteError.Io, Supervisor.rerunInitAfterRebind(m));
+
+    try testing.expect(m.suspended);
+    try testing.expectEqual(original_deadline, m.grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), m.devname);
+    try testing.expect(!sup.devname_map.contains("hidraw3"));
+    try testing.expectEqual(@as(posix.fd_t, -1), m.instance.devices[0].pollfd().fd);
 }
 
 test "supervisor: Supervisor: stopAll handles suspended instances" {

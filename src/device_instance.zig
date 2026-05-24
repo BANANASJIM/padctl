@@ -32,6 +32,38 @@ const init_seq = @import("init.zig");
 const GamepadState = @import("core/state.zig").GamepadState;
 const FfEvent = uinput.FfEvent;
 
+var closed_device_sentinel: u8 = 0;
+
+const closed_device_vtable = DeviceIO.VTable{
+    .read = closedRead,
+    .write = closedWrite,
+    .feature_report = closedFeatureReport,
+    .pollfd = closedPollfd,
+    .close = closedClose,
+};
+
+fn closedDeviceIO() DeviceIO {
+    return .{ .ptr = &closed_device_sentinel, .vtable = &closed_device_vtable };
+}
+
+fn closedRead(_: *anyopaque, _: []u8) DeviceIO.ReadError!usize {
+    return DeviceIO.ReadError.Disconnected;
+}
+
+fn closedWrite(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+    return DeviceIO.WriteError.Disconnected;
+}
+
+fn closedFeatureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+    return DeviceIO.WriteError.Disconnected;
+}
+
+fn closedPollfd(_: *anyopaque) posix.pollfd {
+    return .{ .fd = -1, .events = 0, .revents = 0 };
+}
+
+fn closedClose(_: *anyopaque) void {}
+
 fn createDeviceIO(
     allocator: std.mem.Allocator,
     iface: InterfaceConfig,
@@ -596,7 +628,10 @@ pub const DeviceInstance = struct {
     /// Close physical device fds only, keeping uinput/aux/touchpad alive.
     /// Used when suspending an instance across device sleep/wake.
     pub fn closeDeviceIO(self: *DeviceInstance) void {
-        for (self.devices) |dev| dev.close();
+        for (self.devices) |*dev| {
+            dev.close();
+            dev.* = closedDeviceIO();
+        }
     }
 
     /// Replace physical device fds with new ones and re-register them in the
@@ -609,7 +644,7 @@ pub const DeviceInstance = struct {
 
     /// Re-run the device init sequence (e.g. handshake packets) using the
     /// current devices[] fds and device_cfg.
-    pub fn rerunInitSequence(self: *DeviceInstance) void {
+    pub fn rerunInitSequence(self: *DeviceInstance) !void {
         if (self.device_cfg.device.init) |init_cfg| {
             for (self.device_cfg.device.interface, self.devices) |iface, dev| {
                 const match = if (init_cfg.interface) |init_iface|
@@ -619,6 +654,7 @@ pub const DeviceInstance = struct {
                 if (!match) continue;
                 init_seq.runInitSequence(self.allocator, dev, init_cfg) catch |err| {
                     std.log.debug("re-init on interface {d}: {}", .{ iface.id, err });
+                    return err;
                 };
             }
         }
@@ -754,6 +790,26 @@ const init_toml =
     \\expect = [0x01]
 ;
 
+const feature_init_toml =
+    \\[device]
+    \\name = "FeatureInitDevice"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 0
+    \\feature_report = [0x81, 0, 0]
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+;
+
 const FailWriteDeviceIO = struct {
     pub fn deviceIO(self: *FailWriteDeviceIO) DeviceIO {
         return .{ .ptr = self, .vtable = &vtable };
@@ -803,6 +859,99 @@ test "DeviceInstance.init propagates init write errors" {
     });
 
     try testing.expectError(DeviceIO.WriteError.Io, result);
+}
+
+test "DeviceInstance.init propagates feature_report init errors" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, feature_init_toml);
+    defer parsed.deinit();
+
+    var failing = FailWriteDeviceIO{};
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = failing.deviceIO();
+
+    var uniq_counter: u16 = 1;
+    const result = DeviceInstance.init(allocator, &parsed.value, null, null, &uniq_counter, .{
+        .test_devices_override = devices,
+    });
+
+    try testing.expectError(DeviceIO.WriteError.Io, result);
+}
+
+test "DeviceInstance: rerunInitSequence propagates init write errors" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, init_toml);
+    defer parsed.deinit();
+
+    var failing = FailWriteDeviceIO{};
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = failing.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+
+    try testing.expectError(DeviceIO.WriteError.Io, inst.rerunInitSequence());
+}
+
+test "DeviceInstance: rerunInitSequence propagates feature_report errors" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, feature_init_toml);
+    defer parsed.deinit();
+
+    var failing = FailWriteDeviceIO{};
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = failing.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+
+    try testing.expectError(DeviceIO.WriteError.Io, inst.rerunInitSequence());
 }
 
 test "DeviceInstance: stop() causes run() to exit" {
@@ -1010,6 +1159,8 @@ test "DeviceInstance: closeDeviceIO closes device fds without touching uinput" {
     // closeDeviceIO must not crash; owner stays .none (not touched)
     inst.closeDeviceIO();
     try testing.expect(inst.owner == .none);
+    try testing.expectEqual(@as(posix.fd_t, -1), inst.devices[0].pollfd().fd);
+    try testing.expectError(DeviceIO.WriteError.Disconnected, inst.devices[0].write(&[_]u8{0x01}));
 }
 
 test "DeviceInstance: rebindDeviceIO replaces device fds" {

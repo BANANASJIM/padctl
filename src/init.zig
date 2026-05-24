@@ -102,7 +102,8 @@ pub fn runInitSequence(
         const n = @min(fr.len, buf.len);
         for (fr[0..n], 0..) |b, i| buf[i] = @intCast(b);
         device.featureReport(buf[0..n]) catch |err| {
-            std.log.warn("feature_report ioctl failed: {}, continuing", .{err});
+            std.log.warn("feature_report ioctl failed: {}", .{err});
+            return err;
         };
         total += 1;
     }
@@ -144,6 +145,36 @@ test "init: parseHexBytes odd length returns error" {
 }
 
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
+
+const FailFeatureReportDeviceIO = struct {
+    pub fn deviceIO(self: *FailFeatureReportDeviceIO) DeviceIO {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = DeviceIO.VTable{
+        .read = read,
+        .write = write,
+        .feature_report = featureReport,
+        .pollfd = pollfd,
+        .close = close,
+    };
+
+    fn read(_: *anyopaque, _: []u8) DeviceIO.ReadError!usize {
+        return DeviceIO.ReadError.Again;
+    }
+
+    fn write(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
+
+    fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+        return DeviceIO.WriteError.Io;
+    }
+
+    fn pollfd(_: *anyopaque) std.posix.pollfd {
+        return .{ .fd = -1, .events = 0, .revents = 0 };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
 
 test "init: runInitSequence: sends command and matches response_prefix" {
     const allocator = std.testing.allocator;
@@ -269,4 +300,15 @@ test "init: runInitSequence: feature_report after commands" {
     try std.testing.expectEqualSlices(u8, &[_]u8{0xaa}, mock.write_log.items);
     try std.testing.expectEqual(@as(usize, 3), mock.feature_report_log.items.len);
     try std.testing.expectEqual(@as(u8, 0x81), mock.feature_report_log.items[0]);
+}
+
+test "init: runInitSequence: feature_report write errors propagate" {
+    const allocator = std.testing.allocator;
+
+    var failing = FailFeatureReportDeviceIO{};
+    const init_cfg = device_mod.InitConfig{
+        .feature_report = &[_]i64{ 0x81, 0, 0 },
+    };
+
+    try std.testing.expectError(DeviceIO.WriteError.Io, runInitSequence(allocator, failing.deviceIO(), init_cfg));
 }
