@@ -1693,7 +1693,7 @@ test "uinput: initBoxed heap-allocates and returns owning pointer" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const out_cfg = device.OutputConfig{};
     const p = UinputDevice.initBoxed(std.testing.allocator, &out_cfg) catch |err| switch (err) {
-        error.PermissionDenied, error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.PermissionDenied, error.AccessDenied, error.FileNotFound, error.NoDevice => return error.SkipZigTest,
         else => return err,
     };
     p.close();

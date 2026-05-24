@@ -202,17 +202,30 @@ pub fn build(b: *std.Build) void {
     if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     test_step.dependOn(&b.addRunArtifact(capture_tests).step);
 
-    // cli_smoke: spawn zig-out/bin/padctl as subprocess; skips if binary absent.
-    const smoke_mod = b.createModule(.{
-        .root_source_file = b.path("src/test/cli_smoke_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    smoke_mod.addImport("build_options", build_opts.createModule());
-    const smoke_tests = b.addTest(.{ .root_module = smoke_mod });
-    const run_smoke = b.addRunArtifact(smoke_tests);
-    run_smoke.step.dependOn(&exe.step);
-    test_step.dependOn(&run_smoke.step);
+    // cli_smoke: run the just-built artifact, not a possibly stale zig-out binary.
+    const smoke_version = b.addRunArtifact(exe);
+    smoke_version.addArg("--version");
+    smoke_version.expectStdOutEqual(b.fmt("padctl {s}\n", .{version}));
+    test_step.dependOn(&smoke_version.step);
+
+    const smoke_help = b.addRunArtifact(exe);
+    smoke_help.addArg("--help");
+    smoke_help.expectExitCode(0);
+    for (&[_][]const u8{
+        "install", "uninstall", "scan",   "list-mappings",
+        "reload",  "switch",    "status", "devices",
+        "dump",
+    }) |cmd| {
+        smoke_help.addCheck(.{ .expect_stdout_match = cmd });
+    }
+    test_step.dependOn(&smoke_help.step);
+
+    const smoke_validate = b.addRunArtifact(exe);
+    smoke_validate.addArgs(&.{ "--validate", "devices/sony/dualsense.toml" });
+    smoke_validate.addFileInput(b.path("devices/sony/dualsense.toml"));
+    smoke_validate.expectExitCode(0);
+    smoke_validate.addCheck(.{ .expect_stdout_match = ": OK" });
+    test_step.dependOn(&smoke_validate.step);
 
     // test-integration: Layer 2 (UHID, requires privilege)
     const integration_step = b.step("test-integration", "Run Layer 2 integration tests (UHID, local)");
