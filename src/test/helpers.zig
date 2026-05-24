@@ -28,6 +28,7 @@ pub const KEY_LEFT: u16 = 105;
 pub const KEY_RIGHT: u16 = 106;
 pub const KEY_F1: u16 = 59;
 pub const KEY_F13: u16 = 183;
+pub const KEY_I: u16 = 23;
 pub const KEY_B: u16 = 48;
 pub const KEY_LEFTSHIFT: u16 = 42;
 
