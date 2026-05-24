@@ -12,7 +12,7 @@ const field_tags = [_][]const u8{ "left_x", "left_y", "right_x", "right_y", "lt"
 const field_types = [_][]const u8{ "u8", "i8", "u16le", "i16le", "u16be", "i16be", "u32le", "i32le", "u32be", "i32be" };
 const transforms = [_][]const u8{ "negate", "abs", "scale(0,255)", "clamp(-128,127)", "deadzone(10)" };
 
-const button_names = [_][]const u8{ "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Start", "Select", "Home", "LS", "RS", "DPadUp", "DPadDown", "DPadLeft", "DPadRight", "M1", "M2", "M3", "M4" };
+const button_names = [_][]const u8{ "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Start", "Select", "Home", "LS", "RS", "DPadUp", "DPadDown", "DPadLeft", "DPadRight", "M1", "M2", "M3", "M4", "C", "Z", "LM", "RM", "O" };
 
 pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
     var fbs = std.io.fixedBufferStream(buf);
@@ -87,7 +87,7 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
         const bg_size: u8 = @min(4, report_size - next_offset);
         w.print("[report.button_group]\nsource = {{ offset = {d}, size = {d} }}\nmap = {{ ", .{ bg_offset, bg_size }) catch return buf[0..fbs.pos];
         const n_btns = rng.intRangeAtMost(u8, 2, @min(4, bg_size * 8));
-        var btn_used: [21]bool = .{false} ** 21;
+        var btn_used: [button_names.len]bool = .{false} ** button_names.len;
         for (0..n_btns) |i| {
             const bi = pickUnused(rng, &btn_used, button_names.len);
             if (i > 0) w.writeAll(", ") catch break;
@@ -133,8 +133,8 @@ fn pickUnused(rng: std.Random, used: []bool, len: usize) usize {
 
 // --- Mapping config generation ---
 
-const remap_sources = [_][]const u8{ "A", "B", "X", "Y", "LB", "RB", "M1", "M2", "M3", "M4", "C", "Z" };
-const remap_targets = [_][]const u8{ "A", "B", "X", "Y", "KEY_F1", "KEY_F2", "KEY_F13", "mouse_left", "mouse_right", "disabled", "macro:test_macro" };
+const remap_sources = [_][]const u8{ "A", "B", "X", "Y", "LB", "RB", "M1", "M2", "M3", "M4", "C", "Z", "LM", "RM", "O" };
+const remap_targets = [_][]const u8{ "A", "B", "X", "Y", "KEY_F1", "KEY_F2", "KEY_F13", "KEY_I", "mouse_left", "mouse_right", "disabled", "macro:test_macro" };
 const layer_triggers = [_][]const u8{ "LT", "RT", "Select", "Start", "Home", "LM", "RM" };
 const layer_names = [_][]const u8{ "aim", "fn", "alt", "nav" };
 const gyro_modes = [_][]const u8{ "mouse", "off", "joystick" };
@@ -151,7 +151,7 @@ pub fn randomMappingConfig(rng: std.Random, buf: []u8) []const u8 {
     // Base remaps: 2-4
     const n_remaps = rng.intRangeAtMost(u8, 2, 4);
     w.writeAll("[remap]\n") catch return buf[0..0];
-    var src_used: [12]bool = .{false} ** 12;
+    var src_used: [remap_sources.len]bool = .{false} ** remap_sources.len;
     for (0..n_remaps) |_| {
         const si = pickUnused(rng, &src_used, remap_sources.len);
         const ti = rng.intRangeAtMost(usize, 0, remap_targets.len - 1);
@@ -181,7 +181,7 @@ pub fn randomMappingConfig(rng: std.Random, buf: []u8) []const u8 {
         // 1-3 layer remaps
         const n_lr = rng.intRangeAtMost(u8, 1, 3);
         w.writeAll("[layer.remap]\n") catch {};
-        var lsrc_used: [12]bool = .{false} ** 12;
+        var lsrc_used: [remap_sources.len]bool = .{false} ** remap_sources.len;
         for (0..n_lr) |_| {
             const lsi = pickUnused(rng, &lsrc_used, remap_sources.len);
             const lti = rng.intRangeAtMost(usize, 0, remap_targets.len - 1);

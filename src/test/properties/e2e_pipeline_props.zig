@@ -9,6 +9,7 @@ const device_mod = @import("../../config/device.zig");
 const interpreter_mod = @import("../../core/interpreter.zig");
 const state_mod = @import("../../core/state.zig");
 const helpers = @import("../helpers.zig");
+const aux_drt = @import("../aux_drt.zig");
 
 const Interpreter = interpreter_mod.Interpreter;
 const FieldType = interpreter_mod.FieldType;
@@ -358,6 +359,67 @@ test "e2e pipeline: vader5 — axes + button A → remap A→KEY_F13" {
     try testing.expectEqual(@as(i16, 5000), ev.gamepad.ax);
     try testing.expectEqual(@as(i16, 3000), ev.gamepad.ay);
     try testing.expectEqual(@as(u8, 200), ev.gamepad.lt);
+}
+
+test "e2e pipeline: vader5 LM→KEY_I has no idle ghost aux events" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var ctx = try makeMapper(
+        \\[remap]
+        \\LM = "KEY_I"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    var raw = [_]u8{0} ** 32;
+    raw[0] = 0x5a;
+    raw[1] = 0xa5;
+    raw[2] = 0xef;
+
+    const idle_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(u64, 0), (idle_delta.buttons orelse 0) & btnMask(.LM));
+    const idle = try m.apply(idle_delta, 16, 0);
+    try aux_drt.compareDeterministicAux(&.{}, idle.aux.slice());
+
+    raw[11] = 0x10; // A changes while LM remains released.
+    std.mem.writeInt(i16, raw[3..5], 2048, .little);
+    const unrelated_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(u64, 0), (unrelated_delta.buttons orelse 0) & btnMask(.LM));
+    const unrelated = try m.apply(unrelated_delta, 16, 16_000_000);
+    try aux_drt.compareDeterministicAux(&.{}, unrelated.aux.slice());
+
+    raw[11] = 0;
+    std.mem.writeInt(i16, raw[3..5], 0, .little);
+    const idle_again_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(u64, 0), (idle_again_delta.buttons orelse 0) & btnMask(.LM));
+    const idle_again = try m.apply(idle_again_delta, 16, 32_000_000);
+    try aux_drt.compareDeterministicAux(&.{}, idle_again.aux.slice());
+
+    raw[13] = 0x40; // LM = button_group bit 22.
+    const press_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expect((press_delta.buttons orelse 0) & btnMask(.LM) != 0);
+    const press = try m.apply(press_delta, 16, 48_000_000);
+    const expected_press = [_]aux_drt.AuxEvent{.{ .key = .{ .code = helpers.KEY_I, .pressed = true } }};
+    try aux_drt.compareDeterministicAux(&expected_press, press.aux.slice());
+
+    const held_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expect((held_delta.buttons orelse 0) & btnMask(.LM) != 0);
+    const held = try m.apply(held_delta, 16, 56_000_000);
+    try aux_drt.compareDeterministicAux(&.{}, held.aux.slice());
+
+    raw[13] = 0;
+    const release_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(u64, 0), (release_delta.buttons orelse 0) & btnMask(.LM));
+    const release = try m.apply(release_delta, 16, 64_000_000);
+    const expected_release = [_]aux_drt.AuxEvent{.{ .key = .{ .code = helpers.KEY_I, .pressed = false } }};
+    try aux_drt.compareDeterministicAux(&expected_release, release.aux.slice());
+
+    const idle_after_release_delta = (try interp.processReport(1, &raw)) orelse return error.NoMatch;
+    const idle_after_release = try m.apply(idle_after_release_delta, 16, 80_000_000);
+    try aux_drt.compareDeterministicAux(&.{}, idle_after_release.aux.slice());
 }
 
 test "e2e pipeline: dualsense USB — scaled axes + buttons → remap B→mouse_left" {
