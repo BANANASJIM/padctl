@@ -142,20 +142,28 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .touch1_active => delta.touch1_active = val != 0,
         .battery_level => delta.battery_level = @intCast(val & 0xff),
         .dpad => {
-            // HID hat switch: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8+=neutral
-            const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
-            const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
-            if (val >= 0 and val < 8) {
-                const idx: usize = @intCast(val);
-                delta.dpad_x = HAT_X[idx];
-                delta.dpad_y = HAT_Y[idx];
-            } else {
-                delta.dpad_x = 0;
-                delta.dpad_y = 0;
-            }
+            const decoded = decodeDpadHat(val);
+            delta.dpad_x = decoded.x;
+            delta.dpad_y = decoded.y;
         },
         .unknown => {},
     }
+}
+
+pub const DpadHat = struct {
+    x: i8,
+    y: i8,
+};
+
+pub fn decodeDpadHat(val: i64) DpadHat {
+    // HID hat switch: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8+=neutral.
+    const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
+    const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
+    if (val >= 0 and val < 8) {
+        const idx: usize = @intCast(val);
+        return .{ .x = HAT_X[idx], .y = HAT_Y[idx] };
+    }
+    return .{ .x = 0, .y = 0 };
 }
 
 // --- pre-compiled transform chain ---

@@ -113,6 +113,11 @@ jobs:
         run: lake build oracle
       - name: Verify oracle binary exists
         run: test -x formal/lean/.lake/build/bin/oracle
+      - name: Verify generated Lean vectors are current
+        working-directory: formal/lean
+        run: |
+          .lake/build/bin/oracle > /tmp/padctl-lean-test-vectors.csv
+          diff -u test_vectors.csv /tmp/padctl-lean-test-vectors.csv
       - name: Upload oracle artifact
         uses: actions/upload-artifact@v4
         with:

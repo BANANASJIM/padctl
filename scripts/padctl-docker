@@ -146,7 +146,7 @@ cmd_canary() {
     bash -c '
       set -euo pipefail
       mount -t devtmpfs devtmpfs /dev
-      PADCTL_TEST_REQUIRE_UHID=1 zig build test-uhid-uniq -Dlibusb=false
+      PADCTL_TEST_REQUIRE_UHID=1 zig build test-uhid -Dlibusb=false
     '
 }
 

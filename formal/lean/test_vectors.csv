@@ -31,11 +31,14 @@ scale,0,255,-100,100,-100
 scale,255,255,-100,100,100
 scale,127,255,-100,100,-1
 scale,128,255,-100,100,0
+scale,-7,127,0,100,-5
+scale,-128,127,0,100,-100
 # CHAIN
 # input,tMax,op1,op2,...,expected
 50,255,negate,clamp:-100:100,-50
 5,255,scale:-100:100,deadzone:10,-97
 -80,255,abs,clamp:0:50,50
+7,127,negate,scale:0:100,-5
 42,255,,42
 # READFIELD
 # field_type,offset,hex_bytes,expected
@@ -63,6 +66,22 @@ FieldType.i16be,0,0
 FieldType.i16be,2,32767
 FieldType.i16be,4,-32768
 FieldType.i16be,6,-1
+FieldType.u32le,0,0
+FieldType.u32le,4,2147483647
+FieldType.u32le,8,2147483648
+FieldType.u32le,12,4294967295
+FieldType.i32le,0,0
+FieldType.i32le,4,2147483647
+FieldType.i32le,8,-2147483648
+FieldType.i32le,12,-1
+FieldType.u32be,0,0
+FieldType.u32be,4,2147483647
+FieldType.u32be,8,2147483648
+FieldType.u32be,12,4294967295
+FieldType.i32be,0,0
+FieldType.i32be,4,2147483647
+FieldType.i32be,8,-2147483648
+FieldType.i32be,12,-1
 # EXTRACTBITS
 # byteOff,startBit,bitCount,hex_bytes,expected
 0,0,0,0
@@ -110,6 +129,20 @@ sum8,0,3,3,1
 sum8,0,3,3,0
 xor,0,2,2,1
 xor,0,2,2,0
+crc32,0,9,computed=3421780262,expected=3421780262,1
+crc32_verify,0,9,9,1
+# HAT_DECODE
+# hatValue,expected_dx,expected_dy
+0,0,-1
+1,1,-1
+2,1,0
+3,1,1
+4,0,1
+5,-1,1
+6,-1,0
+7,-1,-1
+8,0,0
+15,0,0
 # BUTTON_DECODE
 # srcOff,srcSize,entries,hex_bytes,expected
 0,1,0:0|2:4,17
@@ -117,10 +150,10 @@ xor,0,2,2,0
 0,1,0:0,0
 # LAYER_FSM
 # action,description,tapHold_before,tapHold_after
-press,idle_to_pending,none,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false }
-timer,pending_to_active,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false },some { layerIdx := 0, phase := TapHoldPhase.active, layerActivated := true }
-release,active_to_idle,some { layerIdx := 0, phase := TapHoldPhase.active, layerActivated := true },none
-press,pending_noop,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false },some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false }
+press,idle_to_pending,none,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false, elapsedMs := 0 }
+timer,pending_to_active,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false, elapsedMs := 0 },some { layerIdx := 0, phase := TapHoldPhase.active, layerActivated := true, elapsedMs := 0 }
+release,active_to_idle,some { layerIdx := 0, phase := TapHoldPhase.active, layerActivated := true, elapsedMs := 0 },none
+press,pending_noop,some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false, elapsedMs := 0 },some { layerIdx := 0, phase := TapHoldPhase.pending, layerActivated := false, elapsedMs := 0 }
 # REMAP
 # buttons,prevButtons,entries,suppress,inject,aux_count
 1,0,0>g4,1,16,0
