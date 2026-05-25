@@ -10,6 +10,14 @@ yay -S padctl-git
 
 A prebuilt binary package (`padctl-bin`) is also available in the AUR.
 
+If you previously installed from source with `sudo padctl install`, remove that
+manual install before switching to AUR so pacman can own the files:
+
+```sh
+sudo padctl uninstall --prefix /usr --no-immutable
+yay -S padctl-git   # or: yay -S padctl-bin
+```
+
 ### Debian / Ubuntu
 
 ```sh

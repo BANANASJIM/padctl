@@ -99,6 +99,14 @@ yay -S padctl-bin   # prebuilt binary
 yay -S padctl-git   # build from source
 ```
 
+If you previously installed from source with `sudo padctl install`, remove that
+manual install before switching to AUR so pacman can own the files:
+
+```sh
+sudo padctl uninstall --prefix /usr --no-immutable
+yay -S padctl-bin   # or: yay -S padctl-git
+```
+
 ### Debian / Ubuntu
 
 ```sh

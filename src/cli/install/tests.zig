@@ -58,6 +58,7 @@ const generateUdevRules = _udev.generateUdevRules;
 const generateDriverBlockRules = _udev.generateDriverBlockRules;
 const generateDriverBlockRulesFromEntries = _udev.generateDriverBlockRulesFromEntries;
 const sentinelPath = udev_mod.sentinelPath;
+const runtime_sentinel_path = udev_mod.runtime_sentinel_path;
 const writeServiceSentinel = udev_mod.writeServiceSentinel;
 const removeServiceSentinel = udev_mod.removeServiceSentinel;
 const shouldProactiveUnbind = udev_mod.shouldProactiveUnbind;
@@ -1510,6 +1511,43 @@ test "install: #137 generates ACTION==remove rebind line" {
 
     try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"remove\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "/bind") != null);
+}
+
+test "install: staged driver-block udev rule uses runtime sentinel path" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const opts = InstallOptions{ .destdir = destdir, .prefix = "/usr", .user_service = false };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try ensureDirAll(allocator, plan.udev_dir);
+
+    const drivers = [_][]const u8{"xpad"};
+    const entries = [_]UdevEntry{.{
+        .name = "Test Pad",
+        .vid = 0x0f0d,
+        .pid = 0x00c1,
+        .block_kernel_drivers = &drivers,
+    }};
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try udev_mod.installUdevRules(allocator, &plan, &entries);
+    }
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{plan.udev_dir});
+    defer allocator.free(rules_path);
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, runtime_sentinel_path) != null);
+    try testing.expect(std.mem.indexOf(u8, content, destdir) == null);
 }
 
 // (3) FAILS if writeServiceSentinel stops writing or sentinelPath diverges

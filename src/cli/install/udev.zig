@@ -47,8 +47,13 @@ pub const UdevEntry = struct {
     clone_vid_pid: bool = false,
 };
 
-/// Path to the service-enabled sentinel. `/etc/padctl` is the fixed FHS
-/// sysconfdir (consistent with the reconnect-script `/etc/padctl/mappings`
+/// Runtime path checked by installed udev rules. This must never include
+/// `destdir`: package managers stage files under DESTDIR, but udev executes the
+/// rule on the target system after installation.
+pub const runtime_sentinel_path = "/etc/padctl/service-enabled";
+
+/// Filesystem path to the service-enabled sentinel. `/etc/padctl` is the fixed
+/// FHS sysconfdir (consistent with the reconnect-script `/etc/padctl/mappings`
 /// path in services.zig), so only `destdir` is prefixed — never `prefix`.
 pub fn sentinelPath(allocator: std.mem.Allocator, destdir: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/etc/padctl/service-enabled", .{destdir});
@@ -279,9 +284,7 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
 
     const driver_rules_path = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{plan.udev_dir});
     defer allocator.free(driver_rules_path);
-    const sentinel = try sentinelPath(allocator, plan.opts.destdir);
-    defer allocator.free(sentinel);
-    generateDriverBlockRulesFromEntries(allocator, entries, driver_rules_path, sentinel) catch |err| {
+    generateDriverBlockRulesFromEntries(allocator, entries, driver_rules_path, runtime_sentinel_path) catch |err| {
         var errbuf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&errbuf, "warning: driver block rules not generated: {}\n", .{err}) catch "warning: driver block rules error\n";
         _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
