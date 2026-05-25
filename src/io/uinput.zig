@@ -11,6 +11,7 @@ const c = @cImport({
 });
 
 const ioctl_constants = @import("ioctl_constants.zig");
+const write_exact = @import("write_exact.zig");
 const UI_SET_EVBIT = ioctl_constants.UI_SET_EVBIT;
 const UI_SET_KEYBIT = ioctl_constants.UI_SET_KEYBIT;
 const UI_SET_RELBIT = ioctl_constants.UI_SET_RELBIT;
@@ -365,7 +366,7 @@ pub const UinputDevice = struct {
         if (n > 0) {
             events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
             n += 1;
-            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+            try write_exact.writeExact(self.fd, std.mem.sliceAsBytes(events[0..n]));
         }
 
         self.prev = s;
@@ -569,7 +570,7 @@ pub const AuxDevice = struct {
         if (n > 0) {
             buf[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
             n += 1;
-            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(buf[0..n]));
+            try write_exact.writeExact(self.fd, std.mem.sliceAsBytes(buf[0..n]));
         }
     }
 
@@ -723,7 +724,7 @@ pub const TouchpadDevice = struct {
         if (n > 0) {
             events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
             n += 1;
-            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+            try write_exact.writeExact(self.fd, std.mem.sliceAsBytes(events[0..n]));
         }
     }
 
@@ -840,7 +841,7 @@ pub const GenericUinputDevice = struct {
         if (n > 0) {
             events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
             n += 1;
-            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+            try write_exact.writeExact(self.fd, std.mem.sliceAsBytes(events[0..n]));
         }
         gs.prev_values = gs.values;
     }

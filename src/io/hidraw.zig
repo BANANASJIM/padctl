@@ -3,6 +3,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const io = @import("device_io.zig");
 const ioctl = @import("ioctl_constants.zig");
+const write_exact = @import("write_exact.zig");
 
 pub const DeviceIO = io.DeviceIO;
 
@@ -221,7 +222,7 @@ pub const HidrawDevice = struct {
 
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *HidrawDevice = @ptrCast(@alignCast(ptr));
-        _ = posix.write(self.fd, data) catch |err| switch (err) {
+        write_exact.writeExact(self.fd, data) catch |err| switch (err) {
             error.BrokenPipe, error.ConnectionResetByPeer => return DeviceIO.WriteError.Disconnected,
             else => return DeviceIO.WriteError.Io,
         };

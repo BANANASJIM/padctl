@@ -30,6 +30,7 @@ const mapping_mod = @import("config/mapping.zig");
 const MappingConfig = mapping_mod.MappingConfig;
 const init_seq = @import("init.zig");
 const GamepadState = @import("core/state.zig").GamepadState;
+const ButtonId = @import("core/state.zig").ButtonId;
 const FfEvent = uinput.FfEvent;
 
 var closed_device_sentinel: u8 = 0;
@@ -207,6 +208,11 @@ pub const DeviceInstance = struct {
     // Test-only: counts rebuildAuxIfChanged invocations so tests can verify
     // the switch path rebuilds aux caps without relying on /dev/uinput.
     rebuild_aux_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
+
+    pub const QuiesceOptions = struct {
+        reset_input_state: bool = false,
+        reset_mapper_state: bool = false,
+    };
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
     ///
@@ -535,8 +541,8 @@ pub const DeviceInstance = struct {
                 const old_mcfg: ?*const MappingConfig = if (self.mapper) |*m| m.config else self.mapping_cfg;
                 if (Mapper.init(new, self.loop.macro_timer_fd, self.allocator)) |created| {
                     var new_mapper = created;
+                    self.quiesceOutputs(.{});
                     if (self.mapper) |*old| {
-                        self.releaseMapperAux(old);
                         old.deinit();
                     }
                     new_mapper.seedInputState(self.loop.gamepad_state);
@@ -625,6 +631,45 @@ pub const DeviceInstance = struct {
         self.aux_dev = try AuxDevice.create(key_codes, caps.needs_rel);
     }
 
+    pub fn quiesceOutputs(self: *DeviceInstance, options: QuiesceOptions) void {
+        self.loop.quiesceTimersAndRumble(self.devices, self.allocator, self.device_cfg, self.device_cfg.device.name);
+
+        if (self.mapper) |*m| {
+            self.releaseMapperAux(m);
+            if (options.reset_mapper_state) {
+                m.resetRuntimeState();
+            }
+        }
+
+        const neutral = GamepadState{};
+        if (self.primary_output) |output| {
+            output.emit(neutral) catch |err| {
+                std.log.warn("primary output quiesce failed: {}", .{err});
+            };
+        }
+        if (self.imu_output) |imu_output| {
+            imu_output.emit(neutral) catch |err| {
+                std.log.warn("imu output quiesce failed: {}", .{err});
+            };
+        }
+        if (self.touchpad_dev) |*tp| {
+            tp.touchpadOutputDevice().emitTouch(neutral) catch |err| {
+                std.log.warn("touchpad output quiesce failed: {}", .{err});
+            };
+        }
+        if (self.generic_state) |*gs| {
+            if (self.generic_uinput) |*gu| {
+                @memset(gs.values[0..gs.count], 0);
+                gu.genericOutputDevice().emitGeneric(gs) catch |err| {
+                    std.log.warn("generic output quiesce failed: {}", .{err});
+                };
+            }
+        }
+        if (options.reset_input_state) {
+            self.loop.gamepad_state = .{};
+        }
+    }
+
     /// Close physical device fds only, keeping uinput/aux/touchpad alive.
     /// Used when suspending an instance across device sleep/wake.
     pub fn closeDeviceIO(self: *DeviceInstance) void {
@@ -705,6 +750,7 @@ fn nullOutput() OutputDevice {
 
 const testing = std.testing;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
+const MockOutput = @import("test/mock_output.zig").MockOutput;
 const mapping = @import("config/mapping.zig");
 const device_mod = @import("config/device.zig");
 
@@ -1161,6 +1207,67 @@ test "DeviceInstance: closeDeviceIO closes device fds without touching uinput" {
     try testing.expect(inst.owner == .none);
     try testing.expectEqual(@as(posix.fd_t, -1), inst.devices[0].pollfd().fd);
     try testing.expectError(DeviceIO.WriteError.Disconnected, inst.devices[0].write(&[_]u8{0x01}));
+}
+
+test "DeviceInstance: quiesceOutputs emits neutral primary frame and resets input state when requested" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+    inst.primary_output = out.outputDevice();
+    inst.loop.gamepad_state = .{
+        .ax = 123,
+        .buttons = @as(u64, 1) << @intFromEnum(ButtonId.A),
+    };
+    out.prev = inst.loop.gamepad_state;
+
+    inst.quiesceOutputs(.{ .reset_input_state = true });
+
+    try testing.expectEqual(@as(usize, 1), out.emitted.items.len);
+    try testing.expect(std.meta.eql(GamepadState{}, out.emitted.items[0]));
+    try testing.expect(std.meta.eql(GamepadState{}, inst.loop.gamepad_state));
+}
+
+test "DeviceInstance: quiesceOutputs can preserve input state for mapper reseed" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+    const held = GamepadState{
+        .rx = -50,
+        .buttons = @as(u64, 1) << @intFromEnum(ButtonId.RB),
+    };
+    inst.primary_output = out.outputDevice();
+    inst.loop.gamepad_state = held;
+    out.prev = held;
+
+    inst.quiesceOutputs(.{});
+
+    try testing.expectEqual(@as(usize, 1), out.emitted.items.len);
+    try testing.expect(std.meta.eql(GamepadState{}, out.emitted.items[0]));
+    try testing.expect(std.meta.eql(held, inst.loop.gamepad_state));
 }
 
 test "DeviceInstance: rebindDeviceIO replaces device fds" {

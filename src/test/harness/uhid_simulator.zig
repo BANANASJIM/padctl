@@ -31,12 +31,14 @@ const posix = std.posix;
 // module-import edge.
 const uhid = @import("../../io/uhid.zig");
 const ioctl_constants = @import("../../io/ioctl_constants.zig");
+const write_exact = @import("../../io/write_exact.zig");
 const cleanup = @import("../uhid_test_cleanup.zig");
 
 pub const SimulatorError = error{
     SkipZigTest,
     HidrawNotFound,
     KernelBusy,
+    ShortWrite,
 } || posix.OpenError || posix.WriteError || posix.ReadError || posix.PollError;
 
 pub const CreateOptions = struct {
@@ -87,7 +89,10 @@ pub const UhidSimulator = struct {
             else => |e| return e,
         };
         cleanup.registerUhidFd(fd);
-        errdefer posix.close(fd);
+        errdefer {
+            cleanup.unregisterUhidFd(fd);
+            posix.close(fd);
+        }
 
         sendCreate(fd, opts) catch |err| switch (err) {
             error.SkipZigTest => return error.SkipZigTest,
@@ -179,7 +184,7 @@ pub const UhidSimulator = struct {
         var buf: [uhid.UHID_EVENT_SIZE]u8 = std.mem.zeroes([uhid.UHID_EVENT_SIZE]u8);
         const copy_len = @min(bytes.len, uhid.UHID_EVENT_SIZE);
         @memcpy(buf[0..copy_len], bytes[0..copy_len]);
-        _ = try posix.write(fd, &buf);
+        try write_exact.writeExact(fd, &buf);
     }
 };
 

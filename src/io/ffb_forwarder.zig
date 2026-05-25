@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const OutputReport = @import("uhid.zig").OutputReport;
+const write_exact = @import("write_exact.zig");
 
 /// Writes UHID_OUTPUT bytes byte-faithfully to the physical wheel hidraw fd.
 ///
@@ -20,7 +21,7 @@ pub const FfbForwarder = struct {
     /// Errors are classified and logged; none escape to the caller.
     pub fn forward(self: *FfbForwarder, report: OutputReport) void {
         if (self.state == .disabled) return;
-        _ = posix.write(self.physical_fd, report.data) catch |err| switch (err) {
+        write_exact.writeExact(self.physical_fd, report.data) catch |err| switch (err) {
             error.WouldBlock => {
                 self.drops_eagain += 1;
                 std.log.debug("ffb forwarder: EAGAIN (drop #{d})", .{self.drops_eagain});
@@ -34,6 +35,11 @@ pub const FfbForwarder = struct {
             error.NoDevice => {
                 // Device unplugged; supervisor unbind handles cleanup.
                 std.log.warn("ffb forwarder: hidraw ENODEV, disabling", .{});
+                self.state = .disabled;
+                return;
+            },
+            error.ShortWrite => {
+                std.log.warn("ffb forwarder: hidraw short write, disabling", .{});
                 self.state = .disabled;
                 return;
             },

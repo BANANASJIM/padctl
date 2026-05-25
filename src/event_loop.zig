@@ -227,6 +227,27 @@ pub fn disarmTimer(fd: posix.fd_t) void {
     }
 }
 
+/// Best-effort lifecycle drain used after the worker thread has stopped.
+/// It clears pending timerfds and emits a zero rumble frame while physical
+/// device fds are still open, so later teardown/restart cannot inherit stale
+/// layer, macro, or force-feedback state.
+fn quiesceTimersAndRumbleImpl(
+    self: *EventLoop,
+    devices: []DeviceIO,
+    alloc: std.mem.Allocator,
+    dcfg: ?*const DeviceConfig,
+    tag: []const u8,
+) void {
+    disarmTimer(self.timer_fd);
+    disarmTimer(self.macro_timer_fd);
+    disarmTimer(self.rumble_stop_fd);
+    self.rumble_scheduler = .{};
+    self.last_rumble_ns = 0;
+    if (dcfg) |cfg| {
+        _ = emitRumbleFrame(devices, alloc, cfg, 0, 0, tag);
+    }
+}
+
 /// Fire a CHORD_SWITCH command at the daemon's own control socket.
 /// Best-effort, fire-and-forget — runs on the device thread, the supervisor
 /// performs the actual mapping switch on its own thread. Failure to connect
@@ -814,6 +835,16 @@ pub const EventLoop = struct {
         _ = posix.write(self.stop_w, &[_]u8{1}) catch {};
     }
 
+    pub fn quiesceTimersAndRumble(
+        self: *EventLoop,
+        devices: []DeviceIO,
+        alloc: std.mem.Allocator,
+        dcfg: ?*const DeviceConfig,
+        tag: []const u8,
+    ) void {
+        quiesceTimersAndRumbleImpl(self, devices, alloc, dcfg, tag);
+    }
+
     pub fn deinit(self: *EventLoop) void {
         posix.close(self.signal_fd);
         posix.close(self.stop_r);
@@ -999,6 +1030,28 @@ test "event_loop: armTimer / disarmTimer: arm then disarm does not leave fd read
     var pfd = [1]posix.pollfd{.{ .fd = loop.timer_fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 0);
     try testing.expectEqual(@as(usize, 0), ready);
+}
+
+test "event_loop: quiesceTimersAndRumble disarms layer macro and rumble timers" {
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    armTimer(loop.timer_fd, 5000);
+    armTimer(loop.macro_timer_fd, 5000);
+    armRumbleStopFd(loop.rumble_stop_fd, monotonicNs() + 5 * std.time.ns_per_s);
+    loop.last_rumble_ns = monotonicNs();
+    _ = loop.rumble_scheduler.onPlay(0, 1000, loop.last_rumble_ns);
+
+    loop.quiesceTimersAndRumble(&.{}, testing.allocator, null, "test");
+
+    var pfds = [_]posix.pollfd{
+        .{ .fd = loop.timer_fd, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = loop.macro_timer_fd, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = loop.rumble_stop_fd, .events = posix.POLL.IN, .revents = 0 },
+    };
+    const ready = try posix.poll(&pfds, 0);
+    try testing.expectEqual(@as(usize, 0), ready);
+    try testing.expectEqual(@as(i128, 0), loop.last_rumble_ns);
 }
 
 test "event_loop: armTimer: fires after timeout" {

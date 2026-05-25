@@ -75,6 +75,7 @@ pub const io = struct {
     pub const uhid_descriptor = @import("io/uhid_descriptor.zig");
     pub const uniq = @import("io/uniq.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
+    pub const write_exact = @import("io/write_exact.zig");
     pub const netlink = @import("io/netlink.zig");
     pub const ffb_forwarder = @import("io/ffb_forwarder.zig");
 };

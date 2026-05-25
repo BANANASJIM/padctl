@@ -69,6 +69,8 @@ const SwitchTx = struct {
     committed: bool = false,
 };
 
+threadlocal var test_fail_next_restart_managed: bool = false;
+
 fn parseChordSwitchConfig(maybe_cfg: ?user_config_mod.ChordSwitchConfig) ?chord_detector_mod.Config {
     return chord_detector_mod.fromUserConfig(maybe_cfg);
 }
@@ -450,6 +452,7 @@ pub const Supervisor = struct {
             std.log.info("device suspended: \"{s}\" {s} (grace {d}s)", .{ m.instance.device_cfg.device.name, devname, self.suspend_grace_sec });
             m.instance.stop();
             m.thread.join();
+            m.instance.quiesceOutputs(.{ .reset_input_state = true, .reset_mapper_state = true });
             m.instance.closeDeviceIO();
             m.suspended = true;
             // Schedule grace deadline. Saturating add keeps us safe against
@@ -570,6 +573,7 @@ pub const Supervisor = struct {
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
                 m.instance.stop();
                 m.thread.join();
+                m.instance.quiesceOutputs(.{ .reset_input_state = true, .reset_mapper_state = true });
                 self.teardownManaged(m);
                 _ = self.managed.swapRemove(i);
                 return;
@@ -648,10 +652,18 @@ pub const Supervisor = struct {
     }
 
     fn restartManagedThread(m: *ManagedInstance) !void {
+        if (builtin.is_test and test_fail_next_restart_managed) {
+            test_fail_next_restart_managed = false;
+            return error.TestInjectedRestartFailure;
+        }
         @atomicStore(bool, &m.instance.stopped, false, .release);
         @atomicStore(bool, &m.instance.loop.running, true, .release);
         @atomicStore(bool, &m.instance.loop.disconnected, false, .release);
-        m.thread = try std.Thread.spawn(.{}, threadEntry, .{m.instance});
+        m.thread = std.Thread.spawn(.{}, threadEntry, .{m.instance}) catch |err| {
+            @atomicStore(bool, &m.instance.stopped, true, .release);
+            @atomicStore(bool, &m.instance.loop.running, false, .release);
+            return err;
+        };
     }
 
     fn rerunInitAfterRebind(m: *ManagedInstance) !void {
@@ -725,8 +737,8 @@ pub const Supervisor = struct {
             found = true;
             m.instance.stop();
             m.thread.join();
+            m.instance.quiesceOutputs(.{});
             if (m.instance.mapper) |*cur| {
-                m.instance.releaseMapperAux(cur);
                 cur.deinit();
                 m.instance.mapper = null;
             }
@@ -774,6 +786,10 @@ pub const Supervisor = struct {
 
         m.instance.mapper = tx.old_mapper;
         m.instance.mapping_cfg = tx.old_mapping_cfg;
+        if (m.instance.mapper) |*old| {
+            old.resetRuntimeState();
+            old.seedInputState(m.instance.loop.gamepad_state);
+        }
         m.switch_mapping = tx.old_switch_mapping;
         m.switch_mapping_stem = tx.old_switch_mapping_stem;
         restartManagedThread(m) catch |err| {
@@ -796,6 +812,7 @@ pub const Supervisor = struct {
             const m = &self.managed.items[tx.idx];
             m.instance.stop();
             m.thread.join();
+            m.instance.quiesceOutputs(.{});
             self.restoreSwitchTarget(tx, m, true);
         }
     }
@@ -835,10 +852,8 @@ pub const Supervisor = struct {
             return error.SwitchFailed;
         }
 
+        m.instance.quiesceOutputs(.{});
         if (tx.new_mapper) |*new_mapper| {
-            if (tx.old_mapper) |*old_mapper| {
-                m.instance.releaseMapperAux(old_mapper);
-            }
             new_mapper.seedInputState(m.instance.loop.gamepad_state);
         }
         m.instance.mapper = tx.new_mapper.?;
@@ -861,6 +876,10 @@ pub const Supervisor = struct {
             }
             m.instance.mapper = tx.old_mapper;
             m.instance.mapping_cfg = tx.old_mapping_cfg;
+            if (m.instance.mapper) |*old| {
+                old.resetRuntimeState();
+                old.seedInputState(m.instance.loop.gamepad_state);
+            }
             m.switch_mapping = tx.old_switch_mapping;
             m.switch_mapping_stem = tx.old_switch_mapping_stem;
             restartManagedThread(m) catch |rollback_err| {
@@ -948,6 +967,9 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| {
             if (!m.suspended) m.thread.join();
         }
+        for (self.managed.items) |*m| {
+            if (!m.suspended) m.instance.quiesceOutputs(.{ .reset_input_state = true, .reset_mapper_state = true });
+        }
         for (self.managed.items) |*m| self.teardownManaged(m);
         self.managed.clearRetainingCapacity();
     }
@@ -976,6 +998,7 @@ pub const Supervisor = struct {
             if (!m.suspended) {
                 m.instance.stop();
                 m.thread.join();
+                m.instance.quiesceOutputs(.{ .reset_input_state = true, .reset_mapper_state = true });
             }
             self.teardownManaged(m);
             _ = self.managed.swapRemove(idx);
@@ -996,37 +1019,60 @@ pub const Supervisor = struct {
             } else if (nc.mapping_cfg) |new_map| {
                 const m = found.?;
                 if (m.suspended) continue;
+
+                var new_mapping_arena = std.heap.ArenaAllocator.init(self.allocator);
+                errdefer new_mapping_arena.deinit();
+                const new_arena_alloc = new_mapping_arena.allocator();
+                const map_copy = try new_arena_alloc.create(MappingConfig);
+                map_copy.* = new_map.*;
+
+                // Build the new mapper before touching the old arena so a
+                // failed reload leaves the running mapping intact.
+                var new_mapper = try Mapper.init(map_copy, m.instance.loop.macro_timer_fd, self.allocator);
+                var new_mapper_installed = false;
+                errdefer if (!new_mapper_installed) new_mapper.deinit();
+
                 // Stop-Swap-Restart: stop thread before touching arena
                 m.instance.stop();
                 m.thread.join();
+                m.instance.quiesceOutputs(.{});
 
                 var old_mapper = m.instance.mapper;
                 const old_mapping_cfg = m.instance.mapping_cfg;
-                if (old_mapper) |*mapper| {
-                    m.instance.releaseMapperAux(mapper);
-                }
-                self.clearSwitchMapping(m);
-                _ = m.mapping_arena.reset(.retain_capacity);
-                const arena_alloc = m.mapping_arena.allocator();
-                const map_copy = try arena_alloc.create(MappingConfig);
-                map_copy.* = new_map.*;
+                var old_mapping_arena = m.mapping_arena;
 
                 // Rebuild the mapper so layer state/timers do not keep slices into
-                // the old mapping arena after the reset above.
-                var new_mapper = try Mapper.init(map_copy, m.instance.loop.macro_timer_fd, self.allocator);
+                // the old mapping arena after the swap below.
                 new_mapper.seedInputState(m.instance.loop.gamepad_state);
                 m.instance.mapper = new_mapper;
+                new_mapper_installed = true;
                 m.instance.mapping_cfg = map_copy;
                 self.installChordDetector(m);
                 m.instance.rebuildAuxIfChanged(map_copy, old_mapping_cfg) catch |err| {
                     std.log.warn("rebuildAuxIfChanged: {}", .{err});
                 };
                 restartManagedThread(m) catch |err| {
+                    if (old_mapping_cfg) |old_cfg| {
+                        m.instance.rebuildAuxIfChanged(old_cfg, map_copy) catch |rollback_aux_err| {
+                            std.log.warn("rebuildAuxIfChanged rollback: {}", .{rollback_aux_err});
+                        };
+                    }
+                    if (old_mapper) |*mapper| {
+                        mapper.resetRuntimeState();
+                        mapper.seedInputState(m.instance.loop.gamepad_state);
+                    }
                     m.instance.mapper = old_mapper;
                     m.instance.mapping_cfg = old_mapping_cfg;
                     new_mapper.deinit();
+                    restartManagedThread(m) catch |rollback_err| {
+                        std.log.err("reload rollback restart failed for {s}: {}", .{ m.phys_key, rollback_err });
+                    };
                     return err;
                 };
+
+                m.mapping_arena = new_mapping_arena;
+                old_mapping_arena.deinit();
+                self.clearSwitchMapping(m);
 
                 if (old_mapper) |*mapper| {
                     mapper.deinit();
@@ -1036,8 +1082,8 @@ pub const Supervisor = struct {
                 if (m.suspended) continue;
                 m.instance.stop();
                 m.thread.join();
+                m.instance.quiesceOutputs(.{});
                 if (m.instance.mapper) |*mapper| {
-                    m.instance.releaseMapperAux(mapper);
                     mapper.deinit();
                     m.instance.mapper = null;
                 }
@@ -2114,6 +2160,7 @@ const mapper_mod = @import("core/mapper.zig");
 const device_mod = @import("config/device.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
+const MockOutput = @import("test/mock_output.zig").MockOutput;
 const uinput = @import("io/uinput.zig");
 const state_mod = @import("core/state.zig");
 
@@ -2447,11 +2494,66 @@ test "supervisor: hotplug duplicate precheck catches active devname and live phy
     try testing.expect(!sup.hasLiveDuplicate("hidraw1", "phys1", &parsed_dev.value));
 }
 
+test "supervisor: detach quiesces primary output before suspension" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    const parsed_map = try mapping_mod.parseString(allocator,
+        \\[[layer]]
+        \\name = "held"
+        \\trigger = "LT"
+        \\activation = "hold"
+    );
+    defer parsed_map.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    const held = state_mod.GamepadState{
+        .ax = 77,
+        .buttons = @as(u64, 1) << @intFromEnum(state_mod.ButtonId.A),
+    };
+    inst.primary_output = out.outputDevice();
+    inst.loop.gamepad_state = held;
+    out.prev = held;
+    inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.macro_timer_fd, allocator);
+    inst.mapping_cfg = &parsed_map.value;
+    _ = inst.mapper.?.layer.onTriggerPress("held", 200, 1_000);
+    inst.mapper.?.state.buttons = @as(u64, 1) << @intFromEnum(state_mod.ButtonId.LT);
+
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst, null));
+    sup.detach("hidraw0");
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(@as(usize, 1), out.emitted.items.len);
+    try testing.expect(std.meta.eql(state_mod.GamepadState{}, out.emitted.items[0]));
+    try testing.expect(std.meta.eql(state_mod.GamepadState{}, inst.loop.gamepad_state));
+    try testing.expect(inst.mapper.?.layer.tap_hold == null);
+    try testing.expect(std.meta.eql(state_mod.GamepadState{}, inst.mapper.?.state));
+}
+
 test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     const allocator = testing.allocator;
 
     const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
     defer parsed_dev.deinit();
+    const old_parsed = try mapping_mod.parseString(allocator,
+        \\[[layer]]
+        \\name = "old"
+        \\trigger = "LT"
+        \\activation = "toggle"
+    );
+    defer old_parsed.deinit();
 
     const base_dir = "/tmp/padctl_supervisor_test_switch";
     std.fs.deleteTreeAbsolute(base_dir) catch {};
@@ -2493,6 +2595,11 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     defer mock_b.deinit();
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    inst_a.mapper = try mapper_mod.Mapper.init(&old_parsed.value, inst_a.loop.macro_timer_fd, allocator);
+    inst_a.mapping_cfg = &old_parsed.value;
+    try inst_a.mapper.?.layer.toggled.put("old", {});
+    inst_a.mapper.?.state.buttons = @as(u64, 1) << @intFromEnum(state_mod.ButtonId.A);
+    inst_a.loop.gamepad_state.buttons = @as(u64, 1) << @intFromEnum(state_mod.ButtonId.RB);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
     try sup.spawnInstance("usb-1-1", inst_a, null);
     try sup.spawnInstance("usb-1-2", inst_b, null);
@@ -2506,10 +2613,12 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     const n = try posix.read(resp_fds[1], &resp_buf);
     try testing.expectEqualStrings("ERR switch-failed\n", resp_buf[0..n]);
     try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
-    try testing.expect(sup.managed.items[0].instance.mapper == null);
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
     try testing.expect(sup.managed.items[1].instance.mapper == null);
-    try testing.expect(sup.managed.items[0].instance.mapping_cfg == null);
+    try testing.expectEqual(@as(?*const mapping_mod.MappingConfig, &old_parsed.value), sup.managed.items[0].instance.mapping_cfg);
     try testing.expect(sup.managed.items[1].instance.mapping_cfg == null);
+    try testing.expectEqual(@as(usize, 0), sup.managed.items[0].instance.mapper.?.layer.toggled.count());
+    try testing.expectEqual(@as(u64, @as(u64, 1) << @intFromEnum(state_mod.ButtonId.RB)), sup.managed.items[0].instance.mapper.?.state.buttons);
     try testing.expect(sup.managed.items[0].switch_mapping == null);
     try testing.expect(sup.managed.items[1].switch_mapping == null);
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[0].instance.stopped, .acquire));
@@ -2763,6 +2872,57 @@ test "supervisor: Supervisor: two rapid reloads serialize — no race condition"
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     try testing.expect(sup.managed.items[0].instance.mapper != null);
     try testing.expectEqual(@as(u32, 1), sup.managed.items[0].instance.mapper.?.next_token);
+}
+
+test "supervisor: reload restart failure preserves switch mapping and restarts old mapper" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    const new_parsed = try mapping_mod.parseString(allocator, "name = \"new\"");
+    defer new_parsed.deinit();
+
+    const switch_pr = try allocator.create(mapping_mod.ParseResult);
+    switch_pr.* = try mapping_mod.parseString(allocator,
+        \\name = "switch"
+        \\[[layer]]
+        \\name = "old"
+        \\trigger = "LT"
+        \\activation = "toggle"
+    );
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    inst.mapper = try mapper_mod.Mapper.init(&switch_pr.value, inst.loop.macro_timer_fd, allocator);
+    inst.mapping_cfg = &switch_pr.value;
+    inst.loop.gamepad_state.buttons = @as(u64, 1) << @intFromEnum(state_mod.ButtonId.RB);
+    try inst.mapper.?.layer.toggled.put("old", {});
+    try sup.spawnInstance("usb-1-1", inst, null);
+    sup.managed.items[0].switch_mapping = switch_pr;
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    var new_map = new_parsed.value;
+    const entry = ConfigEntry{
+        .phys_key = "usb-1-1",
+        .device_cfg = &parsed_dev.value,
+        .mapping_cfg = &new_map,
+    };
+    test_fail_next_restart_managed = true;
+    try testing.expectError(error.TestInjectedRestartFailure, sup.reload(&.{entry}, testInitFn));
+
+    const managed = &sup.managed.items[0];
+    try testing.expect(managed.switch_mapping == switch_pr);
+    try testing.expectEqual(@as(?*const mapping_mod.MappingConfig, &switch_pr.value), managed.instance.mapping_cfg);
+    try testing.expect(managed.instance.mapper != null);
+    try testing.expectEqual(@as(usize, 0), managed.instance.mapper.?.layer.toggled.count());
+    try testing.expectEqual(@as(u64, @as(u64, 1) << @intFromEnum(state_mod.ButtonId.RB)), managed.instance.mapper.?.state.buttons);
+    try testing.expectEqual(false, @atomicLoad(bool, &managed.instance.stopped, .acquire));
 }
 
 test "supervisor: Supervisor: reload null mapping clears existing mapper" {

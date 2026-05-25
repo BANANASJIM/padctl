@@ -26,6 +26,11 @@ pub const TimerQueue = struct {
         self.heap.deinit();
     }
 
+    pub fn clear(self: *TimerQueue) void {
+        self.heap.clearRetainingCapacity();
+        self.rearmFd(0);
+    }
+
     pub fn arm(self: *TimerQueue, deadline_ns: i128, token: u32, now_ns: i128) !void {
         try self.heap.add(.{ .absolute_ns = deadline_ns, .token = token });
         self.rearmFd(now_ns);
@@ -147,6 +152,18 @@ test "TimerQueue: cancel nonexistent token is a no-op" {
     try q.arm(1000, 5, 0);
     q.cancel(99, 0);
     try testing.expectEqual(@as(usize, 1), q.heap.count());
+}
+
+test "TimerQueue: clear removes all deadlines and disarms" {
+    const allocator = testing.allocator;
+    var q = TimerQueue.init(allocator, -1);
+    defer q.deinit();
+
+    try q.arm(1000, 5, 0);
+    try q.arm(2000, 6, 0);
+
+    q.clear();
+    try testing.expectEqual(@as(usize, 0), q.heap.count());
 }
 
 test "TimerQueue: arm + drain with real timerfd fires within deadline" {

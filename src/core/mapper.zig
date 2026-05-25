@@ -260,6 +260,34 @@ pub const Mapper = struct {
         self.seeded_buttons = seeded.buttons;
     }
 
+    pub fn resetRuntimeState(self: *Mapper) void {
+        self.layer.tap_hold = null;
+        self.layer.toggled.clearRetainingCapacity();
+        self.state = .{};
+        self.prev = .{};
+        self.gyro_proc.reset();
+        self.stick_left.reset();
+        self.stick_right.reset();
+        self.suppressed_buttons = 0;
+        self.injected_buttons = 0;
+        self.seeded_buttons = 0;
+        self.aux_down_targets = [_]?AuxDownTarget{null} ** BUTTON_COUNT;
+        self.gesture_aux_down_targets = [_]?AuxDownTarget{null} ** BUTTON_COUNT;
+        self.pending_tap_release = null;
+        self.aux_tap_release_tokens = .{};
+        self.macro_timer_tap_pending = 0;
+        self.gesture_engine.reset();
+        self.gesture_tokens.clear();
+        self.gesture_timer_tap_pending = 0;
+        self.gesture_held_gamepad = 0;
+        self.active_macros.clearRetainingCapacity();
+        self.timer_queue.clear();
+        self.next_token = 1;
+        if (self.chord_detector) |cd| {
+            self.chord_detector = ChordDetector.init(cd.cfg);
+        }
+    }
+
     fn applyTriggerThreshold(self: *const Mapper, gs: *GamepadState) void {
         if (self.config.trigger_threshold) |threshold| {
             const lt_bit = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
@@ -1140,6 +1168,46 @@ fn makeMapping(toml_str: []const u8, allocator: std.mem.Allocator) !mapping.Pars
 fn makeMapper(cfg: *const MappingConfig, allocator: std.mem.Allocator) !Mapper {
     // Use -1 as a dummy fd for tests (timer operations are no-ops on invalid fd)
     return Mapper.init(cfg, std.posix.STDIN_FILENO, allocator);
+}
+
+test "mapper: resetRuntimeState clears transient layer timer and input state" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LT"
+        \\activation = "hold_toggle"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    try m.layer.toggled.put("aim", {});
+    _ = m.layer.onTriggerPressWithMode("aim", 200, 1_000, .hold_toggle);
+    m.state.buttons = buttonBit("A");
+    m.prev.buttons = buttonBit("A");
+    m.seeded_buttons = buttonBit("A");
+    m.pending_tap_release = buttonBit("B");
+    m.macro_timer_tap_pending = buttonBit("X");
+    m.gesture_timer_tap_pending = buttonBit("Y");
+    m.gesture_held_gamepad = buttonBit("RB");
+    m.aux_down_targets[@intFromEnum(ButtonId.A)] = .{ .key = 30 };
+    try m.timer_queue.arm(2_000, 99, 1_000);
+
+    m.resetRuntimeState();
+
+    try testing.expect(m.layer.tap_hold == null);
+    try testing.expectEqual(@as(usize, 0), m.layer.toggled.count());
+    try testing.expect(std.meta.eql(GamepadState{}, m.state));
+    try testing.expect(std.meta.eql(GamepadState{}, m.prev));
+    try testing.expectEqual(@as(u64, 0), m.seeded_buttons);
+    try testing.expectEqual(@as(?u64, null), m.pending_tap_release);
+    try testing.expectEqual(@as(u64, 0), m.macro_timer_tap_pending);
+    try testing.expectEqual(@as(u64, 0), m.gesture_timer_tap_pending);
+    try testing.expectEqual(@as(u64, 0), m.gesture_held_gamepad);
+    try testing.expect(m.aux_down_targets[@intFromEnum(ButtonId.A)] == null);
+    try testing.expectEqual(@as(usize, 0), m.timer_queue.heap.count());
 }
 
 test "mapper: no layer no remap: apply passes through unchanged" {

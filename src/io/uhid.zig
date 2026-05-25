@@ -21,6 +21,7 @@ const state = @import("../core/state.zig");
 const uinput = @import("uinput.zig");
 const device_cfg = @import("../config/device.zig");
 const descriptor = @import("uhid_descriptor.zig");
+const write_exact = @import("write_exact.zig");
 
 // --- Kernel protocol constants ---------------------------------------------
 
@@ -119,7 +120,7 @@ pub fn uhidCreate(
     var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
     const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
     @memcpy(buf[0..copy_len], bytes[0..copy_len]);
-    _ = try posix.write(fd, &buf);
+    try write_exact.writeExact(fd, &buf);
 }
 
 /// Send a `UHID_INPUT2` event carrying an input report payload. Rejects
@@ -139,7 +140,7 @@ pub fn uhidInput(fd: posix.fd_t, data: []const u8) !void {
     var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
     const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
     @memcpy(buf[0..copy_len], bytes[0..copy_len]);
-    _ = try posix.write(fd, &buf);
+    try write_exact.writeExact(fd, &buf);
 }
 
 /// Send a `UHID_DESTROY` event on the given fd. Best-effort (errors
@@ -147,7 +148,7 @@ pub fn uhidInput(fd: posix.fd_t, data: []const u8) !void {
 pub fn uhidDestroy(fd: posix.fd_t) void {
     var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
     std.mem.writeInt(u32, buf[0..4], UHID_DESTROY, .little);
-    _ = posix.write(fd, &buf) catch {};
+    write_exact.writeExact(fd, &buf) catch {};
 }
 
 // --- UHID_OUTPUT types -------------------------------------------------------
@@ -349,7 +350,7 @@ pub const UhidDevice = struct {
         var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
         const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
         @memcpy(buf[0..copy_len], bytes[0..copy_len]);
-        _ = posix.write(fd, &buf) catch return error.UhidCreateFailed;
+        write_exact.writeExact(fd, &buf) catch return error.UhidCreateFailed;
     }
 
     /// Expose this device through the shared `OutputDevice` vtable.
