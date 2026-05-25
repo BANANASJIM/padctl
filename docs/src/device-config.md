@@ -33,6 +33,7 @@ Optional initialization sequence sent after device open.
 | `disable` | string | no | Hex byte string sent on shutdown |
 | `interface` | integer | no | Interface to send init commands on |
 | `report_size` | integer | no | Expected report size after init |
+| `require_response` | bool | no | When `true`, a missing `response_prefix` ACK fails init/re-init instead of continuing. Use for devices whose input reports are valid only after an acknowledged mode switch. |
 | `feature_report` | integer[] | no | HID feature report sent via `HIDIOCSFEATURE` immediately after `commands`. Encoded as a list of byte values (0–255); `byte[0]` is the report ID. |
 
 ## `[[report]]`

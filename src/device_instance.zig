@@ -837,6 +837,28 @@ const init_toml =
     \\expect = [0x01]
 ;
 
+const strict_init_toml =
+    \\[device]
+    \\name = "StrictInitDevice"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 0
+    \\commands = ["0101"]
+    \\response_prefix = [0x5a]
+    \\require_response = true
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+;
+
 const feature_init_toml =
     \\[device]
     \\name = "FeatureInitDevice"
@@ -908,6 +930,26 @@ test "DeviceInstance.init propagates init write errors" {
     try testing.expectError(DeviceIO.WriteError.Io, result);
 }
 
+test "DeviceInstance.init propagates required init ack failures" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, strict_init_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = mock.deviceIO();
+
+    var uniq_counter: u16 = 1;
+    const result = DeviceInstance.init(allocator, &parsed.value, null, null, &uniq_counter, .{
+        .test_devices_override = devices,
+    });
+
+    try testing.expectError(error.InitFailed, result);
+}
+
 test "DeviceInstance.init propagates feature_report init errors" {
     const allocator = testing.allocator;
 
@@ -962,6 +1004,44 @@ test "DeviceInstance: rerunInitSequence propagates init write errors" {
     };
 
     try testing.expectError(DeviceIO.WriteError.Io, inst.rerunInitSequence());
+}
+
+test "DeviceInstance: rerunInitSequence propagates required init ack failures" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, strict_init_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = mock.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+
+    try testing.expectError(error.InitFailed, inst.rerunInitSequence());
 }
 
 test "DeviceInstance: rerunInitSequence propagates feature_report errors" {

@@ -20,6 +20,7 @@ commands = [
     "5aa5 0402 06",
 ]
 response_prefix = [0x5a, 0xa5]
+require_response = true
 enable  = "5aa5 1107 ff01 ffff ff15 00"
 disable = "5aa5 1107 ff00 ffff ff14 00"
 

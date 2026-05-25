@@ -2025,6 +2025,7 @@ pub const Supervisor = struct {
             error.NoDevice,
             error.NotFound,
             error.Disconnected,
+            error.InitFailed,
             error.Io,
             => true,
             else => false,
@@ -2261,6 +2262,28 @@ const init_device_toml =
     \\[device.init]
     \\interface = 0
     \\commands = ["0101"]
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+;
+
+const strict_init_device_toml =
+    \\[device]
+    \\name = "StrictInitDevice"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 0
+    \\commands = ["0101"]
+    \\response_prefix = [0x5a]
+    \\require_response = true
     \\[[report]]
     \\name = "r"
     \\interface = 0
@@ -3580,6 +3603,50 @@ test "supervisor: failed re-init after suspended rebind preserves grace state" {
     try m.instance.rebindDeviceIO(&new_devs);
     try testing.expectError(DeviceIO.WriteError.Io, Supervisor.rerunInitAfterRebind(m));
 
+    try testing.expect(m.suspended);
+    try testing.expectEqual(original_deadline, m.grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), m.devname);
+    try testing.expect(!sup.devname_map.contains("hidraw3"));
+    try testing.expectEqual(@as(posix.fd_t, -1), m.instance.devices[0].pollfd().fd);
+}
+
+test "supervisor: required init ack failure after suspended rebind preserves grace state" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, strict_init_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    sup.suspend_grace_sec = 5;
+    sup.test_now_override_ns = 10 * std.time.ns_per_s;
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var new_devs = [_]DeviceIO{mock_b.deviceIO()};
+    var opener = TestRebindOpenCtx{ .devices = &new_devs };
+    try testing.expectError(error.HotplugTransient, sup.tryResumeSuspendedInstance(
+        "hidraw5",
+        "usb-1-1",
+        1,
+        2,
+        &opener,
+        TestRebindOpenCtx.open,
+    ));
+
+    const m = &sup.managed.items[0];
     try testing.expect(m.suspended);
     try testing.expectEqual(original_deadline, m.grace_deadline_ns.?);
     try testing.expectEqual(@as(?[]const u8, null), m.devname);

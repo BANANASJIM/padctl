@@ -18,6 +18,7 @@ pub const InitConfig = struct {
     response_prefix: ?[]const i64 = null,
     enable: ?[]const u8 = null,
     disable: ?[]const u8 = null,
+    require_response: bool = false,
     interface: ?i64 = null,
     report_size: ?i64 = null,
     /// HID feature report to send via HIDIOCSFEATURE immediately after commands.

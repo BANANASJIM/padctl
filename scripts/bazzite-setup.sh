@@ -85,6 +85,70 @@ current_upstream_ref() {
     git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true
 }
 
+run_user_systemctl() {
+    local output status
+    if output="$(systemctl --user "$@" 2>&1 >/dev/null)"; then
+        return 0
+    fi
+    status=$?
+    if [[ "$output" != *"Failed to connect to bus"* && "$output" != *"No medium found"* ]]; then
+        return "$status"
+    fi
+
+    local uid user runtime bus
+    uid="$(id -u 2>/dev/null || true)"
+    user="$(id -un 2>/dev/null || true)"
+    [[ -n "$uid" && -n "$user" ]] || return 1
+
+    runtime="/run/user/$uid"
+    bus="$runtime/bus"
+    [[ -S "$bus" ]] || return 1
+    command -v sudo >/dev/null 2>&1 || return 1
+
+    sudo -u "$user" \
+        env XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
+        systemctl --user "$@" >/dev/null 2>&1
+}
+
+legacy_system_service_present() {
+    systemctl is-active --quiet padctl.service >/dev/null 2>&1 \
+        || systemctl is-enabled --quiet padctl.service >/dev/null 2>&1
+}
+
+stop_existing_padctl_services() {
+    if run_user_systemctl is-active padctl.service; then
+        info "Stopping existing user padctl service..."
+        if run_user_systemctl stop padctl.service; then
+            ok "User service stopped"
+        else
+            warn "Could not stop user padctl.service; install will still try to restart it"
+        fi
+    fi
+
+    if legacy_system_service_present; then
+        warn "Stopping legacy system padctl.service to avoid a stale daemon grabbing the controller"
+        sudo systemctl stop padctl.service >/dev/null 2>&1 || warn "Could not stop legacy system padctl.service"
+        sudo systemctl disable padctl.service >/dev/null 2>&1 || warn "Could not disable legacy system padctl.service"
+        sudo systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+ensure_user_padctl_service() {
+    if ! run_user_systemctl daemon-reload; then
+        warn "Could not reload user systemd manager"
+    fi
+    if ! run_user_systemctl enable padctl.service; then
+        warn "Could not enable user padctl.service"
+    fi
+    if run_user_systemctl restart padctl.service; then
+        ok "User service restarted"
+    elif run_user_systemctl start padctl.service; then
+        ok "User service started"
+    else
+        warn "Could not start user padctl.service — check 'systemctl --user status padctl.service'"
+    fi
+}
+
 sync_managed_repo_to_remote() {
     local repo="$1"
     local branch="$2"
@@ -322,12 +386,8 @@ fi
 zig build "${build_args[@]}"
 ok "Build complete"
 
-# --- 6. Stop existing service (if running) ---
-if systemctl --user is-active padctl.service &>/dev/null; then
-    info "Stopping existing padctl service..."
-    systemctl --user stop padctl.service 2>/dev/null || true
-    ok "Service stopped"
-fi
+# --- 6. Stop existing services before overwriting the binary ---
+stop_existing_padctl_services
 
 # --- 6b. Prompt for mapping if not specified ---
 if [[ -z "$MAPPING" && -d "$PADCTL_REPO/mappings" ]]; then
@@ -371,9 +431,7 @@ ok "padctl installed to $PREFIX"
 # freshly-installed unit files take effect and the IPC socket is bound
 # before we apply the mapping and verify.
 info "Ensuring daemon is running as user..."
-systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable padctl.service &>/dev/null || true
-systemctl --user restart padctl.service 2>/dev/null || true
+ensure_user_padctl_service
 
 # --- 7c. Apply mapping to the running daemon (config.toml persists for future boots,
 #         but the already-running daemon needs an explicit switch for the current session).
@@ -423,13 +481,13 @@ else
 fi
 
 # Check service
-if systemctl --user is-enabled padctl.service &>/dev/null; then
+if run_user_systemctl is-enabled padctl.service; then
     ok "Service: enabled"
 else
     warn "Service: not enabled (may need manual enable)"
 fi
 
-if systemctl --user is-active padctl.service &>/dev/null; then
+if run_user_systemctl is-active padctl.service; then
     ok "Service: running"
 else
     # The daemon should always be running after a successful install — it

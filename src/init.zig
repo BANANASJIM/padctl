@@ -70,6 +70,7 @@ pub fn runInitSequence(
     defer if (init_config.response_prefix != null) allocator.free(prefix);
 
     const report_size: usize = if (init_config.report_size) |rs| @intCast(rs) else 0;
+    const require_response = init_config.require_response;
 
     var total: usize = 0;
 
@@ -79,6 +80,7 @@ pub fn runInitSequence(
             defer allocator.free(bytes);
             sendAndWaitPrefix(device, bytes, prefix, 50, report_size) catch |err| {
                 if (err == error.InitFailed) {
+                    if (require_response) return err;
                     std.log.debug("init command got no ack, continuing", .{});
                 } else return err;
             };
@@ -91,6 +93,7 @@ pub fn runInitSequence(
         defer allocator.free(bytes);
         sendAndWaitPrefix(device, bytes, prefix, 50, report_size) catch |err| {
             if (err == error.InitFailed) {
+                if (require_response) return err;
                 std.log.debug("enable command got no ack, continuing", .{});
             } else return err;
         };
@@ -210,6 +213,22 @@ test "init: runInitSequence: exhausted retries logs warning and continues" {
     };
 
     try runInitSequence(allocator, dev, init_cfg);
+}
+
+test "init: runInitSequence: require_response fails on missing ack" {
+    const allocator = std.testing.allocator;
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+
+    const init_cfg = device_mod.InitConfig{
+        .commands = &[_][]const u8{"0101"},
+        .response_prefix = &[_]i64{0x5a},
+        .require_response = true,
+    };
+
+    try std.testing.expectError(error.InitFailed, runInitSequence(allocator, dev, init_cfg));
 }
 
 test "init: runInitSequence: enable command sent after commands" {

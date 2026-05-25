@@ -51,6 +51,7 @@ test "isTransientOpenError: transient errors are retried" {
     try testing.expect(Supervisor.isTransientOpenError(error.NoDevice));
     try testing.expect(Supervisor.isTransientOpenError(error.NotFound));
     try testing.expect(Supervisor.isTransientOpenError(error.Disconnected));
+    try testing.expect(Supervisor.isTransientOpenError(error.InitFailed));
     try testing.expect(Supervisor.isTransientOpenError(error.Io));
 }
 
