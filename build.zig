@@ -110,20 +110,10 @@ pub fn build(b: *std.Build) void {
 
     // test: Layer 0 + Layer 1 (CI); refAllDecls in main.zig pulls in debug/render.zig tests
     // test_root.zig sits at repo root so @embedFile("../../...") paths in src/ stay within package.
-    const unit_mod = b.createModule(.{
-        .root_source_file = b.path("test_root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_c = .trap,
-    });
-    unit_mod.addImport("toml", toml_mod);
-    unit_mod.addImport("analyse", capture_analyse_mod);
-    unit_mod.addImport("toml_gen", capture_toml_gen_mod);
-    unit_mod.addImport("capture_resolve", capture_resolve_mod);
-    unit_mod.addImport("build_options", build_opts.createModule());
+    const unit_mod = createTestRootModule(b, target, optimize, false, toml_mod, capture_analyse_mod, capture_toml_gen_mod, capture_resolve_mod, build_opts);
     if (use_wasm) addWasm3(b, unit_mod, wasm3_c_flags);
-    const unit_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
-    const unit_tests = b.addTest(.{ .root_module = unit_mod, .filters = unit_filters });
+    const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
+    const unit_tests = b.addTest(.{ .root_module = unit_mod, .filters = test_filters });
     if (use_libusb) {
         unit_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -135,20 +125,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
     // test-tsan: ThreadSanitizer-enabled test run (local dev)
-    const tsan_mod = b.createModule(.{
-        .root_source_file = b.path("test_root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_c = .trap,
-        .sanitize_thread = true,
-    });
-    tsan_mod.addImport("toml", toml_mod);
-    tsan_mod.addImport("analyse", capture_analyse_mod);
-    tsan_mod.addImport("toml_gen", capture_toml_gen_mod);
-    tsan_mod.addImport("capture_resolve", capture_resolve_mod);
-    tsan_mod.addImport("build_options", build_opts.createModule());
+    const tsan_mod = createTestRootModule(b, target, optimize, true, toml_mod, capture_analyse_mod, capture_toml_gen_mod, capture_resolve_mod, build_opts);
     if (use_wasm) addWasm3(b, tsan_mod, wasm3_c_flags);
-    const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
+    const tsan_tests = b.addTest(.{ .root_module = tsan_mod, .filters = test_filters });
     if (use_libusb) {
         tsan_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -159,19 +138,9 @@ pub fn build(b: *std.Build) void {
     tsan_step.dependOn(&b.addRunArtifact(tsan_tests).step);
 
     // test-safe: ReleaseSafe test run (catches UB under optimization)
-    const safe_mod = b.createModule(.{
-        .root_source_file = b.path("test_root.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .sanitize_c = .trap,
-    });
-    safe_mod.addImport("toml", toml_mod);
-    safe_mod.addImport("analyse", capture_analyse_mod);
-    safe_mod.addImport("toml_gen", capture_toml_gen_mod);
-    safe_mod.addImport("capture_resolve", capture_resolve_mod);
-    safe_mod.addImport("build_options", build_opts.createModule());
+    const safe_mod = createTestRootModule(b, target, .ReleaseSafe, false, toml_mod, capture_analyse_mod, capture_toml_gen_mod, capture_resolve_mod, build_opts);
     if (use_wasm) addWasm3(b, safe_mod, wasm3_c_flags);
-    const safe_tests = b.addTest(.{ .root_module = safe_mod });
+    const safe_tests = b.addTest(.{ .root_module = safe_mod, .filters = test_filters });
     if (use_libusb) {
         safe_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -198,7 +167,7 @@ pub fn build(b: *std.Build) void {
     fuzz_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
     // capture L0 tests (analyse pure functions)
-    const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod });
+    const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod, .filters = test_filters });
     if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     test_step.dependOn(&b.addRunArtifact(capture_tests).step);
 
@@ -237,7 +206,7 @@ pub fn build(b: *std.Build) void {
     });
     integ_mod.addImport("toml", toml_mod);
     integ_mod.addImport("src", src_mod);
-    const integ_tests = b.addTest(.{ .root_module = integ_mod });
+    const integ_tests = b.addTest(.{ .root_module = integ_mod, .filters = test_filters });
     if (use_libusb) {
         integ_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -255,7 +224,7 @@ pub fn build(b: *std.Build) void {
     });
     alldev_mod.addImport("toml", toml_mod);
     alldev_mod.addImport("src", src_mod);
-    const alldev_tests = b.addTest(.{ .root_module = alldev_mod });
+    const alldev_tests = b.addTest(.{ .root_module = alldev_mod, .filters = test_filters });
     if (use_libusb) {
         alldev_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -275,7 +244,7 @@ pub fn build(b: *std.Build) void {
     });
     deck_e2e_mod.addImport("toml", toml_mod);
     deck_e2e_mod.addImport("src", src_mod);
-    const deck_e2e_tests = b.addTest(.{ .root_module = deck_e2e_mod });
+    const deck_e2e_tests = b.addTest(.{ .root_module = deck_e2e_mod, .filters = test_filters });
     if (use_libusb) {
         deck_e2e_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -295,7 +264,7 @@ pub fn build(b: *std.Build) void {
     });
     grace_int_mod.addImport("toml", toml_mod);
     grace_int_mod.addImport("src", src_mod);
-    const grace_int_tests = b.addTest(.{ .root_module = grace_int_mod });
+    const grace_int_tests = b.addTest(.{ .root_module = grace_int_mod, .filters = test_filters });
     if (use_libusb) {
         grace_int_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -315,7 +284,7 @@ pub fn build(b: *std.Build) void {
     });
     routing_mod.addImport("toml", toml_mod);
     routing_mod.addImport("src", src_mod);
-    const routing_tests = b.addTest(.{ .root_module = routing_mod });
+    const routing_tests = b.addTest(.{ .root_module = routing_mod, .filters = test_filters });
     if (use_libusb) {
         routing_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -323,6 +292,10 @@ pub fn build(b: *std.Build) void {
     }
     routing_tests.linkLibC();
     test_step.dependOn(&b.addRunArtifact(routing_tests).step);
+    const routing_safe_tests = addSupervisorUhidRoutingTests(b, target, .ReleaseSafe, false, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, test_filters);
+    safe_step.dependOn(&b.addRunArtifact(routing_safe_tests).step);
+    const routing_tsan_tests = addSupervisorUhidRoutingTests(b, target, optimize, true, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, test_filters);
+    tsan_step.dependOn(&b.addRunArtifact(routing_tsan_tests).step);
 
     // uhid_output_dispatch_test and pidff_e2e_test are imported into
     // src/main.zig's test namespace and compiled into the main test artifact.
@@ -338,7 +311,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_c = .trap,
     });
     e2e_mod.addImport("src", src_mod);
-    const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
+    const e2e_tests = b.addTest(.{ .root_module = e2e_mod, .filters = test_filters });
     if (use_libusb) {
         e2e_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -356,7 +329,7 @@ pub fn build(b: *std.Build) void {
     });
     gen_e2e_mod.addImport("src", src_mod);
     gen_e2e_mod.addImport("toml", toml_mod);
-    const gen_e2e_tests = b.addTest(.{ .root_module = gen_e2e_mod });
+    const gen_e2e_tests = b.addTest(.{ .root_module = gen_e2e_mod, .filters = test_filters });
     if (use_libusb) {
         gen_e2e_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -378,7 +351,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_c = .trap,
     });
     uhid_mod.addImport("toml", toml_mod);
-    const uhid_tests = b.addTest(.{ .root_module = uhid_mod });
+    const uhid_tests = b.addTest(.{ .root_module = uhid_mod, .filters = test_filters });
     if (use_libusb) {
         uhid_tests.linkSystemLibrary("usb-1.0");
     } else {
@@ -399,6 +372,89 @@ pub fn build(b: *std.Build) void {
         const spike_step = b.step("spike", "Run TOML spike");
         spike_step.dependOn(&b.addRunArtifact(spike_exe).step);
     } else |_| {}
+}
+
+fn createTestRootModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_thread: bool,
+    toml_mod: *std.Build.Module,
+    capture_analyse_mod: *std.Build.Module,
+    capture_toml_gen_mod: *std.Build.Module,
+    capture_resolve_mod: *std.Build.Module,
+    build_opts: *std.Build.Step.Options,
+) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("test_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+        .sanitize_thread = sanitize_thread,
+    });
+    mod.addImport("toml", toml_mod);
+    mod.addImport("analyse", capture_analyse_mod);
+    mod.addImport("toml_gen", capture_toml_gen_mod);
+    mod.addImport("capture_resolve", capture_resolve_mod);
+    mod.addImport("build_options", build_opts.createModule());
+    return mod;
+}
+
+fn createSrcModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_thread: bool,
+    toml_mod: *std.Build.Module,
+    build_opts: *std.Build.Step.Options,
+    use_wasm: bool,
+    wasm3_c_flags: []const []const u8,
+    use_libusb: bool,
+) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+        .sanitize_thread = sanitize_thread,
+    });
+    mod.addImport("toml", toml_mod);
+    mod.addImport("build_options", build_opts.createModule());
+    if (!use_libusb) mod.addIncludePath(b.path("compat"));
+    if (use_wasm) addWasm3(b, mod, wasm3_c_flags);
+    return mod;
+}
+
+fn addSupervisorUhidRoutingTests(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_thread: bool,
+    toml_mod: *std.Build.Module,
+    build_opts: *std.Build.Step.Options,
+    use_wasm: bool,
+    wasm3_c_flags: []const []const u8,
+    use_libusb: bool,
+    test_filters: []const []const u8,
+) *std.Build.Step.Compile {
+    const src_mod = createSrcModule(b, target, optimize, sanitize_thread, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb);
+    const routing_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/supervisor_uhid_routing_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+        .sanitize_thread = sanitize_thread,
+    });
+    routing_mod.addImport("toml", toml_mod);
+    routing_mod.addImport("src", src_mod);
+    const routing_tests = b.addTest(.{ .root_module = routing_mod, .filters = test_filters });
+    if (use_libusb) {
+        routing_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        routing_tests.addIncludePath(b.path("compat"));
+    }
+    routing_tests.linkLibC();
+    return routing_tests;
 }
 
 fn addWasm3(b: *std.Build, mod: *std.Build.Module, c_flags: []const []const u8) void {

@@ -360,10 +360,11 @@ pub fn applyAdaptiveTrigger(
 pub const EventLoop = struct {
     pollfds: [MAX_FDS]posix.pollfd,
     fd_count: usize,
+    device_count: usize,
     signal_fd: posix.fd_t,
     stop_r: posix.fd_t,
     stop_w: posix.fd_t,
-    // device fds start at slot 5 (after signalfd + stop_pipe + timer_fd + rumble_stop_fd + macro_timer_fd)
+    // device fds start at Slots.device_base, after the fixed wakeup sources.
     device_base: usize,
     /// Dedicated timerfd for layer hold-trigger arm/disarm (slot 2).
     /// Written by `timer_request` returned from `Mapper.apply()`.
@@ -429,6 +430,7 @@ pub const EventLoop = struct {
         var loop = EventLoop{
             .pollfds = undefined,
             .fd_count = 0,
+            .device_count = 0,
             .signal_fd = sig_fd,
             .stop_r = stop_r,
             .stop_w = stop_w,
@@ -458,21 +460,28 @@ pub const EventLoop = struct {
     }
 
     pub fn addDevice(self: *EventLoop, device: DeviceIO) !void {
-        const slot = self.fd_count;
+        if (self.uinput_ff_slot != null or self.uhid_output_slot != null) return error.DeviceSlotsClosed;
+        if (self.device_count >= MAX_DEVICE_INTERFACES) return error.TooManyDevices;
+
+        const slot = self.device_base + self.device_count;
+        std.debug.assert(slot == self.fd_count);
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = device.pollfd();
+        self.device_count += 1;
         self.fd_count += 1;
     }
 
     /// Replace pollfd entries for device slots with fds from new DeviceIO
     /// slice. The number of devices must match the original count.
-    pub fn rebindDevices(self: *EventLoop, devices: []DeviceIO) void {
+    pub fn rebindDevices(self: *EventLoop, devices: []DeviceIO) !void {
+        if (devices.len != self.device_count) return error.DeviceCountMismatch;
         for (devices, 0..) |dev, i| {
             self.pollfds[self.device_base + i] = dev.pollfd();
         }
     }
 
     pub fn addUinputFf(self: *EventLoop, fd: posix.fd_t) !void {
+        if (self.uinput_ff_slot != null) return error.OutputSlotAlreadyRegistered;
         const slot = self.fd_count;
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
@@ -483,6 +492,7 @@ pub const EventLoop = struct {
     /// Register the primary UHID fd for `UHID_OUTPUT` polling.
     /// Only called when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     pub fn addUhidOutput(self: *EventLoop, fd: posix.fd_t) !void {
+        if (self.uhid_output_slot != null) return error.OutputSlotAlreadyRegistered;
         const slot = self.fd_count;
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
@@ -491,6 +501,11 @@ pub const EventLoop = struct {
     }
 
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
+        if (ctx.devices.len != self.device_count) {
+            self.running = false;
+            return error.DeviceCountMismatch;
+        }
+
         self.running = true;
         var buf: [512]u8 = undefined;
 
@@ -684,8 +699,9 @@ pub const EventLoop = struct {
 
             // Check device fds
             for (ctx.devices, 0..) |dev, i| {
+                if (i >= self.device_count) break;
                 const slot = self.device_base + i;
-                if (slot >= self.fd_count) break;
+                std.debug.assert(slot < self.fd_count);
 
                 const revents = self.pollfds[slot].revents;
                 const has_in = revents & posix.POLL.IN != 0;
@@ -898,6 +914,7 @@ test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     // rumble_stop_fd, macro_timer_fd; the FF fd becomes slot 5,
     // fd_count goes 5 → 6.
     try testing.expectEqual(@as(usize, 6), loop.fd_count);
+    try testing.expectEqual(@as(usize, 0), loop.device_count);
     try testing.expectEqual(@as(?usize, 5), loop.uinput_ff_slot);
     try testing.expectEqual(pfds[0], loop.pollfds[Slots.device_base].fd);
 }
@@ -968,6 +985,7 @@ test "event_loop: EventLoop.initManaged creates eventfd and timerfds" {
     // slot 3 = rumble-stop timerfd, slot 4 = macro timerfd
     try testing.expect(loop.macro_timer_fd >= 0);
     try testing.expectEqual(@as(usize, 5), loop.fd_count);
+    try testing.expectEqual(@as(usize, 0), loop.device_count);
 }
 
 test "event_loop: EventLoop.stop wakes ppoll" {
@@ -993,30 +1011,144 @@ test "event_loop: EventLoop.addDevice registers fd" {
     // 3=rumble_stop_fd, 4=macro timerfd. First device lands at slot 5,
     // fd_count goes 5 → 6.
     try testing.expectEqual(@as(usize, 6), loop.fd_count);
+    try testing.expectEqual(@as(usize, 1), loop.device_count);
     try testing.expectEqual(mock.pipe_r, loop.pollfds[Slots.device_base].fd);
 }
 
-test "event_loop: EventLoop.addDevice rejects overflow" {
+test "event_loop: EventLoop.addDevice rejects beyond device interface limit" {
     const allocator = testing.allocator;
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    // Fill remaining slots (already have 5: signalfd + stop_pipe +
-    // layer timer_fd + rumble-stop timerfd + macro timerfd).
-    var mocks: [MAX_FDS - FIXED_SLOT_COUNT]MockDeviceIO = undefined;
-    for (0..MAX_FDS - FIXED_SLOT_COUNT) |i| {
+    var mocks: [MAX_DEVICE_INTERFACES]MockDeviceIO = undefined;
+    for (0..MAX_DEVICE_INTERFACES) |i| {
         mocks[i] = try MockDeviceIO.init(allocator, &.{});
     }
-    defer for (0..MAX_FDS - FIXED_SLOT_COUNT) |i| mocks[i].deinit();
+    defer for (0..MAX_DEVICE_INTERFACES) |i| mocks[i].deinit();
 
-    for (0..MAX_FDS - FIXED_SLOT_COUNT) |i| {
+    for (0..MAX_DEVICE_INTERFACES) |i| {
         const dev = mocks[i].deviceIO();
         try loop.addDevice(dev);
     }
+
+    try testing.expectEqual(MAX_DEVICE_INTERFACES, loop.device_count);
+    try testing.expectEqual(FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES, loop.fd_count);
+
     var extra = try MockDeviceIO.init(allocator, &.{});
     defer extra.deinit();
     const extra_dev = extra.deviceIO();
-    try testing.expectError(error.TooManyFds, loop.addDevice(extra_dev));
+    try testing.expectError(error.TooManyDevices, loop.addDevice(extra_dev));
+}
+
+test "event_loop: EventLoop.addDevice rejects after output slots are registered" {
+    const allocator = testing.allocator;
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    const pfds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(pfds[0]);
+    defer posix.close(pfds[1]);
+    try loop.addUinputFf(pfds[0]);
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    try testing.expectError(error.DeviceSlotsClosed, loop.addDevice(mock.deviceIO()));
+}
+
+test "event_loop: EventLoop output slots append after device slots" {
+    const allocator = testing.allocator;
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    try loop.addDevice(mock_a.deviceIO());
+    try loop.addDevice(mock_b.deviceIO());
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    const uhid_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(uhid_pipe[0]);
+    defer posix.close(uhid_pipe[1]);
+
+    try loop.addUinputFf(ff_pipe[0]);
+    try loop.addUhidOutput(uhid_pipe[0]);
+
+    try testing.expectEqual(@as(usize, 2), loop.device_count);
+    try testing.expectEqual(@as(?usize, Slots.device_base + 2), loop.uinput_ff_slot);
+    try testing.expectEqual(@as(?usize, Slots.device_base + 3), loop.uhid_output_slot);
+    try testing.expectEqual(@as(usize, FIXED_SLOT_COUNT + 4), loop.fd_count);
+    try testing.expectEqual(ff_pipe[0], loop.pollfds[Slots.device_base + 2].fd);
+    try testing.expectEqual(uhid_pipe[0], loop.pollfds[Slots.device_base + 3].fd);
+}
+
+test "event_loop: EventLoop output slot registration rejects duplicates" {
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    const uhid_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(uhid_pipe[0]);
+    defer posix.close(uhid_pipe[1]);
+
+    try loop.addUinputFf(ff_pipe[0]);
+    try testing.expectError(error.OutputSlotAlreadyRegistered, loop.addUinputFf(ff_pipe[0]));
+
+    try loop.addUhidOutput(uhid_pipe[0]);
+    try testing.expectError(error.OutputSlotAlreadyRegistered, loop.addUhidOutput(uhid_pipe[0]));
+}
+
+test "event_loop: EventLoop.rebindDevices rejects device count mismatch" {
+    const allocator = testing.allocator;
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    try loop.addDevice(mock.deviceIO());
+
+    var empty = [_]DeviceIO{};
+    try testing.expectError(error.DeviceCountMismatch, loop.rebindDevices(&empty));
+}
+
+test "event_loop: EventLoop.run rejects device count mismatch before polling" {
+    const allocator = testing.allocator;
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    try loop.addDevice(mock.deviceIO());
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    const NoopOutput = struct {
+        fn emit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+        fn pollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+            return null;
+        }
+        fn close(_: *anyopaque) void {}
+        const vtable = uinput.OutputDevice.VTable{ .emit = emit, .poll_ff = pollFf, .close = close };
+    };
+    var noop_sentinel: u8 = 0;
+    const output = uinput.OutputDevice{ .ptr = &noop_sentinel, .vtable = &NoopOutput.vtable };
+
+    loop.running = true;
+    var empty = [_]DeviceIO{};
+    try testing.expectError(error.DeviceCountMismatch, loop.run(.{
+        .devices = &empty,
+        .interpreter = &interp,
+        .output = output,
+        .poll_timeout_ms = 1,
+    }));
+    try testing.expect(!loop.running);
 }
 
 test "event_loop: armTimer / disarmTimer: arm then disarm does not leave fd readable" {

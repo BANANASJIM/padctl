@@ -682,9 +682,10 @@ pub const DeviceInstance = struct {
     /// Replace physical device fds with new ones and re-register them in the
     /// event loop. Caller must provide the same number of DeviceIO entries as
     /// the original devices[] slice.
-    pub fn rebindDeviceIO(self: *DeviceInstance, new_devices: []DeviceIO) void {
+    pub fn rebindDeviceIO(self: *DeviceInstance, new_devices: []DeviceIO) !void {
+        if (new_devices.len != self.devices.len) return error.DeviceCountMismatch;
+        try self.loop.rebindDevices(new_devices);
         @memcpy(self.devices, new_devices);
-        self.loop.rebindDevices(self.devices);
     }
 
     /// Re-run the device init sequence (e.g. handshake packets) using the
@@ -1292,10 +1293,29 @@ test "DeviceInstance: rebindDeviceIO replaces device fds" {
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
     var new_devs = [_]DeviceIO{mock_b.deviceIO()};
-    inst.rebindDeviceIO(&new_devs);
+    try inst.rebindDeviceIO(&new_devs);
 
     // Verify the device was replaced (new mock's pollfd)
     const pfd = inst.devices[0].pollfd();
     const expected_pfd = mock_b.deviceIO().pollfd();
     try testing.expectEqual(expected_pfd.fd, pfd.fd);
+}
+
+test "DeviceInstance: rebindDeviceIO rejects device count mismatch" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    var empty = [_]DeviceIO{};
+    try testing.expectError(error.DeviceCountMismatch, inst.rebindDeviceIO(&empty));
 }

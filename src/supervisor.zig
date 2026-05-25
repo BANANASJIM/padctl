@@ -26,6 +26,24 @@ const control_socket = @import("io/control_socket.zig");
 
 const socket_client = @import("cli/socket_client.zig");
 
+const RebindDeviceOpener = *const fn (
+    ctx: *anyopaque,
+    allocator: std.mem.Allocator,
+    iface: config_device.InterfaceConfig,
+    vid: u16,
+    pid: u16,
+) anyerror!DeviceIO;
+
+fn openDeviceWithRetryForRebind(
+    _: *anyopaque,
+    allocator: std.mem.Allocator,
+    iface: config_device.InterfaceConfig,
+    vid: u16,
+    pid: u16,
+) !DeviceIO {
+    return openDeviceWithRetry(allocator, iface, vid, pid);
+}
+
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
     phys_key: []const u8,
@@ -373,9 +391,26 @@ pub const Supervisor = struct {
         // through to a fresh attach.
         var stale_devname_buf: [64]u8 = undefined;
         var stale_devname: ?[]const u8 = null;
-        for (self.managed.items) |m| {
+        var i: usize = 0;
+        while (i < self.managed.items.len) : (i += 1) {
+            const m = &self.managed.items[i];
             if (!std.mem.eql(u8, m.phys_key, phys_key)) continue;
-            if (managedInstanceAlive(&m)) return false;
+            const same_device_id =
+                m.instance.device_cfg.device.vid == instance.device_cfg.device.vid and
+                m.instance.device_cfg.device.pid == instance.device_cfg.device.pid;
+            if (m.suspended and !same_device_id) {
+                std.log.info("hotplug: replacing suspended {x:0>4}:{x:0>4} at phys \"{s}\" with {x:0>4}:{x:0>4}", .{
+                    @as(u16, @intCast(m.instance.device_cfg.device.vid)),
+                    @as(u16, @intCast(m.instance.device_cfg.device.pid)),
+                    phys_key,
+                    @as(u16, @intCast(instance.device_cfg.device.vid)),
+                    @as(u16, @intCast(instance.device_cfg.device.pid)),
+                });
+                self.teardownManaged(m);
+                _ = self.managed.swapRemove(i);
+                break;
+            }
+            if (managedInstanceAlive(m)) return false;
             // Dead fds. Capture devname for detachFull (detach frees it).
             if (m.devname) |dn| {
                 const n = @min(dn.len, stale_devname_buf.len);
@@ -2047,56 +2082,15 @@ pub const Supervisor = struct {
             devname, vid, pid, phys, iface_id,
         });
 
-        // Check for a suspended instance with the same VID:PID to rebind
-        for (self.managed.items) |*m| {
-            if (!m.suspended) continue;
-            const mcfg = m.instance.device_cfg;
-            std.log.debug("hotplug: suspended candidate vid={x:0>4} pid={x:0>4} phys_key=\"{s}\" new_phys=\"{s}\" phys_match={}", .{
-                @as(u16, @intCast(mcfg.device.vid)), @as(u16, @intCast(mcfg.device.pid)), m.phys_key, phys, std.mem.eql(u8, m.phys_key, phys),
-            });
-            // Match by physical topology path (stable across sleep/wake)
-            // rather than VID:PID (ambiguous with identical controllers)
-            if (!std.mem.eql(u8, m.phys_key, phys)) continue;
-
-            // Reopen all interface fds for the suspended instance
-            const new_devices = self.allocator.alloc(DeviceIO, mcfg.device.interface.len) catch return;
-            var opened: usize = 0;
-            errdefer {
-                for (new_devices[0..opened]) |dev| dev.close();
-                self.allocator.free(new_devices);
-            }
-            for (mcfg.device.interface, 0..) |iface, idx| {
-                new_devices[idx] = openDeviceWithRetry(self.allocator, iface, vid, pid) catch |err| {
-                    std.log.warn("rebind: open interface {d} failed: {}", .{ iface.id, err });
-                    for (new_devices[0..opened]) |dev| dev.close();
-                    self.allocator.free(new_devices);
-                    if (isTransientOpenError(err)) return error.HotplugTransient;
-                    std.log.warn("hotplug: suspended instance found but resume aborted: open failed", .{});
-                    return;
-                };
-                opened += 1;
-            }
-
-            m.instance.rebindDeviceIO(new_devices);
-            self.allocator.free(new_devices);
-            rerunInitAfterRebind(m) catch |err| {
-                std.log.warn("hotplug: suspended instance resume aborted: re-init failed: {}", .{err});
-                if (isTransientOpenError(err)) return error.HotplugTransient;
-                return;
-            };
-
-            // Commit bookkeeping only after every fallible step succeeds. On
-            // failure `m.suspended`/`m.grace_deadline_ns` stay as-is so the
-            // grace-window GC still reclaims the entry.
-            self.finalizeRebind(m, devname, phys) catch |err| {
-                m.instance.closeDeviceIO();
-                std.log.warn("hotplug: suspended instance resume aborted: {}", .{err});
-                return;
-            };
-            std.log.info("hotplug: resumed suspended instance (phys_key match) for {s}", .{devname});
-            std.log.info("device resumed: \"{s}\" {s}/{s}", .{ mcfg.device.name, dev_root, devname });
-            return;
-        }
+        var opener_ctx: u8 = 0;
+        if (try self.tryResumeSuspendedInstance(
+            devname,
+            phys,
+            vid,
+            pid,
+            &opener_ctx,
+            openDeviceWithRetryForRebind,
+        )) return;
 
         if (self.hasLiveDuplicate(devname, phys, cfg.?)) return;
 
@@ -2149,6 +2143,79 @@ pub const Supervisor = struct {
                 });
             }
         }
+    }
+
+    fn tryResumeSuspendedInstance(
+        self: *Supervisor,
+        devname: []const u8,
+        phys: []const u8,
+        vid: u16,
+        pid: u16,
+        opener_ctx: *anyopaque,
+        opener: RebindDeviceOpener,
+    ) !bool {
+        for (self.managed.items) |*m| {
+            if (!m.suspended) continue;
+            const mcfg = m.instance.device_cfg;
+            const mcfg_vid: u16 = @intCast(mcfg.device.vid);
+            const mcfg_pid: u16 = @intCast(mcfg.device.pid);
+            const phys_match = std.mem.eql(u8, m.phys_key, phys);
+            const id_match = mcfg_vid == vid and mcfg_pid == pid;
+            std.log.debug("hotplug: suspended candidate vid={x:0>4} pid={x:0>4} phys_key=\"{s}\" new_phys=\"{s}\" phys_match={} id_match={}", .{
+                mcfg_vid, mcfg_pid, m.phys_key, phys, phys_match, id_match,
+            });
+            // Match by physical topology path (stable across sleep/wake)
+            // plus VID:PID so a different controller plugged into the same
+            // port starts a fresh instance instead of inheriting stale state.
+            if (!phys_match or !id_match) continue;
+
+            const new_devices = try self.allocator.alloc(DeviceIO, mcfg.device.interface.len);
+            var opened: usize = 0;
+            var new_devices_owned = true;
+            errdefer {
+                if (new_devices_owned) {
+                    for (new_devices[0..opened]) |dev| dev.close();
+                    self.allocator.free(new_devices);
+                }
+            }
+            for (mcfg.device.interface, 0..) |iface, idx| {
+                new_devices[idx] = opener(opener_ctx, self.allocator, iface, vid, pid) catch |err| {
+                    std.log.warn("rebind: open interface {d} failed: {}", .{ iface.id, err });
+                    for (new_devices[0..opened]) |dev| dev.close();
+                    self.allocator.free(new_devices);
+                    new_devices_owned = false;
+                    if (isTransientOpenError(err)) return error.HotplugTransient;
+                    std.log.warn("hotplug: suspended instance found but resume aborted: open failed", .{});
+                    return true;
+                };
+                opened += 1;
+            }
+
+            try m.instance.rebindDeviceIO(new_devices);
+            new_devices_owned = false;
+            self.allocator.free(new_devices);
+            rerunInitAfterRebind(m) catch |err| {
+                m.instance.closeDeviceIO();
+                std.log.warn("hotplug: suspended instance resume aborted: re-init failed: {}", .{err});
+                if (isTransientOpenError(err)) return error.HotplugTransient;
+                return true;
+            };
+
+            // Commit bookkeeping only after every fallible step succeeds. On
+            // failure `m.suspended`/`m.grace_deadline_ns` stay as-is and
+            // physical fds are closed so a later ADD can try a fresh rebind.
+            self.finalizeRebind(m, devname, phys) catch |err| {
+                m.instance.closeDeviceIO();
+                std.log.warn("hotplug: suspended instance resume aborted: {}", .{err});
+                if (err == error.OutOfMemory) return err;
+                return true;
+            };
+            std.log.info("hotplug: resumed suspended instance (phys_key/VID/PID match) for {s}", .{devname});
+            std.log.info("device resumed: \"{s}\" {s}", .{ mcfg.device.name, devname });
+            return true;
+        }
+
+        return false;
     }
 };
 
@@ -2253,6 +2320,27 @@ const FailWriteDeviceIO = struct {
     }
 
     fn close(_: *anyopaque) void {}
+};
+
+const TestRebindOpenCtx = struct {
+    devices: []DeviceIO,
+    next: usize = 0,
+    fail: ?anyerror = null,
+
+    fn open(
+        ptr: *anyopaque,
+        _: std.mem.Allocator,
+        _: config_device.InterfaceConfig,
+        _: u16,
+        _: u16,
+    ) !DeviceIO {
+        const self: *TestRebindOpenCtx = @ptrCast(@alignCast(ptr));
+        if (self.fail) |err| return err;
+        if (self.next >= self.devices.len) return error.TestNoDevice;
+        const dev = self.devices[self.next];
+        self.next += 1;
+        return dev;
+    }
 };
 
 fn makeTestInstance(
@@ -3159,7 +3247,7 @@ test "supervisor: Supervisor: suspend preserves instance, resume rebinds device 
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
     var new_devs = [_]DeviceIO{mock_b.deviceIO()};
-    inst_ptr.rebindDeviceIO(&new_devs);
+    try inst_ptr.rebindDeviceIO(&new_devs);
     sup.managed.items[0].suspended = false;
 
     const dn = try allocator.dupe(u8, "hidraw5");
@@ -3181,6 +3269,286 @@ test "supervisor: Supervisor: suspend preserves instance, resume rebinds device 
         sup.stopAll();
         sup.deinit();
     }
+}
+
+test "supervisor: suspended hotplug rebind helper resumes through production transaction" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+    const inst_ptr = sup.managed.items[0].instance;
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var new_devs = [_]DeviceIO{mock_b.deviceIO()};
+    var opener = TestRebindOpenCtx{ .devices = &new_devs };
+    try testing.expect(try sup.tryResumeSuspendedInstance(
+        "hidraw5",
+        "usb-1-1",
+        1,
+        2,
+        &opener,
+        TestRebindOpenCtx.open,
+    ));
+
+    try testing.expectEqual(@as(usize, 1), opener.next);
+    try testing.expectEqual(inst_ptr, sup.managed.items[0].instance);
+    try testing.expect(!sup.managed.items[0].suspended);
+    try testing.expectEqual(@as(?u64, null), sup.managed.items[0].grace_deadline_ns);
+    try testing.expect(original_deadline > 0);
+    try testing.expectEqualStrings("hidraw5", sup.managed.items[0].devname.?);
+    try testing.expect(sup.devname_map.contains("hidraw5"));
+    try testing.expectEqual(mock_b.deviceIO().pollfd().fd, inst_ptr.devices[0].pollfd().fd);
+}
+
+test "supervisor: suspended hotplug rebind helper ignores same phys with different VID/PID" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var no_devices = [_]DeviceIO{};
+    var opener = TestRebindOpenCtx{ .devices = &no_devices };
+    try testing.expect(!try sup.tryResumeSuspendedInstance(
+        "hidraw5",
+        "usb-1-1",
+        9,
+        9,
+        &opener,
+        TestRebindOpenCtx.open,
+    ));
+
+    try testing.expectEqual(@as(usize, 0), opener.next);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), sup.managed.items[0].devname);
+    try testing.expect(!sup.devname_map.contains("hidraw5"));
+}
+
+test "supervisor: fresh hotplug attach replaces suspended entry with different VID/PID on same phys" {
+    const allocator = testing.allocator;
+
+    const parsed_old = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_old.deinit();
+
+    const parsed_new = try device_mod.parseString(allocator,
+        \\[device]
+        \\name = "Replacement"
+        \\vid = 9
+        \\pid = 9
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 3
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\left_x = { offset = 1, type = "i16le" }
+    );
+    defer parsed_new.deinit();
+
+    var mock_old = try MockDeviceIO.init(allocator, &.{});
+    defer mock_old.deinit();
+    var mock_new = try MockDeviceIO.init(allocator, &.{});
+    defer mock_new.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    const old_inst = try makeTestInstance(allocator, &mock_old, &parsed_old.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", old_inst, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+
+    const new_inst = try makeTestInstance(allocator, &mock_new, &parsed_new.value);
+    var new_attached = false;
+    defer if (!new_attached) {
+        new_inst.deinit();
+        allocator.destroy(new_inst);
+    };
+    new_attached = try sup.attachWithInstanceResult("hidraw5", "usb-1-1", new_inst, null);
+
+    try testing.expect(new_attached);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expectEqual(new_inst, sup.managed.items[0].instance);
+    try testing.expect(!sup.managed.items[0].suspended);
+    try testing.expectEqual(@as(i64, 9), sup.managed.items[0].instance.device_cfg.device.vid);
+    try testing.expectEqual(@as(i64, 9), sup.managed.items[0].instance.device_cfg.device.pid);
+    try testing.expectEqualStrings("hidraw5", sup.managed.items[0].devname.?);
+    try testing.expect(sup.devname_map.contains("hidraw5"));
+}
+
+test "supervisor: suspended hotplug rebind helper propagates allocation failure" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var no_devices = [_]DeviceIO{};
+    var opener = TestRebindOpenCtx{ .devices = &no_devices };
+    const result = blk: {
+        const real_alloc = sup.allocator;
+        var failing_alloc = testing.FailingAllocator.init(real_alloc, .{ .fail_index = 0 });
+        sup.allocator = failing_alloc.allocator();
+        defer sup.allocator = real_alloc;
+        break :blk sup.tryResumeSuspendedInstance(
+            "hidraw5",
+            "usb-1-1",
+            1,
+            2,
+            &opener,
+            TestRebindOpenCtx.open,
+        );
+    };
+
+    try testing.expectError(error.OutOfMemory, result);
+    try testing.expectEqual(@as(usize, 0), opener.next);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), sup.managed.items[0].devname);
+    try testing.expect(!sup.devname_map.contains("hidraw5"));
+}
+
+test "supervisor: suspended hotplug rebind helper propagates finalize allocation failure" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var new_devs = [_]DeviceIO{mock_b.deviceIO()};
+    var opener = TestRebindOpenCtx{ .devices = &new_devs };
+    const result = blk: {
+        const real_alloc = sup.allocator;
+        var failing_alloc = testing.FailingAllocator.init(real_alloc, .{ .fail_index = 1 });
+        sup.allocator = failing_alloc.allocator();
+        defer sup.allocator = real_alloc;
+        break :blk sup.tryResumeSuspendedInstance(
+            "hidraw5",
+            "usb-1-1",
+            1,
+            2,
+            &opener,
+            TestRebindOpenCtx.open,
+        );
+    };
+
+    try testing.expectError(error.OutOfMemory, result);
+    try testing.expectEqual(@as(usize, 1), opener.next);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), sup.managed.items[0].devname);
+    try testing.expect(!sup.devname_map.contains("hidraw5"));
+}
+
+test "supervisor: suspended hotplug rebind helper closes failed reinit fds and preserves grace" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, init_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+    sup.suspend_grace_sec = 5;
+    sup.test_now_override_ns = 10 * std.time.ns_per_s;
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    sup.detach("hidraw3");
+    try testing.expect(sup.managed.items[0].suspended);
+    const original_deadline = sup.managed.items[0].grace_deadline_ns.?;
+
+    var failing = FailWriteDeviceIO{};
+    var new_devs = [_]DeviceIO{failing.deviceIO()};
+    var opener = TestRebindOpenCtx{ .devices = &new_devs };
+    try testing.expectError(error.HotplugTransient, sup.tryResumeSuspendedInstance(
+        "hidraw5",
+        "usb-1-1",
+        1,
+        2,
+        &opener,
+        TestRebindOpenCtx.open,
+    ));
+
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expectEqual(original_deadline, sup.managed.items[0].grace_deadline_ns.?);
+    try testing.expectEqual(@as(?[]const u8, null), sup.managed.items[0].devname);
+    try testing.expect(!sup.devname_map.contains("hidraw5"));
+    try testing.expectEqual(@as(posix.fd_t, -1), sup.managed.items[0].instance.devices[0].pollfd().fd);
 }
 
 test "supervisor: failed re-init after suspended rebind preserves grace state" {
@@ -3209,7 +3577,7 @@ test "supervisor: failed re-init after suspended rebind preserves grace state" {
     var failing = FailWriteDeviceIO{};
     var new_devs = [_]DeviceIO{failing.deviceIO()};
     const m = &sup.managed.items[0];
-    m.instance.rebindDeviceIO(&new_devs);
+    try m.instance.rebindDeviceIO(&new_devs);
     try testing.expectError(DeviceIO.WriteError.Io, Supervisor.rerunInitAfterRebind(m));
 
     try testing.expect(m.suspended);
@@ -3245,7 +3613,7 @@ test "supervisor: failed feature-report re-init after suspended rebind preserves
     var failing = FailWriteDeviceIO{};
     var new_devs = [_]DeviceIO{failing.deviceIO()};
     const m = &sup.managed.items[0];
-    m.instance.rebindDeviceIO(&new_devs);
+    try m.instance.rebindDeviceIO(&new_devs);
     try testing.expectError(DeviceIO.WriteError.Io, Supervisor.rerunInitAfterRebind(m));
 
     try testing.expect(m.suspended);

@@ -114,3 +114,4 @@ zig build check-all
 | `-Dlibusb=false` | `true` | Disable libusb-1.0 linkage (hidraw-only path) |
 | `-Dwasm=false` | `true` | Disable WASM plugin runtime |
 | `-Dtest-coverage=true` | `false` | Run tests with kcov coverage |
+| `-Dtest-filter=<text>` | unset | Run only Zig tests whose names contain `<text>` across test targets |
