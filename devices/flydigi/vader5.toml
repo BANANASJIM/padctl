@@ -102,8 +102,11 @@ Z      = "BTN_TRIGGER_HAPPY2"
 LM     = "BTN_TRIGGER_HAPPY3"
 RM     = "BTN_TRIGGER_HAPPY4"
 M1     = "BTN_TRIGGER_HAPPY5"
-M2     = "BTN_TRIGGER_HAPPY6"
-M3     = "BTN_TRIGGER_HAPPY7"
+# Steam labels SDL paddle slots in Xbox Elite order: usage 22 is P3 and
+# usage 23 is P2. Keep M2/M3 swapped at the evdev-code level so Vader M2
+# appears as the expected lower-right paddle instead of P3.
+M2     = "BTN_TRIGGER_HAPPY7"
+M3     = "BTN_TRIGGER_HAPPY6"
 M4     = "BTN_TRIGGER_HAPPY8"
 O      = "BTN_TRIGGER_HAPPY9"
 
