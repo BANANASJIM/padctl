@@ -24,169 +24,184 @@ offset | bytes          | item
 
                                  === 1. Buttons (Button Page) ===
 0x0008 | 05 09          | Usage Page (Button)
-0x000A | 19 01          | Usage Minimum (Button 1)
-0x000C | 29 11          | Usage Maximum (Button 17)
-0x000E | 15 00          | Logical Minimum (0)
-0x0010 | 25 01          | Logical Maximum (1)
-0x0012 | 75 01          | Report Size (1 bit)
-0x0014 | 95 11          | Report Count (17 bits) — matches steam-deck.toml [output.buttons] count
-0x0016 | 81 02          | Input (Data, Var, Abs) — the button bitmap
-0x0018 | 75 01          | Report Size (1 bit)
-0x001A | 95 07          | Report Count (7 bits) — padding to realign to byte boundary (17 + 7 = 24 = 3 bytes)
-0x001C | 81 03          | Input (Const, Var, Abs) — padding
+0x000A | 09 01          | Usage (Button 1)  | A / BTN_SOUTH
+0x000C | 09 02          | Usage (Button 2)  | B / BTN_EAST
+0x000E | 09 05          | Usage (Button 5)  | X / BTN_WEST
+0x0010 | 09 04          | Usage (Button 4)  | Y / BTN_NORTH
+0x0012 | 09 07          | Usage (Button 7)  | LB / BTN_TL
+0x0014 | 09 08          | Usage (Button 8)  | RB / BTN_TR
+0x0016 | 09 09          | Usage (Button 9)  | LT / BTN_TL2
+0x0018 | 09 0A          | Usage (Button 10) | RT / BTN_TR2
+0x001A | 09 0C          | Usage (Button 12) | Start / BTN_START
+0x001C | 09 0B          | Usage (Button 11) | Select / BTN_SELECT
+0x001E | 09 0D          | Usage (Button 13) | Home / BTN_MODE
+0x0020 | 09 0E          | Usage (Button 14) | LS / BTN_THUMBL
+0x0022 | 09 0F          | Usage (Button 15) | RS / BTN_THUMBR
+0x0024 | 09 11          | Usage (Button 17) | M1 / BTN_TRIGGER_HAPPY1
+0x0026 | 09 12          | Usage (Button 18) | M2 / BTN_TRIGGER_HAPPY2
+0x0028 | 09 13          | Usage (Button 19) | M3 / BTN_TRIGGER_HAPPY3
+0x002A | 09 14          | Usage (Button 20) | M4 / BTN_TRIGGER_HAPPY4
+0x002C | 15 00          | Logical Minimum (0)
+0x002E | 25 01          | Logical Maximum (1)
+0x0030 | 75 01          | Report Size (1 bit)
+0x0032 | 95 11          | Report Count (17 bits) — matches steam-deck.toml [output.buttons] count
+0x0034 | 81 02          | Input (Data, Var, Abs) — the button bitmap
+0x0036 | 75 01          | Report Size (1 bit)
+0x0038 | 95 07          | Report Count (7 bits) — padding to realign to byte boundary (17 + 7 = 24 = 3 bytes)
+0x003A | 81 03          | Input (Const, Var, Abs) — padding
 
                                  === 2. Hat switch (dpad) ===
-0x001E | 05 01          | Usage Page (Generic Desktop)
-0x0020 | 09 39          | Usage (Hat switch)
-0x0022 | 15 00          | Logical Minimum (0)
-0x0024 | 25 07          | Logical Maximum (7) — 8 directions, 8 = null
-0x0026 | 35 00          | Physical Minimum (0)
-0x0028 | 46 3B 01       | Physical Maximum (315 degrees)
-0x002B | 65 14          | Unit (Eng Rot: Degrees)
-0x002D | 75 04          | Report Size (4 bits)
-0x002F | 95 01          | Report Count (1)
-0x0031 | 81 42          | Input (Data, Var, Abs, Null) — 0x42: Null bit set, allows invalid=8
-0x0033 | 65 00          | Unit (None) — reset unit scope so following axes aren't degrees
-0x0035 | 75 04          | Report Size (4 bits)
-0x0037 | 95 01          | Report Count (1)
-0x0039 | 81 03          | Input (Const, Var, Abs) — 4-bit padding to realign to byte boundary
+0x003C | 05 01          | Usage Page (Generic Desktop)
+0x003E | 09 39          | Usage (Hat switch)
+0x0040 | 15 00          | Logical Minimum (0)
+0x0042 | 25 07          | Logical Maximum (7) — 8 directions, 8 = null
+0x0044 | 35 00          | Physical Minimum (0)
+0x0046 | 46 3B 01       | Physical Maximum (315 degrees)
+0x0049 | 65 14          | Unit (Eng Rot: Degrees)
+0x004B | 75 04          | Report Size (4 bits)
+0x004D | 95 01          | Report Count (1)
+0x004F | 81 42          | Input (Data, Var, Abs, Null) — 0x42: Null bit set, allows invalid=8
+0x0051 | 65 00          | Unit (None) — reset unit scope so following axes aren't degrees
+0x0053 | 75 04          | Report Size (4 bits)
+0x0055 | 95 01          | Report Count (1)
+0x0057 | 81 03          | Input (Const, Var, Abs) — 4-bit padding to realign to byte boundary
 
                                  === 3. Left stick X ===
-0x003B | 05 01          | Usage Page (Generic Desktop)
-0x003D | 09 30          | Usage (X)
-0x003F | 16 00 80       | Logical Minimum (-32768)
-0x0042 | 26 FF 7F       | Logical Maximum (32767)
-0x0045 | 75 10          | Report Size (16 bits)
-0x0047 | 95 01          | Report Count (1)
-0x0049 | 81 02          | Input (Data, Var, Abs)
+0x0059 | 05 01          | Usage Page (Generic Desktop)
+0x005B | 09 30          | Usage (X)
+0x005D | 16 00 80       | Logical Minimum (-32768)
+0x0060 | 26 FF 7F       | Logical Maximum (32767)
+0x0063 | 75 10          | Report Size (16 bits)
+0x0065 | 95 01          | Report Count (1)
+0x0067 | 81 02          | Input (Data, Var, Abs)
 
                                  === 4. Left stick Y ===
-0x004B | 05 01          | Usage Page (Generic Desktop)
-0x004D | 09 31          | Usage (Y)
-0x004F | 16 00 80       | Logical Minimum (-32768)
-0x0052 | 26 FF 7F       | Logical Maximum (32767)
-0x0055 | 75 10          | Report Size (16 bits)
-0x0057 | 95 01          | Report Count (1)
-0x0059 | 81 02          | Input (Data, Var, Abs)
+0x0069 | 05 01          | Usage Page (Generic Desktop)
+0x006B | 09 31          | Usage (Y)
+0x006D | 16 00 80       | Logical Minimum (-32768)
+0x0070 | 26 FF 7F       | Logical Maximum (32767)
+0x0073 | 75 10          | Report Size (16 bits)
+0x0075 | 95 01          | Report Count (1)
+0x0077 | 81 02          | Input (Data, Var, Abs)
 
                                  === 5. Right stick X ===
-0x005B | 05 01          | Usage Page (Generic Desktop)
-0x005D | 09 33          | Usage (Rx)
-0x005F | 16 00 80       | Logical Minimum (-32768)
-0x0062 | 26 FF 7F       | Logical Maximum (32767)
-0x0065 | 75 10          | Report Size (16 bits)
-0x0067 | 95 01          | Report Count (1)
-0x0069 | 81 02          | Input (Data, Var, Abs)
+0x0079 | 05 01          | Usage Page (Generic Desktop)
+0x007B | 09 33          | Usage (Rx)
+0x007D | 16 00 80       | Logical Minimum (-32768)
+0x0080 | 26 FF 7F       | Logical Maximum (32767)
+0x0083 | 75 10          | Report Size (16 bits)
+0x0085 | 95 01          | Report Count (1)
+0x0087 | 81 02          | Input (Data, Var, Abs)
 
                                  === 6. Right stick Y ===
-0x006B | 05 01          | Usage Page (Generic Desktop)
-0x006D | 09 34          | Usage (Ry)
-0x006F | 16 00 80       | Logical Minimum (-32768)
-0x0072 | 26 FF 7F       | Logical Maximum (32767)
-0x0075 | 75 10          | Report Size (16 bits)
-0x0077 | 95 01          | Report Count (1)
-0x0079 | 81 02          | Input (Data, Var, Abs)
-
-                                 === 7. Left trigger (Z) ===
-0x007B | 05 01          | Usage Page (Generic Desktop)
-0x007D | 09 32          | Usage (Z)
-0x007F | 15 00          | Logical Minimum (0)
-0x0081 | 26 FF 00       | Logical Maximum (255)
-0x0084 | 75 08          | Report Size (8 bits)
-0x0086 | 95 01          | Report Count (1)
-0x0088 | 81 02          | Input (Data, Var, Abs)
-
-                                 === 8. Right trigger (Rz) ===
-0x008A | 05 01          | Usage Page (Generic Desktop)
-0x008C | 09 35          | Usage (Rz)
-0x008E | 15 00          | Logical Minimum (0)
-0x0090 | 26 FF 00       | Logical Maximum (255)
-0x0093 | 75 08          | Report Size (8 bits)
+0x0089 | 05 01          | Usage Page (Generic Desktop)
+0x008B | 09 34          | Usage (Ry)
+0x008D | 16 00 80       | Logical Minimum (-32768)
+0x0090 | 26 FF 7F       | Logical Maximum (32767)
+0x0093 | 75 10          | Report Size (16 bits)
 0x0095 | 95 01          | Report Count (1)
 0x0097 | 81 02          | Input (Data, Var, Abs)
 
+                                 === 7. Left trigger (Z) ===
+0x0099 | 05 01          | Usage Page (Generic Desktop)
+0x009B | 09 32          | Usage (Z)
+0x009D | 15 00          | Logical Minimum (0)
+0x009F | 26 FF 00       | Logical Maximum (255)
+0x00A2 | 75 08          | Report Size (8 bits)
+0x00A4 | 95 01          | Report Count (1)
+0x00A6 | 81 02          | Input (Data, Var, Abs)
+
+                                 === 8. Right trigger (Rz) ===
+0x00A8 | 05 01          | Usage Page (Generic Desktop)
+0x00AA | 09 35          | Usage (Rz)
+0x00AC | 15 00          | Logical Minimum (0)
+0x00AE | 26 FF 00       | Logical Maximum (255)
+0x00B1 | 75 08          | Report Size (8 bits)
+0x00B3 | 95 01          | Report Count (1)
+0x00B5 | 81 02          | Input (Data, Var, Abs)
+
                                  === 9. Touchpad (Logical Collection, two fingers) ===
-0x0099 | 05 0D          | Usage Page (Digitizer)
-0x009B | 09 05          | Usage (Touch Pad)
-0x009D | A1 02          | Collection (Logical)
+0x00B7 | 05 0D          | Usage Page (Digitizer)
+0x00B9 | 09 05          | Usage (Touch Pad)
+0x00BB | A1 02          | Collection (Logical)
 
                                  === Finger 0 ===
-0x009F | 09 22          | Usage (Finger)
-0x00A1 | A1 02          | Collection (Logical)
-0x00A3 | 09 42          | Usage (Tip Switch)
-0x00A5 | 15 00          | Logical Minimum (0)
-0x00A7 | 25 01          | Logical Maximum (1)
-0x00A9 | 75 01          | Report Size (1 bit)
-0x00AB | 95 01          | Report Count (1)
-0x00AD | 81 02          | Input (Data, Var, Abs) — tip switch (contact state)
-0x00AF | 75 07          | Report Size (7 bits)
-0x00B1 | 95 01          | Report Count (1)
-0x00B3 | 81 03          | Input (Const, Var, Abs) — padding
-0x00B5 | 05 01          | Usage Page (Generic Desktop)
-0x00B7 | 09 30          | Usage (X)
-0x00B9 | 16 00 80       | Logical Minimum (-32768)
-0x00BC | 26 FF 7F       | Logical Maximum (32767)
-0x00BF | 75 10          | Report Size (16 bits)
-0x00C1 | 95 01          | Report Count (1)
-0x00C3 | 81 02          | Input (Data, Var, Abs)
-0x00C5 | 09 31          | Usage (Y)
-0x00C7 | 16 00 80       | Logical Minimum (-32768)
-0x00CA | 26 FF 7F       | Logical Maximum (32767)
-0x00CD | 75 10          | Report Size (16 bits)
+0x00BD | 09 22          | Usage (Finger)
+0x00BF | A1 02          | Collection (Logical)
+0x00C1 | 09 42          | Usage (Tip Switch)
+0x00C3 | 15 00          | Logical Minimum (0)
+0x00C5 | 25 01          | Logical Maximum (1)
+0x00C7 | 75 01          | Report Size (1 bit)
+0x00C9 | 95 01          | Report Count (1)
+0x00CB | 81 02          | Input (Data, Var, Abs) — tip switch (contact state)
+0x00CD | 75 07          | Report Size (7 bits)
 0x00CF | 95 01          | Report Count (1)
-0x00D1 | 81 02          | Input (Data, Var, Abs)
-0x00D3 | 05 0D          | Usage Page (Digitizer)
-0x00D5 | C0             | End Collection (Finger 0)
+0x00D1 | 81 03          | Input (Const, Var, Abs) — padding
+0x00D3 | 05 01          | Usage Page (Generic Desktop)
+0x00D5 | 09 30          | Usage (X)
+0x00D7 | 16 00 80       | Logical Minimum (-32768)
+0x00DA | 26 FF 7F       | Logical Maximum (32767)
+0x00DD | 75 10          | Report Size (16 bits)
+0x00DF | 95 01          | Report Count (1)
+0x00E1 | 81 02          | Input (Data, Var, Abs)
+0x00E3 | 09 31          | Usage (Y)
+0x00E5 | 16 00 80       | Logical Minimum (-32768)
+0x00E8 | 26 FF 7F       | Logical Maximum (32767)
+0x00EB | 75 10          | Report Size (16 bits)
+0x00ED | 95 01          | Report Count (1)
+0x00EF | 81 02          | Input (Data, Var, Abs)
+0x00F1 | 05 0D          | Usage Page (Digitizer)
+0x00F3 | C0             | End Collection (Finger 0)
 
                                  === Finger 1 ===
-0x00D6 | 09 22          | Usage (Finger)
-0x00D8 | A1 02          | Collection (Logical)
-0x00DA | 09 42          | Usage (Tip Switch)
-0x00DC | 15 00          | Logical Minimum (0)
-0x00DE | 25 01          | Logical Maximum (1)
-0x00E0 | 75 01          | Report Size (1 bit)
-0x00E2 | 95 01          | Report Count (1)
-0x00E4 | 81 02          | Input (Data, Var, Abs)
-0x00E6 | 75 07          | Report Size (7 bits)
-0x00E8 | 95 01          | Report Count (1)
-0x00EA | 81 03          | Input (Const, Var, Abs) — padding
-0x00EC | 05 01          | Usage Page (Generic Desktop)
-0x00EE | 09 30          | Usage (X)
-0x00F0 | 16 00 80       | Logical Minimum (-32768)
-0x00F3 | 26 FF 7F       | Logical Maximum (32767)
-0x00F6 | 75 10          | Report Size (16 bits)
-0x00F8 | 95 01          | Report Count (1)
-0x00FA | 81 02          | Input (Data, Var, Abs)
-0x00FC | 09 31          | Usage (Y)
-0x00FE | 16 00 80       | Logical Minimum (-32768)
-0x0101 | 26 FF 7F       | Logical Maximum (32767)
-0x0104 | 75 10          | Report Size (16 bits)
+0x00F4 | 09 22          | Usage (Finger)
+0x00F6 | A1 02          | Collection (Logical)
+0x00F8 | 09 42          | Usage (Tip Switch)
+0x00FA | 15 00          | Logical Minimum (0)
+0x00FC | 25 01          | Logical Maximum (1)
+0x00FE | 75 01          | Report Size (1 bit)
+0x0100 | 95 01          | Report Count (1)
+0x0102 | 81 02          | Input (Data, Var, Abs)
+0x0104 | 75 07          | Report Size (7 bits)
 0x0106 | 95 01          | Report Count (1)
-0x0108 | 81 02          | Input (Data, Var, Abs)
-0x010A | 05 0D          | Usage Page (Digitizer)
-0x010C | C0             | End Collection (Finger 1)
-0x010D | C0             | End Collection (Touch Pad)
+0x0108 | 81 03          | Input (Const, Var, Abs) — padding
+0x010A | 05 01          | Usage Page (Generic Desktop)
+0x010C | 09 30          | Usage (X)
+0x010E | 16 00 80       | Logical Minimum (-32768)
+0x0111 | 26 FF 7F       | Logical Maximum (32767)
+0x0114 | 75 10          | Report Size (16 bits)
+0x0116 | 95 01          | Report Count (1)
+0x0118 | 81 02          | Input (Data, Var, Abs)
+0x011A | 09 31          | Usage (Y)
+0x011C | 16 00 80       | Logical Minimum (-32768)
+0x011F | 26 FF 7F       | Logical Maximum (32767)
+0x0122 | 75 10          | Report Size (16 bits)
+0x0124 | 95 01          | Report Count (1)
+0x0126 | 81 02          | Input (Data, Var, Abs)
+0x0128 | 05 0D          | Usage Page (Digitizer)
+0x012A | C0             | End Collection (Finger 1)
+0x012B | C0             | End Collection (Touch Pad)
 
                                  === 10. Rumble output report (Vendor-Defined) ===
-0x010E | 06 00 FF       | Usage Page (Vendor-Defined 0xFF00)
-0x0111 | 85 02          | Report ID (2) — rumble output report
-0x0113 | 09 01          | Usage (Vendor Usage 1)
-0x0115 | 15 00          | Logical Minimum (0)
-0x0117 | 26 FF 00       | Logical Maximum (255)
-0x011A | 75 08          | Report Size (8 bits)
-0x011C | 95 02          | Report Count (2) — strong + weak magnitudes
-0x011E | 91 02          | Output (Data, Var, Abs)
+0x012C | 06 00 FF       | Usage Page (Vendor-Defined 0xFF00)
+0x012F | 85 02          | Report ID (2) — rumble output report
+0x0131 | 09 01          | Usage (Vendor Usage 1)
+0x0133 | 15 00          | Logical Minimum (0)
+0x0135 | 26 FF 00       | Logical Maximum (255)
+0x0138 | 75 08          | Report Size (8 bits)
+0x013A | 95 02          | Report Count (2) — strong + weak magnitudes
+0x013C | 91 02          | Output (Data, Var, Abs)
 
                                  === End Application Collection ===
-0x0120 | C0             | End Collection
+0x013E | C0             | End Collection
 
 --------------------------------------------------------------------------
-Total bytes: 0x121 = 289
+Total bytes: 0x13F = 319
 
 Invariants validated by the structural test:
   * Collection opens == closes (each A1 has a matching C0)
   * Exactly one Report ID appears on the input side (0x85 0x01) — the
-    0x85 0x02 at 0x0111 names the rumble OUTPUT report and is expected.
+    0x85 0x02 at 0x012F names the rumble OUTPUT report and is expected.
   * Prologue is Usage Page (Generic Desktop) + Usage (Game Pad) +
     Collection (Application).
   * Sum of Report Size × Report Count across all Input items is a
