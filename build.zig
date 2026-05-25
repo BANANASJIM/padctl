@@ -171,6 +171,11 @@ pub fn build(b: *std.Build) void {
     if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     test_step.dependOn(&b.addRunArtifact(capture_tests).step);
 
+    const bazzite_setup_tests = b.addSystemCommand(&.{ "bash", "scripts/test-bazzite-setup.sh" });
+    const bazzite_setup_test_step = b.step("test-bazzite-setup", "Run Bazzite setup script regression tests");
+    bazzite_setup_test_step.dependOn(&bazzite_setup_tests.step);
+    test_step.dependOn(&bazzite_setup_tests.step);
+
     // cli_smoke: run the just-built artifact, not a possibly stale zig-out binary.
     const smoke_version = b.addRunArtifact(exe);
     smoke_version.addArg("--version");
