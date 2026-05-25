@@ -223,17 +223,13 @@ pub const UhidDescriptorBuilder = struct {
         var emitted_any_input: bool = false;
 
         // --- 1. Face buttons (Button Page) ---
-        const button_count: u8 = if (out.buttons) |b| blk: {
-            const n = b.map.count();
-            if (n > 64) break :blk 64;
-            break :blk @intCast(n);
-        } else 0;
+        const button_count = buttonCount(out);
         if (button_count > 0) {
             // Build per-button Usage array in ButtonId enum order.
-            // Buttons with a direct BTN_* → Usage mapping get their canonical
-            // Usage; others (e.g. BTN_TRIGGER_HAPPY) get the lowest free Usage
-            // so the descriptor stays valid and ≤64 entries.
-            var button_usages: [64]u8 = undefined;
+            // Buttons with a Linux Game Pad collection mapping get their
+            // canonical Usage; unsupported BTN_* codes get the lowest free
+            // Usage so the descriptor stays valid and <=64 entries.
+            var button_usages = [_]u8{0} ** 64;
             var occupied = std.bit_set.IntegerBitSet(65).initEmpty();
             {
                 const buttons = out.buttons.?;
@@ -1137,18 +1133,21 @@ pub const MAX_REPORT_BYTES: usize = 32;
 
 pub const EncodeError = error{ReportTooLong};
 
-/// Maps a Linux BTN_* evdev code to its HID Button Page Usage number.
-/// The kernel maps Button Page usages to evdev codes in four groups of 16:
-///   Usage  1-16 → BTN_GAMEPAD (0x130-0x13F)
-///   Usage 17-32 → BTN_MISC    (0x100-0x10F)
-///   Usage 33-48 → BTN_MOUSE   (0x110-0x11F)
-///   Usage 49-64 → BTN_JOYSTICK(0x120-0x12F)
-/// Returns null for codes outside these ranges (e.g. BTN_TRIGGER_HAPPY).
+/// Maps a Linux BTN_* evdev code to its HID Button Page Usage number for the
+/// top-level Generic Desktop `Game Pad` collection emitted by this builder.
+/// Linux maps usages 1..16 to `BTN_GAMEPAD + usage - 1`; usages above 16 use
+/// the trigger-happy range, so usage 21 resolves to `BTN_TRIGGER_HAPPY5`.
 fn btnCodeToHidUsage(code: u16) ?u8 {
-    if (code >= 0x130 and code <= 0x13F) return @intCast(code - 0x130 + 1);
-    if (code >= 0x100 and code <= 0x10F) return @intCast(code - 0x100 + 17);
-    if (code >= 0x110 and code <= 0x11F) return @intCast(code - 0x110 + 33);
-    if (code >= 0x120 and code <= 0x12F) return @intCast(code - 0x120 + 49);
+    const btn_gamepad: u16 = 0x130;
+    const btn_trigger_happy1: u16 = 0x2c0;
+    const btn_trigger_happy40: u16 = 0x2e7;
+
+    if (code >= btn_gamepad and code <= btn_gamepad + 0x0f) {
+        return @intCast(code - btn_gamepad + 1);
+    }
+    if (code >= btn_trigger_happy1 and code <= btn_trigger_happy40) {
+        return @intCast(code - btn_trigger_happy1 + 17);
+    }
     return null;
 }
 
@@ -1169,12 +1168,15 @@ fn buttonIdSlot(cfg: device.OutputConfig, bit_idx: u8) ?state_mod.ButtonId {
     return null;
 }
 
-/// Number of buttons the builder declares — mirrors the `map.count()` +
-/// 64-cap path in `buildFromOutput` so encoder and descriptor stay in sync.
+/// Number of known `ButtonId` entries the builder declares, in the same order
+/// `buttonIdSlot` uses to keep encoder and descriptor bit positions in sync.
 fn buttonCount(cfg: device.OutputConfig) u8 {
     const buttons = cfg.buttons orelse return 0;
-    const n = buttons.map.count();
-    return if (n > 64) 64 else @intCast(n);
+    var count: u8 = 0;
+    inline for (@typeInfo(state_mod.ButtonId).@"enum".fields) |f| {
+        if (buttons.map.contains(f.name)) count += 1;
+    }
+    return count;
 }
 
 fn axisWithCode(cfg: device.OutputConfig, code: []const u8) ?device.AxisConfig {
@@ -1336,6 +1338,25 @@ fn makeButtonsMap(allocator: std.mem.Allocator, entries: []const ButtonEntry) !t
     return .{ .map = map };
 }
 
+fn expectButtonUsages(desc: []const u8, expected: []const u8) !void {
+    var i: usize = 0;
+    while (i + 1 < desc.len) : (i += 1) {
+        if (desc[i] == 0x05 and desc[i + 1] == 0x09) {
+            var pos = i + 2;
+            for (expected) |usage| {
+                try testing.expect(pos + 1 < desc.len);
+                try testing.expectEqual(@as(u8, 0x09), desc[pos]);
+                try testing.expectEqual(usage, desc[pos + 1]);
+                pos += 2;
+            }
+            try testing.expect(pos < desc.len);
+            try testing.expectEqual(@as(u8, 0x15), desc[pos]);
+            return;
+        }
+    }
+    return error.MissingButtonUsagePage;
+}
+
 test "descriptor: empty config (no buttons, no axes, no touchpad) is rejected" {
     const alloc = testing.allocator;
     const out = device.OutputConfig{ .name = "empty" };
@@ -1384,6 +1405,67 @@ test "descriptor: minimal gamepad (2 buttons + 1 stick axis pair) produces valid
 
     // Reasonable size bounds.
     try testing.expect(desc.len < uhid.HID_MAX_DESCRIPTOR_SIZE);
+}
+
+test "descriptor: Game Pad button code mapper uses trigger-happy usages above 16" {
+    try testing.expectEqual(@as(?u8, 1), btnCodeToHidUsage(try input_codes.resolveBtnCode("BTN_SOUTH")));
+    try testing.expectEqual(@as(?u8, 16), btnCodeToHidUsage(0x13f));
+    try testing.expectEqual(@as(?u8, 17), btnCodeToHidUsage(try input_codes.resolveBtnCode("BTN_TRIGGER_HAPPY1")));
+    try testing.expectEqual(@as(?u8, 21), btnCodeToHidUsage(try input_codes.resolveBtnCode("BTN_TRIGGER_HAPPY5")));
+    try testing.expectEqual(@as(?u8, 24), btnCodeToHidUsage(try input_codes.resolveBtnCode("BTN_TRIGGER_HAPPY8")));
+    try testing.expectEqual(@as(?u8, 56), btnCodeToHidUsage(try input_codes.resolveBtnCode("BTN_TRIGGER_HAPPY40")));
+    try testing.expectEqual(@as(?u8, null), btnCodeToHidUsage(try input_codes.resolveBtnCode("BTN_0")));
+}
+
+test "descriptor: per-button usages preserve Xbox Elite paddle codes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "M1", .code = "BTN_TRIGGER_HAPPY5" },
+        .{ .name = "M2", .code = "BTN_TRIGGER_HAPPY6" },
+        .{ .name = "M3", .code = "BTN_TRIGGER_HAPPY7" },
+        .{ .name = "M4", .code = "BTN_TRIGGER_HAPPY8" },
+    });
+    const out = device.OutputConfig{ .name = "elite-paddles", .buttons = buttons };
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    try expectButtonUsages(desc, &.{ 21, 22, 23, 24 });
+}
+
+test "descriptor: unknown output button keys do not create undefined usage slots" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const buttons = try makeButtonsMap(a, &.{
+        .{ .name = "A", .code = "BTN_SOUTH" },
+        .{ .name = "NotAButtonId", .code = "BTN_TRIGGER_HAPPY5" },
+    });
+    const out = device.OutputConfig{ .name = "unknown-button-key", .buttons = buttons };
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(testing.allocator, out);
+    defer testing.allocator.free(desc);
+
+    try expectButtonUsages(desc, &.{1});
+}
+
+test "descriptor: Vader 5 paddles emit Xbox Elite trigger-happy usages" {
+    const alloc = testing.allocator;
+    const parsed = try device.parseFile(alloc, "devices/flydigi/vader5.toml");
+    defer parsed.deinit();
+    const out = parsed.value.output orelse return error.MissingOutputSection;
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(alloc, out);
+    defer alloc.free(desc);
+
+    try expectButtonUsages(desc, &.{
+        1,  2,  4,  5,  7,  8,  12, 11, 13, 14,
+        15, 21, 22, 23, 24, 17, 18, 19, 20, 25,
+    });
 }
 
 test "descriptor: button count padding rounds to byte boundary" {
