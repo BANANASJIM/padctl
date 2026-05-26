@@ -2,6 +2,7 @@ const std = @import("std");
 const macro_mod = @import("macro.zig");
 const remap = @import("remap.zig");
 const timer_queue_mod = @import("timer_queue.zig");
+const state_mod = @import("state.zig");
 
 const Macro = macro_mod.Macro;
 const MacroStep = macro_mod.MacroStep;
@@ -9,6 +10,30 @@ const aux_event_mod = @import("aux_event.zig");
 const AuxEventList = aux_event_mod.AuxEventList;
 const TimerQueue = timer_queue_mod.TimerQueue;
 const RemapTargetResolved = remap.RemapTargetResolved;
+const ButtonId = state_mod.ButtonId;
+
+/// Analog floor contributed by macros for LT/RT. Mapper merges this into
+/// emit_state.lt/rt via @max so a physical press always wins over the macro
+/// when stronger (issue #99 — digital BTN_TL2 alone is not seen by SDL/games).
+pub const AxisInjection = struct {
+    lt: u8 = 0,
+    rt: u8 = 0,
+};
+
+fn axisFloorOf(target: RemapTargetResolved) ?struct { lt: u8, rt: u8 } {
+    return switch (target) {
+        .gamepad_button => |b| switch (b) {
+            .LT => .{ .lt = 255, .rt = 0 },
+            .RT => .{ .lt = 0, .rt = 255 },
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn raiseAxis(dst: *u8, value: u8) void {
+    if (value > dst.*) dst.* = value;
+}
 
 pub const MacroPlayer = struct {
     macro: *const Macro,
@@ -17,6 +42,10 @@ pub const MacroPlayer = struct {
     timer_token: u32,
     trigger_src_idx: u6,
     held_gamepad_buttons: u64,
+    // Analog axis floor contributed by an outstanding `.down LT/RT` step,
+    // cleared by the matching `.up` or emitPendingReleases on cancel.
+    held_axis_lt: u8,
+    held_axis_rt: u8,
     // Deadline at which the next step becomes eligible. While now_ns is below
     // this, step() must yield the frame so per-poll Mapper.apply calls do not
     // race past delay= boundaries.
@@ -38,6 +67,8 @@ pub const MacroPlayer = struct {
             .timer_token = token,
             .trigger_src_idx = src_idx,
             .held_gamepad_buttons = 0,
+            .held_axis_lt = 0,
+            .held_axis_rt = 0,
             .next_step_eligible_at_ns = 0,
             .trigger_held = true,
             .awaiting_restart_at_ns = null,
@@ -51,14 +82,28 @@ pub const MacroPlayer = struct {
     ///   of a .gamepad_button target set or clear bits here.
     /// pending_tap_release: tap bits ORed by this frame; mapper clears them next frame
     ///   (same cadence as the remap tap path — see mapper.emitTapEvent).
+    /// axes: analog LT/RT floor for this frame (issue #99). `.tap` raises the
+    ///   floor for one frame; `.down`/`.up` flip the player's held-axis state
+    ///   which is re-asserted every frame until cancelled.
     pub fn step(
         self: *MacroPlayer,
         aux: *AuxEventList,
         queue: *TimerQueue,
         injected_buttons: *u64,
         pending_tap_release: *u64,
+        axes: *AxisInjection,
         now_ns: i128,
     ) !bool {
+        // Re-assert the held axis floor on every frame, even when the early
+        // returns below short-circuit step execution (delay window,
+        // pause_for_release). The same-frame `.up` path clears held_axis_*
+        // before its final raiseAxis at function exit, so a release wins over
+        // a stale floor.
+        defer {
+            raiseAxis(&axes.lt, self.held_axis_lt);
+            raiseAxis(&axes.rt, self.held_axis_rt);
+        }
+
         if (self.waiting_for_release) return false;
         // Prevent same-frame double-emit — only the macro timerfd expiry
         // advances state past a delay boundary.
@@ -80,14 +125,26 @@ pub const MacroPlayer = struct {
                 .tap => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
                     remap.applyTarget(target, .tap, aux, injected_buttons, pending_tap_release, null);
+                    if (axisFloorOf(target)) |f| {
+                        raiseAxis(&axes.lt, f.lt);
+                        raiseAxis(&axes.rt, f.rt);
+                    }
                 },
                 .down => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
                     remap.applyTarget(target, .press, aux, injected_buttons, null, &self.held_gamepad_buttons);
+                    if (axisFloorOf(target)) |f| {
+                        raiseAxis(&self.held_axis_lt, f.lt);
+                        raiseAxis(&self.held_axis_rt, f.rt);
+                    }
                 },
                 .up => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
                     remap.applyTarget(target, .release, aux, injected_buttons, null, &self.held_gamepad_buttons);
+                    if (axisFloorOf(target)) |f| {
+                        if (f.lt != 0) self.held_axis_lt = 0;
+                        if (f.rt != 0) self.held_axis_rt = 0;
+                    }
                 },
                 .delay => |ms| {
                     const deadline = now_ns + @as(i128, ms) * std.time.ns_per_ms;
@@ -171,6 +228,8 @@ pub const MacroPlayer = struct {
 
         injected_buttons.* &= ~self.held_gamepad_buttons;
         self.held_gamepad_buttons = 0;
+        self.held_axis_lt = 0;
+        self.held_axis_rt = 0;
     }
 };
 
@@ -195,6 +254,7 @@ const StepCtx = struct {
     queue: TimerQueue,
     injected: u64 = 0,
     tap_release: u64 = 0,
+    axes: AxisInjection = .{},
 
     fn init(allocator: std.mem.Allocator) StepCtx {
         return .{ .queue = dummyQueue(allocator) };
@@ -205,7 +265,7 @@ const StepCtx = struct {
     }
 
     fn step(self: *StepCtx, p: *MacroPlayer) !bool {
-        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release, 0);
+        return p.step(&self.aux, &self.queue, &self.injected, &self.tap_release, &self.axes, 0);
     }
 };
 
@@ -267,7 +327,7 @@ test "macro_player: delay arms timer queue returns not-done" {
     ctx.aux = .{};
     // now_ns must be past the delay deadline before step resumes.
     const after_delay: i128 = 50 * std.time.ns_per_ms + 1;
-    const done2 = try player.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, after_delay);
+    const done2 = try player.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len);
 }
@@ -373,7 +433,7 @@ test "macro_player: repeat_delay_ms — held trigger reschedules; release stops"
     const t0: i128 = 0;
 
     // First iteration: tap fires (press+release events), player not done, restart armed.
-    const done0 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0);
+    const done0 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, t0);
     try testing.expect(!done0);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len);
     try testing.expectEqual(@as(usize, 1), ctx.queue.heap.count());
@@ -381,21 +441,21 @@ test "macro_player: repeat_delay_ms — held trigger reschedules; release stops"
 
     // Mid-restart-window: must not advance.
     ctx.aux = .{};
-    const done_mid = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0 + 20 * ns_per_ms);
+    const done_mid = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, t0 + 20 * ns_per_ms);
     try testing.expect(!done_mid);
     try testing.expectEqual(@as(usize, 0), ctx.aux.len);
 
     // Restart deadline reached, trigger still held: second iteration fires.
     ctx.aux = .{};
     p.setTriggerHeld(true);
-    const done1 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0 + 50 * ns_per_ms);
+    const done1 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, t0 + 50 * ns_per_ms);
     try testing.expect(!done1);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len); // press + release of KEY_A again
 
     // Release trigger; reach next restart deadline → player completes (returns true).
     ctx.aux = .{};
     p.setTriggerHeld(false);
-    const done2 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, t0 + 100 * ns_per_ms + 1);
+    const done2 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, t0 + 100 * ns_per_ms + 1);
     try testing.expect(done2);
     try testing.expectEqual(@as(usize, 0), ctx.aux.len); // no further taps after release
 }
@@ -416,7 +476,7 @@ test "macro_player: repeat_delay_ms — release mid-iteration completes current 
     const ns_per_ms: i128 = std.time.ns_per_ms;
 
     // Frame 0: trigger held, first tap fires, then delay arms.
-    const done0 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, 0);
+    const done0 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, 0);
     try testing.expect(!done0);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len); // KEY_A press+release
 
@@ -427,7 +487,7 @@ test "macro_player: repeat_delay_ms — release mid-iteration completes current 
     // Delay expires: second tap fires AND end-of-steps reached. trigger_held=false
     // means the macro completes (returns true) — no restart armed.
     ctx.aux = .{};
-    const done1 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, 10 * ns_per_ms + 1);
+    const done1 = try p.step(&ctx.aux, &ctx.queue, &ctx.injected, &ctx.tap_release, &ctx.axes, 10 * ns_per_ms + 1);
     try testing.expect(done1);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len); // KEY_B press+release
     try testing.expect(p.awaiting_restart_at_ns == null);

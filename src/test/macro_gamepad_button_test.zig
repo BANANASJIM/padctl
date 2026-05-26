@@ -24,6 +24,7 @@ const ButtonId = state_mod.ButtonId;
 const MacroStep = macro_mod.MacroStep;
 const Macro = macro_mod.Macro;
 const MacroPlayer = macro_player_mod.MacroPlayer;
+const AxisInjection = macro_player_mod.AxisInjection;
 const TimerQueue = timer_queue_mod.TimerQueue;
 const AuxEventList = aux_event_mod.AuxEventList;
 
@@ -42,8 +43,9 @@ test "macro: tap LT sets LT bit and schedules release next frame" {
     defer q.deinit();
     var injected: u64 = 0;
     var tap_release: u64 = 0;
+    var axes = AxisInjection{};
 
-    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
+    const done = try player.step(&aux, &q, &injected, &tap_release, &axes, 0);
     try testing.expect(done);
     try testing.expectEqual(@as(usize, 0), aux.len);
     try testing.expectEqual(btnBit(.LT), injected & btnBit(.LT));
@@ -65,8 +67,9 @@ test "macro: down A then up A toggles A bit" {
     defer q.deinit();
     var injected: u64 = 0;
     var tap_release: u64 = 0;
+    var axes = AxisInjection{};
 
-    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
+    const done = try player.step(&aux, &q, &injected, &tap_release, &axes, 0);
     try testing.expect(done);
     // down + up in one step call → net-zero; tap_release should stay clean.
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.A));
@@ -84,15 +87,16 @@ test "macro: down A with delay holds A bit between frames" {
     defer q.deinit();
     var injected: u64 = 0;
     var tap_release: u64 = 0;
+    var axes = AxisInjection{};
 
-    const done1 = try player.step(&aux, &q, &injected, &tap_release, 0);
+    const done1 = try player.step(&aux, &q, &injected, &tap_release, &axes, 0);
     try testing.expect(!done1);
     try testing.expectEqual(btnBit(.A), injected & btnBit(.A));
 
     aux = .{};
     // now_ns must advance past the 10ms delay deadline before the step proceeds.
     const after_delay: i128 = 10 * std.time.ns_per_ms + 1;
-    const done2 = try player.step(&aux, &q, &injected, &tap_release, after_delay);
+    const done2 = try player.step(&aux, &q, &injected, &tap_release, &axes, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(u64, 0), injected & btnBit(.A));
 }
@@ -108,8 +112,9 @@ test "macro: down RT then cancel clears RT via emitPendingReleases" {
     defer q.deinit();
     var injected: u64 = 0;
     var tap_release: u64 = 0;
+    var axes = AxisInjection{};
 
-    _ = try player.step(&aux, &q, &injected, &tap_release, 0);
+    _ = try player.step(&aux, &q, &injected, &tap_release, &axes, 0);
     try testing.expectEqual(btnBit(.RT), injected & btnBit(.RT));
 
     // Simulate layer switch / macro cancel.
@@ -131,8 +136,9 @@ test "macro: tap mouse_left emits mouse_button aux events" {
     defer q.deinit();
     var injected: u64 = 0;
     var tap_release: u64 = 0;
+    var axes = AxisInjection{};
 
-    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
+    const done = try player.step(&aux, &q, &injected, &tap_release, &axes, 0);
     try testing.expect(done);
     try testing.expectEqual(@as(usize, 2), aux.len);
     switch (aux.get(0)) {
@@ -163,8 +169,9 @@ test "macro: unknown target name silently skipped" {
     defer q.deinit();
     var injected: u64 = 0;
     var tap_release: u64 = 0;
+    var axes = AxisInjection{};
 
-    const done = try player.step(&aux, &q, &injected, &tap_release, 0);
+    const done = try player.step(&aux, &q, &injected, &tap_release, &axes, 0);
     try testing.expect(done);
     // Unknown target produced nothing; KEY_A tap produced press+release.
     try testing.expectEqual(@as(usize, 2), aux.len);

@@ -574,6 +574,7 @@ pub const Mapper = struct {
         }
 
         var macro_tap_release: u64 = 0;
+        var macro_axes: macro_player_mod.AxisInjection = .{};
         var i: usize = 0;
         while (i < self.active_macros.items.len) {
             // Re-assert macro-held gamepad bits each frame; injected_buttons is reset
@@ -589,6 +590,7 @@ pub const Mapper = struct {
                 &self.timer_queue,
                 &self.injected_buttons,
                 &macro_tap_release,
+                &macro_axes,
                 now_ns,
             ) catch |err| blk: {
                 std.log.warn("macro step failed: {}", .{err});
@@ -608,6 +610,10 @@ pub const Mapper = struct {
         // assemble emit state
         var emit_state = self.state;
         emit_state.buttons = (self.state.buttons & ~self.suppressed_buttons) | self.injected_buttons;
+        // issue #99: macros driving LT/RT raise the analog axis floor; physical
+        // input still wins when the user presses harder than the macro.
+        if (macro_axes.lt > emit_state.lt) emit_state.lt = macro_axes.lt;
+        if (macro_axes.rt > emit_state.rt) emit_state.rt = macro_axes.rt;
         emit_state.synthesizeDpadAxes();
         if (suppress_dpad_hat) {
             emit_state.dpad_x = 0;
@@ -871,6 +877,9 @@ pub const Mapper = struct {
     pub fn onMacroTimerExpired(self: *Mapper, now_ns: i128) AuxEventList {
         var aux = AuxEventList{};
         var macro_tap_release: u64 = 0;
+        // Axis floor on timer-driven resume is discarded; the next Mapper.apply()
+        // frame re-walks active macros and recomputes from held_axis_*.
+        var macro_axes: macro_player_mod.AxisInjection = .{};
         var buf: [16]timer_queue_mod.Deadline = undefined;
         const expired = self.timer_queue.drainExpired(now_ns, &buf);
         for (expired) |d| {
@@ -893,6 +902,7 @@ pub const Mapper = struct {
                         &self.timer_queue,
                         &self.injected_buttons,
                         &macro_tap_release,
+                        &macro_axes,
                         now_ns,
                     ) catch |err| blk: {
                         std.log.warn("macro step failed: {}", .{err});

@@ -25,6 +25,7 @@ const ButtonId = state_mod.ButtonId;
 const MacroStep = macro_mod.MacroStep;
 const Macro = macro_mod.Macro;
 const MacroPlayer = macro_player_mod.MacroPlayer;
+const AxisInjection = macro_player_mod.AxisInjection;
 const TimerQueue = timer_queue_mod.TimerQueue;
 
 const KEY_B = h.KEY_B;
@@ -168,7 +169,8 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
     var aux1 = AuxEventList{};
     var injected1: u64 = 0;
     var tap_rel1: u64 = 0;
-    const done1 = try player.step(&aux1, &q, &injected1, &tap_rel1, 0);
+    var axes1 = AxisInjection{};
+    const done1 = try player.step(&aux1, &q, &injected1, &tap_rel1, &axes1, 0);
     try testing.expect(!done1);
     // Two events: KEY_B press + release.
     try testing.expectEqual(@as(usize, 2), aux1.len);
@@ -193,9 +195,10 @@ test "macro: macro playback — tap B, delay 50, tap LEFT sequence" {
     var aux2 = AuxEventList{};
     var injected2: u64 = 0;
     var tap_rel2: u64 = 0;
+    var axes2 = AxisInjection{};
     // Advance now_ns past the 50ms delay deadline so the step can proceed.
     const after_delay: i128 = 50 * std.time.ns_per_ms + 1;
-    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, after_delay);
+    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, &axes2, after_delay);
     try testing.expect(done2);
     try testing.expectEqual(@as(usize, 2), aux2.len);
     switch (aux2.get(0)) {
@@ -231,7 +234,8 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
     var aux1 = AuxEventList{};
     var injected1: u64 = 0;
     var tap_rel1: u64 = 0;
-    const done1 = try player.step(&aux1, &q, &injected1, &tap_rel1, 0);
+    var axes1 = AxisInjection{};
+    const done1 = try player.step(&aux1, &q, &injected1, &tap_rel1, &axes1, 0);
     try testing.expect(!done1);
     try testing.expectEqual(@as(usize, 1), aux1.len);
     switch (aux1.get(0)) {
@@ -247,7 +251,8 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
     var aux2 = AuxEventList{};
     var injected2: u64 = 0;
     var tap_rel2: u64 = 0;
-    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, 0);
+    var axes2 = AxisInjection{};
+    const done2 = try player.step(&aux2, &q, &injected2, &tap_rel2, &axes2, 0);
     try testing.expect(!done2);
     try testing.expectEqual(@as(usize, 0), aux2.len);
 
@@ -256,7 +261,8 @@ test "macro: pause_for_release — down LSHIFT, pause, no output until released"
     var aux3 = AuxEventList{};
     var injected3: u64 = 0;
     var tap_rel3: u64 = 0;
-    const done3 = try player.step(&aux3, &q, &injected3, &tap_rel3, 0);
+    var axes3 = AxisInjection{};
+    const done3 = try player.step(&aux3, &q, &injected3, &tap_rel3, &axes3, 0);
     try testing.expect(done3);
     try testing.expectEqual(@as(usize, 1), aux3.len);
     switch (aux3.get(0)) {
