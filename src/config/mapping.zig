@@ -186,6 +186,7 @@ fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *co
                                 .tap => |name| scanTarget(caps, name),
                                 .down => |name| scanTarget(caps, name),
                                 .up => |name| scanTarget(caps, name),
+                                .press => |name| scanTarget(caps, name),
                                 .delay, .pause_for_release => {},
                             }
                         }
@@ -336,6 +337,7 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
     defer parser.deinit();
     var result = try parser.parseString(content);
     errdefer result.deinit();
+    try expandMacroPress(&result);
     try expandMacroStepDelays(&result);
     if (lintUnknownFields(allocator, content)) |findings| {
         defer {
@@ -349,9 +351,72 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
 
 fn isEmittingStep(s: MacroStep) bool {
     return switch (s) {
-        .tap, .down, .up => true,
+        .tap, .down, .up, .press => true,
         .delay, .pause_for_release => false,
     };
+}
+
+// Parse-time AST rewrite: each `{ press = "BTN" }` step expands to
+// `{ down = "BTN" }` at its original position, with `{ up = "BTN" }` steps
+// appended after the last step in reverse encounter order (LIFO unwind).
+// Having both `{ press = "BTN" }` and an explicit `{ down = "BTN" }` or
+// `{ up = "BTN" }` for the same button in the same macro is rejected as
+// ambiguous. After this function returns, no `.press` variants remain.
+fn expandMacroPress(result: *ParseResult) !void {
+    const macros = result.value.macro orelse return;
+    if (macros.len == 0) return;
+    const arena = result.arena.allocator();
+
+    var rewritten = try arena.alloc(Macro, macros.len);
+    for (macros, 0..) |m, i| {
+        rewritten[i] = m;
+
+        // Collect press targets in encounter order.
+        var press_targets: [32][]const u8 = undefined;
+        var press_count: usize = 0;
+
+        for (m.steps) |s| {
+            if (s != .press) continue;
+            if (press_count >= press_targets.len) return error.TooManyPressSteps;
+            press_targets[press_count] = s.press;
+            press_count += 1;
+        }
+        if (press_count == 0) continue;
+
+        // Validate: no explicit down/up for any press target.
+        for (m.steps) |s| {
+            const name = switch (s) {
+                .down => |n| n,
+                .up => |n| n,
+                else => continue,
+            };
+            for (press_targets[0..press_count]) |pt| {
+                if (std.mem.eql(u8, pt, name)) return error.PressConflict;
+            }
+        }
+
+        // Build expanded steps: replace .press with .down; append .up in reverse.
+        const out_len = m.steps.len + press_count;
+        var out = try arena.alloc(MacroStep, out_len);
+        var k: usize = 0;
+        for (m.steps) |s| {
+            out[k] = switch (s) {
+                .press => |n| .{ .down = n },
+                else => s,
+            };
+            k += 1;
+        }
+        // Append .up in reverse encounter order (LIFO).
+        var rev: usize = press_count;
+        while (rev > 0) {
+            rev -= 1;
+            out[k] = .{ .up = press_targets[rev] };
+            k += 1;
+        }
+        std.debug.assert(k == out_len);
+        rewritten[i].steps = out;
+    }
+    result.value.macro = rewritten;
 }
 
 // Parse-time AST rewrite: between every pair of adjacent EMITTING steps

@@ -323,6 +323,7 @@ Step types:
 | `{ up = "KEY" }` | Release a key |
 | `{ delay = N }` | Wait N milliseconds |
 | `"pause_for_release"` | Wait until the trigger button is released |
+| `{ press = "KEY" }` | Sugar: emits `down` here and appends `up` at macro end (LIFO if multiple). Cannot be mixed with explicit `down`/`up` of the same button. |
 
 Macro fields:
 

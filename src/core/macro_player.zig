@@ -156,6 +156,7 @@ pub const MacroPlayer = struct {
                     self.waiting_for_release = true;
                     return false;
                 },
+                else => unreachable, // .press is eliminated by expandMacroPress at parse time
             }
         }
 
@@ -212,6 +213,7 @@ pub const MacroPlayer = struct {
                 },
                 .tap => {},
                 .delay, .pause_for_release => {},
+                else => unreachable, // .press is eliminated by expandMacroPress at parse time
             }
         }
 

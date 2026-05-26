@@ -6,6 +6,10 @@ pub const MacroStep = union(enum) {
     up: []const u8,
     delay: u32,
     pause_for_release: void,
+    // Transient parse-time variant — expanded to .down at step site + .up at macro
+    // end (reverse order) by expandMacroPress in config/mapping.zig. Never present
+    // after parseString returns; runtime code must never execute this arm.
+    press: []const u8,
 };
 
 pub const Macro = struct {
