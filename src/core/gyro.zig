@@ -20,6 +20,7 @@ pub const GyroConfig = struct {
     invert_x: bool = false,
     invert_y: bool = false,
     blend_stick: bool = false,
+    minimum_output: f32 = 0.0,
 };
 
 pub const GyroOutput = struct {
@@ -83,8 +84,19 @@ pub const GyroProcessor = struct {
         const final_y = if (cfg.invert_y) -scaled_y else scaled_y;
 
         if (std.mem.eql(u8, cfg.mode, "joystick")) {
-            const jx: ?i16 = if (raw_x != null) @intFromFloat(std.math.clamp(final_x * 20000.0, -32767.0, 32767.0)) else null;
-            const jy: ?i16 = if (raw_y != null) @intFromFloat(std.math.clamp(final_y * 20000.0, -32767.0, 32767.0)) else null;
+            const mo = std.math.clamp(cfg.minimum_output, 0.0, 1.0);
+            var out_x = final_x;
+            var out_y = final_y;
+            if (mo > 0.0) {
+                const m = @sqrt(out_x * out_x + out_y * out_y);
+                if (m > 0.0 and m < mo) {
+                    const scale = mo / m;
+                    out_x *= scale;
+                    out_y *= scale;
+                }
+            }
+            const jx: ?i16 = if (raw_x != null) @intFromFloat(std.math.clamp(out_x * 20000.0, -32767.0, 32767.0)) else null;
+            const jy: ?i16 = if (raw_y != null) @intFromFloat(std.math.clamp(out_y * 20000.0, -32767.0, 32767.0)) else null;
             return .{ .rel_x = 0, .rel_y = 0, .joy_x = jx, .joy_y = jy };
         }
 
@@ -455,4 +467,162 @@ test "gyro: yaw-only input (gy nonzero, gx=0) produces only rel_x" {
     // rel_y must be zero (no pitch input), rel_x must be non-zero (yaw drives horizontal)
     try testing.expectEqual(@as(i32, 0), out.rel_y);
     try testing.expect(out.rel_x != 0 or g.accum_x != 0);
+}
+
+// --- minimum_output tests ---
+
+// gz=2622 with sensitivity=1, deadzone=0, max_val=32767 produces:
+//   applyCurve = 2622/32767 ≈ 0.08002; final_x ≈ 0.08002
+// snap to minimum_output=0.15 → joy_x = round(0.15*20000) = 3000
+test "gyro: minimum_output: snap magnitude from 0.08 to 0.15 (joystick)" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .rate,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+        .deadzone = 0,
+        .minimum_output = 0.15,
+    };
+    const out = g.process(&cfg, 0, 0, 2622);
+    try testing.expect(out.joy_x != null);
+    try testing.expect(out.joy_y == null);
+    // snap brings magnitude from ~0.08 to 0.15; joy_x = round(0.15 * 20000) = 3000
+    try testing.expect(@abs(@as(i32, out.joy_x.?) - 3000) <= 5);
+}
+
+// gz=16384, sensitivity=1 → final_x ≈ 0.5; 0.5 > minimum_output=0.15 → unchanged
+test "gyro: minimum_output: no snap when above threshold" {
+    var g = GyroProcessor{};
+    const cfg_with = GyroConfig{
+        .mode = "joystick",
+        .response = .rate,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+        .deadzone = 0,
+        .minimum_output = 0.15,
+    };
+    var g2 = GyroProcessor{};
+    const cfg_without = GyroConfig{
+        .mode = "joystick",
+        .response = .rate,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+        .deadzone = 0,
+        .minimum_output = 0.0,
+    };
+    const out_with = g.process(&cfg_with, 0, 0, 16384);
+    const out_without = g2.process(&cfg_without, 0, 0, 16384);
+    try testing.expectEqual(out_without.joy_x, out_with.joy_x);
+}
+
+// deadzone=500 absorbs gz=100 (< deadzone) → zero output; minimum_output must not resurrect it
+test "gyro: minimum_output: deadzone wins over minimum_output" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .rate,
+        .axis_x = .roll,
+        .axis_y = .none,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+        .deadzone = 500,
+        .minimum_output = 0.15,
+    };
+    const out = g.process(&cfg, 0, 0, 100);
+    try testing.expect(out.joy_x != null);
+    try testing.expectEqual(@as(i16, 0), out.joy_x.?);
+}
+
+// minimum_output=0.0 (default): output byte-identical to pre-feature behavior
+test "gyro: minimum_output: default 0.0 is no-op for existing configs" {
+    const inputs = [_]i16{ 500, 2000, 8000, 16384, 32767 };
+    for (inputs) |gz| {
+        var g1 = GyroProcessor{};
+        var g2 = GyroProcessor{};
+        const cfg_default = GyroConfig{
+            .mode = "joystick",
+            .response = .rate,
+            .axis_x = .roll,
+            .axis_y = .none,
+            .smoothing = 0.0,
+            .sensitivity_x = 1.0,
+            .deadzone = 0,
+            .minimum_output = 0.0,
+        };
+        const cfg_explicit = GyroConfig{
+            .mode = "joystick",
+            .response = .rate,
+            .axis_x = .roll,
+            .axis_y = .none,
+            .smoothing = 0.0,
+            .sensitivity_x = 1.0,
+            .deadzone = 0,
+        };
+        const out1 = g1.process(&cfg_default, 0, 0, gz);
+        const out2 = g2.process(&cfg_explicit, 0, 0, gz);
+        try testing.expectEqual(out1.joy_x, out2.joy_x);
+    }
+}
+
+// mouse mode: minimum_output has no effect on REL output
+test "gyro: minimum_output: mouse mode ignores minimum_output" {
+    var g1 = GyroProcessor{};
+    var g2 = GyroProcessor{};
+    const cfg_mo = GyroConfig{
+        .mode = "mouse",
+        .smoothing = 0.0,
+        .sensitivity_x = 5.0,
+        .sensitivity_y = 5.0,
+        .deadzone = 0,
+        .minimum_output = 0.5,
+    };
+    const cfg_base = GyroConfig{
+        .mode = "mouse",
+        .smoothing = 0.0,
+        .sensitivity_x = 5.0,
+        .sensitivity_y = 5.0,
+        .deadzone = 0,
+        .minimum_output = 0.0,
+    };
+    _ = g1.process(&cfg_mo, 500, 500, 0);
+    _ = g2.process(&cfg_base, 500, 500, 0);
+    // Accumulators must be identical — minimum_output had no effect
+    try testing.expectEqual(g2.accum_x, g1.accum_x);
+    try testing.expectEqual(g2.accum_y, g1.accum_y);
+}
+
+// direction-preserving: 2D input, both axes driven equally; ratio out_x/out_y = in_x/in_y
+test "gyro: minimum_output: direction preserved in 2D snap" {
+    var g = GyroProcessor{};
+    // axis_x=roll(gz), axis_y=pitch(gx); both = 2622 → final_x = final_y ≈ 0.08
+    // magnitude ≈ 0.08 * sqrt(2) ≈ 0.1131 < minimum_output=0.15 → snap
+    // After snap: out_x = out_y (ratio preserved), magnitude = 0.15
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .rate,
+        .axis_x = .roll,
+        .axis_y = .pitch,
+        .smoothing = 0.0,
+        .sensitivity_x = 1.0,
+        .sensitivity_y = 1.0,
+        .deadzone = 0,
+        .minimum_output = 0.15,
+    };
+    const out = g.process(&cfg, 2622, 0, 2622);
+    try testing.expect(out.joy_x != null);
+    try testing.expect(out.joy_y != null);
+    const fx: f32 = @floatFromInt(out.joy_x.?);
+    const fy: f32 = @floatFromInt(out.joy_y.?);
+    const mag = @sqrt(fx * fx + fy * fy);
+    // Expected magnitude: 0.15 * 20000 = 3000
+    try testing.expect(@abs(mag - 3000.0) < 10.0);
+    // Direction: equal components (45° angle), ratio should be ≈ 1.0
+    try testing.expect(@abs(fx - fy) <= 2);
 }

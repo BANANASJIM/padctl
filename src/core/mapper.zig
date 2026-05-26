@@ -995,6 +995,7 @@ fn resolveGyroConfig2(mc: *const mapping.GyroConfig) gyro.GyroConfig {
         .invert_y = mc.invert_y orelse false,
         .target = if (mc.target) |t| (if (std.mem.eql(u8, t, "left_stick")) .left_stick else .right_stick) else .right_stick,
         .blend_stick = mc.blend_stick orelse false,
+        .minimum_output = if (mc.minimum_output) |v| @as(f32, @floatCast(std.math.clamp(v, 0.0, 1.0))) else 0.0,
     };
 }
 

@@ -261,6 +261,7 @@ pub const GyroConfig = struct {
     invert_x: ?bool = null,
     invert_y: ?bool = null,
     blend_stick: ?bool = null,
+    minimum_output: ?f64 = null,
 };
 
 pub const StickConfig = struct {
@@ -565,6 +566,12 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
             } else if ((std.mem.eql(u8, btn_name, "LT") or std.mem.eql(u8, btn_name, "RT")) and trigger_threshold == null) {
                 std.log.warn("config: gyro activate '{s}' uses an analog trigger but trigger_threshold is not set — gate will never fire; add trigger_threshold = 128", .{spec});
             }
+        }
+    }
+
+    if (g.minimum_output) |mo| {
+        if (mo > 1.0) {
+            std.log.warn("config: gyro minimum_output {d:.3} > 1.0 — will be clamped to 1.0", .{mo});
         }
     }
 }
