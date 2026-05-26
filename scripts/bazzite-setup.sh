@@ -194,9 +194,13 @@ update_existing_repo() {
     local branch="$2"
     local auto_managed="$3"
 
+    local before_sha expected_sha after_sha
+    before_sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+
     repo_updated=false
     if [[ -n "$branch" ]]; then
         git -C "$repo" fetch origin >/dev/null 2>&1
+        expected_sha="$(git -C "$repo" rev-parse "origin/$branch" 2>/dev/null || true)"
         if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
             git -C "$repo" checkout "$branch" >/dev/null 2>&1 || warn "checkout $branch failed"
         elif git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
@@ -216,6 +220,8 @@ update_existing_repo() {
     else
         # Only pull if on a branch that tracks a remote (skip for local-only branches).
         if git -C "$repo" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+            git -C "$repo" fetch origin >/dev/null 2>&1
+            expected_sha="$(git -C "$repo" rev-parse '@{upstream}' 2>/dev/null || true)"
             if timeout 10 git -C "$repo" pull --ff-only >/dev/null 2>&1; then
                 repo_updated=true
             else
@@ -226,11 +232,27 @@ update_existing_repo() {
                 fi
             fi
         elif $auto_managed; then
+            git -C "$repo" fetch origin >/dev/null 2>&1
+            expected_sha="$(git -C "$repo" rev-parse "$(origin_head_ref "$repo")" 2>/dev/null || true)"
             sync_managed_repo_to_remote "$repo" ""
             repo_updated=true
         else
             info "Local branch with no upstream — skipping pull"
         fi
+    fi
+
+    # Verify the repo actually advanced to the expected remote commit.
+    # git pull can return success ("Already up to date") while HEAD stays behind
+    # when the working tree had local changes that prevented a real fast-forward,
+    # or when the upstream ref was not fetched yet on a prior run.
+    # Only enforce this when auto_managed is true — user-managed repos are allowed
+    # to stay on local branches that differ from origin.
+    after_sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+    if $auto_managed && [[ -n "$expected_sha" && "$after_sha" != "$expected_sha" ]]; then
+        err "padctl repo was not updated: local HEAD ${after_sha:0:7} does not match remote ${expected_sha:0:7}"
+        err "Local changes may be blocking the update. Resolve with:"
+        err "  cd $repo && git stash && git pull --ff-only"
+        return 1
     fi
 }
 
