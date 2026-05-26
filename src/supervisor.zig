@@ -379,8 +379,21 @@ pub const Supervisor = struct {
         return false;
     }
 
-    fn attachWithInstanceResult(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !bool {
+    pub fn attachWithInstanceResult(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !bool {
         if (self.devname_map.contains(devname)) return false;
+        // issue #236: forfeit grace for stale suspended entries sharing this
+        // device's VID:PID but parked under a different phys_key. The grace
+        // window's contract is "same controller will return at the same
+        // physical topology"; once a fresh ADD arrives for the same VID:PID at
+        // a different phys (dongle re-enumeration, USB renumber, PR #304's
+        // cold-scan retry replay after boot), the old uinput is stale — and
+        // leaving it alive in parallel with the new one causes consumers
+        // (Steam) to keep reading inputs from the now-dead device.
+        self.pruneStaleSuspendedForId(
+            @intCast(instance.device_cfg.device.vid),
+            @intCast(instance.device_cfg.device.pid),
+            phys_key,
+        );
         // Dedup by phys_key. Race guard: when a controller is unplugged and
         // replugged within the detach-delay window (or a USB re-enumeration
         // skips the REMOVE uevent entirely), an ADD can reach this path while
@@ -660,6 +673,25 @@ pub const Supervisor = struct {
             .switch_mapping = null,
             .default_mapping_pr = default_pr,
         });
+    }
+
+    fn pruneStaleSuspendedForId(self: *Supervisor, vid: u16, pid: u16, keep_phys: []const u8) void {
+        var i: usize = self.managed.items.len;
+        var pruned: bool = false;
+        while (i > 0) {
+            i -= 1;
+            const m = &self.managed.items[i];
+            if (!m.suspended) continue;
+            const m_vid: u16 = @intCast(m.instance.device_cfg.device.vid);
+            const m_pid: u16 = @intCast(m.instance.device_cfg.device.pid);
+            if (m_vid != vid or m_pid != pid) continue;
+            if (std.mem.eql(u8, m.phys_key, keep_phys)) continue;
+            std.log.info("hotplug: forfeiting grace for stale suspended phys \"{s}\" (VID={x:0>4} PID={x:0>4}); new attach at \"{s}\"", .{ m.phys_key, vid, pid, keep_phys });
+            self.teardownManaged(m);
+            _ = self.managed.swapRemove(i);
+            pruned = true;
+        }
+        if (pruned) self.armGraceTimer();
     }
 
     fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {

@@ -144,6 +144,7 @@ pub const testing_support = struct {
     pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
     pub const uhid_test_cleanup = @import("test/uhid_test_cleanup.zig");
     pub const device_instance_imu_ownership_test = @import("test/device_instance_imu_ownership_test.zig");
+    pub const supervisor_suspended_attach_takeover_test = @import("test/supervisor_suspended_attach_takeover_test.zig");
     // Permanent canary — proves test discovery walks into testing_support.
     // If the discovery mechanism breaks again, this test stops running and
     // we can prove the regression with a deliberate failure.
