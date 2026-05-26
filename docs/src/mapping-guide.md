@@ -387,6 +387,12 @@ steps = [
 
 Bind in remap: `M1 = "macro:dodge_roll"`
 
+> **Warning:** `hold_timeout` belongs on the `[[layer]]` block, not `[[macro]]`.
+> A `hold_timeout` value under `[[macro]]` is not recognized and the schema
+> linter will warn about it; the layer continues to use the default 200 ms.
+> To make a hold layer fire quickly, put `hold_timeout = 50` (or your chosen
+> value, 1–5000 ms) on the `[[layer]]` block itself.
+
 #### Repeat-while-held — turbo / combo (`repeat_delay_ms`)
 
 Add `repeat_delay_ms = N` to a `[[macro]]` block to make the macro restart while
