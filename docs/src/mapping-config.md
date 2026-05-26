@@ -332,6 +332,8 @@ Macro fields:
 | `steps` | Ordered step list |
 | `repeat_delay_ms` | Optional. While the trigger button is held, restart the macro `N` ms after the previous run finishes. Releasing the trigger lets the current iteration finish naturally and stops further restarts. Omit for single-shot (legacy) behaviour. |
 
+> **Note:** `hold_timeout` is a `[[layer]]` field (see above, default 200 ms). It is **not** a `[[macro]]` field — placing it under `[[macro]]` has no effect (the schema linter warns about it). To make a hold-activated layer respond faster, set `hold_timeout` on the `[[layer]]` block, e.g. `hold_timeout = 50`.
+
 ```toml
 # Turbo: spam A while RM is held, 50 ms between presses.
 [[macro]]

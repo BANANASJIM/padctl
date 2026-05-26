@@ -1598,6 +1598,19 @@ test "lintUnknownFields: [[macro]] steps array does not mis-flag inline-table ke
     try std.testing.expectEqual(@as(usize, 0), findings.items.len);
 }
 
+test "lintUnknownFields: hold_timeout on [[macro]] is flagged (issue #331)" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[macro]]
+        \\name = "quick"
+        \\hold_timeout = 5
+        \\steps = [{ tap = "A" }]
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expect(findFinding(findings.items, "macro", "hold_timeout") != null);
+}
+
 test "lintUnknownFields: forward-compat field flagged once with table context" {
     const allocator = std.testing.allocator;
     const toml_str =
