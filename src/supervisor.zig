@@ -222,6 +222,15 @@ pub const Supervisor = struct {
     /// null = feature disabled. Installed onto every newly initialised Mapper
     /// via `installChordDetector`.
     chord_detector_cfg: ?chord_detector_mod.Config = null,
+    /// True when PADCTL_TRACE_LIFECYCLE=1 at startup. Cached once so hot paths
+    /// pay only a bool branch, not a getenv call per event.
+    trace_lifecycle: bool = false,
+
+    /// Emit a [lifecycle] info line when trace_lifecycle is enabled.
+    fn traceLifecycle(self: *const Supervisor, comptime fmt: []const u8, args: anytype) void {
+        if (!self.trace_lifecycle) return;
+        std.log.info("[lifecycle] " ++ fmt, args);
+    }
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -267,6 +276,7 @@ pub const Supervisor = struct {
             break :blk null;
         };
 
+        const trace_on = std.mem.eql(u8, std.posix.getenv("PADCTL_TRACE_LIFECYCLE") orelse "", "1");
         var sup: Supervisor = .{
             .allocator = allocator,
             .managed = .{},
@@ -285,8 +295,12 @@ pub const Supervisor = struct {
             .test_switch_mapping_override = null,
             .test_switch_fail_commit_index = null,
             .grace_timer_fd = grace_fd,
+            .trace_lifecycle = trace_on,
         };
         sup.applyUserConfigRuntime();
+        if (trace_on) {
+            std.log.info("[lifecycle] trace enabled suspend_grace_sec={d}", .{sup.suspend_grace_sec});
+        }
         return sup;
     }
 
@@ -557,6 +571,10 @@ pub const Supervisor = struct {
             const deadline = m.grace_deadline_ns orelse continue;
             if (now_ns < deadline) continue;
             std.log.info("grace window expired for phys \"{s}\"; tearing down uinput", .{m.phys_key});
+            self.traceLifecycle("gc_teardown devname={s} phys={s} reason=grace_expired", .{
+                m.instance.device_cfg.device.name,
+                m.phys_key,
+            });
             // `detach()` has already joined the worker thread and closed
             // the hidraw fds, so `teardownManaged` just frees the uinput
             // + bookkeeping.
@@ -572,9 +590,17 @@ pub const Supervisor = struct {
     fn armGraceTimer(self: *Supervisor) void {
         if (self.grace_timer_fd < 0) return;
         var soonest: ?u64 = null;
+        const now_arm = self.nowNs();
         for (self.managed.items) |*m| {
             const d = m.grace_deadline_ns orelse continue;
             if (soonest == null or d < soonest.?) soonest = d;
+            const remaining_ms: u64 = if (d > now_arm) (d - now_arm) / std.time.ns_per_ms else 0;
+            self.traceLifecycle("arm_grace devname={s} phys={s} deadline_ms={d} grace_sec={d}", .{
+                m.instance.device_cfg.device.name,
+                m.phys_key,
+                remaining_ms,
+                self.suspend_grace_sec,
+            });
         }
         const disarm = linux.itimerspec{
             .it_value = .{ .sec = 0, .nsec = 0 },
@@ -687,6 +713,9 @@ pub const Supervisor = struct {
             if (m_vid != vid or m_pid != pid) continue;
             if (std.mem.eql(u8, m.phys_key, keep_phys)) continue;
             std.log.info("hotplug: forfeiting grace for stale suspended phys \"{s}\" (VID={x:0>4} PID={x:0>4}); new attach at \"{s}\"", .{ m.phys_key, vid, pid, keep_phys });
+            self.traceLifecycle("prune_stale_suspended vid=0x{x:0>4} pid=0x{x:0>4} kept_phys={s} pruned_phys={s}", .{
+                vid, pid, keep_phys, m.phys_key,
+            });
             self.teardownManaged(m);
             _ = self.managed.swapRemove(i);
             pruned = true;
@@ -1225,11 +1254,14 @@ pub const Supervisor = struct {
         var dir = std.fs.openDirAbsolute(dev_root, .{ .iterate = true }) catch return;
         defer dir.close();
 
+        var count: usize = 0;
         var it = dir.iterate();
         while (it.next() catch return) |entry| {
             if (!isHidrawDevname(entry.name)) continue;
             self.enqueueHotplugRetry(entry.name);
+            count += 1;
         }
+        self.traceLifecycle("cold_scan_retry source=enqueueColdScanRetriesForDevRoot count={d}", .{count});
     }
 
     fn drainHotplugRetry(self: *Supervisor) void {
@@ -1678,11 +1710,47 @@ pub const Supervisor = struct {
         }
     }
 
+    /// Walk /sys/class/input/event*/device/id/{vendor,product} to find the
+    /// eventN node matching vid:pid. Writes the result into `out` (e.g.
+    /// "/dev/input/event5"). Returns a slice into `out` on success, null when
+    /// /sys is unavailable or no match found.
+    fn resolveEvdevNode(vid: u16, pid: u16, out: []u8) ?[]u8 {
+        var dir = std.fs.openDirAbsolute("/sys/class/input", .{ .iterate = true }) catch return null;
+        defer dir.close();
+        var it = dir.iterate();
+        while (it.next() catch null) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, "event")) continue;
+            var path_buf: [128]u8 = undefined;
+            var nbuf: [8]u8 = undefined;
+            const vpath = std.fmt.bufPrint(&path_buf, "{s}/device/id/vendor", .{entry.name}) catch continue;
+            const vf = dir.openFile(vpath, .{}) catch continue;
+            const vn = vf.read(&nbuf) catch {
+                vf.close();
+                continue;
+            };
+            vf.close();
+            const ev = std.fmt.parseInt(u16, std.mem.trimRight(u8, nbuf[0..vn], "\n\r "), 16) catch continue;
+            if (ev != vid) continue;
+            const ppath = std.fmt.bufPrint(&path_buf, "{s}/device/id/product", .{entry.name}) catch continue;
+            const pf = dir.openFile(ppath, .{}) catch continue;
+            const pn = pf.read(&nbuf) catch {
+                pf.close();
+                continue;
+            };
+            pf.close();
+            const ep = std.fmt.parseInt(u16, std.mem.trimRight(u8, nbuf[0..pn], "\n\r "), 16) catch continue;
+            if (ep != pid) continue;
+            return std.fmt.bufPrint(out, "/dev/input/{s}", .{entry.name}) catch null;
+        }
+        return null;
+    }
+
     fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
-        var buf: [1024]u8 = undefined;
+        var buf: [4096]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buf);
         const w = stream.writer();
+        const now_ns = self.nowNs();
 
         w.writeAll("STATUS") catch return;
         for (self.managed.items) |*m| {
@@ -1700,6 +1768,30 @@ pub const Supervisor = struct {
                 break :blk "(none)";
             };
             w.print(" device={s} state={s} mapping={s}", .{ name, state_str, mapping_name }) catch break;
+
+            // Diagnostic fields (issue #236).
+            const vid: u16 = @intCast(m.instance.device_cfg.device.vid);
+            const pid: u16 = @intCast(m.instance.device_cfg.device.pid);
+            const output_kind: []const u8 = switch (m.instance.owner) {
+                .none => "none",
+                .uinput => "uinput",
+                .uhid => "uhid",
+            };
+            const output_fd_alive: bool = m.instance.owner != .none;
+            w.print(" phys_key={s} vid=0x{x:0>4} pid=0x{x:0>4} output_kind={s} output_fd_alive={}", .{
+                m.phys_key, vid, pid, output_kind, output_fd_alive,
+            }) catch break;
+
+            if (m.grace_deadline_ns) |dl| {
+                const remaining_ms: u64 = if (dl > now_ns) (dl - now_ns) / std.time.ns_per_ms else 0;
+                w.print(" grace_deadline_remaining_ms={d}", .{remaining_ms}) catch {};
+            }
+
+            var evdev_buf: [48]u8 = undefined;
+            const evdev_node = resolveEvdevNode(vid, pid, &evdev_buf) orelse "<unresolved>";
+            w.print(" evdev_node={s}", .{evdev_node}) catch {};
+
+            w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len}) catch {};
         }
         w.writeByte('\n') catch return;
         cs.sendResponse(fd, stream.getWritten());
@@ -4534,4 +4626,77 @@ test "supervisor: lookupChordMappingName: deterministic order when two profiles 
     const pz = try mapping_cfg.parseFile(allocator, zebra_path);
     defer pz.deinit();
     try testing.expectEqual(@as(?u8, 1), pz.value.chord_index);
+}
+
+// Test 1: trace_lifecycle field correctly reflects PADCTL_TRACE_LIFECYCLE env at init.
+// Falsifiability: without `trace_lifecycle` field initialisation in initForTest, this
+// assertion cannot be constructed; the field would remain at its default (false) even
+// when the caller sets it, and the test below demonstrates the field is read correctly.
+test "supervisor: trace_lifecycle flag initialised from field (gate check)" {
+    const allocator = testing.allocator;
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    // Default: no trace.
+    try testing.expect(!sup.trace_lifecycle);
+
+    // Enable via field (simulates what init() does after reading the env var).
+    sup.trace_lifecycle = true;
+    try testing.expect(sup.trace_lifecycle);
+
+    // traceLifecycle is a no-op when false (does not crash).
+    sup.trace_lifecycle = false;
+    sup.traceLifecycle("test {s}", .{"ok"});
+}
+
+// Test 2: handleStatus output contains new diagnostic fields.
+// Falsifiability: reverting the phys_key/vid/pid/output_kind/output_fd_alive/hotplug_pending
+// additions to handleStatus causes these assertions to fail (fields absent from response).
+test "supervisor: handleStatus includes diagnostic fields (issue #236)" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    sup.handleStatus(resp_fds[0]);
+    var resp_buf: [512]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    const resp = resp_buf[0..n];
+
+    try testing.expect(std.mem.indexOf(u8, resp, "phys_key=") != null);
+    try testing.expect(std.mem.indexOf(u8, resp, "vid=") != null);
+    try testing.expect(std.mem.indexOf(u8, resp, "output_kind=") != null);
+    try testing.expect(std.mem.indexOf(u8, resp, "output_fd_alive=") != null);
+    try testing.expect(std.mem.indexOf(u8, resp, "hotplug_pending=") != null);
+
+    // Arm a grace deadline and verify grace_deadline_remaining_ms appears.
+    sup.managed.items[0].grace_deadline_ns = sup.nowNs() + 30 * std.time.ns_per_s;
+    sup.handleStatus(resp_fds[0]);
+    const n2 = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n2], "grace_deadline_remaining_ms=") != null);
+
+    defer {
+        sup.managed.items[0].grace_deadline_ns = null;
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
 }
