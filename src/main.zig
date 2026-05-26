@@ -102,6 +102,7 @@ pub const testing_support = struct {
     pub const gyro_stick_e2e_test = @import("test/gyro_stick_e2e_test.zig");
     pub const macro_e2e_test = @import("test/macro_e2e_test.zig");
     pub const macro_gamepad_button_test = @import("test/macro_gamepad_button_test.zig");
+    pub const macro_step_delay_test = @import("test/macro_step_delay_test.zig");
     pub const capture_e2e_test = @import("test/capture_e2e_test.zig");
     pub const supervisor_e2e_test = @import("test/supervisor_e2e_test.zig");
     pub const wasm_e2e_test = @import("test/wasm_e2e_test.zig");

@@ -16,6 +16,11 @@ pub const Macro = struct {
     // Releasing the trigger lets the current iteration finish naturally and stops
     // further restarts. Absent / null = single-shot behaviour.
     repeat_delay_ms: ?u32 = null,
+    // Per-macro override for implicit delay (ms) inserted between adjacent
+    // emitting steps (down/up/tap). Overrides MappingConfig.macro_step_delay.
+    // Explicit `delay` / `pause_for_release` neighbours suppress insertion.
+    // Resolved at parse-time AST rewrite — the player never sees this field.
+    step_delay: ?u32 = null,
 };
 
 // --- tests ---

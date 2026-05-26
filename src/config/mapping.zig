@@ -321,6 +321,11 @@ pub const MappingConfig = struct {
     macro: ?[]const Macro = null,
     adaptive_trigger: ?AdaptiveTriggerConfig = null,
     trigger_threshold: ?u8 = null,
+    // Global default for implicit delay (ms) between adjacent emitting macro
+    // steps. Per-macro `step_delay` overrides this. null / 0 → no insertion
+    // (byte-identical to pre-issue-333 behaviour). Applied via parse-time AST
+    // rewrite in `parseString` — see `expandMacroStepDelays`.
+    macro_step_delay: ?u32 = null,
 };
 
 pub const ParseResult = toml.Parsed(MappingConfig);
@@ -328,7 +333,9 @@ pub const ParseResult = toml.Parsed(MappingConfig);
 pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
     var parser = toml.Parser(MappingConfig).init(allocator);
     defer parser.deinit();
-    const result = try parser.parseString(content);
+    var result = try parser.parseString(content);
+    errdefer result.deinit();
+    try expandMacroStepDelays(&result);
     if (lintUnknownFields(allocator, content)) |findings| {
         defer {
             var f = findings;
@@ -337,6 +344,52 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
         warnLintFindings(findings.items);
     } else |_| {} // lint failure (OOM) must not break parsing
     return result;
+}
+
+fn isEmittingStep(s: MacroStep) bool {
+    return switch (s) {
+        .tap, .down, .up => true,
+        .delay, .pause_for_release => false,
+    };
+}
+
+// Parse-time AST rewrite: between every pair of adjacent EMITTING steps
+// (tap/down/up) insert a `delay` step. Per-macro `step_delay` wins over the
+// global `macro_step_delay`. Explicit `delay` and `pause_for_release` are not
+// considered emitting, so they suppress insertion against either neighbour.
+// Effective delay 0 (default 0, or explicit `step_delay = 0`) → identity.
+fn expandMacroStepDelays(result: *ParseResult) !void {
+    const macros = result.value.macro orelse return;
+    if (macros.len == 0) return;
+    const global = result.value.macro_step_delay;
+    const arena = result.arena.allocator();
+
+    var rewritten = try arena.alloc(Macro, macros.len);
+    for (macros, 0..) |m, i| {
+        const eff: u32 = m.step_delay orelse (global orelse 0);
+        rewritten[i] = m;
+        if (eff == 0 or m.steps.len < 2) continue;
+
+        var count: usize = m.steps.len;
+        for (m.steps[0 .. m.steps.len - 1], m.steps[1..]) |a, b| {
+            if (isEmittingStep(a) and isEmittingStep(b)) count += 1;
+        }
+        if (count == m.steps.len) continue;
+
+        var out = try arena.alloc(MacroStep, count);
+        var k: usize = 0;
+        for (m.steps, 0..) |s, j| {
+            out[k] = s;
+            k += 1;
+            if (j + 1 < m.steps.len and isEmittingStep(s) and isEmittingStep(m.steps[j + 1])) {
+                out[k] = .{ .delay = eff };
+                k += 1;
+            }
+        }
+        std.debug.assert(k == count);
+        rewritten[i].steps = out;
+    }
+    result.value.macro = rewritten;
 }
 
 pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {

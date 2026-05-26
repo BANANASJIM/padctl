@@ -331,6 +331,35 @@ Macro fields:
 | `name` | Identifier referenced from remap as `macro:<name>` |
 | `steps` | Ordered step list |
 | `repeat_delay_ms` | Optional. While the trigger button is held, restart the macro `N` ms after the previous run finishes. Releasing the trigger lets the current iteration finish naturally and stops further restarts. Omit for single-shot (legacy) behaviour. |
+| `step_delay` | Optional. Per-macro implicit delay (ms) inserted between adjacent emitting steps (`tap`/`down`/`up`). Overrides the top-level `macro_step_delay`. Explicit `delay` steps and `pause_for_release` neighbours suppress insertion. `0` disables (explicit zero wins over the global default). |
+
+### Implicit step delays
+
+The top-level `macro_step_delay = N` (ms) sets a global default that is inserted between every pair of adjacent emitting steps (`tap` / `down` / `up`) in every macro. A per-macro `step_delay` overrides the global. Both default to `0` (no insertion, byte-identical to legacy behaviour).
+
+Insertion rules:
+
+- Only inserted between two adjacent **emitting** steps (`tap`/`down`/`up`).
+- Never inserted adjacent to an explicit `{ delay = N }` step (it already is a delay).
+- Never inserted adjacent to `"pause_for_release"` (treat it as a synchronization point).
+- Per-macro `step_delay` (including explicit `0`) wins over global `macro_step_delay`.
+
+```toml
+macro_step_delay = 50   # global default for every macro
+
+[[macro]]
+name = "unarmed"
+# step_delay omitted → inherits global 50
+steps = [
+    { down = "RB" },
+    { down = "X" },
+    "pause_for_release",
+    { up = "X" },
+    { up = "RB" },
+]
+# Effective after parse:
+#   down RB, delay 50, down X, pause_for_release, up X, delay 50, up RB
+```
 
 > **Note:** `hold_timeout` is a `[[layer]]` field (see above, default 200 ms). It is **not** a `[[macro]]` field — placing it under `[[macro]]` has no effect (the schema linter warns about it). To make a hold-activated layer respond faster, set `hold_timeout` on the `[[layer]]` block, e.g. `hold_timeout = 50`.
 
