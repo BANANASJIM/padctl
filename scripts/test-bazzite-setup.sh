@@ -60,6 +60,7 @@ case "$cmd" in
         case "${1:-}" in
             HEAD) read_state head ;;
             origin/main) read_state origin ;;
+            '@{upstream}') read_state origin ;;
             *) exit 1 ;;
         esac
         ;;
@@ -112,6 +113,10 @@ case "$cmd" in
     pull)
         if [[ -f "$(state_dir)/pull-fails" ]]; then
             exit 1
+        fi
+        if [[ -f "$(state_dir)/pull-noop" ]]; then
+            # Simulates "Already up to date" — exits 0 but HEAD does not move.
+            exit 0
         fi
         read_state origin >"$(state_dir)/head"
         printf 'new\n' >"$repo/version.txt"
@@ -301,7 +306,38 @@ test_user_branch_is_not_reset_to_remote() {
     fi
 }
 
+# Regression test for issue #320: managed repo where git pull returns success (exit 0)
+# but HEAD does not advance to origin's SHA ("Already up to date" silent no-op).
+# Before the fix, the script continued to the build step using the stale checkout.
+# After the fix, update_existing_repo must return non-zero with a clear error.
+test_managed_silent_noop_pull_is_detected() {
+    local fakebin="$tmpdir/fakebin-noop"
+    local old_path="$PATH"
+    write_fake_git "$fakebin"
+    export PATH="$fakebin:$PATH"
+
+    local repo="$tmpdir/fake-managed-noop"
+    # Local HEAD is old; origin has advanced. pull returns 0 but does NOT move HEAD.
+    create_fake_repo "$repo" "old-head" "new-head" "old content" false
+    # create_fake_repo adds pull-fails; remove it so pull returns 0 (the silent-noop case).
+    rm -f "$repo/.fakegit/pull-fails"
+    touch "$repo/.fakegit/pull-noop"
+
+    local update_exit=0
+    update_existing_repo "$repo" "" true || update_exit=$?
+
+    export PATH="$old_path"
+
+    if [[ "$update_exit" -eq 0 ]]; then
+        echo "FAIL: update_existing_repo returned 0 on silent-noop pull (issue #320 regression)" >&2
+        exit 1
+    fi
+    # HEAD must still be old-head (we did not silently proceed)
+    [[ "$(PATH="$fakebin:$PATH" git -C "$repo" rev-parse HEAD)" == "old-head" ]] || true
+}
+
 bash -n "$SCRIPT_DIR/bazzite-setup.sh"
+test_managed_silent_noop_pull_is_detected
 if command -v git >/dev/null 2>&1; then
     test_managed_dirty_repo_recovers_from_pull_failure
     test_user_repo_is_not_reset_after_pull_failure
