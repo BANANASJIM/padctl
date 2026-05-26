@@ -699,9 +699,35 @@ pub const Mapper = struct {
         // Reset dpad prev so edge detection fires on the next frame.
         self.prev.dpad_x = 0;
         self.prev.dpad_y = 0;
-        // Cancel in-flight macros; emit releases for any held keys/buttons.
-        for (self.active_macros.items) |*p| p.emitPendingReleases(aux, &self.injected_buttons);
-        self.active_macros.clearRetainingCapacity();
+        // On deactivation (no layer active after the change): macros that reached
+        // pause_for_release get one drain pass to execute their up= cleanup steps.
+        // On activation or layer switch: cancel everything as before.
+        const configs = self.config.layer orelse &.{};
+        const is_deactivation = self.layer.getActive(configs) == null;
+        if (is_deactivation) {
+            while (self.active_macros.items.len > 0) {
+                const p = &self.active_macros.items[0];
+                if (p.waiting_for_release) {
+                    p.notifyTriggerReleased();
+                    var dummy_tap: u64 = 0;
+                    var dummy_axes = macro_player_mod.AxisInjection{};
+                    const done = p.step(aux, &self.timer_queue, &self.injected_buttons, &dummy_tap, &dummy_axes, now_ns) catch false;
+                    if (done) {
+                        _ = self.active_macros.swapRemove(0);
+                        continue;
+                    }
+                    // step() didn't finish (delay after pause_for_release, etc.) — cancel.
+                    p.emitPendingReleases(aux, &self.injected_buttons);
+                    _ = self.active_macros.swapRemove(0);
+                } else {
+                    p.emitPendingReleases(aux, &self.injected_buttons);
+                    _ = self.active_macros.swapRemove(0);
+                }
+            }
+        } else {
+            for (self.active_macros.items) |*p| p.emitPendingReleases(aux, &self.injected_buttons);
+            self.active_macros.clearRetainingCapacity();
+        }
         releasePendingAuxTapReleases(self, aux, now_ns);
         // Discard tap bits staged from a cancelled macro's timer expiry.
         self.macro_timer_tap_pending = 0;
