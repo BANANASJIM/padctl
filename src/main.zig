@@ -184,6 +184,34 @@ const VERSION = @import("build_options").version;
 
 pub const DumpAction = enum { enable, disable, status, @"export", clear };
 
+fn parseScope(v: []const u8) ?cli.install.LifecycleScope {
+    if (std.mem.eql(u8, v, "system")) return .system;
+    if (std.mem.eql(u8, v, "user")) return .user;
+    if (std.mem.eql(u8, v, "package")) return .package;
+    return null;
+}
+
+fn reportScopeOrLog(err: anyerror, phase_name: []const u8) void {
+    switch (err) {
+        error.NonRootSystemPrefix => {
+            _ = std.posix.write(std.posix.STDERR_FILENO,
+                \\error: system-scope install requires root.
+                \\  Either run with sudo, or use:
+                \\    padctl install --scope=user --prefix="$HOME/.local"
+                \\
+            ) catch {};
+        },
+        error.RootUserScopeNoSudoUser => {
+            _ = std.posix.write(std.posix.STDERR_FILENO,
+                \\error: cannot determine target user for --scope=user under root.
+                \\  Run with:  sudo -u <user> padctl install --scope=user
+                \\
+            ) catch {};
+        },
+        else => std.log.err("{s} failed: {}", .{ phase_name, err }),
+    }
+}
+
 const Cli = struct {
     allocator: std.mem.Allocator,
     config_path: ?[]const u8 = null,
@@ -273,6 +301,12 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     opts.user_service = true;
                 } else if (std.mem.eql(u8, iarg, "--no-user-service")) {
                     opts.user_service = false;
+                } else if (std.mem.eql(u8, iarg, "--scope")) {
+                    const v = args.next() orelse return error.MissingArgValue;
+                    opts.scope = parseScope(v) orelse {
+                        std.log.err("invalid --scope value: {s} (expected system|user|package)", .{v});
+                        return error.UnknownArgument;
+                    };
                 } else {
                     std.log.err("unknown install argument: {s}", .{iarg});
                     return error.UnknownArgument;
@@ -298,6 +332,12 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     opts.no_immutable = true;
                 } else if (std.mem.eql(u8, iarg, "--mapping")) {
                     try mapping_list.append(allocator, args.next() orelse return error.MissingArgValue);
+                } else if (std.mem.eql(u8, iarg, "--scope")) {
+                    const v = args.next() orelse return error.MissingArgValue;
+                    opts.scope = parseScope(v) orelse {
+                        std.log.err("invalid --scope value: {s} (expected system|user|package)", .{v});
+                        return error.UnknownArgument;
+                    };
                 } else {
                     std.log.err("unknown uninstall argument: {s}", .{iarg});
                     return error.UnknownArgument;
@@ -661,7 +701,7 @@ pub fn main() !void {
     // install subcommand
     if (parsed.install_opts) |opts| {
         cli.install.run(allocator, opts) catch |err| {
-            std.log.err("install failed: {}", .{err});
+            reportScopeOrLog(err, "install");
             std.process.exit(1);
         };
         std.process.exit(0);
@@ -670,7 +710,7 @@ pub fn main() !void {
     // uninstall subcommand
     if (parsed.uninstall_opts) |opts| {
         cli.install.uninstall(allocator, opts) catch |err| {
-            std.log.err("uninstall failed: {}", .{err});
+            reportScopeOrLog(err, "uninstall");
             std.process.exit(1);
         };
         std.process.exit(0);

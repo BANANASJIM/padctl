@@ -1,4 +1,8 @@
 const std = @import("std");
+const scope_mod = @import("scope.zig");
+
+pub const LifecycleScope = scope_mod.LifecycleScope;
+pub const ScopeError = scope_mod.ScopeError;
 
 pub const InstallOptions = struct {
     prefix: []const u8 = "/usr",
@@ -17,6 +21,8 @@ pub const InstallOptions = struct {
     /// When true: writes ~/.config/systemd/user/padctl.service.
     /// When false (root): writes /usr/lib/systemd/user (prefix=/usr) or /etc/systemd/user (other prefix).
     user_service: ?bool = null,
+    /// Explicit --scope override; null = auto-detect.
+    scope: ?LifecycleScope = null,
 };
 
 pub const ImmutableKind = enum { none, ostree, read_only_usr };
@@ -311,6 +317,8 @@ pub const EnvSnapshot = struct {
     home: ?[]const u8,
     sudo_user: ?[]const u8,
     sudo_uid: ?[]const u8,
+    install_phase: ?[]const u8 = null,
+    destdir_env: ?[]const u8 = null,
 
     pub fn fromProcess() EnvSnapshot {
         return .{
@@ -318,6 +326,8 @@ pub const EnvSnapshot = struct {
             .home = std.posix.getenv("HOME"),
             .sudo_user = std.posix.getenv("SUDO_USER"),
             .sudo_uid = std.posix.getenv("SUDO_UID"),
+            .install_phase = std.posix.getenv("PADCTL_INSTALL_PHASE"),
+            .destdir_env = std.posix.getenv("DESTDIR"),
         };
     }
 };
@@ -335,7 +345,10 @@ pub const InstallPlan = struct {
     sudo_uid: ?[]const u8,
     home: ?[]const u8,
 
-    // --- derived axes ---
+    // --- single source of truth ---
+    scope: LifecycleScope,
+
+    // --- derived axes (computed-from-scope shims; PR-4/PR-5 will remove) ---
     staging_mode: bool,
     effective_user_service: bool,
     immutable_kind: ImmutableKind,
@@ -352,14 +365,31 @@ pub const InstallPlan = struct {
     share_dir: []const u8,
     udev_dir: []const u8,
 
+    /// True iff this plan describes a staged package build. Single chokepoint
+    /// for "skip live runtime touch" decisions.
+    pub fn isStaging(self: *const InstallPlan) bool {
+        return self.scope == .package;
+    }
+
     pub fn compute(allocator: std.mem.Allocator, opts: InstallOptions, env: EnvSnapshot) !InstallPlan {
         const is_root = env.uid == 0;
         const destdir = opts.destdir;
-        const staging_mode = destdir.len != 0;
 
-        // staging mode (--destdir set, packaging build) defaults to system path;
-        // explicit --user-service still routes to user HOME.
-        const effective_user_service = opts.user_service orelse (!is_root and !staging_mode);
+        const scope = try scope_mod.detect(.{
+            .destdir = destdir,
+            .forced_scope = opts.scope,
+            .install_phase_env = env.install_phase,
+            .destdir_env = env.destdir_env,
+            .euid = @intCast(env.uid),
+            .sudo_user_env = env.sudo_user,
+            .prefix = opts.prefix,
+        });
+
+        const staging_mode = scope == .package;
+
+        // user-service routing follows scope. Explicit --user-service still wins
+        // for transitional callers; PR-5 removes the orthogonal axis.
+        const effective_user_service = opts.user_service orelse (scope == .user);
 
         const immutable_kind = detectImmutableOs(allocator, if (staging_mode) destdir else "");
         const effective_immutable = opts.immutable or (immutable_kind != .none and !opts.no_immutable);
@@ -409,6 +439,7 @@ pub const InstallPlan = struct {
             .sudo_user = env.sudo_user,
             .sudo_uid = env.sudo_uid,
             .home = env.home,
+            .scope = scope,
             .staging_mode = staging_mode,
             .effective_user_service = effective_user_service,
             .immutable_kind = immutable_kind,
