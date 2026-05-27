@@ -571,7 +571,7 @@ pub const Supervisor = struct {
             const deadline = m.grace_deadline_ns orelse continue;
             if (now_ns < deadline) continue;
             std.log.info("grace window expired for phys \"{s}\"; tearing down uinput", .{m.phys_key});
-            self.traceLifecycle("gc_teardown devname={s} phys={s} reason=grace_expired", .{
+            self.traceLifecycle("gc_teardown model={s} phys={s} reason=grace_expired", .{
                 m.instance.device_cfg.device.name,
                 m.phys_key,
             });
@@ -595,7 +595,7 @@ pub const Supervisor = struct {
             const d = m.grace_deadline_ns orelse continue;
             if (soonest == null or d < soonest.?) soonest = d;
             const remaining_ms: u64 = if (d > now_arm) (d - now_arm) / std.time.ns_per_ms else 0;
-            self.traceLifecycle("arm_grace devname={s} phys={s} deadline_ms={d} grace_sec={d}", .{
+            self.traceLifecycle("arm_grace model={s} phys={s} deadline_ms={d} grace_sec={d}", .{
                 m.instance.device_cfg.device.name,
                 m.phys_key,
                 remaining_ms,
@@ -1710,17 +1710,19 @@ pub const Supervisor = struct {
         }
     }
 
-    /// Walk /sys/class/input/event*/device/id/{vendor,product} to find the
-    /// eventN node matching vid:pid. Writes the result into `out` (e.g.
-    /// "/dev/input/event5"). Returns a slice into `out` on success, null when
-    /// /sys is unavailable or no match found.
-    fn resolveEvdevNode(vid: u16, pid: u16, out: []u8) ?[]u8 {
-        var dir = std.fs.openDirAbsolute("/sys/class/input", .{ .iterate = true }) catch return null;
+    /// Walk sysfs_root/event*/device/id/{vendor,product} to find all eventN
+    /// nodes matching vid:pid. Appends each as "/dev/input/eventN(name)" into
+    /// `out`, comma-separated. Returns a slice into `out` on any match, null
+    /// when the directory is unavailable or no match is found. Truncates with
+    /// "..." when the buffer is full.
+    fn resolveEvdevNodesAt(sysfs_root: []const u8, vid: u16, pid: u16, out: []u8) ?[]u8 {
+        var dir = std.fs.openDirAbsolute(sysfs_root, .{ .iterate = true }) catch return null;
         defer dir.close();
         var it = dir.iterate();
+        var written: usize = 0;
         while (it.next() catch null) |entry| {
             if (!std.mem.startsWith(u8, entry.name, "event")) continue;
-            var path_buf: [128]u8 = undefined;
+            var path_buf: [256]u8 = undefined;
             var nbuf: [8]u8 = undefined;
             const vpath = std.fmt.bufPrint(&path_buf, "{s}/device/id/vendor", .{entry.name}) catch continue;
             const vf = dir.openFile(vpath, .{}) catch continue;
@@ -1740,9 +1742,40 @@ pub const Supervisor = struct {
             pf.close();
             const ep = std.fmt.parseInt(u16, std.mem.trimRight(u8, nbuf[0..pn], "\n\r "), 16) catch continue;
             if (ep != pid) continue;
-            return std.fmt.bufPrint(out, "/dev/input/{s}", .{entry.name}) catch null;
+            // Read kernel device name for disambiguation.
+            var dev_name_buf: [64]u8 = undefined;
+            const npath = std.fmt.bufPrint(&path_buf, "{s}/device/name", .{entry.name}) catch continue;
+            const dev_name: []const u8 = blk: {
+                const nf = dir.openFile(npath, .{}) catch break :blk "";
+                const nn = nf.read(&dev_name_buf) catch {
+                    nf.close();
+                    break :blk "";
+                };
+                nf.close();
+                break :blk std.mem.trimRight(u8, dev_name_buf[0..nn], "\n\r ");
+            };
+            const sep: []const u8 = if (written > 0) "," else "";
+            const segment = if (dev_name.len > 0)
+                std.fmt.bufPrint(out[written..], "{s}/dev/input/{s}({s})", .{ sep, entry.name, dev_name })
+            else
+                std.fmt.bufPrint(out[written..], "{s}/dev/input/{s}", .{ sep, entry.name });
+            if (segment) |s| {
+                written += s.len;
+            } else |_| {
+                // Buffer full — append truncation marker if space allows.
+                const marker = "...";
+                if (written + marker.len <= out.len) {
+                    @memcpy(out[written..][0..marker.len], marker);
+                    written += marker.len;
+                }
+                break;
+            }
         }
-        return null;
+        return if (written > 0) out[0..written] else null;
+    }
+
+    fn resolveEvdevNode(vid: u16, pid: u16, out: []u8) ?[]u8 {
+        return resolveEvdevNodesAt("/sys/class/input", vid, pid, out);
     }
 
     fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
@@ -1787,7 +1820,7 @@ pub const Supervisor = struct {
                 w.print(" grace_deadline_remaining_ms={d}", .{remaining_ms}) catch {};
             }
 
-            var evdev_buf: [48]u8 = undefined;
+            var evdev_buf: [256]u8 = undefined;
             const evdev_node = resolveEvdevNode(vid, pid, &evdev_buf) orelse "<unresolved>";
             w.print(" evdev_node={s}", .{evdev_node}) catch {};
 
@@ -4699,4 +4732,48 @@ test "supervisor: handleStatus includes diagnostic fields (issue #236)" {
         sup.ctrl_sock = null;
         sup.deinit();
     }
+}
+
+test "supervisor: resolveEvdevNodesAt returns all matching nodes with device name" {
+    // Build a synthetic sysfs tree under /tmp with two event nodes sharing the same VID:PID.
+    // Falsifiability: the old single-return impl would yield only one event path; this test
+    // asserts both event5 and event7 appear, so it would FAIL pre-fix.
+    const base = "/tmp/padctl_test_evdev_multi";
+    std.fs.deleteTreeAbsolute(base) catch {};
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    const Event = struct { name: []const u8, dev_name: []const u8 };
+    const events = [_]Event{
+        .{ .name = "event5", .dev_name = "Vader 5 Pro" },
+        .{ .name = "event7", .dev_name = "Vader 5 Pro IMU" },
+    };
+    for (events) |ev| {
+        var p0: [128]u8 = undefined;
+        var p1: [128]u8 = undefined;
+        var p2: [128]u8 = undefined;
+        var p3: [128]u8 = undefined;
+        var p4: [128]u8 = undefined;
+        var p5: [128]u8 = undefined;
+        std.fs.makeDirAbsolute(base) catch {};
+        std.fs.makeDirAbsolute(try std.fmt.bufPrint(&p0, "{s}/{s}", .{ base, ev.name })) catch {};
+        std.fs.makeDirAbsolute(try std.fmt.bufPrint(&p1, "{s}/{s}/device", .{ base, ev.name })) catch {};
+        try std.fs.makeDirAbsolute(try std.fmt.bufPrint(&p2, "{s}/{s}/device/id", .{ base, ev.name }));
+        var vf = try std.fs.createFileAbsolute(try std.fmt.bufPrint(&p3, "{s}/{s}/device/id/vendor", .{ base, ev.name }), .{});
+        try vf.writeAll("045e\n");
+        vf.close();
+        var pf = try std.fs.createFileAbsolute(try std.fmt.bufPrint(&p4, "{s}/{s}/device/id/product", .{ base, ev.name }), .{});
+        try pf.writeAll("02fd\n");
+        pf.close();
+        var nf = try std.fs.createFileAbsolute(try std.fmt.bufPrint(&p5, "{s}/{s}/device/name", .{ base, ev.name }), .{});
+        try nf.writeAll(ev.dev_name);
+        nf.close();
+    }
+
+    var out: [512]u8 = undefined;
+    const result = Supervisor.resolveEvdevNodesAt(base, 0x045e, 0x02fd, &out);
+    try testing.expect(result != null);
+    const s = result.?;
+    try testing.expect(std.mem.indexOf(u8, s, "/dev/input/event5") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "/dev/input/event7") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "Vader 5 Pro IMU") != null);
 }
