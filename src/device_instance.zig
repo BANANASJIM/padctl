@@ -19,6 +19,7 @@ const uhid_descriptor = @import("io/uhid_descriptor.zig");
 const uniq_mod = @import("io/uniq.zig");
 const ffb_mod = @import("io/ffb_forwarder.zig");
 const FfbForwarder = ffb_mod.FfbForwarder;
+const WedgeAtomics = @import("io/wedge_atomics.zig").WedgeAtomics;
 const device_cfg = @import("config/device.zig");
 const generic = @import("core/generic.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
@@ -205,6 +206,9 @@ pub const DeviceInstance = struct {
     poll_timeout_ms: ?u32 = null,
     /// Active only when force_feedback.backend="uhid" + kind="pid".
     ffb_forwarder: ?FfbForwarder = null,
+    /// PR-ε.1 wedge instrumentation. Bumped by hidraw + ffb_forwarder; read by
+    /// Supervisor.handleStatus. Inert until consumers attach (see attachWedges).
+    wedge: WedgeAtomics = .{},
     // Test-only: counts rebuildAuxIfChanged invocations so tests can verify
     // the switch path rebuilds aux caps without relying on /dev/uinput.
     rebuild_aux_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
@@ -488,6 +492,21 @@ pub const DeviceInstance = struct {
             .stopped = false,
             .ffb_forwarder = ffb_fwd,
         };
+    }
+
+    /// Wire wedge instrumentation into hidraw devices and the FFB forwarder.
+    /// Safe to call only AFTER the DeviceInstance is heap-stable (Supervisor
+    /// allocates it via allocator.create before spawnInstance). Idempotent.
+    pub fn attachWedges(self: *DeviceInstance) void {
+        const Hidraw = @import("io/hidraw.zig").HidrawDevice;
+        const tag = Hidraw.vtablePtr();
+        for (self.devices) |dev| {
+            if (dev.vtable == tag) {
+                const h: *Hidraw = @ptrCast(@alignCast(dev.ptr));
+                h.attachWedge(&self.wedge);
+            }
+        }
+        if (self.ffb_forwarder) |*fwd| fwd.attachWedge(&self.wedge);
     }
 
     pub fn deinit(self: *DeviceInstance) void {

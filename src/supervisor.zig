@@ -678,6 +678,10 @@ pub const Supervisor = struct {
     }
 
     fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
+        // Wire wedge atomics through the chokepoint so all 4 spawn call
+        // sites (run() initial_configs, doReload, hotplug retry,
+        // attachWithInstanceResult) get Bug E instrumentation uniformly.
+        instance.attachWedges();
         // Install chord detector before spawning the thread so the mapper sees
         // the cfg from the very first frame.
         if (self.chord_detector_cfg) |cfg| {
@@ -1778,7 +1782,7 @@ pub const Supervisor = struct {
         return resolveEvdevNodesAt("/sys/class/input", vid, pid, out);
     }
 
-    fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
+    pub fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
         var buf: [4096]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buf);
@@ -1825,6 +1829,19 @@ pub const Supervisor = struct {
             w.print(" evdev_node={s}", .{evdev_node}) catch {};
 
             w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len}) catch {};
+
+            // PR-ε.1 wedge instrumentation. write_in_flight_ms=0 when no write is
+            // currently blocked; a sustained non-zero value (hundreds of ms) is the
+            // smoking gun for a kernel-side D-state hang on usb_control_msg.
+            const inb = m.instance.wedge.loadInbound();
+            const outb = m.instance.wedge.loadOutbound();
+            const ifs = m.instance.wedge.loadInFlight();
+            const inb_ago_ms: u64 = if (inb == 0 or now_ns < inb) 0 else (now_ns - inb) / std.time.ns_per_ms;
+            const outb_ago_ms: u64 = if (outb == 0 or now_ns < outb) 0 else (now_ns - outb) / std.time.ns_per_ms;
+            const inflight_ms: u64 = if (ifs == 0 or now_ns < ifs) 0 else (now_ns - ifs) / std.time.ns_per_ms;
+            w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
+                inb_ago_ms, outb_ago_ms, inflight_ms,
+            }) catch {};
         }
         w.writeByte('\n') catch return;
         cs.sendResponse(fd, stream.getWritten());

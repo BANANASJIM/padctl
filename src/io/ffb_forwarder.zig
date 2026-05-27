@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const OutputReport = @import("uhid.zig").OutputReport;
 const write_exact = @import("write_exact.zig");
+const WedgeAtomics = @import("wedge_atomics.zig").WedgeAtomics;
 
 /// Writes UHID_OUTPUT bytes byte-faithfully to the physical wheel hidraw fd.
 ///
@@ -12,15 +13,23 @@ pub const FfbForwarder = struct {
     state: enum { active, disabled } = .active,
     writes_total: u64 = 0,
     drops_eagain: u64 = 0,
+    /// Optional borrowed wedge instrumentation; see hidraw.zig.
+    wedge: ?*WedgeAtomics = null,
 
     pub fn init(physical_fd: posix.fd_t) FfbForwarder {
         return .{ .physical_fd = physical_fd };
+    }
+
+    pub fn attachWedge(self: *FfbForwarder, wedge: *WedgeAtomics) void {
+        self.wedge = wedge;
     }
 
     /// Write report.data to the physical hidraw fd, byte-for-byte unchanged.
     /// Errors are classified and logged; none escape to the caller.
     pub fn forward(self: *FfbForwarder, report: OutputReport) void {
         if (self.state == .disabled) return;
+        if (self.wedge) |w| w.beginWrite();
+        defer if (self.wedge) |w| w.endWrite();
         write_exact.writeExact(self.physical_fd, report.data) catch |err| switch (err) {
             error.WouldBlock => {
                 self.drops_eagain += 1;
@@ -50,6 +59,7 @@ pub const FfbForwarder = struct {
             },
         };
         self.writes_total += 1;
+        if (self.wedge) |w| w.bumpOutbound();
     }
 
     pub fn deinit(_: *FfbForwarder) void {}

@@ -4,6 +4,7 @@ const posix = std.posix;
 const io = @import("device_io.zig");
 const ioctl = @import("ioctl_constants.zig");
 const write_exact = @import("write_exact.zig");
+const WedgeAtomics = @import("wedge_atomics.zig").WedgeAtomics;
 
 pub const DeviceIO = io.DeviceIO;
 
@@ -30,6 +31,10 @@ pub const HidrawDevice = struct {
     fd: posix.fd_t,
     evdev_fds: BoundedArray(posix.fd_t, MAX_EVDEV_GRABS),
     allocator: std.mem.Allocator,
+    /// Optional wedge instrumentation. Borrowed pointer; lifetime owned by the
+    /// enclosing DeviceInstance. When non-null, read/write/feature_report bump
+    /// the corresponding atomics for PR-ε.2 watchdog consumption.
+    wedge: ?*WedgeAtomics = null,
 
     pub fn init(allocator: std.mem.Allocator) HidrawDevice {
         return .{
@@ -37,6 +42,10 @@ pub const HidrawDevice = struct {
             .evdev_fds = .{},
             .allocator = allocator,
         };
+    }
+
+    pub fn attachWedge(self: *HidrawDevice, wedge: *WedgeAtomics) void {
+        self.wedge = wedge;
     }
 
     /// Scan /dev/hidraw0..hidraw63 for a device matching vid/pid.
@@ -201,6 +210,12 @@ pub const HidrawDevice = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    /// Vtable address used as a runtime type tag so DeviceInstance can detect
+    /// hidraw-backed DeviceIO entries (e.g. to attach wedge instrumentation).
+    pub fn vtablePtr() *const DeviceIO.VTable {
+        return &vtable;
+    }
+
     const vtable = DeviceIO.VTable{
         .read = read,
         .write = write,
@@ -217,27 +232,34 @@ pub const HidrawDevice = struct {
             else => return DeviceIO.ReadError.Io,
         };
         if (n == 0) return DeviceIO.ReadError.Disconnected;
+        if (self.wedge) |w| w.bumpInbound();
         return n;
     }
 
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *HidrawDevice = @ptrCast(@alignCast(ptr));
+        if (self.wedge) |w| w.beginWrite();
+        defer if (self.wedge) |w| w.endWrite();
         write_exact.writeExact(self.fd, data) catch |err| switch (err) {
             error.BrokenPipe, error.ConnectionResetByPeer => return DeviceIO.WriteError.Disconnected,
             else => return DeviceIO.WriteError.Io,
         };
+        if (self.wedge) |w| w.bumpOutbound();
     }
 
     fn featureReport(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *HidrawDevice = @ptrCast(@alignCast(ptr));
         const len: u14 = @intCast(@min(data.len, 0x3fff));
         const req = ioctl.HIDIOCSFEATURE(len);
+        if (self.wedge) |w| w.beginWrite();
+        defer if (self.wedge) |w| w.endWrite();
         const rc = linux.ioctl(self.fd, req, @intFromPtr(data.ptr));
         if (rc < 0) {
             const errno = posix.errno(rc);
             if (errno == .NODEV or errno == .PIPE) return DeviceIO.WriteError.Disconnected;
             return DeviceIO.WriteError.Io;
         }
+        if (self.wedge) |w| w.bumpOutbound();
     }
 
     fn pollfd(ptr: *anyopaque) posix.pollfd {

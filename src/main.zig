@@ -150,6 +150,7 @@ pub const testing_support = struct {
     pub const device_instance_imu_ownership_test = @import("test/device_instance_imu_ownership_test.zig");
     pub const supervisor_suspended_attach_takeover_test = @import("test/supervisor_suspended_attach_takeover_test.zig");
     pub const supervisor_suspend_output_continuity_test = @import("test/supervisor_suspend_output_continuity_test.zig");
+    pub const wedge_instrumentation_test = @import("test/wedge_instrumentation_test.zig");
     // Permanent canary — proves test discovery walks into testing_support.
     // If the discovery mechanism breaks again, this test stops running and
     // we can prove the regression with a deliberate failure.
