@@ -8,6 +8,23 @@ const BUF_SIZE = 256;
 /// Suffix joined to the socket's parent directory to advertise the bound path.
 pub const ADVERTISED_FILE_NAME = "socket.advertised";
 
+const unix_path_len = @typeInfo(@TypeOf(@as(linux.sockaddr.un, undefined).path)).array.len;
+
+/// Returns true if a live daemon is bound to `path` (connect(AF_UNIX) succeeds).
+/// Used both by `ControlSocket.init` (refuse to start when another instance owns
+/// the socket) and by the install/uninstall flow (refuse to unlink under a
+/// running daemon — issue #216).
+pub fn probeAlive(path: []const u8) bool {
+    if (path.len == 0 or path.len >= unix_path_len) return false;
+    const probe_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return false;
+    defer posix.close(probe_fd);
+    var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..path.len], path);
+    posix.connect(probe_fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)) catch return false;
+    return true;
+}
+
 pub const ControlSocket = struct {
     listen_fd: posix.fd_t,
     client_fds: [MAX_CLIENTS]posix.fd_t,
@@ -28,17 +45,7 @@ pub const ControlSocket = struct {
             else => return err,
         };
 
-        // Probe: if a live daemon owns the socket, refuse to start.
-        // Skip for over-length paths (PathTooLong will be returned below).
-        if (path_z.len < @as(usize, @typeInfo(@TypeOf(@as(linux.sockaddr.un, undefined).path)).array.len)) probe: {
-            const probe_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch break :probe;
-            defer posix.close(probe_fd);
-            var probe_addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
-            @memset(&probe_addr.path, 0);
-            @memcpy(probe_addr.path[0..path_z.len], path_z[0..path_z.len]);
-            posix.connect(probe_fd, @ptrCast(&probe_addr), @sizeOf(linux.sockaddr.un)) catch break :probe;
-            return error.AlreadyRunning;
-        }
+        if (probeAlive(path)) return error.AlreadyRunning;
 
         // Unlink stale socket
         std.fs.deleteFileAbsolute(path) catch {};

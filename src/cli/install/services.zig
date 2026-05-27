@@ -9,6 +9,17 @@ const runCmdWarn = plan_mod.runCmdWarn;
 const planSystemctlUser = plan_mod.planSystemctlUser;
 const atomicInstallBinary = plan_mod.atomicInstallBinary;
 
+pub const SystemctlScope = enum { system, user, both };
+
+/// Test hook: when non-null, `stopDaemonScope` records calls here instead of
+/// invoking real systemctl. Set to a non-null pointer in tests; reset to null
+/// in `defer`. Each call appends the scope and verbs (verbs are not duped).
+pub const TestStopCall = struct { scope: SystemctlScope, verbs: []const []const u8 };
+pub var test_stop_calls: ?*std.ArrayList(TestStopCall) = null;
+/// Test hook: when non-null, `stopDaemonScope` returns this error before
+/// dispatching to systemctl. Lets tests simulate a failed stop.
+pub var test_stop_force_error: ?anyerror = null;
+
 /// Generate the systemd --user unit. SupplementaryGroups= is intentionally
 /// NOT emitted: a user-scope service manager runs unprivileged (no CAP_SETGID)
 /// and cannot apply it, so the directive aborts startup with status=216/GROUP
@@ -348,6 +359,27 @@ pub fn runSystemctlSystem(verbs: []const []const u8) void {
     };
     defer freeArgv(allocator, argv);
     runCmd(argv);
+}
+
+/// Stop the padctl service in the requested systemctl scope(s) before any
+/// destructive op on daemon-owned runtime state (issue #216). On `.both`,
+/// stops are dispatched to both system and user scopes; either may report
+/// "not loaded" / "inactive" without surfacing as an error — the caller
+/// re-probes the socket afterwards to confirm the daemon released it.
+pub fn stopDaemonScope(allocator: std.mem.Allocator, scope: SystemctlScope) !void {
+    if (test_stop_force_error) |err| return err;
+    if (test_stop_calls) |list| {
+        try list.append(allocator, .{ .scope = scope, .verbs = &.{ "stop", "padctl.service" } });
+        return;
+    }
+    switch (scope) {
+        .system => runSystemctlSystem(&.{ "stop", "padctl.service" }),
+        .user => runSystemctlUser(&.{ "stop", "padctl.service" }),
+        .both => {
+            runSystemctlSystem(&.{ "stop", "padctl.service" });
+            runSystemctlUser(&.{ "stop", "padctl.service" });
+        },
+    }
 }
 
 fn buildSystemctlSystemArgv(allocator: std.mem.Allocator, verbs: []const []const u8) ![][]const u8 {

@@ -4,6 +4,68 @@ const services = @import("services.zig");
 const udev = @import("udev.zig");
 const migration = @import("migration.zig");
 const mappings = @import("mappings.zig");
+const control_socket = @import("../../io/control_socket.zig");
+
+/// Test hook: when non-null, `probeSocketAlive` calls this instead of probing.
+/// Lets uninstall tests simulate a live daemon (and toggle aliveness between
+/// the pre-stop and post-stop probes) without binding a real socket.
+pub var test_probe_alive_override: ?*const fn (path: []const u8) bool = null;
+
+fn probeSocketAlive(path: []const u8) bool {
+    if (test_probe_alive_override) |f| return f(path);
+    return control_socket.probeAlive(path);
+}
+
+/// Probe-guarded unlink: if a live daemon is bound to `path`, stop it in both
+/// systemctl scopes and re-probe before deleting. Refuses (returns error) when
+/// the daemon survives the stop. Silent unlink when no daemon is present.
+fn unlinkRuntimePath(allocator: std.mem.Allocator, path: []const u8) !void {
+    if (probeSocketAlive(path)) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "  warn: padctl daemon is bound to ") catch {};
+        _ = std.posix.write(std.posix.STDERR_FILENO, path) catch {};
+        _ = std.posix.write(std.posix.STDERR_FILENO, "; stopping before unlink\n") catch {};
+        services.stopDaemonScope(allocator, .both) catch {
+            _ = std.posix.write(std.posix.STDERR_FILENO,
+                \\  error: failed to stop padctl daemon; refusing to unlink live socket.
+                \\  Manually: sudo systemctl stop padctl.service && systemctl --user stop padctl.service
+                \\
+            ) catch {};
+            return error.DaemonStopFailed;
+        };
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+        if (probeSocketAlive(path)) {
+            _ = std.posix.write(std.posix.STDERR_FILENO,
+                \\  error: padctl daemon still alive after stop; refusing to unlink live socket
+                \\
+            ) catch {};
+            return error.DaemonStillAlive;
+        }
+    }
+    std.fs.deleteFileAbsolute(path) catch {};
+}
+
+/// Remove `*.wants/padctl.service` symlinks whose target unit file no longer
+/// exists on disk — left dangling after the stop+unlink cycle on some installs.
+fn gcDanglingWantsLinks(allocator: std.mem.Allocator, destdir: []const u8) void {
+    const candidates = [_][]const u8{
+        "/etc/systemd/system/multi-user.target.wants/padctl.service",
+        "/etc/systemd/user/default.target.wants/padctl.service",
+    };
+    for (candidates) |suffix| {
+        const path = std.fmt.allocPrint(allocator, "{s}{s}", .{ destdir, suffix }) catch continue;
+        defer allocator.free(path);
+        migration.removeBrokenSymlink(path);
+    }
+    if (std.posix.getenv("HOME")) |home| {
+        const user_path = std.fmt.allocPrint(
+            allocator,
+            "{s}/.config/systemd/user/default.target.wants/padctl.service",
+            .{home},
+        ) catch return;
+        defer allocator.free(user_path);
+        migration.removeBrokenSymlink(user_path);
+    }
+}
 
 const InstallOptions = plan_mod.InstallOptions;
 const InstallPlan = plan_mod.InstallPlan;
@@ -223,6 +285,12 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         opts.prefix;
 
     if (destdir.len == 0) {
+        // Stop+disable in both scopes so a system-scope install (which
+        // pre-#216 the user-only path never touched) is also shut down.
+        if (is_root) {
+            services.runSystemctlSystem(&.{ "stop", "padctl.service" });
+            services.runSystemctlSystem(&.{ "disable", "padctl.service" });
+        }
         const stop_plan = services.currentPlanFromEnv();
         if (stop_plan.mode == .skip) {
             const groups = [_][]const []const u8{
@@ -375,15 +443,18 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     }
 
     {
-        const path = try std.fmt.allocPrint(allocator, "{s}/run/padctl/padctl.pid", .{destdir});
-        defer allocator.free(path);
-        std.fs.deleteFileAbsolute(path) catch {};
+        // Socket liveness is the canonical signal — the same daemon owns the
+        // pid file. Probe-and-stop on the socket gates both unlinks.
+        const sock_path = try std.fmt.allocPrint(allocator, "{s}/run/padctl/padctl.sock", .{destdir});
+        defer allocator.free(sock_path);
+        try unlinkRuntimePath(allocator, sock_path);
+
+        const pid_path = try std.fmt.allocPrint(allocator, "{s}/run/padctl/padctl.pid", .{destdir});
+        defer allocator.free(pid_path);
+        std.fs.deleteFileAbsolute(pid_path) catch {};
     }
-    {
-        const path = try std.fmt.allocPrint(allocator, "{s}/run/padctl/padctl.sock", .{destdir});
-        defer allocator.free(path);
-        std.fs.deleteFileAbsolute(path) catch {};
-    }
+
+    gcDanglingWantsLinks(allocator, destdir);
 
     if (destdir.len == 0) {
         const reload_plan = services.currentPlanFromEnv();

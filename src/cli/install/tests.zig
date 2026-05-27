@@ -12,6 +12,7 @@ const phase_mod = @import("phase.zig");
 const user_config_mod = @import("../../config/user_config.zig");
 const paths = @import("../../config/paths.zig");
 const toml_extract = @import("../toml_extract.zig");
+const control_socket_mod = @import("../../io/control_socket.zig");
 
 // plan.zig
 const InstallOptions = plan_mod.InstallOptions;
@@ -889,6 +890,289 @@ test "install: uninstall applies destdir to runtime state paths" {
         std.debug.print("padctl.sock not cleaned up under destdir: {s}\n", .{sock_path});
         return error.RuntimeSockNotRemoved;
     } else |_| {}
+}
+
+// --- issue #216: probe-and-stop guard before unlinking live socket ---
+
+const ProbeRig = struct {
+    var alive_responses: [4]bool = .{ false, false, false, false };
+    var alive_call_count: usize = 0;
+    var calls: std.ArrayList(services_mod.TestStopCall) = .empty;
+
+    fn reset() void {
+        alive_responses = .{ false, false, false, false };
+        alive_call_count = 0;
+        calls = .empty;
+        services_mod.test_stop_calls = null;
+        services_mod.test_stop_force_error = null;
+        phase_mod.test_probe_alive_override = null;
+    }
+
+    fn probeAlive(_: []const u8) bool {
+        const i = alive_call_count;
+        alive_call_count += 1;
+        if (i >= alive_responses.len) return false;
+        return alive_responses[i];
+    }
+};
+
+test "uninstall: probes live daemon and stops in both scopes before unlink (issue #216)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const run_dir = try std.fmt.allocPrint(allocator, "{s}/run/padctl", .{staging});
+    defer allocator.free(run_dir);
+    try ensureDirAll(allocator, run_dir);
+
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/padctl.sock", .{run_dir});
+    defer allocator.free(sock_path);
+    {
+        var f = try std.fs.createFileAbsolute(sock_path, .{ .truncate = true });
+        defer f.close();
+    }
+
+    ProbeRig.alive_responses = .{ true, false, false, false }; // alive pre-stop, dead after
+    phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    services_mod.test_stop_calls = &ProbeRig.calls;
+    defer ProbeRig.calls.deinit(allocator);
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    try testing.expectEqual(@as(usize, 1), ProbeRig.calls.items.len);
+    try testing.expectEqual(services_mod.SystemctlScope.both, ProbeRig.calls.items[0].scope);
+    try testing.expectEqualStrings("stop", ProbeRig.calls.items[0].verbs[0]);
+    try testing.expectEqualStrings("padctl.service", ProbeRig.calls.items[0].verbs[1]);
+
+    // Pre-probe + post-probe both consumed; socket file gone.
+    try testing.expect(ProbeRig.alive_call_count >= 2);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(sock_path, .{}));
+}
+
+test "uninstall: dead daemon triggers no stop call (issue #216)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const run_dir = try std.fmt.allocPrint(allocator, "{s}/run/padctl", .{staging});
+    defer allocator.free(run_dir);
+    try ensureDirAll(allocator, run_dir);
+
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/padctl.sock", .{run_dir});
+    defer allocator.free(sock_path);
+    {
+        var f = try std.fs.createFileAbsolute(sock_path, .{ .truncate = true });
+        defer f.close();
+    }
+
+    ProbeRig.alive_responses = .{ false, false, false, false };
+    phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    services_mod.test_stop_calls = &ProbeRig.calls;
+    defer ProbeRig.calls.deinit(allocator);
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(sock_path, .{}));
+}
+
+test "uninstall: stop failure refuses unlink and returns DaemonStopFailed (issue #216)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const run_dir = try std.fmt.allocPrint(allocator, "{s}/run/padctl", .{staging});
+    defer allocator.free(run_dir);
+    try ensureDirAll(allocator, run_dir);
+
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/padctl.sock", .{run_dir});
+    defer allocator.free(sock_path);
+    {
+        var f = try std.fs.createFileAbsolute(sock_path, .{ .truncate = true });
+        defer f.close();
+    }
+
+    ProbeRig.alive_responses = .{ true, false, false, false };
+    phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    services_mod.test_stop_force_error = error.SystemctlFailed;
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try testing.expectError(error.DaemonStopFailed, uninstall(allocator, opts));
+    }
+
+    try std.fs.accessAbsolute(sock_path, .{});
+}
+
+test "uninstall: daemon survives stop returns DaemonStillAlive and keeps socket (issue #216)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const run_dir = try std.fmt.allocPrint(allocator, "{s}/run/padctl", .{staging});
+    defer allocator.free(run_dir);
+    try ensureDirAll(allocator, run_dir);
+
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/padctl.sock", .{run_dir});
+    defer allocator.free(sock_path);
+    {
+        var f = try std.fs.createFileAbsolute(sock_path, .{ .truncate = true });
+        defer f.close();
+    }
+
+    // Alive pre-stop AND alive post-stop+wait → daemon refused to die.
+    ProbeRig.alive_responses = .{ true, true, false, false };
+    phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    services_mod.test_stop_calls = &ProbeRig.calls;
+    defer ProbeRig.calls.deinit(allocator);
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try testing.expectError(error.DaemonStillAlive, uninstall(allocator, opts));
+    }
+
+    try testing.expectEqual(@as(usize, 1), ProbeRig.calls.items.len);
+    try std.fs.accessAbsolute(sock_path, .{});
+}
+
+test "uninstall: GCs dangling *.wants/padctl.service symlinks" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const wants_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/system/multi-user.target.wants", .{staging});
+    defer allocator.free(wants_dir);
+    try ensureDirAll(allocator, wants_dir);
+
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{wants_dir});
+    defer allocator.free(link_path);
+    // Target deliberately does not exist — this is the dangling symlink case.
+    try std.posix.symlink("/usr/lib/systemd/system/padctl.service", link_path);
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    // lstat does not follow the symlink — proves whether the link itself was unlinked.
+    var lbuf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.fs.readLinkAbsolute(link_path, &lbuf)) |_| {
+        return error.DanglingSymlinkNotRemoved;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+}
+
+test "control_socket: probeAlive returns false for nonexistent path" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    const missing = try std.fs.path.join(testing.allocator, &.{ root, "missing.sock" });
+    defer testing.allocator.free(missing);
+
+    try testing.expect(!control_socket_mod.probeAlive(missing));
+}
+
+test "control_socket: probeAlive returns true for live listener" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const sock_path = try std.fs.path.join(allocator, &.{ root, "live.sock" });
+    defer allocator.free(sock_path);
+
+    var cs = control_socket_mod.ControlSocket.init(allocator, sock_path) catch |err| {
+        if (err == error.AccessDenied) return;
+        return err;
+    };
+    defer cs.deinit();
+
+    try testing.expect(control_socket_mod.probeAlive(sock_path));
 }
 
 test "install: generateReconnectScript has required commands" {
