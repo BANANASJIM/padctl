@@ -1,23 +1,80 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const control_socket = @import("../io/control_socket.zig");
 
 pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
+pub const SYSTEM_RUNTIME_DIR = "/run/padctl";
 
-/// Non-root user with XDG_RUNTIME_DIR set → use XDG socket path
-/// (daemon binds there before the file exists; no existence check here).
-/// Root or missing XDG_RUNTIME_DIR → system path for system-service compatibility.
+/// Resolution order (first match wins):
+///   1. $PADCTL_SOCKET env override
+///   2. $XDG_RUNTIME_DIR/socket.advertised (user-scope daemon)
+///   3. /run/padctl/socket.advertised (system-scope daemon)
+///   4. Backward-compat fallback (old uid-relative paths)
+///
+/// Step 2 has no `padctl/` segment: the user-scope daemon binds at
+/// `$XDG_RUNTIME_DIR/padctl.sock`, so `dirname()` is `$XDG_RUNTIME_DIR` and
+/// `writeAdvertisedFile` produces `$XDG_RUNTIME_DIR/socket.advertised`.
 pub fn resolveSocketPath(buf: []u8) []const u8 {
-    if (posix.geteuid() != 0) {
-        if (posix.getenv("XDG_RUNTIME_DIR")) |xrd| {
-            return resolveSocketPathForXrd(buf, xrd);
+    const env_override = blk: {
+        if (posix.getenv("PADCTL_SOCKET")) |v| {
+            if (v.len > 0) break :blk v;
+        }
+        break :blk null;
+    };
+    const xrd = posix.getenv("XDG_RUNTIME_DIR");
+    return resolveSocketPathFor(buf, env_override, xrd, SYSTEM_RUNTIME_DIR, posix.geteuid() == 0);
+}
+
+/// Pure resolver; takes injectable env/runtime-dir parameters so tests can
+/// exercise every branch without mutating the process environment.
+pub fn resolveSocketPathFor(
+    buf: []u8,
+    env_override: ?[]const u8,
+    xdg_runtime_dir: ?[]const u8,
+    system_runtime_dir: []const u8,
+    is_root: bool,
+) []const u8 {
+    if (env_override) |v| {
+        if (v.len > 0) return copyOrDefault(buf, v);
+    }
+
+    if (xdg_runtime_dir) |xrd| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const adv = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ xrd, control_socket.ADVERTISED_FILE_NAME }) catch null;
+        if (adv) |p| if (readAdvertised(buf, p)) |out| return out;
+    }
+
+    {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const adv = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ system_runtime_dir, control_socket.ADVERTISED_FILE_NAME }) catch null;
+        if (adv) |p| if (readAdvertised(buf, p)) |out| return out;
+    }
+
+    // Backward-compat fallback so a new CLI still reaches an old daemon.
+    if (!is_root) {
+        if (xdg_runtime_dir) |xrd| {
+            return std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch DEFAULT_SOCKET_PATH;
         }
     }
     return DEFAULT_SOCKET_PATH;
 }
 
-fn resolveSocketPathForXrd(buf: []u8, xrd: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/padctl.sock", .{xrd}) catch DEFAULT_SOCKET_PATH;
+fn copyOrDefault(buf: []u8, s: []const u8) []const u8 {
+    if (s.len > buf.len) return DEFAULT_SOCKET_PATH;
+    @memcpy(buf[0..s.len], s);
+    return buf[0..s.len];
+}
+
+fn readAdvertised(out: []u8, advertised_path: []const u8) ?[]const u8 {
+    var file = std.fs.openFileAbsolute(advertised_path, .{}) catch return null;
+    defer file.close();
+    var raw: [256]u8 = undefined;
+    const n = file.readAll(&raw) catch return null;
+    const trimmed = std.mem.trim(u8, raw[0..n], " \t\r\n");
+    if (trimmed.len == 0 or trimmed.len > out.len) return null;
+    @memcpy(out[0..trimmed.len], trimmed);
+    return out[0..trimmed.len];
 }
 
 pub const ConnectError = posix.SocketError || posix.ConnectError || error{ PathTooLong, InvalidPath };
@@ -77,21 +134,64 @@ test "resolveSocketPath: root returns system path" {
     try testing.expectEqualStrings("/run/padctl/padctl.sock", DEFAULT_SOCKET_PATH);
 }
 
-test "resolveSocketPath: XDG path returned even when socket does not exist" {
-    // Regression for chicken-and-egg: old code called accessAbsolute, which
-    // caused fall-through to DEFAULT_SOCKET_PATH when the socket didn't exist yet.
-    // Test the pure helper directly to avoid env manipulation in the test suite.
+// Test A: env override wins over every advertised file and fallback.
+test "resolveSocketPathFor: PADCTL_SOCKET env override wins" {
     var buf: [256]u8 = undefined;
-    const result = resolveSocketPathForXrd(&buf, "/nonexistent/padctl-test-xdg");
-    try testing.expectEqualStrings("/nonexistent/padctl-test-xdg/padctl.sock", result);
+    const got = resolveSocketPathFor(&buf, "/custom/path.sock", "/run/user/1000", "/run/padctl", false);
+    try testing.expectEqualStrings("/custom/path.sock", got);
 }
 
-test "resolveSocketPath: buf large enough for XDG path" {
-    // Verify bufPrint won't overflow for a typical XDG_RUNTIME_DIR length.
+// Falsifiability: drop the XDG advertised-read branch in resolveSocketPathFor
+// and this test must FAIL — the resolver will hit the backward-compat
+// fallback and return the XDG socket path instead of the advertised value.
+// Fixture writes at `$XDG_RUNTIME_DIR/socket.advertised` (no `padctl/`
+// segment) to match the daemon writer: dirname($XDG/padctl.sock) is $XDG.
+test "resolveSocketPathFor: XDG advertised file is honored" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const xrd = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(xrd);
+
+    var f = try tmp.dir.createFile(control_socket.ADVERTISED_FILE_NAME, .{ .truncate = true });
+    try f.writeAll("/tmp/foo.sock\n");
+    f.close();
+
     var buf: [256]u8 = undefined;
-    const fake_xrd = "/run/user/1000";
-    const result = std.fmt.bufPrint(&buf, "{s}/padctl.sock", .{fake_xrd}) catch unreachable;
-    try testing.expectEqualStrings("/run/user/1000/padctl.sock", result);
+    const got = resolveSocketPathFor(&buf, null, xrd, "/nonexistent-system", false);
+    try testing.expectEqualStrings("/tmp/foo.sock", got);
+}
+
+// Test C: system advertised file picked when XDG is missing.
+test "resolveSocketPathFor: system advertised file is honored when XDG absent" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const sys_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(sys_root);
+
+    var f = try tmp.dir.createFile(control_socket.ADVERTISED_FILE_NAME, .{ .truncate = true });
+    try f.writeAll("/run/padctl/padctl.sock");
+    f.close();
+
+    var buf: [256]u8 = undefined;
+    const got = resolveSocketPathFor(&buf, null, null, sys_root, true);
+    try testing.expectEqualStrings("/run/padctl/padctl.sock", got);
+}
+
+// Test D: backward-compat fallback when no env, no advertised files.
+test "resolveSocketPathFor: fallback returns XDG path for non-root user" {
+    var buf: [256]u8 = undefined;
+    const got = resolveSocketPathFor(&buf, null, "/run/user/1000", "/nonexistent-system", false);
+    try testing.expectEqualStrings("/run/user/1000/padctl.sock", got);
+}
+
+test "resolveSocketPathFor: fallback returns system path for root" {
+    var buf: [256]u8 = undefined;
+    const got = resolveSocketPathFor(&buf, null, null, "/nonexistent-system", true);
+    try testing.expectEqualStrings(DEFAULT_SOCKET_PATH, got);
 }
 
 test "formatSwitch: global" {
