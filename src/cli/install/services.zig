@@ -168,6 +168,8 @@ pub fn generateSystemServiceContent(allocator: std.mem.Allocator, prefix: []cons
         \\ProtectHome=true
         \\PrivateTmp=true
         \\RuntimeDirectory=padctl
+        \\RuntimeDirectoryMode=0755
+        \\RuntimeDirectoryPreserve=no
         \\StateDirectory=padctl
         \\{s}DeviceAllow=/dev/hidraw* rw
         \\DeviceAllow=/dev/uinput rw

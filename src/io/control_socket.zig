@@ -40,6 +40,8 @@ pub const ControlSocket = struct {
         defer allocator.free(path_z);
 
         const dir = std.fs.path.dirname(path) orelse "/run";
+        // systemd RuntimeDirectory= creates this when service is active;
+        // defensive for daemon started outside systemd (dev/test/foreground).
         std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
