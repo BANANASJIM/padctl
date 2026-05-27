@@ -1460,17 +1460,17 @@ test "descriptor: Vader 5 keeps Steam/SDL M2 and M3 paddle order" {
     const out = parsed.value.output orelse return error.MissingOutputSection;
 
     const buttons = out.buttons orelse return error.MissingButtons;
-    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY5", buttons.map.get("M1") orelse return error.MissingM1);
-    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY7", buttons.map.get("M2") orelse return error.MissingM2);
-    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY6", buttons.map.get("M3") orelse return error.MissingM3);
-    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY8", buttons.map.get("M4") orelse return error.MissingM4);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.map.get("M2") orelse return error.MissingM2);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.map.get("M3") orelse return error.MissingM3);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.map.get("M4") orelse return error.MissingM4);
 
     const desc = try UhidDescriptorBuilder.buildFromOutput(alloc, out);
     defer alloc.free(desc);
 
     try expectButtonUsages(desc, &.{
         1,  2,  4,  5,  7,  8,  12, 11, 13, 14,
-        15, 21, 23, 22, 24, 17, 18, 19, 20, 25,
+        15, 17, 19, 18, 20, 25, 26, 27, 28, 29,
     });
 }
 

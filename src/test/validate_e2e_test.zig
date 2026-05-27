@@ -237,3 +237,38 @@ test "validate: all device TOMLs have at least one report" {
         try testing.expect(parsed.value.report.len >= 1);
     }
 }
+
+// --- 6. vader5 paddle slot invariants (regression for PR #235) ---
+
+test "vader5: M1..M4 occupy BTN_TRIGGER_HAPPY1..4 (Steam Elite paddle slots)" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer parsed.deinit();
+
+    const buttons = parsed.value.output.?.buttons.?.map;
+
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.get("M1") orelse return error.MissingM1);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.get("M2") orelse return error.MissingM2);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.get("M3") orelse return error.MissingM3);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.get("M4") orelse return error.MissingM4);
+}
+
+test "vader5: C/Z/LM/RM/O do not occupy BTN_TRIGGER_HAPPY1..4" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer parsed.deinit();
+
+    const buttons = parsed.value.output.?.buttons.?.map;
+    const paddle_slots = [_][]const u8{
+        "BTN_TRIGGER_HAPPY1", "BTN_TRIGGER_HAPPY2",
+        "BTN_TRIGGER_HAPPY3", "BTN_TRIGGER_HAPPY4",
+    };
+    const face_extras = [_][]const u8{ "C", "Z", "LM", "RM", "O" };
+
+    for (face_extras) |btn| {
+        const code = buttons.get(btn) orelse continue;
+        for (paddle_slots) |slot| {
+            try testing.expect(!std.mem.eql(u8, code, slot));
+        }
+    }
+}

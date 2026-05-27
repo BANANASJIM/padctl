@@ -98,18 +98,16 @@ Start  = "BTN_START"
 Home   = "BTN_MODE"
 LS     = "BTN_THUMBL"
 RS     = "BTN_THUMBR"
-C      = "BTN_TRIGGER_HAPPY1"
-Z      = "BTN_TRIGGER_HAPPY2"
-LM     = "BTN_TRIGGER_HAPPY3"
-RM     = "BTN_TRIGGER_HAPPY4"
-M1     = "BTN_TRIGGER_HAPPY5"
-# Steam labels SDL paddle slots in Xbox Elite order: usage 22 is P3 and
-# usage 23 is P2. Keep M2/M3 swapped at the evdev-code level so Vader M2
-# appears as the expected lower-right paddle instead of P3.
-M2     = "BTN_TRIGGER_HAPPY7"
-M3     = "BTN_TRIGGER_HAPPY6"
-M4     = "BTN_TRIGGER_HAPPY8"
-O      = "BTN_TRIGGER_HAPPY9"
+M1     = "BTN_TRIGGER_HAPPY1"
+# Steam Xbox Elite order: usage 22 = P3, usage 23 = P2; swap M2/M3 so Vader M2 lands at P3.
+M2     = "BTN_TRIGGER_HAPPY3"
+M3     = "BTN_TRIGGER_HAPPY2"
+M4     = "BTN_TRIGGER_HAPPY4"
+C      = "BTN_TRIGGER_HAPPY9"
+Z      = "BTN_TRIGGER_HAPPY10"
+LM     = "BTN_TRIGGER_HAPPY11"
+RM     = "BTN_TRIGGER_HAPPY12"
+O      = "BTN_TRIGGER_HAPPY13"
 
 [output.dpad]
 type = "hat"
