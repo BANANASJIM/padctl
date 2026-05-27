@@ -650,6 +650,9 @@ test "install: system unit declares RuntimeDirectory=padctl + Mode=0755 + Preser
     try testing.expect(std.mem.indexOf(u8, content, "\nRuntimeDirectory=padctl\n") != null);
     try testing.expect(std.mem.indexOf(u8, content, "\nRuntimeDirectoryMode=0755\n") != null);
     try testing.expect(std.mem.indexOf(u8, content, "\nRuntimeDirectoryPreserve=no\n") != null);
+    const user_content = try generateServiceContent(allocator, "/usr");
+    defer allocator.free(user_content);
+    try testing.expect(std.mem.indexOf(u8, user_content, "RuntimeDirectory") == null);
 }
 
 test "install: inputGroupHintNeeded suppressed when host has no input group" {
