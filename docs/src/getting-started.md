@@ -115,6 +115,15 @@ Custom prefix (e.g. for packaging):
 sudo ./zig-out/bin/padctl install --prefix /usr --destdir "$DESTDIR"
 ```
 
+### Lifecycle scope override
+
+`PADCTL_INSTALL_PHASE=package` forces the installer to act as if invoked by a
+package post-install script (no service start/enable, no XDG path creation,
+no UDEV reload). Useful for `dpkg --configure`, `rpm --install`, and AUR
+`PKGBUILD` `package()` functions. The variable is recognized in priority
+order: `DESTDIR` env > `PADCTL_INSTALL_PHASE` env > `--scope` flag > euid >
+`--prefix`.
+
 ### Additional Services
 
 `padctl install` also sets up the following on all systems:

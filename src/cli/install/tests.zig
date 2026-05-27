@@ -647,9 +647,13 @@ test "install: system unit declares RuntimeDirectory=padctl + Mode=0755 + Preser
     const allocator = testing.allocator;
     const content = try generateSystemServiceContent(allocator, "/usr", false);
     defer allocator.free(content);
-    try testing.expect(std.mem.indexOf(u8, content, "\nRuntimeDirectory=padctl\n") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "\nRuntimeDirectoryMode=0755\n") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "\nRuntimeDirectoryPreserve=no\n") != null);
+    const service_idx = std.mem.indexOf(u8, content, "\n[Service]\n") orelse return error.MissingServiceSection;
+    const install_idx = std.mem.indexOf(u8, content, "\n[Install]\n") orelse content.len;
+    inline for (.{ "\nRuntimeDirectory=padctl\n", "\nRuntimeDirectoryMode=0755\n", "\nRuntimeDirectoryPreserve=no\n" }) |needle| {
+        const idx = std.mem.indexOf(u8, content, needle) orelse return error.DirectiveMissing;
+        try testing.expect(idx > service_idx);
+        try testing.expect(idx < install_idx);
+    }
     const user_content = try generateServiceContent(allocator, "/usr");
     defer allocator.free(user_content);
     try testing.expect(std.mem.indexOf(u8, user_content, "RuntimeDirectory") == null);
