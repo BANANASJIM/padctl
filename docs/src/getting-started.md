@@ -120,9 +120,9 @@ sudo ./zig-out/bin/padctl install --prefix /usr --destdir "$DESTDIR"
 `PADCTL_INSTALL_PHASE=package` forces the installer to act as if invoked by a
 package post-install script (no service start/enable, no XDG path creation,
 no UDEV reload). Useful for `dpkg --configure`, `rpm --install`, and AUR
-`PKGBUILD` `package()` functions. The variable is recognized in priority
-order: `DESTDIR` env > `PADCTL_INSTALL_PHASE` env > `--scope` flag > euid >
-`--prefix`.
+`PKGBUILD` `package()` functions. Scope is resolved in this priority order:
+`--destdir` flag > `PADCTL_INSTALL_PHASE` env > `DESTDIR` env > `--scope`
+flag > euid > `--prefix`.
 
 ### Additional Services
 
