@@ -841,7 +841,7 @@ test "uninstall: legacy padctl-resume.service is removed (non-immutable)" {
     } else |_| {}
 }
 
-test "install: uninstall applies destdir to runtime state paths" {
+test "install: uninstall removes runtime state paths under system scope" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -869,11 +869,19 @@ test "install: uninstall applies destdir to runtime state paths" {
         defer f.close();
     }
 
+    // PR-3: runtime paths are touched only in non-package scopes. Force
+    // scope=.system and redirect the path root to the staging tmpdir.
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 0;
+    defer phase_mod.test_euid_override = null;
+
     const opts = InstallOptions{
         .prefix = "/usr/local",
-        .destdir = staging,
+        .destdir = "",
         .immutable = false,
         .user_service = false,
+        .scope = .system,
     };
     {
         var silencer = try SilencedStdout.begin();
@@ -882,12 +890,12 @@ test "install: uninstall applies destdir to runtime state paths" {
     }
 
     if (std.fs.accessAbsolute(pid_path, .{})) |_| {
-        std.debug.print("padctl.pid not cleaned up under destdir: {s}\n", .{pid_path});
+        std.debug.print("padctl.pid not cleaned up under runtime-root override: {s}\n", .{pid_path});
         return error.RuntimePidNotRemoved;
     } else |_| {}
 
     if (std.fs.accessAbsolute(sock_path, .{})) |_| {
-        std.debug.print("padctl.sock not cleaned up under destdir: {s}\n", .{sock_path});
+        std.debug.print("padctl.sock not cleaned up under runtime-root override: {s}\n", .{sock_path});
         return error.RuntimeSockNotRemoved;
     } else |_| {}
 }
@@ -941,14 +949,19 @@ test "uninstall: probes live daemon and stops in both scopes before unlink (issu
 
     ProbeRig.alive_responses = .{ true, false, false, false }; // alive pre-stop, dead after
     phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 0;
+    defer phase_mod.test_euid_override = null;
     services_mod.test_stop_calls = &ProbeRig.calls;
     defer ProbeRig.calls.deinit(allocator);
 
     const opts = InstallOptions{
         .prefix = "/usr/local",
-        .destdir = staging,
+        .destdir = "",
         .immutable = false,
         .user_service = false,
+        .scope = .system,
     };
     {
         var silencer = try SilencedStdout.begin();
@@ -991,14 +1004,19 @@ test "uninstall: dead daemon triggers no stop call (issue #216)" {
 
     ProbeRig.alive_responses = .{ false, false, false, false };
     phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 0;
+    defer phase_mod.test_euid_override = null;
     services_mod.test_stop_calls = &ProbeRig.calls;
     defer ProbeRig.calls.deinit(allocator);
 
     const opts = InstallOptions{
         .prefix = "/usr/local",
-        .destdir = staging,
+        .destdir = "",
         .immutable = false,
         .user_service = false,
+        .scope = .system,
     };
     {
         var silencer = try SilencedStdout.begin();
@@ -1035,13 +1053,18 @@ test "uninstall: stop failure refuses unlink and returns DaemonStopFailed (issue
 
     ProbeRig.alive_responses = .{ true, false, false, false };
     phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 0;
+    defer phase_mod.test_euid_override = null;
     services_mod.test_stop_force_error = error.SystemctlFailed;
 
     const opts = InstallOptions{
         .prefix = "/usr/local",
-        .destdir = staging,
+        .destdir = "",
         .immutable = false,
         .user_service = false,
+        .scope = .system,
     };
     {
         var silencer = try SilencedStdout.begin();
@@ -1078,14 +1101,19 @@ test "uninstall: daemon survives stop returns DaemonStillAlive and keeps socket 
     // Alive pre-stop AND alive post-stop+wait → daemon refused to die.
     ProbeRig.alive_responses = .{ true, true, false, false };
     phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 0;
+    defer phase_mod.test_euid_override = null;
     services_mod.test_stop_calls = &ProbeRig.calls;
     defer ProbeRig.calls.deinit(allocator);
 
     const opts = InstallOptions{
         .prefix = "/usr/local",
-        .destdir = staging,
+        .destdir = "",
         .immutable = false,
         .user_service = false,
+        .scope = .system,
     };
     {
         var silencer = try SilencedStdout.begin();
@@ -1118,11 +1146,17 @@ test "uninstall: GCs dangling *.wants/padctl.service symlinks" {
     // Target deliberately does not exist — this is the dangling symlink case.
     try std.posix.symlink("/usr/lib/systemd/system/padctl.service", link_path);
 
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 0;
+    defer phase_mod.test_euid_override = null;
+
     const opts = InstallOptions{
         .prefix = "/usr/local",
-        .destdir = staging,
+        .destdir = "",
         .immutable = false,
         .user_service = false,
+        .scope = .system,
     };
     {
         var silencer = try SilencedStdout.begin();
@@ -1863,7 +1897,7 @@ test "install: #137 writeServiceSentinel creates the gating file" {
 // the predicate that gates writeServiceSentinel in phase.zig.
 test "install: #137 no sentinel under --no-enable" {
     const testing = std.testing;
-    const opts = InstallOptions{ .no_enable = true };
+    const opts = InstallOptions{ .no_enable = true, .prefix = "/home/alice/.local" };
     const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
     const plan = try InstallPlan.compute(testing.allocator, opts, env);
     defer plan.deinit(testing.allocator);
@@ -1921,13 +1955,13 @@ test "install: #137 shouldProactiveUnbind truth table" {
     const cases = [_]Case{
         // enabling, not --no-enable → true
         .{
-            .opts = .{},
+            .opts = .{ .prefix = "/home/a/.local" },
             .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
             .want = true,
         },
         // enabling but --no-enable → false
         .{
-            .opts = .{ .no_enable = true },
+            .opts = .{ .no_enable = true, .prefix = "/home/a/.local" },
             .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
             .want = false,
         },
@@ -2806,7 +2840,7 @@ test "install: explicit --no-user-service returns false regardless of sudo_hop" 
 // behavioural spec.
 test "install: InstallPlan case A — non-root default" {
     const testing = std.testing;
-    const opts = InstallOptions{};
+    const opts = InstallOptions{ .prefix = "/home/alice/.local" };
     const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
     const plan = try InstallPlan.compute(testing.allocator, opts, env);
     defer plan.deinit(testing.allocator);
@@ -2893,7 +2927,7 @@ test "install: InstallPlan service_dir routes by user_service + immutable" {
     const testing = std.testing;
     // Non-root → user dir under HOME. HOME must be set for the test env (it is,
     // by zig's test runner).
-    const opts = InstallOptions{};
+    const opts = InstallOptions{ .prefix = "/home/alice/.local" };
     const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
     const plan = try InstallPlan.compute(testing.allocator, opts, env);
     defer plan.deinit(testing.allocator);
@@ -3576,4 +3610,182 @@ test "uninstall: removes 61-padctl-driver-block.rules" {
             return error.RuleFileNotRemoved;
         } else |_| {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// PR-3: LifecycleScope integration tests
+// ---------------------------------------------------------------------------
+
+const scope_mod = @import("scope.zig");
+const LifecycleScope = scope_mod.LifecycleScope;
+
+test "plan: compute sets scope from destdir to .package" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const opts = InstallOptions{ .prefix = "/usr", .destdir = "/tmp/staging-pr3" };
+    const env = EnvSnapshot{
+        .uid = 0,
+        .home = null,
+        .sudo_user = null,
+        .sudo_uid = null,
+    };
+    var plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try testing.expectEqual(LifecycleScope.package, plan.scope);
+    try testing.expect(plan.isStaging());
+}
+
+test "plan: compute sets scope to .system for root without destdir" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const opts = InstallOptions{ .prefix = "/usr", .destdir = "" };
+    const env = EnvSnapshot{
+        .uid = 0,
+        .home = "/root",
+        .sudo_user = null,
+        .sudo_uid = null,
+    };
+    var plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try testing.expectEqual(LifecycleScope.system, plan.scope);
+    try testing.expect(!plan.isStaging());
+}
+
+test "plan: compute sets scope to .user for non-root with HOME prefix" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const opts = InstallOptions{ .prefix = "/home/u/.local", .destdir = "" };
+    const env = EnvSnapshot{
+        .uid = 1000,
+        .home = "/home/u",
+        .sudo_user = null,
+        .sudo_uid = null,
+    };
+    var plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try testing.expectEqual(LifecycleScope.user, plan.scope);
+    try testing.expect(!plan.isStaging());
+}
+
+test "plan: isStaging() returns true iff scope == .package" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    {
+        const opts = InstallOptions{ .destdir = "/tmp/p", .prefix = "/usr" };
+        const env = EnvSnapshot{ .uid = 0, .home = null, .sudo_user = null, .sudo_uid = null };
+        var plan = try InstallPlan.compute(allocator, opts, env);
+        defer plan.deinit(allocator);
+        try testing.expect(plan.isStaging());
+    }
+    {
+        const opts = InstallOptions{ .destdir = "", .prefix = "/usr" };
+        const env = EnvSnapshot{ .uid = 0, .home = null, .sudo_user = null, .sudo_uid = null };
+        var plan = try InstallPlan.compute(allocator, opts, env);
+        defer plan.deinit(allocator);
+        try testing.expect(!plan.isStaging());
+    }
+}
+
+// Falsifiability: temp-remove the `if (scope != .package)` gate around the
+// runtime-touch block in phase.zig — this test fires systemctl calls and
+// touches the runtime root in package mode, so it would observe the probe
+// stop call recorded into ProbeRig and fail with calls.items.len == 1.
+test "uninstall: package scope skips ALL runtime ops" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    // Seed a fake "live" socket and a dangling wants-link inside staging so
+    // the test can prove the package path does NOT touch them.
+    const run_dir = try std.fmt.allocPrint(allocator, "{s}/run/padctl", .{staging});
+    defer allocator.free(run_dir);
+    try ensureDirAll(allocator, run_dir);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/padctl.sock", .{run_dir});
+    defer allocator.free(sock_path);
+    {
+        var f = try std.fs.createFileAbsolute(sock_path, .{ .truncate = true });
+        f.close();
+    }
+
+    const wants_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/system/multi-user.target.wants", .{staging});
+    defer allocator.free(wants_dir);
+    try ensureDirAll(allocator, wants_dir);
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{wants_dir});
+    defer allocator.free(link_path);
+    try std.posix.symlink("/usr/lib/systemd/system/padctl.service", link_path);
+
+    // ProbeRig would record any stopDaemonScope call if the probe fired.
+    phase_mod.test_probe_alive_override = ProbeRig.probeAlive;
+    ProbeRig.alive_responses = .{ true, true, true, true }; // would force a stop
+    services_mod.test_stop_calls = &ProbeRig.calls;
+    defer ProbeRig.calls.deinit(allocator);
+
+    const opts = InstallOptions{
+        .prefix = "/usr/local",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    // No probe call, no stop call, no socket unlink, no dangling-symlink GC.
+    try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);
+    try testing.expectEqual(@as(usize, 0), ProbeRig.alive_call_count);
+    try std.fs.accessAbsolute(sock_path, .{}); // still exists
+    var lbuf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.fs.readLinkAbsolute(link_path, &lbuf); // still exists
+}
+
+test "uninstall: user scope routes to user systemctl only" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    ProbeRig.reset();
+    defer ProbeRig.reset();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    // Drive scope=.user from a forced non-root euid so the path runs even
+    // when the test container is root.
+    phase_mod.test_runtime_root_override = staging;
+    defer phase_mod.test_runtime_root_override = null;
+    phase_mod.test_euid_override = 1000;
+    defer phase_mod.test_euid_override = null;
+
+    services_mod.test_stop_calls = &ProbeRig.calls;
+    defer ProbeRig.calls.deinit(allocator);
+
+    const opts = InstallOptions{
+        .prefix = "/home/alice/.local",
+        .destdir = "",
+        .immutable = false,
+        .user_service = true,
+        .scope = .user,
+    };
+
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    // scope=.user must NOT trigger a system-scope stop. The PR-2 probe-and-stop
+    // path only fires when probeSocketAlive returns true, and there's no socket
+    // here, so stopDaemonScope is never called — calls list stays empty.
+    try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);
 }
