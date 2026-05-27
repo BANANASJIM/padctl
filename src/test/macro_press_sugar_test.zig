@@ -125,6 +125,19 @@ test "macro_press: case E — press conflicts with explicit up on same button" {
     try testing.expectError(error.PressConflict, mapping.parseString(allocator, src));
 }
 
+test "macro_press: case G — press conflicts with explicit down on same button" {
+    const allocator = testing.allocator;
+    const src =
+        \\[[macro]]
+        \\name = "m"
+        \\steps = [
+        \\    { press = "RB" },
+        \\    { down = "RB" },
+        \\]
+    ;
+    try testing.expectError(error.PressConflict, mapping.parseString(allocator, src));
+}
+
 // F — backward compat: existing macros without press are byte-identical.
 test "macro_press: case F — macro without press is byte-identical pre/post" {
     const allocator = testing.allocator;

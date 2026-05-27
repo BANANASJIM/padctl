@@ -333,7 +333,12 @@ test_managed_silent_noop_pull_is_detected() {
         exit 1
     fi
     # HEAD must still be old-head (we did not silently proceed)
-    [[ "$(PATH="$fakebin:$PATH" git -C "$repo" rev-parse HEAD)" == "old-head" ]] || true
+    local actual_head
+    actual_head="$(PATH="$fakebin:$PATH" git -C "$repo" rev-parse HEAD)"
+    if [[ "$actual_head" != "old-head" ]]; then
+        echo "FAIL: HEAD changed silently in noop test (expected old-head, got $actual_head)" >&2
+        exit 1
+    fi
 }
 
 bash -n "$SCRIPT_DIR/bazzite-setup.sh"
