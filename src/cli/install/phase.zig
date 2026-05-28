@@ -282,7 +282,6 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         .destdir = opts.destdir,
         .forced_scope = opts.scope,
         .install_phase_env = std.posix.getenv("PADCTL_INSTALL_PHASE"),
-        .destdir_env = std.posix.getenv("DESTDIR"),
         .euid = effective_uid,
         .sudo_user_env = std.posix.getenv("SUDO_USER"),
         .prefix = opts.prefix,

@@ -210,6 +210,27 @@ jobs:
                 exit 1
               fi
 
+              # ---- Scenario A2 (#355): ambient DESTDIR must NOT suppress the sentinel ----
+              # Re-run an enabled install with DESTDIR exported in the environment
+              # (as a parent build shell might). Scope detection must honor only the
+              # --destdir flag, never the ambient env var, so the sentinel written by
+              # Scenario A must survive. Before the #355 fix this install silently
+              # entered staging mode and removed the sentinel.
+              su - testuser -c "sudo DESTDIR=/tmp/ambient SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
+                HOME=/home/testuser \
+                /usr/local/bin/padctl install --prefix /usr/local 2>&1"
+
+              echo "=== sentinel mechanism invariants (Scenario A2: ambient DESTDIR, #355) ==="
+              FAIL=0
+
+              check "ambient DESTDIR does not suppress sentinel (#355)" \
+                "[ -e \"\$SENTINEL\" ]"
+
+              if [ $FAIL -ne 0 ]; then
+                echo "=== SCENARIO A2 FAILED ==="
+                exit 1
+              fi
+
               # ---- Scenario B: --no-enable install => no sentinel => predicate-false skips unbind ----
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
