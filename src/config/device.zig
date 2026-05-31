@@ -244,7 +244,79 @@ fn fieldTypeSize(type_str: []const u8) ?i64 {
     return null;
 }
 
+pub fn isSuppressClass(class: []const u8) bool {
+    return std.mem.eql(u8, class, "suppress");
+}
+
+fn isSuppressInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
+    for (cfg.device.interface) |iface| {
+        if (iface.id == iface_id) return isSuppressClass(iface.class);
+    }
+    return false;
+}
+
+/// Number of interfaces opened into the devices[] array (everything except
+/// suppress-class interfaces). Suppress interfaces are claimed separately and
+/// consume no DeviceIO slot.
+pub fn openedInterfaceCount(cfg: *const DeviceConfig) usize {
+    var n: usize = 0;
+    for (cfg.device.interface) |iface| {
+        if (!isSuppressClass(iface.class)) n += 1;
+    }
+    return n;
+}
+
+/// Map a USB interface id to its index in the devices[] array, counting only
+/// non-suppress interfaces. Returns null when the id is unknown or suppressed.
+pub fn deviceIndexForInterface(cfg: *const DeviceConfig, iface_id: i64) ?usize {
+    var idx: usize = 0;
+    for (cfg.device.interface) |iface| {
+        if (isSuppressClass(iface.class)) continue;
+        if (iface.id == iface_id) return idx;
+        idx += 1;
+    }
+    return null;
+}
+
+/// Inverse of deviceIndexForInterface: map a devices[] index back to its
+/// InterfaceConfig, skipping suppress interfaces. Returns null when out of range.
+pub fn interfaceForDeviceIndex(cfg: *const DeviceConfig, dev_idx: usize) ?*const InterfaceConfig {
+    var idx: usize = 0;
+    for (cfg.device.interface) |*iface| {
+        if (isSuppressClass(iface.class)) continue;
+        if (idx == dev_idx) return iface;
+        idx += 1;
+    }
+    return null;
+}
+
 pub fn validate(cfg: *const DeviceConfig) !void {
+    for (cfg.device.interface) |iface| {
+        const is_hid = std.mem.eql(u8, iface.class, "hid");
+        const is_vendor = std.mem.eql(u8, iface.class, "vendor");
+        const is_suppress = std.mem.eql(u8, iface.class, "suppress");
+        if (!is_hid and !is_vendor and !is_suppress) return error.InvalidConfig;
+        if (is_suppress and (iface.ep_in != null or iface.ep_out != null))
+            return error.InvalidConfig;
+    }
+
+    // A suppress interface is claimed only to evict the kernel driver; it is
+    // never read or written, so no report/command/init may reference it.
+    for (cfg.report) |report| {
+        if (isSuppressInterface(cfg, report.interface)) return error.InvalidConfig;
+    }
+    if (cfg.commands) |cmds| {
+        var it = cmds.map.iterator();
+        while (it.next()) |entry| {
+            if (isSuppressInterface(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
+        }
+    }
+    if (cfg.device.init) |init_cfg| {
+        if (init_cfg.interface) |iface_id| {
+            if (isSuppressInterface(cfg, iface_id)) return error.InvalidConfig;
+        }
+    }
+
     for (cfg.report) |report| {
         if (report.fields) |fields| {
             var seen_buf: [64][]const u8 = undefined;
@@ -535,17 +607,138 @@ test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
     defer result.deinit();
 
     const cfg = result.value;
-    try std.testing.expectEqual(@as(usize, 1), cfg.device.interface.len);
+    // IF1 read transport + IF2/IF3 suppress-only claims.
+    try std.testing.expectEqual(@as(usize, 3), cfg.device.interface.len);
+    try std.testing.expectEqual(@as(usize, 1), openedInterfaceCount(&cfg));
     const if1 = cfg.device.interface[0];
     try std.testing.expectEqual(@as(i64, 1), if1.id);
     try std.testing.expectEqualStrings("vendor", if1.class);
     try std.testing.expectEqual(@as(i64, 0x82), if1.ep_in orelse return error.MissingEpIn);
     try std.testing.expectEqual(@as(i64, 0x06), if1.ep_out orelse return error.MissingEpOut);
 
+    try std.testing.expectEqualStrings("suppress", cfg.device.interface[1].class);
+    try std.testing.expectEqual(@as(i64, 2), cfg.device.interface[1].id);
+    try std.testing.expect(cfg.device.interface[1].ep_in == null);
+    try std.testing.expectEqualStrings("suppress", cfg.device.interface[2].class);
+    try std.testing.expectEqual(@as(i64, 3), cfg.device.interface[2].id);
+
     const init_cfg = cfg.device.init orelse return error.MissingInit;
     try std.testing.expectEqual(@as(i64, 1), init_cfg.interface orelse return error.MissingInterface);
     try std.testing.expect(init_cfg.commands != null);
     try std.testing.expect(init_cfg.enable != null);
+}
+
+fn suppressIndexToml(comptime suppress_first: bool) []const u8 {
+    const report_block =
+        \\[[device.interface]]
+        \\id = 5
+        \\class = "hid"
+        \\
+    ;
+    const suppress_block =
+        \\[[device.interface]]
+        \\id = 9
+        \\class = "suppress"
+        \\
+    ;
+    const head =
+        \\[device]
+        \\name = "Mixed"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+    ;
+    const tail =
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 5
+        \\size = 16
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[report.fields]
+        \\left_x = { offset = 6, type = "i16le" }
+        \\
+    ;
+    return if (suppress_first)
+        head ++ suppress_block ++ report_block ++ tail
+    else
+        head ++ report_block ++ suppress_block ++ tail;
+}
+
+test "device: suppress interface excluded from devices[] index regardless of order" {
+    const allocator = std.testing.allocator;
+
+    inline for (.{ true, false }) |suppress_first| {
+        const result = try parseString(allocator, suppressIndexToml(suppress_first));
+        defer result.deinit();
+        const cfg = result.value;
+
+        try validate(&cfg);
+        try std.testing.expectEqual(@as(usize, 2), cfg.device.interface.len);
+        // Only the hid interface gets a devices[] slot.
+        try std.testing.expectEqual(@as(usize, 1), openedInterfaceCount(&cfg));
+        // The report interface (id 5) always resolves to devices[0] whether the
+        // suppress interface (id 9) precedes or follows it.
+        try std.testing.expectEqual(@as(?usize, 0), deviceIndexForInterface(&cfg, 5));
+        try std.testing.expectEqual(@as(?usize, null), deviceIndexForInterface(&cfg, 9));
+        // Inverse mapping yields the report interface, never the suppress one.
+        const iface0 = interfaceForDeviceIndex(&cfg, 0) orelse return error.MissingInterface;
+        try std.testing.expectEqual(@as(i64, 5), iface0.id);
+        try std.testing.expectEqual(@as(?*const InterfaceConfig, null), interfaceForDeviceIndex(&cfg, 1));
+    }
+}
+
+test "device: validate rejects suppress interface with endpoints" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Bad"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 1
+        \\class = "suppress"
+        \\ep_in = 0x81
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 1
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: validate rejects report referencing a suppress interface" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Bad"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 1
+        \\class = "suppress"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 1
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
 test "device: force_feedback.auto_stop defaults to true when unspecified" {

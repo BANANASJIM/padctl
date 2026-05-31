@@ -5,6 +5,7 @@ const posix = std.posix;
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const UsbrawDevice = @import("io/usbraw.zig").UsbrawDevice;
+const UsbrawSuppress = @import("io/usbraw.zig").UsbrawSuppress;
 const uinput = @import("io/uinput.zig");
 const UinputDevice = uinput.UinputDevice;
 const AuxDevice = uinput.AuxDevice;
@@ -181,6 +182,9 @@ pub fn openUhidDeviceForTest(
 pub const DeviceInstance = struct {
     allocator: std.mem.Allocator,
     devices: []DeviceIO,
+    /// Interfaces claimed via libusb solely to evict the kernel driver so the
+    /// physical device exposes no hidraw node for them. Never read or written.
+    suppress_devs: []*UsbrawSuppress = &.{},
     loop: EventLoop,
     interp: Interpreter,
     mapper: ?Mapper,
@@ -239,27 +243,49 @@ pub const DeviceInstance = struct {
         const pid: u16 = @intCast(cfg.device.pid);
 
         const override_active = opts.test_devices_override != null;
-        const devices = opts.test_devices_override orelse try allocator.alloc(DeviceIO, cfg.device.interface.len);
+        const devices = opts.test_devices_override orelse try allocator.alloc(DeviceIO, device_cfg.openedInterfaceCount(cfg));
         errdefer if (!override_active) allocator.free(devices);
 
         var opened: usize = 0;
         errdefer for (devices[0..opened]) |dev| dev.close();
 
+        // Suppress interfaces are claimed only to evict the kernel driver; they
+        // are not read or written and get no DeviceIO slot.
+        const suppress_count = cfg.device.interface.len - device_cfg.openedInterfaceCount(cfg);
+        const suppress_devs: []*UsbrawSuppress = if (!override_active and suppress_count > 0)
+            try allocator.alloc(*UsbrawSuppress, suppress_count)
+        else
+            &.{};
+        errdefer if (!override_active and suppress_count > 0) allocator.free(suppress_devs);
+
+        var suppressed: usize = 0;
+        errdefer for (suppress_devs[0..suppressed]) |sd| sd.close();
+
         if (!override_active) {
-            for (cfg.device.interface, 0..) |iface, i| {
-                devices[i] = try openDeviceWithRetry(allocator, iface, vid, pid);
+            // Pass 1: open hid/vendor interfaces into devices[] positionally.
+            for (cfg.device.interface) |iface| {
+                if (device_cfg.isSuppressClass(iface.class)) continue;
+                devices[opened] = try openDeviceWithRetry(allocator, iface, vid, pid);
                 opened += 1;
+            }
+            // Pass 2: claim suppress interfaces to remove their hidraw nodes.
+            for (cfg.device.interface) |iface| {
+                if (!device_cfg.isSuppressClass(iface.class)) continue;
+                suppress_devs[suppressed] = try UsbrawSuppress.openSuppress(allocator, vid, pid, @intCast(iface.id));
+                suppressed += 1;
             }
         }
 
         if (cfg.device.init) |init_cfg| {
-            for (cfg.device.interface, devices) |iface, dev| {
+            for (cfg.device.interface) |iface| {
+                if (device_cfg.isSuppressClass(iface.class)) continue;
+                const dev_idx = device_cfg.deviceIndexForInterface(cfg, iface.id) orelse continue;
                 const match = if (init_cfg.interface) |init_iface|
                     iface.id == init_iface
                 else
                     std.mem.eql(u8, iface.class, "vendor");
                 if (!match) continue;
-                init_seq.runInitSequence(allocator, dev, init_cfg) catch |err| {
+                init_seq.runInitSequence(allocator, devices[dev_idx], init_cfg) catch |err| {
                     std.log.debug("init on interface {d}: {}", .{ iface.id, err });
                     return err;
                 };
@@ -475,6 +501,7 @@ pub const DeviceInstance = struct {
         return .{
             .allocator = allocator,
             .devices = devices,
+            .suppress_devs = suppress_devs,
             .loop = loop,
             .interp = interp,
             .mapper = mapper,
@@ -540,6 +567,8 @@ pub const DeviceInstance = struct {
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
+        for (self.suppress_devs) |sd| sd.close();
+        if (self.suppress_devs.len > 0) self.allocator.free(self.suppress_devs);
         for (self.devices) |dev| dev.close();
         self.allocator.free(self.devices);
         self.loop.deinit();
@@ -711,13 +740,15 @@ pub const DeviceInstance = struct {
     /// current devices[] fds and device_cfg.
     pub fn rerunInitSequence(self: *DeviceInstance) !void {
         if (self.device_cfg.device.init) |init_cfg| {
-            for (self.device_cfg.device.interface, self.devices) |iface, dev| {
+            for (self.device_cfg.device.interface) |iface| {
+                if (device_cfg.isSuppressClass(iface.class)) continue;
+                const dev_idx = device_cfg.deviceIndexForInterface(self.device_cfg, iface.id) orelse continue;
                 const match = if (init_cfg.interface) |init_iface|
                     iface.id == init_iface
                 else
                     std.mem.eql(u8, iface.class, "vendor");
                 if (!match) continue;
-                init_seq.runInitSequence(self.allocator, dev, init_cfg) catch |err| {
+                init_seq.runInitSequence(self.allocator, self.devices[dev_idx], init_cfg) catch |err| {
                     std.log.debug("re-init on interface {d}: {}", .{ iface.id, err });
                     return err;
                 };

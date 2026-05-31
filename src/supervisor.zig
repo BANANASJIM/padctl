@@ -2344,7 +2344,10 @@ pub const Supervisor = struct {
             // port starts a fresh instance instead of inheriting stale state.
             if (!phys_match or !id_match) continue;
 
-            const new_devices = try self.allocator.alloc(DeviceIO, mcfg.device.interface.len);
+            // Suppress interfaces stay claimed across suspend/resume (never
+            // closed by closeDeviceIO), so only non-suppress interfaces are
+            // reopened into the rebind array.
+            const new_devices = try self.allocator.alloc(DeviceIO, config_device.openedInterfaceCount(mcfg));
             var opened: usize = 0;
             var new_devices_owned = true;
             errdefer {
@@ -2353,8 +2356,9 @@ pub const Supervisor = struct {
                     self.allocator.free(new_devices);
                 }
             }
-            for (mcfg.device.interface, 0..) |iface, idx| {
-                new_devices[idx] = opener(opener_ctx, self.allocator, iface, vid, pid) catch |err| {
+            for (mcfg.device.interface) |iface| {
+                if (config_device.isSuppressClass(iface.class)) continue;
+                new_devices[opened] = opener(opener_ctx, self.allocator, iface, vid, pid) catch |err| {
                     std.log.warn("rebind: open interface {d} failed: {}", .{ iface.id, err });
                     for (new_devices[0..opened]) |dev| dev.close();
                     self.allocator.free(new_devices);

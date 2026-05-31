@@ -14,7 +14,8 @@ const GenericOutputDevice = @import("io/uinput.zig").GenericOutputDevice;
 const state = @import("core/state.zig");
 const GamepadStateDelta = state.GamepadStateDelta;
 const mapper_mod = @import("core/mapper.zig");
-const DeviceConfig = @import("config/device.zig").DeviceConfig;
+const device_cfg = @import("config/device.zig");
+const DeviceConfig = device_cfg.DeviceConfig;
 const command = @import("core/command.zig");
 const fillTemplate = command.fillTemplate;
 const applyChecksum = command.applyChecksum;
@@ -317,14 +318,11 @@ fn buildAdaptiveTriggerParams(buf: *[12]Param, at: *const AdaptiveTriggerConfig)
     return buf[0..12];
 }
 
-/// Resolve a USB interface ID to the devices array index by matching
-/// against the device config's interface list.  Returns null when the
-/// interface ID is not found.
+/// Resolve a USB interface ID to the devices array index, counting only
+/// non-suppress interfaces so routing is independent of TOML ordering.
+/// Returns null when the interface ID is unknown or suppress-class.
 fn resolveIfaceIdx(dcfg: *const DeviceConfig, iface_id: i64) ?usize {
-    for (dcfg.device.interface, 0..) |iface, i| {
-        if (iface.id == iface_id) return i;
-    }
-    return null;
+    return device_cfg.deviceIndexForInterface(dcfg, iface_id);
 }
 
 pub fn applyAdaptiveTrigger(
@@ -736,7 +734,7 @@ pub const EventLoop = struct {
                     if (n == 0) break;
 
                     const interface_id: u8 = if (ctx.device_config) |dcfg|
-                        @intCast(dcfg.device.interface[i].id)
+                        @intCast((device_cfg.interfaceForDeviceIndex(dcfg, i) orelse continue).id)
                     else
                         @intCast(i);
 
