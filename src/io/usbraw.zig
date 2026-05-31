@@ -226,6 +226,7 @@ pub const UsbrawDevice = struct {
         std.posix.close(self.pipe_w);
         std.posix.close(self.pipe_r);
         _ = c.libusb_release_interface(self.handle, self.interface_id);
+        _ = c.libusb_attach_kernel_driver(self.handle, self.interface_id);
         c.libusb_close(self.handle);
         c.libusb_exit(self.ctx);
         self.allocator.destroy(self);
@@ -285,6 +286,7 @@ pub const UsbrawSuppress = struct {
 
     pub fn close(self: *UsbrawSuppress) void {
         _ = c.libusb_release_interface(self.handle, self.interface_id);
+        _ = c.libusb_attach_kernel_driver(self.handle, self.interface_id);
         c.libusb_close(self.handle);
         c.libusb_exit(self.ctx);
         self.allocator.destroy(self);
