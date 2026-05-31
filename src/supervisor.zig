@@ -172,8 +172,8 @@ const HotplugPending = struct {
     retries: u8,
 };
 
-// 7 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace) + 1 listen + 4 clients.
-pub const SUPERVISOR_MAX_FDS: usize = 7 + 1 + 4;
+// 8 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
+pub const SUPERVISOR_MAX_FDS: usize = 8 + 1 + 4;
 
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
@@ -204,6 +204,12 @@ pub const Supervisor = struct {
     /// `detach()`; drained by `drainGraceTimer()`. -1 = unavailable
     /// (e.g. `initForTest`); callers must call `gcExpiredGrace()` directly.
     grace_timer_fd: posix.fd_t = -1,
+    /// Recurring timerfd (1s) that sweeps managed libusb-backed instances for a
+    /// real physical unplug. These instances never receive a hidraw REMOVE that
+    /// means "unplug" (their hidraw node was deleted by padctl's own claim), so
+    /// liveness is probed via the UsbrawDevice pipe fd instead. -1 = unavailable
+    /// (e.g. `initForTest`).
+    liveness_timer_fd: posix.fd_t = -1,
     /// Test-only clock override (ns). When non-null, `nowNs()` returns
     /// this value instead of reading CLOCK_MONOTONIC. Production paths
     /// leave this null.
@@ -266,6 +272,20 @@ pub const Supervisor = struct {
         };
         errdefer if (grace_fd >= 0) posix.close(grace_fd);
 
+        // Recurring 1s liveness sweep for libusb-backed instances.
+        const liveness_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch blk: {
+            std.log.warn("liveness sweep timer unavailable", .{});
+            break :blk -1;
+        };
+        errdefer if (liveness_fd >= 0) posix.close(liveness_fd);
+        if (liveness_fd >= 0) {
+            const spec = linux.itimerspec{
+                .it_value = .{ .sec = 1, .nsec = 0 },
+                .it_interval = .{ .sec = 1, .nsec = 0 },
+            };
+            _ = linux.timerfd_settime(liveness_fd, .{}, &spec, null);
+        }
+
         const inotify_result = initInotify(allocator);
 
         var sock_path_buf: [256]u8 = undefined;
@@ -295,6 +315,7 @@ pub const Supervisor = struct {
             .test_switch_mapping_override = null,
             .test_switch_fail_commit_index = null,
             .grace_timer_fd = grace_fd,
+            .liveness_timer_fd = liveness_fd,
             .trace_lifecycle = trace_on,
         };
         sup.applyUserConfigRuntime();
@@ -361,6 +382,7 @@ pub const Supervisor = struct {
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
         if (self.hotplug_retry_fd >= 0) posix.close(self.hotplug_retry_fd);
         if (self.grace_timer_fd >= 0) posix.close(self.grace_timer_fd);
+        if (self.liveness_timer_fd >= 0) posix.close(self.liveness_timer_fd);
         self.hotplug_pending.deinit(self.allocator);
         if (self.config_dir) |dir| self.allocator.free(dir);
         if (self.managed.items.len > 0) self.stopAll();
@@ -501,6 +523,24 @@ pub const Supervisor = struct {
             return;
         }
 
+        // Peek first: a libusb-backed instance must keep its devname binding so
+        // it stays addressable. The hidraw REMOVE that triggered this detach is
+        // caused by padctl's own libusb claim deleting the node, not a physical
+        // unplug; real unplug for these instances is detected by the liveness
+        // sweep over the UsbrawDevice pipe fd.
+        const peek = self.devname_map.get(devname) orelse {
+            std.log.debug("detach: {s} not in devname_map", .{devname});
+            return;
+        };
+        for (self.managed.items) |*m| {
+            if (!std.mem.eql(u8, m.phys_key, peek)) continue;
+            if (instanceHoldsLibusb(m)) {
+                std.log.debug("detach: {s} holds libusb; ignoring hidraw REMOVE", .{devname});
+                return;
+            }
+            break;
+        }
+
         const entry = self.devname_map.fetchRemove(devname) orelse {
             std.log.debug("detach: {s} not in devname_map", .{devname});
             return;
@@ -584,6 +624,32 @@ pub const Supervisor = struct {
         self.armGraceTimer();
     }
 
+    /// Drain `liveness_timer_fd` and sweep libusb-backed instances. Called by
+    /// the serve loop on the recurring 1s fire.
+    fn drainLivenessTimer(self: *Supervisor) void {
+        if (self.liveness_timer_fd < 0) return;
+        var tbuf: [8]u8 = undefined;
+        _ = posix.read(self.liveness_timer_fd, &tbuf) catch {};
+        self.sweepLivenessLibusb();
+    }
+
+    /// Tear down any managed libusb-backed instance whose backing device fd has
+    /// hung up (physical unplug). Pure hid-class instances are left to the
+    /// hidraw REMOVE + grace path and are not touched here. Exposed for tests.
+    pub fn sweepLivenessLibusb(self: *Supervisor) void {
+        var i: usize = self.managed.items.len;
+        while (i > 0) {
+            i -= 1;
+            const m = &self.managed.items[i];
+            if (!instanceHoldsLibusb(m)) continue;
+            if (m.suspended) continue;
+            if (managedInstanceAlive(m)) continue;
+            const devname = m.devname orelse continue;
+            std.log.info("device unplugged: \"{s}\" {s}; tearing down", .{ m.instance.device_cfg.device.name, devname });
+            self.detachFull(devname);
+        }
+    }
+
     /// Arm the grace timerfd to fire at the soonest pending deadline. If
     /// no entries are pending, the timer is disarmed. A no-op when
     /// `grace_timer_fd < 0` (e.g. `initForTest`).
@@ -662,6 +728,20 @@ pub const Supervisor = struct {
     /// run. Used by `attachWithInstance` to distinguish a genuine dedup
     /// collision from a race where the ADD uevent for a replug arrives
     /// before REMOVE drains.
+    /// True when the instance owns the physical device through libusb rather
+    /// than through a kernel hidraw node: it claims a suppress-only interface
+    /// or reads a vendor-class interface. Such an instance must not be torn
+    /// down on a hidraw REMOVE uevent — the REMOVE is a side effect of padctl's
+    /// own claim deleting the hidraw node, not a physical unplug.
+    fn instanceHoldsLibusb(m: *const ManagedInstance) bool {
+        if (m.instance.suppress_devs.len > 0) return true;
+        for (m.instance.device_cfg.device.interface) |iface| {
+            if (config_device.isSuppressClass(iface.class)) continue;
+            if (std.mem.eql(u8, iface.class, "vendor")) return true;
+        }
+        return false;
+    }
+
     fn managedInstanceAlive(m: *const ManagedInstance) bool {
         // A suspended instance is an explicit, structured state: fds are
         // already closed and the entry is reserved for rebind via
@@ -1316,7 +1396,7 @@ pub const Supervisor = struct {
     /// is unavailable (e.g. `initForTest` skips netlink/inotify/grace_timer).
     /// Stop and hup always occupy slots 0/1; the rest are assigned in the
     /// fixed order netlink → inotify → debounce → hotplug_retry → grace_timer
-    /// → listen, packed contiguously starting at slot 2.
+    /// → liveness_timer → listen, packed contiguously starting at slot 2.
     const SupervisorPollSet = struct {
         base_nfds: usize,
         netlink_slot: ?usize,
@@ -1324,6 +1404,7 @@ pub const Supervisor = struct {
         debounce_slot: ?usize,
         hotplug_retry_slot: ?usize,
         grace_timer_slot: ?usize,
+        liveness_timer_slot: ?usize,
         listen_slot: ?usize,
 
         fn init(self: *const Supervisor, pollfds: *[SUPERVISOR_MAX_FDS]posix.pollfd) SupervisorPollSet {
@@ -1360,6 +1441,12 @@ pub const Supervisor = struct {
                 base_nfds += 1;
                 break :blk s;
             } else null;
+            const liveness_timer_slot: ?usize = if (self.liveness_timer_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.liveness_timer_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
             const listen_slot: ?usize = if (self.ctrl_sock) |cs| blk: {
                 pollfds[base_nfds] = cs.pollfd();
                 const s = base_nfds;
@@ -1374,6 +1461,7 @@ pub const Supervisor = struct {
                 .debounce_slot = debounce_slot,
                 .hotplug_retry_slot = hotplug_retry_slot,
                 .grace_timer_slot = grace_timer_slot,
+                .liveness_timer_slot = liveness_timer_slot,
                 .listen_slot = listen_slot,
             };
         }
@@ -1454,6 +1542,13 @@ pub const Supervisor = struct {
             if (set.grace_timer_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.drainGraceTimer();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (set.liveness_timer_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainLivenessTimer();
                     pollfds[slot].revents = 0;
                 }
             }
@@ -2429,6 +2524,31 @@ const minimal_device_toml =
     \\left_x = { offset = 1, type = "i16le" }
 ;
 
+// Vendor read interface + suppress claim-only interface (Vader-5 shape).
+const libusb_device_toml =
+    \\[device]
+    \\name = "Libusb Pad"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 1
+    \\class = "vendor"
+    \\ep_in = 0x82
+    \\ep_out = 0x06
+    \\[[device.interface]]
+    \\id = 2
+    \\class = "suppress"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 1
+    \\size = 3
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\left_x = { offset = 1, type = "i16le" }
+;
+
 const init_device_toml =
     \\[device]
     \\name = "InitDevice"
@@ -2829,6 +2949,122 @@ test "supervisor: detach quiesces primary output before suspension" {
     try testing.expect(std.meta.eql(state_mod.GamepadState{}, inst.loop.gamepad_state));
     try testing.expect(inst.mapper.?.layer.tap_hold == null);
     try testing.expect(std.meta.eql(state_mod.GamepadState{}, inst.mapper.?.state));
+}
+
+test "supervisor: instanceHoldsLibusb true for vendor interface, false for pure hid" {
+    const allocator = testing.allocator;
+
+    const libusb_dev = try device_mod.parseString(allocator, libusb_device_toml);
+    defer libusb_dev.deinit();
+    const hid_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer hid_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst_libusb = try makeTestInstance(allocator, &mock_a, &libusb_dev.value);
+    const inst_hid = try makeTestInstance(allocator, &mock_b, &hid_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys-libusb", inst_libusb, null));
+    try testing.expect(try sup.attachWithInstanceResult("hidraw1", "phys-hid", inst_hid, null));
+
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+    for (sup.managed.items) |*m| {
+        if (std.mem.eql(u8, m.phys_key, "phys-libusb")) {
+            try testing.expect(Supervisor.instanceHoldsLibusb(m));
+        } else {
+            try testing.expect(!Supervisor.instanceHoldsLibusb(m));
+        }
+    }
+}
+
+test "supervisor: detach on libusb instance does not suspend and keeps devname binding" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, libusb_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst, null));
+
+    sup.detach("hidraw0");
+
+    // The hidraw REMOVE that detach() saw is padctl's own claim deleting the
+    // node — the instance must stay live and addressable.
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(!sup.managed.items[0].suspended);
+    try testing.expect(sup.managed.items[0].grace_deadline_ns == null);
+    try testing.expect(sup.devname_map.contains("hidraw0"));
+    try testing.expect(sup.managed.items[0].devname != null);
+}
+
+test "supervisor: detach on pure-hid instance still suspends (no regression)" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst, null));
+
+    sup.detach("hidraw0");
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].suspended);
+    try testing.expect(!sup.devname_map.contains("hidraw0"));
+}
+
+test "supervisor: liveness sweep tears down libusb instance whose pipe hung up" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, libusb_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys0", inst, null));
+    sup.detach("hidraw0"); // libusb path: stays live, binding preserved
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // Still alive while the pipe is open.
+    sup.sweepLivenessLibusb();
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // Close the write end → pollfd sees POLLHUP → managedInstanceAlive false.
+    mock.closeWriteEnd();
+    sup.sweepLivenessLibusb();
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expect(!sup.devname_map.contains("hidraw0"));
 }
 
 test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
