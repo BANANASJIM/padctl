@@ -529,6 +529,25 @@ test "device: load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqualStrings("extended", cfg.report[0].name);
 }
 
+test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqual(@as(usize, 1), cfg.device.interface.len);
+    const if1 = cfg.device.interface[0];
+    try std.testing.expectEqual(@as(i64, 1), if1.id);
+    try std.testing.expectEqualStrings("vendor", if1.class);
+    try std.testing.expectEqual(@as(i64, 0x82), if1.ep_in orelse return error.MissingEpIn);
+    try std.testing.expectEqual(@as(i64, 0x06), if1.ep_out orelse return error.MissingEpOut);
+
+    const init_cfg = cfg.device.init orelse return error.MissingInit;
+    try std.testing.expectEqual(@as(i64, 1), init_cfg.interface orelse return error.MissingInterface);
+    try std.testing.expect(init_cfg.commands != null);
+    try std.testing.expect(init_cfg.enable != null);
+}
+
 test "device: force_feedback.auto_stop defaults to true when unspecified" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml);

@@ -2,13 +2,20 @@
 name = "Flydigi Vader 5 Pro"
 vid = 0x37d7
 pid = 0x2401
-block_kernel_drivers = ["xpad"]
+block_kernel_drivers = ["xpad", "hid_generic", "usbhid"]
 
 # Only IF1 is used. IF0 is vendor-class (bInterfaceClass=255) with no
 # hidraw node; the reference driver also uses IF1 exclusively.
+#
+# IF1 is claimed via libusb so the kernel exposes no hidraw/evdev node for
+# it. Steam reads hidraw directly, so a kernel-owned node would still surface
+# the pad as a generic Xbox controller; claiming the interface removes the
+# node entirely.
 [[device.interface]]
 id = 1
-class = "hid"      # hidraw; EP2 IN 32B extended input, EP6 OUT 32B config commands
+class = "vendor"   # EP2 IN 32B extended input, EP6 OUT 32B config commands
+ep_in = 0x82
+ep_out = 0x06
 
 [device.init]
 interface = 1
