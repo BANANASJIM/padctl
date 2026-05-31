@@ -20,6 +20,9 @@ static inline libusb_device_handle *libusb_open_device_with_vid_pid(
 static inline int libusb_detach_kernel_driver(libusb_device_handle *h, int i) {
     (void)h; (void)i; return -1;
 }
+static inline int libusb_attach_kernel_driver(libusb_device_handle *h, int i) {
+    (void)h; (void)i; return -1;
+}
 static inline int libusb_claim_interface(libusb_device_handle *h, int i) {
     (void)h; (void)i; return -1;
 }
