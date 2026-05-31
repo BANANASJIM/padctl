@@ -1019,6 +1019,114 @@ test "DeviceInstance.init propagates feature_report init errors" {
     try testing.expectError(DeviceIO.WriteError.Io, result);
 }
 
+const suppress_first_init_toml =
+    \\[device]
+    \\name = "SuppressFirst"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "suppress"
+    \\[[device.interface]]
+    \\id = 1
+    \\class = "hid"
+    \\[[device.interface]]
+    \\id = 2
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 1
+    \\commands = ["aabb"]
+    \\[[report]]
+    \\name = "r1"
+    \\interface = 1
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[[report]]
+    \\name = "r2"
+    \\interface = 2
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x02]
+;
+
+const report_then_suppress_init_toml =
+    \\[device]
+    \\name = "ReportThenSuppress"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[device.interface]]
+    \\id = 1
+    \\class = "suppress"
+    \\[device.init]
+    \\interface = 0
+    \\commands = ["ccdd"]
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+;
+
+// Regression guard for the suppress-interface index alignment (issue #355,
+// mechanism A). The init-handshake loop must route the init command to the
+// devices[] slot computed by deviceIndexForInterface, NOT to a positional
+// interface[i] counter. With a suppress interface preceding the report
+// interfaces, a positional counter would target the wrong mock (or overflow).
+test "DeviceInstance.init: suppress preceding report routes init via helper, not positional" {
+    const allocator = testing.allocator;
+
+    {
+        const parsed = try device_mod.parseString(allocator, suppress_first_init_toml);
+        defer parsed.deinit();
+
+        var mock0 = try MockDeviceIO.init(allocator, &.{});
+        defer mock0.deinit();
+        var mock1 = try MockDeviceIO.init(allocator, &.{});
+        defer mock1.deinit();
+
+        const devices = try allocator.alloc(DeviceIO, 2);
+        devices[0] = mock0.deviceIO();
+        devices[1] = mock1.deviceIO();
+
+        var uniq_counter: u16 = 1;
+        var inst = try DeviceInstance.init(allocator, &parsed.value, null, null, &uniq_counter, .{
+            .test_devices_override = devices,
+        });
+        defer inst.deinit();
+
+        // init.interface = 1 maps to devices[0] (suppress id=0 consumes no slot).
+        try testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, mock0.write_log.items);
+        try testing.expectEqual(@as(usize, 0), mock1.write_log.items.len);
+    }
+
+    {
+        const parsed = try device_mod.parseString(allocator, report_then_suppress_init_toml);
+        defer parsed.deinit();
+
+        var mock = try MockDeviceIO.init(allocator, &.{});
+        defer mock.deinit();
+
+        const devices = try allocator.alloc(DeviceIO, 1);
+        devices[0] = mock.deviceIO();
+
+        var uniq_counter: u16 = 1;
+        var inst = try DeviceInstance.init(allocator, &parsed.value, null, null, &uniq_counter, .{
+            .test_devices_override = devices,
+        });
+        defer inst.deinit();
+
+        try testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd }, mock.write_log.items);
+    }
+}
+
 test "DeviceInstance: rerunInitSequence propagates init write errors" {
     const allocator = testing.allocator;
 
