@@ -232,6 +232,65 @@ pub const UsbrawDevice = struct {
     }
 };
 
+// Claims an interface purely to evict the kernel driver, so the device
+// exposes no hidraw/evdev node for it. No reads, no writes, no poll fd.
+pub const UsbrawSuppress = struct {
+    handle: *c.libusb_device_handle,
+    ctx: *c.libusb_context,
+    interface_id: i32,
+    allocator: std.mem.Allocator,
+
+    pub fn openSuppress(
+        alloc: std.mem.Allocator,
+        vid: u16,
+        pid: u16,
+        interface_id: u8,
+    ) !*UsbrawSuppress {
+        var ctx: ?*c.libusb_context = null;
+        if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
+
+        const handle = c.libusb_open_device_with_vid_pid(ctx, vid, pid) orelse {
+            c.libusb_exit(ctx);
+            return error.NotFound;
+        };
+
+        _ = c.libusb_detach_kernel_driver(handle, interface_id);
+
+        const rc = c.libusb_claim_interface(handle, interface_id);
+        if (rc == c.LIBUSB_ERROR_BUSY) {
+            c.libusb_close(handle);
+            c.libusb_exit(ctx);
+            return error.Busy;
+        }
+        if (rc != 0) {
+            c.libusb_close(handle);
+            c.libusb_exit(ctx);
+            return error.ClaimFailed;
+        }
+
+        const self = alloc.create(UsbrawSuppress) catch |err| {
+            _ = c.libusb_release_interface(handle, interface_id);
+            c.libusb_close(handle);
+            c.libusb_exit(ctx);
+            return err;
+        };
+        self.* = .{
+            .handle = handle,
+            .ctx = ctx.?,
+            .interface_id = @intCast(interface_id),
+            .allocator = alloc,
+        };
+        return self;
+    }
+
+    pub fn close(self: *UsbrawSuppress) void {
+        _ = c.libusb_release_interface(self.handle, self.interface_id);
+        c.libusb_close(self.handle);
+        c.libusb_exit(self.ctx);
+        self.allocator.destroy(self);
+    }
+};
+
 // --- Tests ---
 
 test "usbraw: RingBuffer push/pop basic" {
