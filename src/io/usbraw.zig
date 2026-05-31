@@ -140,6 +140,16 @@ pub const UsbrawDevice = struct {
         return self;
     }
 
+    fn closeWriteEnd(self: *UsbrawDevice) void {
+        const fd = @atomicRmw(std.posix.fd_t, &self.pipe_w, .Xchg, -1, .acq_rel);
+        if (fd >= 0) std.posix.close(fd);
+    }
+
+    fn signalDisconnect(self: *UsbrawDevice) void {
+        self.disconnected.store(true, .release);
+        self.closeWriteEnd();
+    }
+
     fn readLoop(self: *UsbrawDevice) void {
         var buf: [RingBuffer.SLOT_SIZE]u8 = undefined;
         var transferred: c_int = 0;
@@ -155,8 +165,7 @@ pub const UsbrawDevice = struct {
             );
 
             if (rc == c.LIBUSB_ERROR_NO_DEVICE) {
-                self.disconnected.store(true, .release);
-                _ = std.posix.write(self.pipe_w, "\x01") catch {};
+                self.signalDisconnect();
                 break;
             }
 
@@ -223,7 +232,7 @@ pub const UsbrawDevice = struct {
         const self: *UsbrawDevice = @ptrCast(@alignCast(ptr));
         self.should_stop.store(true, .release);
         self.thread.join();
-        std.posix.close(self.pipe_w);
+        self.closeWriteEnd();
         std.posix.close(self.pipe_r);
         _ = c.libusb_release_interface(self.handle, self.interface_id);
         _ = c.libusb_attach_kernel_driver(self.handle, self.interface_id);
@@ -341,6 +350,26 @@ test "usbraw: RingBuffer wraps around correctly" {
     _ = rb.pop(&out);
     try std.testing.expectEqual(@as(u8, 0xBB), out[0]);
     try std.testing.expectEqual(@as(usize, 0), rb.count);
+}
+
+test "usbraw: signalDisconnect closes write end and raises POLLHUP" {
+    const pipe_fds = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+    var dev: UsbrawDevice = undefined;
+    dev.pipe_r = pipe_fds[0];
+    dev.pipe_w = pipe_fds[1];
+    dev.disconnected = std.atomic.Value(bool).init(false);
+
+    dev.signalDisconnect();
+
+    try std.testing.expectEqual(@as(std.posix.fd_t, -1), dev.pipe_w);
+    try std.testing.expect(dev.disconnected.load(.acquire));
+
+    var fds = [_]std.posix.pollfd{.{ .fd = dev.pipe_r, .events = std.posix.POLL.IN, .revents = 0 }};
+    const ready = try std.posix.poll(&fds, 1000);
+    try std.testing.expect(ready == 1);
+    try std.testing.expect(fds[0].revents & std.posix.POLL.HUP != 0);
+
+    std.posix.close(dev.pipe_r);
 }
 
 test "usbraw: RingBuffer concurrent push/pop" {
