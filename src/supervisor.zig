@@ -643,6 +643,8 @@ pub const Supervisor = struct {
             const m = &self.managed.items[i];
             if (!instanceHoldsLibusb(m)) continue;
             if (m.suspended) continue;
+            // No read fd to probe for POLLHUP — unplug detection here is out of scope.
+            if (m.instance.devices.len == 0) continue;
             if (managedInstanceAlive(m)) continue;
             const devname = m.devname orelse continue;
             std.log.info("device unplugged: \"{s}\" {s}; tearing down", .{ m.instance.device_cfg.device.name, devname });
@@ -2504,6 +2506,7 @@ const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const MockOutput = @import("test/mock_output.zig").MockOutput;
 const uinput = @import("io/uinput.zig");
 const state_mod = @import("core/state.zig");
+const usbraw_mod = @import("io/usbraw.zig");
 
 const minimal_device_toml =
     \\[device]
@@ -2693,6 +2696,39 @@ fn makeTestInstance(
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+    return inst;
+}
+
+// Build a DeviceInstance with no read fd (all-suppress shape): devices[] is
+// empty so managedInstanceAlive() takes its len==0 shortcut. The returned
+// instance is fully deinit-safe (no outputs, no registered fds).
+fn makeFdlessInstance(
+    inst_alloc: std.mem.Allocator,
+    cfg: *const device_mod.DeviceConfig,
+) !*DeviceInstance {
+    const devices = try inst_alloc.alloc(DeviceIO, 0);
+    var loop = try EventLoop.initManaged();
+    errdefer loop.deinit();
+
+    const inst = try inst_alloc.create(DeviceInstance);
+    inst.* = .{
+        .allocator = inst_alloc,
+        .devices = devices,
+        .loop = loop,
+        .interp = @import("core/interpreter.zig").Interpreter.init(cfg),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = cfg,
+        .pending_mapping = null,
+        .stopped = true,
         .poll_timeout_ms = 100,
     };
     return inst;
@@ -3065,6 +3101,42 @@ test "supervisor: liveness sweep tears down libusb instance whose pipe hung up" 
     sup.sweepLivenessLibusb();
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
     try testing.expect(!sup.devname_map.contains("hidraw0"));
+}
+
+test "supervisor: liveness sweep spares an all-suppress instance with no read fd" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, libusb_device_toml);
+    defer parsed_dev.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeFdlessInstance(allocator, &parsed_dev.value);
+    // attachWithInstanceResult registers a devname in devname_map; without it
+    // detachFull is unreachable and the sweep could never tear the entry down,
+    // which would make this test pass even without the guard under test.
+    try testing.expect(try sup.attachWithInstanceResult("hidraw0", "phys-suppress", inst, null));
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.devname_map.contains("hidraw0"));
+
+    // Mimic a claim-only instance: holds the device via libusb (suppress_devs
+    // non-empty) but exposes no readable interface (devices[] empty). The
+    // pointer is never dereferenced — only the slice length is read — so a
+    // dummy is sufficient. Reset to empty before teardown so deinit does not
+    // call close() on it.
+    var dummy_suppress: *usbraw_mod.UsbrawSuppress = undefined;
+    inst.suppress_devs = (&dummy_suppress)[0..1];
+    defer sup.managed.items[0].instance.suppress_devs = &.{};
+
+    try testing.expect(Supervisor.instanceHoldsLibusb(&sup.managed.items[0]));
+    try testing.expect(!Supervisor.managedInstanceAlive(&sup.managed.items[0]));
+
+    sup.sweepLivenessLibusb();
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.devname_map.contains("hidraw0"));
 }
 
 test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {

@@ -300,6 +300,10 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             return error.InvalidConfig;
     }
 
+    // An all-suppress config opens no read fd, so it can never be observed
+    // for liveness; require at least one readable (hid/vendor) interface.
+    if (openedInterfaceCount(cfg) == 0) return error.InvalidConfig;
+
     // A suppress interface is claimed only to evict the kernel driver; it is
     // never read or written, so no report/command/init may reference it.
     for (cfg.report) |report| {
@@ -741,6 +745,23 @@ test "device: validate rejects report referencing a suppress interface" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
+test "device: validate rejects an all-suppress config with no readable interface" {
+    const ifaces = [_]InterfaceConfig{
+        .{ .id = 1, .class = "suppress" },
+        .{ .id = 2, .class = "suppress" },
+    };
+    const cfg = DeviceConfig{
+        .device = .{
+            .name = "AllSuppress",
+            .vid = 0x1234,
+            .pid = 0x5678,
+            .interface = &ifaces,
+        },
+        .report = &.{},
+    };
+    try std.testing.expectError(error.InvalidConfig, validate(&cfg));
+}
+
 test "device: force_feedback.auto_stop defaults to true when unspecified" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml);
@@ -826,7 +847,7 @@ test "device: offset out of bounds returns error" {
     try std.testing.expectError(error.OffsetOutOfBounds, parseString(allocator, bad));
 }
 
-test "device: duplicate field name returns error" {
+test "device: validate rejects a config with no interface at all" {
     const cfg = DeviceConfig{
         .device = .{
             .name = "test",
@@ -836,7 +857,7 @@ test "device: duplicate field name returns error" {
         },
         .report = &.{},
     };
-    try validate(&cfg);
+    try std.testing.expectError(error.InvalidConfig, validate(&cfg));
 }
 
 test "device: invalid transform returns error" {
