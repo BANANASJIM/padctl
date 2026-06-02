@@ -130,13 +130,13 @@ invert_y = true
 | `axis_y` | string | `"pitch"` | Source for virtual stick Y: `"yaw"`, `"pitch"`, `"roll"`, or `"none"`. |
 | `degrees_full` | float | `35.0` | In `"tilt"` response, the absolute tilt angle that maps to full stick deflection. Must be greater than `0` and no more than `180`. |
 | `activate` | string | — | Gate button: bare name (`"LS"`) or `hold_<BTN>` form (`"hold_RB"`) — both are equivalent. For analog triggers (`LT`/`RT`), also set `trigger_threshold`. Omit for always-active. |
-| `sensitivity` | float | — | Overall sensitivity multiplier |
+| `sensitivity` | float | — | Overall sensitivity multiplier. In `"mouse"` mode it scales relative cursor motion; in `"joystick"`/`"rate"` mode it scales an *absolute* stick deflection and typically needs a much larger value (≈50–150) — see the [gyro joystick guide](mapping-guide.md#joystick-mode). |
 | `sensitivity_x` | float | — | X-axis sensitivity override |
 | `sensitivity_y` | float | — | Y-axis sensitivity override |
 | `deadzone` | integer | — | Raw gyro deadzone threshold in `"rate"` response. In `"tilt"` response this is an output stick deadzone after angle conversion. |
 | `smoothing` | float | — | Smoothing factor (0–1) |
 | `curve` | float | — | Acceleration curve exponent |
-| `max_val` | float | — | Maximum output value cap |
+| `max_val` | float | `32767` | Input normalization ceiling: the raw gyro rate that normalizes to `1.0`, before `curve`, `sensitivity`, and output scaling are applied. Lowering it (e.g. `2000`) raises the normalized signal, so a moderate motion drives a larger output — equivalent to raising `sensitivity`, and useful in `"joystick"` mode to keep `sensitivity` numbers small. |
 | `invert_x` | bool | — | Invert X axis |
 | `invert_y` | bool | — | Invert Y axis |
 | `blend_stick` | bool | `false` | When `true`, gyro joystick output is **added** to the physical stick value (`clamp(physical + gyro, -32767..32767)`) instead of replacing it. Only applies when `mode = "joystick"`. Ignored for `mode = "mouse"`. |

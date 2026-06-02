@@ -190,11 +190,14 @@ Set `mode = "joystick"` to route the gyro signal to a virtual stick axis instead
 mode   = "joystick"
 target = "right_stick"   # "right_stick" (default) or "left_stick"
 deadzone    = 200
-sensitivity = 1.5
+sensitivity = 100        # stick mode needs a much larger value than mouse
+                         # mode — see the note below
 smoothing   = 0.3
 ```
 
-This is useful for games that read the right stick for camera control but do not natively support gyro input. In the default `response = "rate"` mode, the usual gyro fields (`sensitivity`, `deadzone`, `smoothing`, `curve`, `invert_x`, `invert_y`) apply in joystick mode the same way as in mouse mode.
+This is useful for games that read the right stick for camera control but do not natively support gyro input. In the default `response = "rate"` mode the same gyro fields (`deadzone`, `smoothing`, `curve`, `invert_x`, `invert_y`) behave as in mouse mode — but **`sensitivity` does not scale the same way.**
+
+Mouse mode integrates the gyro rate into relative cursor motion frame by frame, so even small values keep moving the pointer. Joystick mode instead emits an *absolute* stick deflection: the raw gyro rate is normalized against `max_val` (default `32767`, the full int16 range) before scaling. A normal hand motion produces a raw rate that is only a small fraction of `max_val`, so a mouse-style `sensitivity = 1.5` yields a stick deflection of just a few percent — usually inside the game's own deadzone, so it feels as if gyro is off. Start around **`sensitivity = 100`** and tune in the 50–150 range. Lowering `max_val` (for example `max_val = 2000`) raises the normalized signal and so increases the deflection for a given motion — it is an equivalent lever to `sensitivity`, useful if you would rather keep `sensitivity` small.
 
 For racing games, `response = "tilt"` maps controller tilt to an absolute stick
 position instead of treating gyro motion like stick velocity. `degrees_full`
