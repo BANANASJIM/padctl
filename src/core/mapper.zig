@@ -299,6 +299,7 @@ pub const Mapper = struct {
         self.gesture_tokens.clear();
         self.gesture_timer_tap_pending = 0;
         self.gesture_held_gamepad = 0;
+        // callers must releaseMapperAux first; this only clears state, no release edge.
         self.layer_held_gamepad = 0;
         self.layer_hold_aux_down = null;
         self.active_macros.clearRetainingCapacity();
@@ -2142,9 +2143,16 @@ test "mapper: layer hold == trigger name nets single clean press" {
     _ = m.onLayerTimerExpiredAt(210_000_000);
 
     // LB is force-suppressed as a trigger, but the hold inject re-emits it.
-    // Net result must be a single clean press (the bit set, not cancelled).
+    // `(state & ~suppressed) | injected` must net the bit set (not cancelled).
     const ev = try m.apply(.{ .buttons = lb_mask }, 16, 220_000_000);
     try testing.expect((ev.gamepad.buttons & lb_mask) != 0);
+    // Clean: a gamepad hold produces NO aux key/mouse traffic on this frame.
+    try testing.expectEqual(@as(usize, 0), ev.aux.len);
+
+    // Still held next frame -> bit stays set, no spurious release.
+    const ev_next = try m.apply(.{ .buttons = lb_mask }, 16, 230_000_000);
+    try testing.expect((ev_next.gamepad.buttons & lb_mask) != 0);
+    try testing.expectEqual(@as(usize, 0), ev_next.aux.len);
 }
 
 test "mutation guard: layer hold gamepad re-assert must be killable" {

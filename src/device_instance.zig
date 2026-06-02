@@ -1509,6 +1509,126 @@ test "DeviceInstance: quiesceOutputs can preserve input state for mapper reseed"
     try testing.expect(std.meta.eql(held, inst.loop.gamepad_state));
 }
 
+// input_event wire layout (linux/input.h) for decoding aux fd writes in tests.
+const TestInputEvent = extern struct {
+    sec: isize,
+    usec: isize,
+    type: u16,
+    code: u16,
+    value: i32,
+};
+const EV_KEY_T: u16 = 1;
+const KEY_LEFTSHIFT_T: u16 = 42;
+
+// Read aux fd records and return true iff a KEY_LEFTSHIFT release (value=0) is present.
+fn pipeHasShiftRelease(read_fd: posix.fd_t) !bool {
+    var buf: [4096]u8 = undefined;
+    const n = posix.read(read_fd, &buf) catch |err| switch (err) {
+        error.WouldBlock => return false,
+        else => return err,
+    };
+    const rec = @sizeOf(TestInputEvent);
+    var off: usize = 0;
+    var found = false;
+    while (off + rec <= n) : (off += rec) {
+        var ev: TestInputEvent = undefined;
+        @memcpy(std.mem.asBytes(&ev), buf[off .. off + rec]);
+        if (ev.type == EV_KEY_T and ev.code == KEY_LEFTSHIFT_T and ev.value == 0) found = true;
+    }
+    return found;
+}
+
+// Drive a layer-hold KEY mapper to its ACTIVE state (KEY_LEFTSHIFT pressed) and
+// install it on `inst`, wiring `inst.aux_dev` to `write_fd` so quiesceOutputs'
+// releaseMapperAux release edge lands on a pipe we can read back.
+fn primeLayerHoldActive(inst: *DeviceInstance, m: *Mapper, write_fd: posix.fd_t) !void {
+    const lb_mask = @as(u64, 1) << @intFromEnum(ButtonId.LB);
+    _ = try m.apply(.{ .buttons = lb_mask }, 16, 0);
+    _ = m.onLayerTimerExpiredAt(210_000_000);
+    try testing.expect(m.layer_hold_aux_down != null);
+    inst.mapper = m.*;
+    inst.aux_dev = AuxDevice{ .fd = write_fd };
+}
+
+const layer_hold_key_toml =
+    \\[[layer]]
+    \\name = "sense"
+    \\trigger = "LB"
+    \\activation = "hold"
+    \\hold = "KEY_LEFTSHIFT"
+    \\hold_timeout = 200
+;
+
+test "DeviceInstance: quiesceOutputs releases held layer-hold KEY through aux path" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    const mparsed = try mapping.parseString(allocator, layer_hold_key_toml);
+    defer mparsed.deinit();
+    var m = try Mapper.init(&mparsed.value, std.posix.STDIN_FILENO, allocator);
+    defer m.deinit();
+
+    const pfds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(pfds[0]);
+    defer posix.close(pfds[1]);
+
+    try primeLayerHoldActive(&inst, &m, pfds[1]);
+
+    inst.quiesceOutputs(.{});
+
+    // releaseMapperAux at device_instance.zig:657 must have funneled the held
+    // KEY_LEFTSHIFT release through inst.aux_dev. Removing that call leaks the key.
+    try testing.expect(try pipeHasShiftRelease(pfds[0]));
+    try testing.expect(inst.mapper.?.layer_hold_aux_down == null);
+
+    inst.aux_dev = null; // owned by pipe close, not AuxDevice.close
+}
+
+test "DeviceInstance: quiesceOutputs reset_mapper_state releases held layer-hold KEY" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try testInstance(allocator, &mock, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    const mparsed = try mapping.parseString(allocator, layer_hold_key_toml);
+    defer mparsed.deinit();
+    var m = try Mapper.init(&mparsed.value, std.posix.STDIN_FILENO, allocator);
+    defer m.deinit();
+
+    const pfds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(pfds[0]);
+    defer posix.close(pfds[1]);
+
+    try primeLayerHoldActive(&inst, &m, pfds[1]);
+
+    inst.quiesceOutputs(.{ .reset_mapper_state = true });
+
+    // Release edge must precede resetRuntimeState (which only clears state, no
+    // edge). Order is releaseMapperAux -> resetRuntimeState in quiesceOutputs.
+    try testing.expect(try pipeHasShiftRelease(pfds[0]));
+    try testing.expect(inst.mapper.?.layer_hold_aux_down == null);
+
+    inst.aux_dev = null;
+}
+
 test "DeviceInstance: rebindDeviceIO replaces device fds" {
     const allocator = testing.allocator;
 
