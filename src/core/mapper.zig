@@ -783,15 +783,27 @@ pub const Mapper = struct {
     // hold target. Gamepad hold bits live in layer_held_gamepad (re-asserted
     // every frame); key/mouse holds emit explicit press/release edges here.
     fn updateLayerHold(self: *Mapper, aux: *AuxEventList) void {
+        const configs = self.config.layer orelse &.{};
+        const next_target: ?RemapTargetResolved = blk: {
+            const idx = self.layer.getActiveIndex(configs) orelse break :blk null;
+            break :blk self.resolved_layer_holds[idx];
+        };
+        const next_aux = if (next_target) |target| auxDownTarget(target) else null;
+
         if (self.layer_hold_aux_down) |down| {
+            if (next_aux) |wanted| {
+                if (auxDownTargetEql(down, wanted)) {
+                    // Same held aux across the switch — leave it pressed, no flicker.
+                    self.layer_held_gamepad = 0;
+                    return;
+                }
+            }
             emitAuxDownRelease(down, aux);
             self.layer_hold_aux_down = null;
         }
         self.layer_held_gamepad = 0;
 
-        const configs = self.config.layer orelse &.{};
-        const idx = self.layer.getActiveIndex(configs) orelse return;
-        const target = self.resolved_layer_holds[idx] orelse return;
+        const target = next_target orelse return;
         switch (target) {
             .gamepad_button => |dst| {
                 self.layer_held_gamepad = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst)));
@@ -2065,6 +2077,97 @@ test "mapper: layer toggle gamepad hold: present while latched-on, released on t
     const ev_off = try m.apply(.{ .buttons = 0 }, 16, 64_000_000);
     try testing.expect(!m.layer.toggled.contains("fn"));
     try testing.expectEqual(@as(u64, 0), ev_off.gamepad.buttons & rb_mask);
+}
+
+test "mapper: layer hold key: same-target A->B switch keeps key held with no flicker" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "a"
+        \\trigger = "LB"
+        \\activation = "toggle"
+        \\hold = "KEY_LEFTSHIFT"
+        \\[[layer]]
+        \\name = "b"
+        \\trigger = "RB"
+        \\activation = "toggle"
+        \\hold = "KEY_LEFTSHIFT"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const shift = try @import("../config/input_codes.zig").resolveKeyCode("KEY_LEFTSHIFT");
+    const lb_mask = buttonBit("LB");
+    const rb_mask = buttonBit("RB");
+
+    // Toggle A on: exactly one SHIFT press, no release.
+    _ = try m.apply(.{ .buttons = lb_mask }, 16, 0);
+    const ev_on = try m.apply(.{ .buttons = 0 }, 16, 16_000_000);
+    try testing.expect(m.layer.toggled.contains("a"));
+    try testing.expectEqual(@as(usize, 1), auxCountKey(&ev_on.aux, shift, true));
+    try testing.expectEqual(@as(usize, 0), auxCountKey(&ev_on.aux, shift, false));
+
+    // Atomic A->B handoff: both triggers release in one frame. A toggles off,
+    // B toggles on. Both layers hold SHIFT, so the key must stay held: no
+    // release edge and no duplicate press across the switch.
+    _ = try m.apply(.{ .buttons = lb_mask | rb_mask }, 16, 32_000_000);
+    const ev_switch = try m.apply(.{ .buttons = 0 }, 16, 48_000_000);
+    try testing.expect(!m.layer.toggled.contains("a"));
+    try testing.expect(m.layer.toggled.contains("b"));
+    try testing.expectEqual(@as(usize, 0), auxCountKey(&ev_switch.aux, shift, false));
+    try testing.expectEqual(@as(usize, 0), auxCountKey(&ev_switch.aux, shift, true));
+    try testing.expect(m.layer_hold_aux_down != null);
+
+    // Deactivate B: exactly one SHIFT release.
+    _ = try m.apply(.{ .buttons = rb_mask }, 16, 64_000_000);
+    const ev_off = try m.apply(.{ .buttons = 0 }, 16, 80_000_000);
+    try testing.expect(!m.layer.toggled.contains("b"));
+    try testing.expectEqual(@as(usize, 1), auxCountKey(&ev_off.aux, shift, false));
+    try testing.expect(m.layer_hold_aux_down == null);
+}
+
+test "mapper: layer hold key: different-target A->B switch releases old key and presses new" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "a"
+        \\trigger = "LB"
+        \\activation = "toggle"
+        \\hold = "KEY_LEFTSHIFT"
+        \\[[layer]]
+        \\name = "b"
+        \\trigger = "RB"
+        \\activation = "toggle"
+        \\hold = "KEY_LEFTCTRL"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const shift = try @import("../config/input_codes.zig").resolveKeyCode("KEY_LEFTSHIFT");
+    const ctrl = try @import("../config/input_codes.zig").resolveKeyCode("KEY_LEFTCTRL");
+    const lb_mask = buttonBit("LB");
+    const rb_mask = buttonBit("RB");
+
+    // Toggle A on: one SHIFT press.
+    _ = try m.apply(.{ .buttons = lb_mask }, 16, 0);
+    const ev_on = try m.apply(.{ .buttons = 0 }, 16, 16_000_000);
+    try testing.expect(m.layer.toggled.contains("a"));
+    try testing.expectEqual(@as(usize, 1), auxCountKey(&ev_on.aux, shift, true));
+
+    // Atomic A->B handoff with different targets: exactly one SHIFT release and
+    // one CTRL press on the same frame.
+    _ = try m.apply(.{ .buttons = lb_mask | rb_mask }, 16, 32_000_000);
+    const ev_switch = try m.apply(.{ .buttons = 0 }, 16, 48_000_000);
+    try testing.expect(!m.layer.toggled.contains("a"));
+    try testing.expect(m.layer.toggled.contains("b"));
+    try testing.expectEqual(@as(usize, 1), auxCountKey(&ev_switch.aux, shift, false));
+    try testing.expectEqual(@as(usize, 1), auxCountKey(&ev_switch.aux, ctrl, true));
+    try testing.expectEqual(@as(usize, 0), auxCountKey(&ev_switch.aux, shift, true));
+    try testing.expectEqual(@as(usize, 0), auxCountKey(&ev_switch.aux, ctrl, false));
 }
 
 test "mapper: layer hold key released on mapping switch (releaseHeldAux)" {
