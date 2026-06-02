@@ -646,9 +646,20 @@ pub const Supervisor = struct {
             // No read fd to probe for POLLHUP — unplug detection here is out of scope.
             if (m.instance.devices.len == 0) continue;
             if (managedInstanceAlive(m)) continue;
-            const devname = m.devname orelse continue;
-            std.log.info("device unplugged: \"{s}\" {s}; tearing down", .{ m.instance.device_cfg.device.name, devname });
-            self.detachFull(devname);
+            if (m.devname) |devname| {
+                std.log.info("device unplugged: \"{s}\" {s}; tearing down", .{ m.instance.device_cfg.device.name, devname });
+                self.detachFull(devname);
+            } else {
+                std.log.info("device unplugged: \"{s}\" phys=\"{s}\"; tearing down", .{
+                    m.instance.device_cfg.device.name,
+                    m.phys_key,
+                });
+                m.instance.stop();
+                m.thread.join();
+                m.instance.quiesceOutputs(.{ .reset_input_state = true, .reset_mapper_state = true });
+                self.teardownManaged(m);
+                _ = self.managed.swapRemove(i);
+            }
         }
     }
 
@@ -3101,6 +3112,40 @@ test "supervisor: liveness sweep tears down libusb instance whose pipe hung up" 
     sup.sweepLivenessLibusb();
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
     try testing.expect(!sup.devname_map.contains("hidraw0"));
+}
+
+// A libusb instance spawned without a devname (spawnInstance path, e.g. run()
+// or doReload's found==null branch) must still be reaped by the sweep on
+// unplug. Pre-fix `m.devname orelse continue` skipped it, leaking the worker
+// thread and instance forever.
+test "supervisor: liveness sweep tears down devname-null libusb instance" {
+    const allocator = testing.allocator;
+    const parsed_dev = try device_mod.parseString(allocator, libusb_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.deinit();
+    }
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("phys0", inst, null);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].devname == null);
+
+    // Still alive while the pipe is open.
+    sup.sweepLivenessLibusb();
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // POLLHUP → managedInstanceAlive false. Without the else-branch the sweep
+    // hits `m.devname orelse continue` and leaves managed.items.len == 1.
+    mock.closeWriteEnd();
+    sup.sweepLivenessLibusb();
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
 test "supervisor: liveness sweep spares an all-suppress instance with no read fd" {
