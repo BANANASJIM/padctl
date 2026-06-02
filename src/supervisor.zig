@@ -723,13 +723,6 @@ pub const Supervisor = struct {
         }
     }
 
-    /// Probe whether the backing device fds of `m` are still alive.
-    /// Returns false when the primary device fd has been invalidated (EBADF)
-    /// or the other end has hung up (POLLHUP / POLLERR / POLLNVAL), which
-    /// is what happens after USB removal even if `detach()` has not yet
-    /// run. Used by `attachWithInstance` to distinguish a genuine dedup
-    /// collision from a race where the ADD uevent for a replug arrives
-    /// before REMOVE drains.
     /// True when the instance owns the physical device through libusb rather
     /// than through a kernel hidraw node: it claims a suppress-only interface
     /// or reads a vendor-class interface. Such an instance must not be torn
@@ -744,6 +737,13 @@ pub const Supervisor = struct {
         return false;
     }
 
+    /// Probe whether the backing device fds of `m` are still alive.
+    /// Returns false when the primary device fd has been invalidated (EBADF)
+    /// or the other end has hung up (POLLHUP / POLLERR / POLLNVAL), which
+    /// is what happens after USB removal even if `detach()` has not yet
+    /// run. Used by `attachWithInstance` to distinguish a genuine dedup
+    /// collision from a race where the ADD uevent for a replug arrives
+    /// before REMOVE drains.
     fn managedInstanceAlive(m: *const ManagedInstance) bool {
         // A suspended instance is an explicit, structured state: fds are
         // already closed and the entry is reserved for rebind via

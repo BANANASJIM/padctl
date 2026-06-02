@@ -101,11 +101,13 @@ pub const UsbrawDevice = struct {
 
         const rc = c.libusb_claim_interface(handle, interface_id);
         if (rc == c.LIBUSB_ERROR_BUSY) {
+            _ = c.libusb_attach_kernel_driver(handle, interface_id);
             c.libusb_close(handle);
             c.libusb_exit(ctx);
             return error.Busy;
         }
         if (rc != 0) {
+            _ = c.libusb_attach_kernel_driver(handle, interface_id);
             c.libusb_close(handle);
             c.libusb_exit(ctx);
             return error.ClaimFailed;
@@ -268,11 +270,13 @@ pub const UsbrawSuppress = struct {
 
         const rc = c.libusb_claim_interface(handle, interface_id);
         if (rc == c.LIBUSB_ERROR_BUSY) {
+            _ = c.libusb_attach_kernel_driver(handle, interface_id);
             c.libusb_close(handle);
             c.libusb_exit(ctx);
             return error.Busy;
         }
         if (rc != 0) {
+            _ = c.libusb_attach_kernel_driver(handle, interface_id);
             c.libusb_close(handle);
             c.libusb_exit(ctx);
             return error.ClaimFailed;

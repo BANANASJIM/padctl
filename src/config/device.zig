@@ -745,6 +745,37 @@ test "device: validate rejects report referencing a suppress interface" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
+test "device: validate rejects report->suppress reference even with a readable interface" {
+    const allocator = std.testing.allocator;
+    // A readable hid interface (id 5) keeps openedInterfaceCount >= 1 so the
+    // all-suppress guard does NOT fire; the report targets the suppress
+    // interface (id 9), so only the report->suppress check can reject it.
+    const bad =
+        \\[device]
+        \\name = "Mixed"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 5
+        \\class = "hid"
+        \\
+        \\[[device.interface]]
+        \\id = 9
+        \\class = "suppress"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 9
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
 test "device: validate rejects an all-suppress config with no readable interface" {
     const ifaces = [_]InterfaceConfig{
         .{ .id = 1, .class = "suppress" },

@@ -1075,11 +1075,11 @@ const report_then_suppress_init_toml =
     \\expect = [0x01]
 ;
 
-// Regression guard for the suppress-interface index alignment (issue #355,
-// mechanism A). The init-handshake loop must route the init command to the
-// devices[] slot computed by deviceIndexForInterface, NOT to a positional
-// interface[i] counter. With a suppress interface preceding the report
-// interfaces, a positional counter would target the wrong mock (or overflow).
+// Regression guard for the suppress-interface index alignment (issue #355).
+// The init-handshake loop must route the init command to the devices[] slot
+// computed by deviceIndexForInterface, NOT to a positional interface[i]
+// counter. With a suppress interface preceding the report interfaces, a
+// positional counter would target the wrong mock (or overflow).
 test "DeviceInstance.init: suppress preceding report routes init via helper, not positional" {
     const allocator = testing.allocator;
 
