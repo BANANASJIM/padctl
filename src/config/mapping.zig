@@ -303,6 +303,7 @@ pub const LayerConfig = struct {
     trigger: []const u8,
     activation: []const u8 = "hold",
     tap: ?[]const u8 = null,
+    hold: ?[]const u8 = null,
     hold_timeout: ?i64 = null,
     remap: ?RemapMap = null,
     gyro: ?GyroConfig = null,
@@ -938,6 +939,12 @@ pub fn validate(cfg: *const MappingConfig) !void {
         if (layer.tap) |tap| {
             if (std.mem.startsWith(u8, tap, "macro:")) {
                 return error.LayerTapCannotBeMacro;
+            }
+        }
+
+        if (layer.hold) |hold| {
+            if (std.mem.startsWith(u8, hold, "macro:")) {
+                return error.LayerHoldCannotBeMacro;
             }
         }
 
@@ -1811,6 +1818,56 @@ test "validate: layer tap to gamepad button works (regression)" {
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try validate(&result.value);
+}
+
+test "mapping: layer hold parses into LayerConfig.hold" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "sense"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\hold = "RB"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try validate(&result.value);
+    try std.testing.expectEqualStrings("RB", result.value.layer.?[0].hold.?);
+}
+
+test "mapping: layer tap and hold both set round-trip" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "sense"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\tap = "KEY_F13"
+        \\hold = "KEY_LEFTSHIFT"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try validate(&result.value);
+    try std.testing.expectEqualStrings("KEY_F13", result.value.layer.?[0].tap.?);
+    try std.testing.expectEqualStrings("KEY_LEFTSHIFT", result.value.layer.?[0].hold.?);
+}
+
+test "mapping: validate: layer hold macro: prefix rejected" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "sense"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\hold = "macro:x"
+        \\
+        \\[[macro]]
+        \\name = "x"
+        \\steps = [{ tap = "A" }]
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.LayerHoldCannotBeMacro, validate(&result.value));
 }
 
 // --- chord remap ---

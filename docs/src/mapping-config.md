@@ -189,6 +189,7 @@ name = "fps"
 trigger = "LM"
 activation = "hold"
 tap = "mouse_side"
+hold = "RB"
 hold_timeout = 200
 ```
 
@@ -198,6 +199,7 @@ hold_timeout = 200
 | `trigger` | string | yes | Button name that activates this layer |
 | `activation` | string | no | `"hold"` (default), `"toggle"`, or `"hold_toggle"`. `hold_toggle` starts like `hold`, but holding past `hold_timeout` toggles the layer sticky on/off instead of making it momentary. |
 | `tap` | string | no | Button/key emitted on short press (when using `hold` or `hold_toggle` activation). May be a `ButtonId`, `KEY_*`, `mouse_*`, or `disabled`. **Cannot be `macro:<name>`** — the layer tap dispatch path does not run macros, so `tap = "macro:foo"` is rejected at validate time (`error.LayerTapCannotBeMacro`). Use `macro:<name>` from `[remap]` / `[layer.remap]` instead. |
+| `hold` | string | no | Passthrough output emitted continuously while the layer is **active**, for every activation mode (`hold` / `hold_toggle` / `toggle`). A single `ButtonId`, `KEY_*`, `mouse_*`, or `BTN_*` target. Fires only after the layer activates — never on a short tap (`tap` still fires for the short press). **Cannot be `macro:<name>`** (`error.LayerHoldCannotBeMacro`). Released on every exit path (trigger release, layer/mapping switch, reset). |
 | `hold_timeout` | integer | no | Hold detection threshold in ms (1–5000); default 200 |
 
 ### `[layer.remap]`

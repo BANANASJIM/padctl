@@ -280,6 +280,33 @@ Three activation modes:
 
 The `tap` + `hold_timeout` combination lets a button do double duty: if released before `hold_timeout` ms, it fires `tap` instead of activating the layer.
 
+The optional `hold` field emits a chosen output continuously *while the layer is active* — the trigger does double duty as both a layer switch and a passthrough button. It applies uniformly to all three activation modes, and fires only after the layer activates (a short press that resolves to `tap` emits no `hold` output). Released automatically on every exit path. `hold` takes a single `ButtonId`, `KEY_*`, `mouse_*`, or `BTN_*` target (not `macro:<name>`).
+
+```toml
+# Witcher-3 "Sense": hold LB to enter a layer AND still emit LB.
+[[layer]]
+name         = "sense"
+trigger      = "LB"
+activation   = "hold"
+hold         = "LB"
+hold_timeout = 200
+
+[layer.remap]
+A = "KEY_Q"
+```
+
+```toml
+# Keyboard modifier held while a toggle layer is latched on.
+[[layer]]
+name       = "fn"
+trigger    = "Select"
+activation = "toggle"
+hold       = "KEY_LEFTSHIFT"
+
+[layer.remap]
+A = "KEY_F1"
+```
+
 ```toml
 # "aim" layer: hold LM to enable gyro + mouse aim
 [[layer]]
