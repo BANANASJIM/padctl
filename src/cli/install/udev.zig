@@ -45,6 +45,7 @@ pub const UdevEntry = struct {
     pid: u16,
     block_kernel_drivers: []const []const u8 = &.{},
     clone_vid_pid: bool = false,
+    needs_libusb: bool = false,
 };
 
 /// Runtime path checked by installed udev rules. This must never include
@@ -367,6 +368,9 @@ fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) 
             if (entries.items[j].clone_vid_pid) {
                 entries.items[i].clone_vid_pid = true;
             }
+            if (entries.items[j].needs_libusb) {
+                entries.items[i].needs_libusb = true;
+            }
             const removed = entries.items[j];
             allocator.free(removed.name);
             for (removed.block_kernel_drivers) |d| allocator.free(d);
@@ -427,6 +431,26 @@ pub fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []con
             allocator,
             "KERNELS==\"uhid\", SUBSYSTEM==\"input\", ATTRS{{id/vendor}}==\"{x:0>4}\", ATTRS{{id/product}}==\"{x:0>4}\", TAG+=\"uaccess\"\n",
             .{ e.vid, e.pid },
+        );
+        defer allocator.free(rule);
+        try buf.appendSlice(allocator, rule);
+    }
+
+    // Devices with vendor/suppress interfaces are claimed via libusb, which needs
+    // write access to the raw USB device node (/dev/bus/usb/...) plus driver
+    // detach — the hidraw grant above does not cover that node, so without this
+    // the user-scope daemon cannot claim the device and the bind fails.
+    var has_libusb = false;
+    for (entries) |e| {
+        if (!e.needs_libusb) continue;
+        if (!has_libusb) {
+            try buf.appendSlice(allocator, "\n# Raw USB device node access for libusb-claimed devices\n");
+            has_libusb = true;
+        }
+        const rule = try std.fmt.allocPrint(
+            allocator,
+            "ACTION==\"add\", SUBSYSTEM==\"usb\", ENV{{DEVTYPE}}==\"usb_device\", ATTR{{idVendor}}==\"{x:0>4}\", ATTR{{idProduct}}==\"{x:0>4}\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"\n# {s}\n",
+            .{ e.vid, e.pid, e.name },
         );
         defer allocator.free(rule);
         try buf.appendSlice(allocator, rule);
@@ -758,8 +782,10 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
     var name_buf: [256]u8 = undefined;
     var name: []const u8 = std.fs.path.stem(path);
     var clone_vid_pid: bool = false;
+    var needs_libusb: bool = false;
     var in_device_section = false;
     var in_ffb_section = false;
+    var in_interface_section = false;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
@@ -767,6 +793,7 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
         if (trimmed.len > 0 and trimmed[0] == '[') {
             in_device_section = std.mem.startsWith(u8, trimmed, "[device]");
             in_ffb_section = std.mem.startsWith(u8, trimmed, "[output.force_feedback]");
+            in_interface_section = std.mem.startsWith(u8, trimmed, "[[device.interface]]");
             continue;
         }
         if (in_device_section) {
@@ -785,6 +812,17 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
                     clone_vid_pid = std.mem.eql(u8, val, "true");
                 }
             }
+        } else if (in_interface_section) {
+            // vendor/suppress interfaces are claimed via libusb, not hidraw.
+            if (isFieldKey(trimmed, "class")) {
+                if (std.mem.indexOfScalar(u8, trimmed, '"')) |q1| {
+                    if (std.mem.indexOfScalarPos(u8, trimmed, q1 + 1, '"')) |q2| {
+                        const val = trimmed[q1 + 1 .. q2];
+                        if (std.mem.eql(u8, val, "vendor") or std.mem.eql(u8, val, "suppress"))
+                            needs_libusb = true;
+                    }
+                }
+            }
         }
     }
 
@@ -794,6 +832,7 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
         .pid = dev.pid,
         .block_kernel_drivers = dev.block_kernel_drivers,
         .clone_vid_pid = clone_vid_pid,
+        .needs_libusb = needs_libusb,
     });
 }
 

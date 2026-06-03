@@ -366,6 +366,96 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uhid\"") != null);
 }
 
+const usb_node_rule = "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"37d7\", ATTR{idProduct}==\"2401\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"";
+
+test "install: libusb-claimed device gets raw USB node uaccess rule (#355)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(devices_dir);
+    try std.fs.makeDirAbsolute(devices_dir);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/vader5.toml", .{devices_dir});
+    defer allocator.free(toml_path);
+    {
+        var file = try std.fs.createFileAbsolute(toml_path, .{});
+        defer file.close();
+        try file.writeAll(
+            \\[device]
+            \\name = "Flydigi Vader 5 Pro"
+            \\vid = 0x37d7
+            \\pid = 0x2401
+            \\[[device.interface]]
+            \\id = 1
+            \\class = "vendor"   # libusb-claimed
+            \\[[device.interface]]
+            \\id = 2
+            \\class = "suppress"
+        );
+    }
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
+
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+
+    // Without this grant the libusb claim fails and the device never binds (#355).
+    try testing.expect(std.mem.indexOf(u8, content, usb_node_rule) != null);
+}
+
+test "install: pure-hid device gets no raw USB node rule (#355)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(devices_dir);
+    try std.fs.makeDirAbsolute(devices_dir);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/hidpad.toml", .{devices_dir});
+    defer allocator.free(toml_path);
+    {
+        var file = try std.fs.createFileAbsolute(toml_path, .{});
+        defer file.close();
+        try file.writeAll(
+            \\[device]
+            \\name = "Plain HID Pad"
+            \\vid = 0x37d7
+            \\pid = 0x2401
+            \\[[device.interface]]
+            \\id = 0
+            \\class = "hid"
+        );
+    }
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/60-padctl.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try generateUdevRules(allocator, devices_dir, rules_path, "/usr");
+
+    var file = try std.fs.openFileAbsolute(rules_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+
+    // A hidraw-only device must not emit a raw USB node rule.
+    try testing.expect(std.mem.indexOf(u8, content, "ENV{DEVTYPE}==\"usb_device\"") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
+}
+
 test "install: findDevicesSourceDir discovers repo-root devices from zig-out/bin" {
     const testing = std.testing;
     const allocator = testing.allocator;

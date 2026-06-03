@@ -248,6 +248,15 @@ pub fn isSuppressClass(class: []const u8) bool {
     return std.mem.eql(u8, class, "suppress");
 }
 
+/// True when any interface is claimed via libusb (vendor or suppress class),
+/// which needs raw USB device-node access rather than a hidraw node.
+pub fn usesLibusb(cfg: *const DeviceConfig) bool {
+    for (cfg.device.interface) |iface| {
+        if (std.mem.eql(u8, iface.class, "vendor") or isSuppressClass(iface.class)) return true;
+    }
+    return false;
+}
+
 fn isSuppressInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
     for (cfg.device.interface) |iface| {
         if (iface.id == iface_id) return isSuppressClass(iface.class);
@@ -630,6 +639,34 @@ test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
     try std.testing.expectEqual(@as(i64, 1), init_cfg.interface orelse return error.MissingInterface);
     try std.testing.expect(init_cfg.commands != null);
     try std.testing.expect(init_cfg.enable != null);
+}
+
+test "device: usesLibusb true for vendor/suppress, false for hid-only" {
+    const allocator = std.testing.allocator;
+
+    const vader = try parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer vader.deinit();
+    try std.testing.expect(usesLibusb(&vader.value));
+
+    const hid_only =
+        \\[device]
+        \\name = "H"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+    ;
+    const hid = try parseString(allocator, hid_only);
+    defer hid.deinit();
+    try std.testing.expect(!usesLibusb(&hid.value));
 }
 
 fn suppressIndexToml(comptime suppress_first: bool) []const u8 {

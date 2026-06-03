@@ -2177,7 +2177,7 @@ pub const Supervisor = struct {
 
                 const inst_ptr = try self.allocator.create(DeviceInstance);
                 inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
-                    std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
+                    logBindFailure(&cfg_ptr.value, hidraw_path, err);
                     if (isTransientOpenError(err)) self.enqueueHotplugRetryForPath(hidraw_path);
                     self.allocator.destroy(inst_ptr);
                     if (default_pr_ptr) |p| {
@@ -2314,6 +2314,29 @@ pub const Supervisor = struct {
         };
     }
 
+    fn isLibusbClaimError(err: anyerror) bool {
+        return switch (err) {
+            error.NotFound, error.Busy, error.ClaimFailed => true,
+            else => false,
+        };
+    }
+
+    /// A libusb-claimed device that fails to open/claim drops out silently
+    /// (never enters `managed`, so `padctl status` shows nothing). Surface the
+    /// likely cause and remedy instead, since it almost always means the raw
+    /// USB device node is not accessible to the unprivileged daemon.
+    fn logBindFailure(cfg: *const DeviceConfig, key: []const u8, err: anyerror) void {
+        if (config_device.usesLibusb(cfg) and isLibusbClaimError(err)) {
+            std.log.warn(
+                "cannot claim \"{s}\" via libusb ({}): the raw USB device node is not accessible. " ++
+                    "Install the padctl udev rules and add your user to the 'input' group (or run the daemon privileged), then replug.",
+                .{ cfg.device.name, err },
+            );
+        } else {
+            std.log.warn("DeviceInstance.init for {s}: {}", .{ key, err });
+        }
+    }
+
     pub fn attachWithRoot(self: *Supervisor, devname: []const u8, dev_root: []const u8) !void {
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
@@ -2384,7 +2407,7 @@ pub const Supervisor = struct {
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
-            std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
+            logBindFailure(cfg.?, path, err);
             self.allocator.destroy(inst_ptr);
             if (default_pr_ptr) |p| {
                 p.deinit();
