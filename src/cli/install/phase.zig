@@ -361,6 +361,25 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
+    // /etc udev rules and modules-load.d shadow the {prefix}/lib copies, so an
+    // immutable-mode install can leave them behind even on a normal uninstall.
+    // Remove them unconditionally (the systemd /etc entries stay immutable-gated).
+    const etc_rules = [_][]const u8{
+        "/etc/udev/rules.d/60-padctl.rules",
+        "/etc/udev/rules.d/61-padctl-driver-block.rules",
+        "/etc/udev/rules.d/90-padctl.rules",
+        "/etc/udev/rules.d/99-padctl.rules",
+        "/etc/modules-load.d/padctl.conf",
+    };
+    for (etc_rules) |suffix| {
+        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ destdir, suffix });
+        defer allocator.free(path);
+        std.fs.deleteFileAbsolute(path) catch continue;
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+    }
+
     // Drop the service-enabled sentinel so a future replug of a
     // block_kernel_drivers device is not unbound by a stale udev rule.
     udev.removeServiceSentinel(allocator, destdir);
@@ -442,11 +461,6 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             "/etc/systemd/system/padctl.service",
             "/etc/systemd/system/padctl.service.d/immutable.conf",
             "/etc/systemd/user/padctl.service",
-            "/etc/udev/rules.d/60-padctl.rules",
-            "/etc/udev/rules.d/61-padctl-driver-block.rules",
-            "/etc/udev/rules.d/90-padctl.rules",
-            "/etc/udev/rules.d/99-padctl.rules",
-            "/etc/modules-load.d/padctl.conf",
         };
         for (etc_files) |suffix| {
             const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ destdir, suffix });

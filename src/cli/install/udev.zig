@@ -313,14 +313,31 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
 }
 
 pub fn cleanupLegacyUdevFiles(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
-    // Legacy 99-padctl.rules was renamed to 60- for correct priority.
-    const legacy = try std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d/99-padctl.rules", .{ plan.opts.destdir, plan.prefix });
-    defer allocator.free(legacy);
-    std.fs.deleteFileAbsolute(legacy) catch {};
+    // padctl rules live in two trees: {prefix}/lib/udev/rules.d (normal) and
+    // /etc/udev/rules.d (immutable). /etc shadows /usr/lib, so a leftover rule in
+    // the non-active tree silently overrides the freshly written one after a mode
+    // switch. Sweep every padctl basename from whichever tree is NOT the active
+    // one; the std.mem.eql guard ensures the just-written rules are never deleted.
+    // 99-padctl.rules is the historical 60- name, kept here for upgrade hygiene.
+    const basenames = [_][]const u8{
+        "60-padctl.rules",
+        "61-padctl-driver-block.rules",
+        "90-padctl.rules",
+        "99-padctl.rules",
+    };
+    const etc_dir = try std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d", .{plan.opts.destdir});
+    defer allocator.free(etc_dir);
+    const lib_dir = try std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d", .{ plan.opts.destdir, plan.prefix });
+    defer allocator.free(lib_dir);
 
-    const legacy_etc = try std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d/99-padctl.rules", .{plan.opts.destdir});
-    defer allocator.free(legacy_etc);
-    std.fs.deleteFileAbsolute(legacy_etc) catch {};
+    for ([_][]const u8{ etc_dir, lib_dir }) |dir| {
+        if (std.mem.eql(u8, dir, plan.udev_dir)) continue;
+        for (basenames) |name| {
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+            defer allocator.free(path);
+            std.fs.deleteFileAbsolute(path) catch {};
+        }
+    }
 }
 
 /// Scan all device TOML files in dirs, extract VID/PID/name/block_kernel_drivers,

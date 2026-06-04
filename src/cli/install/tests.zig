@@ -46,6 +46,7 @@ const isValidIdentifier = udev_mod.isValidIdentifier;
 const probeAndUnbindDrivers = udev_mod.probeAndUnbindDrivers;
 const probeAndRebindDrivers = udev_mod.probeAndRebindDrivers;
 const probeAndReprobeDrivers = udev_mod.probeAndReprobeDrivers;
+const cleanupLegacyUdevFiles = udev_mod.cleanupLegacyUdevFiles;
 const readSysHex = udev_mod.readSysHex;
 const findDevicesSourceDir = udev_mod.findDevicesSourceDir;
 const imu_udev_rules_content = udev_mod.imu_udev_rules_content;
@@ -3796,6 +3797,106 @@ test "install: reprobe no-ops when all bound / missing tree" {
     const missing = try std.fmt.allocPrint(allocator, "{s}/nonexistent", .{tmp_path});
     defer allocator.free(missing);
     probeAndReprobeDrivers(allocator, &entries, missing);
+}
+
+// A mode switch must sweep the stale war-rule from the non-active tree while
+// leaving the freshly written active rule intact. Falsifiability: removing the
+// std.mem.eql guard would delete the active /usr/lib copy too.
+test "install: mode switch sweeps stale rule from non-target tree" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    // Stale immutable-mode rule in /etc shadows the normal-mode rule.
+    const etc_dir = try std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d", .{destdir});
+    defer allocator.free(etc_dir);
+    try ensureDirAll(allocator, etc_dir);
+    const etc_rule = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{etc_dir});
+    defer allocator.free(etc_rule);
+    {
+        var f = try std.fs.createFileAbsolute(etc_rule, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# stale: unbinds usbhid\n");
+    }
+
+    const opts = InstallOptions{ .destdir = destdir, .prefix = "/usr", .user_service = false };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+    try ensureDirAll(allocator, plan.udev_dir);
+
+    // Active normal-mode rule in {prefix}/lib (xpad-only).
+    const lib_rule = try std.fmt.allocPrint(allocator, "{s}/61-padctl-driver-block.rules", .{plan.udev_dir});
+    defer allocator.free(lib_rule);
+    {
+        var f = try std.fs.createFileAbsolute(lib_rule, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# active: unbinds xpad\n");
+    }
+
+    try cleanupLegacyUdevFiles(allocator, &plan);
+
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(etc_rule, .{}));
+    try std.fs.accessAbsolute(lib_rule, .{});
+}
+
+// Normal-mode uninstall must remove the /etc udev rules and modules-load.d
+// conf even though they are not immutable-gated. Falsifiability: dropping the
+// always-run /etc sweep in uninstall() leaves these files behind.
+test "uninstall: removes /etc udev rules in normal mode" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const etc_rules_dir = try std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d", .{staging});
+    defer allocator.free(etc_rules_dir);
+    try ensureDirAll(allocator, etc_rules_dir);
+    const etc_modules_dir = try std.fmt.allocPrint(allocator, "{s}/etc/modules-load.d", .{staging});
+    defer allocator.free(etc_modules_dir);
+    try ensureDirAll(allocator, etc_modules_dir);
+
+    const seeded = [_][]const u8{
+        "/etc/udev/rules.d/60-padctl.rules",
+        "/etc/udev/rules.d/61-padctl-driver-block.rules",
+        "/etc/udev/rules.d/90-padctl.rules",
+        "/etc/modules-load.d/padctl.conf",
+    };
+    for (seeded) |suffix| {
+        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ staging, suffix });
+        defer allocator.free(path);
+        var f = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("# padctl generated\n");
+    }
+
+    const opts = InstallOptions{
+        .prefix = "/usr",
+        .destdir = staging,
+        .immutable = false,
+        .user_service = false,
+    };
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+
+    for (seeded) |suffix| {
+        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ staging, suffix });
+        defer allocator.free(path);
+        if (std.fs.accessAbsolute(path, .{})) |_| {
+            std.debug.print("uninstall did not remove: {s}\n", .{path});
+            return error.EtcFileNotRemoved;
+        } else |_| {}
+    }
 }
 
 // Uninstall must remove 61-padctl-driver-block.rules symmetrically with
