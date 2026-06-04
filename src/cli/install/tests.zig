@@ -45,6 +45,7 @@ const UdevEntry = udev_mod.UdevEntry;
 const isValidIdentifier = udev_mod.isValidIdentifier;
 const probeAndUnbindDrivers = udev_mod.probeAndUnbindDrivers;
 const probeAndRebindDrivers = udev_mod.probeAndRebindDrivers;
+const probeAndReprobeDrivers = udev_mod.probeAndReprobeDrivers;
 const readSysHex = udev_mod.readSysHex;
 const findDevicesSourceDir = udev_mod.findDevicesSourceDir;
 const imu_udev_rules_content = udev_mod.imu_udev_rules_content;
@@ -3670,6 +3671,131 @@ test "uninstall: probeAndRebindDrivers binds unbound matching interface only" {
     // Only the unbound interface 1-1.4:1.0 is written; the already-bound
     // 1-1.4:1.1 and non-matching 2-2.1:1.0 must be absent.
     try testing.expectEqualStrings("1-1.4:1.0", written);
+}
+
+// Re-probe must write only the driverless interface to drivers_probe, skip
+// already-bound interfaces, and ignore non-matching devices. Falsifiability:
+// dropping the `accessAbsolute(driver_link)` skip in reprobeInterfaces makes
+// 1.0 appear; dropping the VID:PID match makes the non-matching iface appear.
+test "install: reprobe writes only driverless interfaces" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("sys/bus/usb/drivers/xpad");
+    // Matching device 37d7:2401 with one bound (1.0) and one driverless (1.1) iface.
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.0");
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.1");
+    // Non-matching device with a driverless interface.
+    try tmp.dir.makePath("sys/bus/usb/devices/2-2.1/2-2.1:1.0");
+
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idVendor", .{});
+        defer f.close();
+        try f.writeAll("37d7\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idProduct", .{});
+        defer f.close();
+        try f.writeAll("2401\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idVendor", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/2-2.1/idProduct", .{});
+        defer f.close();
+        try f.writeAll("0000\n");
+    }
+
+    // Mark 1-1.4:1.0 as already bound.
+    {
+        const drv = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/devices/1-1.4/1-1.4:1.0/driver", .{tmp_path});
+        defer allocator.free(drv);
+        try std.posix.symlink("../../../drivers/xpad", drv);
+    }
+
+    // Global drivers_probe write target.
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/drivers_probe", .{});
+        defer f.close();
+    }
+
+    const entries = [_]UdevEntry{.{
+        .name = "Test Device",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+    }};
+    probeAndReprobeDrivers(allocator, &entries, tmp_path);
+
+    const probe_path = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/drivers_probe", .{tmp_path});
+    defer allocator.free(probe_path);
+    var pf = try std.fs.openFileAbsolute(probe_path, .{});
+    defer pf.close();
+    const written = try pf.readToEndAlloc(allocator, 128);
+    defer allocator.free(written);
+
+    try testing.expect(std.mem.indexOf(u8, written, "1-1.4:1.1") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "1-1.4:1.0") == null);
+    try testing.expect(std.mem.indexOf(u8, written, "2-2.1:1.0") == null);
+}
+
+// Re-probe is a no-op when every interface is bound and silently returns when
+// the sysfs tree is absent (non-root / staging). Guards the best-effort
+// catch+continue discipline.
+test "install: reprobe no-ops when all bound / missing tree" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("sys/bus/usb/drivers/xpad");
+    try tmp.dir.makePath("sys/bus/usb/devices/1-1.4/1-1.4:1.0");
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idVendor", .{});
+        defer f.close();
+        try f.writeAll("37d7\n");
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/devices/1-1.4/idProduct", .{});
+        defer f.close();
+        try f.writeAll("2401\n");
+    }
+    // The single interface is already bound.
+    {
+        const drv = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/devices/1-1.4/1-1.4:1.0/driver", .{tmp_path});
+        defer allocator.free(drv);
+        try std.posix.symlink("../../../drivers/xpad", drv);
+    }
+    {
+        var f = try tmp.dir.createFile("sys/bus/usb/drivers_probe", .{});
+        defer f.close();
+    }
+
+    const entries = [_]UdevEntry{.{ .name = "Test Device", .vid = 0x37d7, .pid = 0x2401 }};
+    probeAndReprobeDrivers(allocator, &entries, tmp_path);
+
+    const probe_path = try std.fmt.allocPrint(allocator, "{s}/sys/bus/usb/drivers_probe", .{tmp_path});
+    defer allocator.free(probe_path);
+    var pf = try std.fs.openFileAbsolute(probe_path, .{});
+    defer pf.close();
+    const written = try pf.readToEndAlloc(allocator, 128);
+    defer allocator.free(written);
+    try testing.expectEqual(@as(usize, 0), written.len);
+
+    // Absent sys_root must not error.
+    const missing = try std.fmt.allocPrint(allocator, "{s}/nonexistent", .{tmp_path});
+    defer allocator.free(missing);
+    probeAndReprobeDrivers(allocator, &entries, missing);
 }
 
 // Uninstall must remove 61-padctl-driver-block.rules symmetrically with

@@ -300,6 +300,16 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
     if (!plan.staging_mode and plan.is_root and shouldProactiveUnbind(plan)) {
         probeAndUnbindDrivers(allocator, entries, "");
     }
+
+    // Re-probe interfaces left driverless by an earlier install whose block
+    // list this install no longer covers. udevadm trigger only re-runs rules;
+    // it does not make the kernel re-evaluate drivers for an already-attached
+    // device, so a previously-unbound interface stays ownerless until replug.
+    // Runs even when the block list is empty/reduced, hence not gated by
+    // shouldProactiveUnbind.
+    if (!plan.staging_mode and plan.is_root) {
+        probeAndReprobeDrivers(allocator, entries, "");
+    }
 }
 
 pub fn cleanupLegacyUdevFiles(allocator: std.mem.Allocator, plan: *const InstallPlan) !void {
@@ -708,6 +718,103 @@ fn rebindInterfaces(
         } else |err| {
             std.log.warn("could not rebind {s} to kernel driver '{s}' (replug or run `modprobe {s}` to restore it): {}", .{ child.name, driver, driver, err });
         }
+    }
+}
+
+/// Walk <sys_root>/sys/bus/usb/devices/ and, for any USB device whose
+/// idVendor:idProduct matches an entry, ask the kernel to re-probe every
+/// interface child that currently has no `driver` symlink by writing its name
+/// to the global <sys_root>/sys/bus/usb/drivers_probe. The kernel selects the
+/// correct driver from the descriptor, so no driver name is hard-coded.
+/// Best-effort: catch+continue on every fs error; silent no-op when the tree is
+/// absent or non-root. `sys_root` is "" in production; tests inject a tmpDir.
+pub fn probeAndReprobeDrivers(allocator: std.mem.Allocator, entries: []const UdevEntry, sys_root: []const u8) void {
+    const devices_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/devices",
+        .{sys_root},
+    ) catch return;
+    defer allocator.free(devices_path);
+
+    var devices_dir = std.fs.openDirAbsolute(devices_path, .{ .iterate = true }) catch return;
+    defer devices_dir.close();
+
+    const probe_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/drivers_probe",
+        .{sys_root},
+    ) catch return;
+    defer allocator.free(probe_path);
+
+    for (entries) |entry| {
+        var it = devices_dir.iterate();
+        while (it.next() catch null) |de| {
+            if (de.kind != .sym_link and de.kind != .directory) continue;
+            if (de.name.len == 0 or de.name[0] < '0' or de.name[0] > '9') continue;
+            // Skip interface nodes ("1-1.4:1.0"); only match top-level devices.
+            if (std.mem.indexOfScalar(u8, de.name, ':') != null) continue;
+
+            const vendor_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/sys/bus/usb/devices/{s}/idVendor",
+                .{ sys_root, de.name },
+            ) catch continue;
+            defer allocator.free(vendor_path);
+
+            const product_path = std.fmt.allocPrint(
+                allocator,
+                "{s}/sys/bus/usb/devices/{s}/idProduct",
+                .{ sys_root, de.name },
+            ) catch continue;
+            defer allocator.free(product_path);
+
+            const vid = readSysHex(vendor_path) catch continue;
+            const pid = readSysHex(product_path) catch continue;
+            if (vid != entry.vid or pid != entry.pid) continue;
+
+            reprobeInterfaces(allocator, sys_root, de.name, probe_path);
+        }
+    }
+}
+
+/// For each interface child of USB device `dev_name` ("<dev_name>:N.M") that has
+/// no `driver` symlink, write its name to the global `drivers_probe` attribute.
+fn reprobeInterfaces(
+    allocator: std.mem.Allocator,
+    sys_root: []const u8,
+    dev_name: []const u8,
+    probe_path: []const u8,
+) void {
+    const dev_dir_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/sys/bus/usb/devices/{s}",
+        .{ sys_root, dev_name },
+    ) catch return;
+    defer allocator.free(dev_dir_path);
+
+    var dev_dir = std.fs.openDirAbsolute(dev_dir_path, .{ .iterate = true }) catch return;
+    defer dev_dir.close();
+
+    var it = dev_dir.iterate();
+    while (it.next() catch null) |child| {
+        if (child.kind != .directory and child.kind != .sym_link) continue;
+        if (!std.mem.startsWith(u8, child.name, dev_name)) continue;
+        if (child.name.len <= dev_name.len or child.name[dev_name.len] != ':') continue;
+
+        const driver_link = std.fmt.allocPrint(
+            allocator,
+            "{s}/sys/bus/usb/devices/{s}/{s}/driver",
+            .{ sys_root, dev_name, child.name },
+        ) catch continue;
+        defer allocator.free(driver_link);
+
+        // Already bound to some driver — nothing to re-probe.
+        if (std.fs.accessAbsolute(driver_link, .{})) |_| continue else |_| {}
+
+        if (std.fs.openFileAbsolute(probe_path, .{ .mode = .write_only })) |f| {
+            defer f.close();
+            f.writeAll(child.name) catch {};
+        } else |_| {}
     }
 }
 
