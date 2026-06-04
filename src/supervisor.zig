@@ -185,6 +185,10 @@ pub const Supervisor = struct {
     debounce_fd: posix.fd_t,
     hotplug_retry_fd: posix.fd_t,
     hotplug_pending: std.ArrayList(HotplugPending),
+    // Set by attachWithRoot when an open failed because the hidraw node already
+    // vanished (libusb claim removed it, or the device unplugged); lets the
+    // retry give-up log at debug instead of a misleading warning.
+    last_attach_node_gone: bool = false,
     config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
@@ -1377,7 +1381,11 @@ pub const Supervisor = struct {
                 }
                 p.retries += 1;
                 if (p.retries >= 3) {
-                    std.log.warn("hotplug: giving up on {s} after 3 retries", .{name});
+                    if (self.last_attach_node_gone) {
+                        std.log.debug("hotplug: {s} removed before attach (claimed or unplugged), giving up", .{name});
+                    } else {
+                        std.log.warn("hotplug: giving up on {s} after 3 retries", .{name});
+                    }
                     _ = self.hotplug_pending.swapRemove(i);
                 } else {
                     i += 1;
@@ -2338,12 +2346,22 @@ pub const Supervisor = struct {
     }
 
     pub fn attachWithRoot(self: *Supervisor, devname: []const u8, dev_root: []const u8) !void {
+        self.last_attach_node_gone = false;
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
 
         const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
             if (isTransientOpenError(err)) {
-                std.log.warn("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
+                const node_gone = switch (err) {
+                    error.FileNotFound, error.NoDevice => true,
+                    else => false,
+                };
+                self.last_attach_node_gone = node_gone;
+                if (node_gone) {
+                    std.log.debug("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
+                } else {
+                    std.log.warn("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
+                }
                 return error.HotplugTransient;
             }
             return err;
