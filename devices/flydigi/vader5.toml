@@ -2,15 +2,14 @@
 name = "Flydigi Vader 5 Pro"
 vid = 0x37d7
 pid = 0x2401
-block_kernel_drivers = ["xpad", "hid_generic", "usbhid"]
+block_kernel_drivers = ["xpad"]
 
-# The pad exposes three HID interfaces (IF1 vendor 0xffa0, IF2 Mouse, IF3
-# vendor 0xffee), each producing a hidraw node via hid-generic. padctl claims
-# all three so the kernel exposes no hidraw/evdev node for the physical pad;
-# Steam reads hidraw directly, so any kernel-owned node would still surface
-# the pad as a generic Xbox controller. IF1 is read for input + rumble + init;
-# IF2/IF3 are claimed suppress-only — never read or written, only evicted from
-# hid-generic so their hidraw nodes vanish.
+# The pad exposes a vendor interface (IF0, no driver) plus three HID interfaces
+# (IF1 input, IF2 mouse, IF3 vendor HID). padctl claims IF1 via libusb (read EP
+# 0x82 / write EP 0x06) and IF2/IF3 suppress-only; libusb_claim detaches the
+# kernel HID driver, so their hidraw nodes vanish and Steam sees only the
+# virtual Elite pad. Only xpad is blocked at udev — hid_generic/usbhid must keep
+# binding so a hidraw node exists for discovery before padctl claims it.
 [[device.interface]]
 id = 1
 class = "vendor"   # EP2 IN 32B extended input, EP6 OUT 32B config commands
