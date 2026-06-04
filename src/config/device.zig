@@ -641,6 +641,23 @@ test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
     try std.testing.expect(init_cfg.enable != null);
 }
 
+test "device: vader5 blocks only xpad (regression #355)" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer result.deinit();
+
+    // Blocking hid_generic/usbhid removed the hidraw node that discovery needs;
+    // padctl self-detaches the kernel HID driver at libusb claim, so only xpad
+    // must be blocked.
+    const blocked = result.value.device.block_kernel_drivers orelse return error.MissingBlockList;
+    try std.testing.expectEqual(@as(usize, 1), blocked.len);
+    try std.testing.expectEqualStrings("xpad", blocked[0]);
+    for (blocked) |drv| {
+        try std.testing.expect(!std.mem.eql(u8, drv, "hid_generic"));
+        try std.testing.expect(!std.mem.eql(u8, drv, "usbhid"));
+    }
+}
+
 test "device: usesLibusb true for vendor/suppress, false for hid-only" {
     const allocator = std.testing.allocator;
 
