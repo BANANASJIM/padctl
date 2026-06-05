@@ -942,3 +942,90 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
     // HID writes must be identical (same bytes sent to device).
     try testing.expectEqualSlices(u8, r_off.write_log, r_on.write_log);
 }
+
+test "event_loop: throttled replay after stop still arms auto-stop deadline" {
+    // Regression test for #65 (stuck rumble).
+    //
+    // Sequence:
+    //   T0  FF_PLAY  effect 0, 100ms duration  → emitted, scheduler deadline armed
+    //   T1  FF_STOP  effect 0                  → slot cleared, timerfd disarmed
+    //   T2  FF_PLAY  effect 0, 100ms duration  → THROTTLED (T2-T0 < 10ms)
+    //                                             scheduler MUST still arm deadline
+    //
+    // Pre-fix: onPlay() was gated by `forwarded` (only true when a frame was
+    // emitted). A throttled replay skipped onPlay() → timerfd never rearmed
+    // → motor never stopped → stuck rumble.
+    // Post-fix: onPlay() runs unconditionally whenever scheduler_on.
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // play, explicit stop, then a replay of effect 0; the replay is throttled.
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 100 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 100 },
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx3 = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx3{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+    const T3 = struct {
+        fn run(c: *RunCtx3) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T3.run, .{&ctx});
+
+    // The pipe byte is never drained, so the FF slot stays level-triggered:
+    // each ppoll iteration consumes one event, delivering all three within
+    // microseconds — far inside the 10ms throttle window.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+
+    // Outlast the 100ms auto-stop deadline.
+    std.Thread.sleep(200 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Three frames: play, explicit stop, and the auto-stop — the third only
+    // appears if the throttled replay rearmed the deadline.
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 3 * frame_size), mock_dev.write_log.items.len);
+    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
+    const explicit_stop = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
+    const auto_stop = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, auto_stop);
+}

@@ -169,7 +169,8 @@ fn slotStr(buf: *const [256]u8) []const u8 {
 /// device's `commands.rumble` (or alternate FF type) template. Used by
 /// both the uinput-FF-event path and the userspace auto-stop timerfd path.
 /// Returns true if the frame was successfully written to HID. Callers
-/// must only advance scheduler/throttle state when this returns true.
+/// must only advance the throttle clock (`last_rumble_ns`) when this returns
+/// true; scheduler accounting advances independently of emit.
 fn emitRumbleFrame(
     devices: []DeviceIO,
     alloc: std.mem.Allocator,
@@ -639,14 +640,12 @@ pub const EventLoop = struct {
                             }
                         } else {
                             // Play event: throttle applies to play frames.
-                            var forwarded = false;
                             const elapsed = now_ns - self.last_rumble_ns;
                             if (elapsed >= min_interval_ns) {
                                 if (ctx.allocator) |alloc| {
                                     if (ctx.device_config) |dcfg| {
                                         if (emitRumbleFrame(ctx.devices, alloc, dcfg, ff_ev.strong, ff_ev.weak, ctx.device_tag)) {
                                             self.last_rumble_ns = now_ns;
-                                            forwarded = true;
                                         } else {
                                             rumble_log.debug("[{s}] FF_PLAY: emitRumbleFrame FAILED id={d}", .{ ctx.device_tag, ff_ev.effect_id });
                                         }
@@ -658,7 +657,7 @@ pub const EventLoop = struct {
                                     @as(u64, @intCast(@min(elapsed, std.math.maxInt(u64)))),
                                 });
                             }
-                            if (scheduler_on and forwarded) {
+                            if (scheduler_on) {
                                 const next_dl = self.rumble_scheduler.onPlay(
                                     ff_ev.effect_id,
                                     ff_ev.duration_ms,
