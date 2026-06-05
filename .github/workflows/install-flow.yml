@@ -273,6 +273,46 @@ jobs:
               echo "=== all invariants passed ==="
             '
 
+  bazzite-immutable:
+    name: install / bazzite immutable (ostree sim)
+    runs-on: ubuntu-22.04
+    needs: [build-binary]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download padctl binary
+        uses: actions/download-artifact@v4
+        with:
+          name: padctl-bin
+          path: zig-out/bin
+
+      - name: Restore binary executable bit
+        run: chmod +x zig-out/bin/padctl
+
+      # Bazzite is Fedora-atomic/ostree. The two install-relevant traits — a
+      # /run/ostree-booted marker (immutable auto-detect) and /usr/local being a
+      # symlink to /var/usrlocal (target created only at deploy) — are simulated
+      # on plain fedora, so CI need not pull the multi-GB Bazzite image. Validates
+      # the install-migration hardening (re-probe no-crash, cross-mode rule sweep,
+      # immutable-mode /etc placement and uninstall cleanup).
+      - name: Run Bazzite immutable install test (fedora ostree sim)
+        run: |
+          set -euo pipefail
+          STAGE="$PWD/_bz_stage"
+          mkdir -p "$STAGE/bin"
+          cp zig-out/bin/padctl "$STAGE/bin/padctl"
+          cp -r devices "$STAGE/devices"
+          cp scripts/test-bazzite-immutable.sh "$STAGE/test.sh"
+
+          docker run --rm \
+            -v "$STAGE:/opt/padctl:ro" \
+            fedora:41 \
+            /bin/bash -euo pipefail -c '
+              export PADCTL=/opt/padctl/bin/padctl
+              export DEVICES=/opt/padctl/devices
+              bash /opt/padctl/test.sh
+            '
+
   pkg-deb-smoke:
     name: pkg / deb structure invariants
     runs-on: ubuntu-22.04
