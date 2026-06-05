@@ -113,6 +113,15 @@ pub const UsbrawDevice = struct {
             return error.ClaimFailed;
         }
 
+        // Claim succeeded; release it and restore the kernel driver on any later
+        // failure so the interface is never leaked claimed-but-unowned.
+        errdefer {
+            _ = c.libusb_release_interface(handle, interface_id);
+            _ = c.libusb_attach_kernel_driver(handle, interface_id);
+            c.libusb_close(handle);
+            c.libusb_exit(ctx.?);
+        }
+
         const pipe_fds = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
         errdefer std.posix.close(pipe_fds[0]);
         errdefer std.posix.close(pipe_fds[1]);
@@ -133,11 +142,6 @@ pub const UsbrawDevice = struct {
             .thread = undefined,
             .allocator = alloc,
         };
-        errdefer {
-            _ = c.libusb_release_interface(handle, interface_id);
-            c.libusb_close(handle);
-            c.libusb_exit(ctx.?);
-        }
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;
     }
@@ -284,6 +288,7 @@ pub const UsbrawSuppress = struct {
 
         const self = alloc.create(UsbrawSuppress) catch |err| {
             _ = c.libusb_release_interface(handle, interface_id);
+            _ = c.libusb_attach_kernel_driver(handle, interface_id);
             c.libusb_close(handle);
             c.libusb_exit(ctx);
             return err;
