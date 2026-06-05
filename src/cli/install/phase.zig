@@ -354,6 +354,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/lib/systemd/user/padctl.service",
         "/lib/udev/rules.d/60-padctl.rules",
         "/lib/udev/rules.d/61-padctl-driver-block.rules",
+        "/lib/udev/rules.d/62-padctl-reprobe.rules",
         "/lib/udev/rules.d/90-padctl.rules",
         "/lib/udev/rules.d/99-padctl.rules",
         "/lib/modules-load.d/padctl.conf",
@@ -374,6 +375,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     const etc_rules = [_][]const u8{
         "/etc/udev/rules.d/60-padctl.rules",
         "/etc/udev/rules.d/61-padctl-driver-block.rules",
+        "/etc/udev/rules.d/62-padctl-reprobe.rules",
         "/etc/udev/rules.d/90-padctl.rules",
         "/etc/udev/rules.d/99-padctl.rules",
         "/etc/modules-load.d/padctl.conf",

@@ -60,6 +60,7 @@ const parseHexOrDec = _udev.parseHexOrDec;
 const generateUdevRules = _udev.generateUdevRules;
 const generateDriverBlockRules = _udev.generateDriverBlockRules;
 const generateDriverBlockRulesFromEntries = _udev.generateDriverBlockRulesFromEntries;
+const generateReprobeRulesFromEntries = _udev.generateReprobeRulesFromEntries;
 const sentinelPath = udev_mod.sentinelPath;
 const runtime_sentinel_path = udev_mod.runtime_sentinel_path;
 const writeServiceSentinel = udev_mod.writeServiceSentinel;
@@ -1938,6 +1939,84 @@ test "install: #137 generates ACTION==remove rebind line" {
 
     try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"remove\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "/bind") != null);
+}
+
+// FALSIFIABILITY:
+// (A) FAILS if ATTRS{idVendor} value is wrong (e.g. "37d8" instead of "37d7") —
+//     the hard-coded expected string "37d7" will not be found in the output.
+// (B) FAILS if the drivers_probe write target is removed or renamed — the
+//     substring "drivers_probe" will not appear in the output.
+// (C) FAILS if the live driverless guard (`test -e`) is removed — the
+//     "test -e /sys%p/driver" substring will not match.
+// (D) FAILS if ATTRS{idProduct} does not encode to "2401".
+// (E) FAILS if ACTION is wrong (e.g. "add" only, missing "|bind").
+// (F) FAILS if DEVTYPE is wrong (e.g. "usb_device").
+test "install: #355 generateReprobeRulesFromEntries generates correct rule for Vader 5" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/62.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+
+    const entries = [_]UdevEntry{.{
+        .name = "Flydigi Vader 5",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+    }};
+    try generateReprobeRulesFromEntries(allocator, &entries, rules_path);
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    // (A) vid match
+    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{idVendor}==\"37d7\"") != null);
+    // (D) pid match
+    try testing.expect(std.mem.indexOf(u8, content, "ATTRS{idProduct}==\"2401\"") != null);
+    // (E) action includes |bind
+    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"add|bind\"") != null);
+    // (F) interface devtype
+    try testing.expect(std.mem.indexOf(u8, content, "ENV{DEVTYPE}==\"usb_interface\"") != null);
+    // (B) drivers_probe write target
+    try testing.expect(std.mem.indexOf(u8, content, "drivers_probe") != null);
+    // (C) live driverless guard
+    try testing.expect(std.mem.indexOf(u8, content, "test -e /sys%p/driver") != null);
+}
+
+// FALSIFIABILITY: FAILS if the loop-safety condition is removed — a bound
+// interface (driver symlink present) must NOT be re-probed. We verify the
+// guard is literally present; removing it would cause spurious re-probes on
+// already-bound interfaces (idem-potency breach).
+test "install: #355 reprobe rule has live driverless guard on every entry line" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/62.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+
+    const entries = [_]UdevEntry{
+        .{ .name = "Device A", .vid = 0x37d7, .pid = 0x2401 },
+        .{ .name = "Device B", .vid = 0x0f0d, .pid = 0x00c1 },
+    };
+    try generateReprobeRulesFromEntries(allocator, &entries, rules_path);
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "drivers_probe") == null) continue;
+        try testing.expect(std.mem.indexOf(u8, line, "test -e /sys%p/driver") != null);
+    }
 }
 
 test "install: staged driver-block udev rule uses runtime sentinel path" {
