@@ -290,6 +290,16 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
         const msg = std.fmt.bufPrint(&errbuf, "warning: driver block rules not generated: {}\n", .{err}) catch "warning: driver block rules error\n";
         _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
     };
+}
+
+/// Mutate live kernel driver state to match the freshly written udev rules.
+/// MUST be called AFTER `udevadm control --reload-rules`: re-probe generates
+/// bind uevents that udevd evaluates against its currently loaded ruleset, so a
+/// stale "block usbhid" rule still loaded from a previous install would re-unbind
+/// usbhid and strip the device's hidraw node ("no device"). Self-gates to a
+/// no-op outside root or in staging mode.
+pub fn applyDriverState(allocator: std.mem.Allocator, plan: *const InstallPlan, entries: []const UdevEntry) void {
+    if (plan.staging_mode or !plan.is_root) return;
 
     // Re-probe interfaces left driverless by an earlier install whose block
     // list this install no longer covers, BEFORE evicting currently-blocked
@@ -300,17 +310,14 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
     // skips bound ones, so it never re-binds a driver the unbind step below is
     // about to evict. Not gated by shouldProactiveUnbind so it still recovers
     // when the block list is empty/reduced.
-    if (!plan.staging_mode and plan.is_root) {
-        probeAndReprobeDrivers(allocator, entries, "");
-    }
+    probeAndReprobeDrivers(allocator, entries, "");
 
-    // Evict already-attached devices without waiting for reboot. udevadm
-    // trigger only sends add events; bind rules fire on the next plug cycle.
-    // Proactively writing to sysfs unbind covers devices already claimed by a
-    // blocking driver at install time — but only when this install actually
-    // starts a runnable service, otherwise an unbound device is left ownerless.
-    // Runs last so the eviction is authoritative over the reprobe above.
-    if (!plan.staging_mode and plan.is_root and shouldProactiveUnbind(plan)) {
+    // Evict already-attached devices without waiting for reboot. Proactively
+    // writing to sysfs unbind covers devices already claimed by a blocking
+    // driver at install time — but only when this install actually starts a
+    // runnable service, otherwise an unbound device is left ownerless. Runs
+    // last so the eviction is authoritative over the reprobe above.
+    if (shouldProactiveUnbind(plan)) {
         probeAndUnbindDrivers(allocator, entries, "");
     }
 }

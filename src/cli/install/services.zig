@@ -480,11 +480,10 @@ pub fn installReconnectScript(allocator: std.mem.Allocator, plan: *const Install
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 }
 
-pub fn runSystemctlPhase(plan: *const InstallPlan) void {
-    _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
-    runCmd(&.{ "udevadm", "control", "--reload-rules" });
-    runCmd(&.{ "udevadm", "trigger" });
-
+// Manage the systemd units. The caller reloads the udev ruleset and applies
+// driver state first, so the service starts against a device already in its
+// final driver state.
+pub fn runSystemctlUnits(plan: *const InstallPlan) void {
     if (plan.systemctl_plan.mode == .skip) {
         var groups: [3][]const []const u8 = undefined;
         var n: usize = 0;
