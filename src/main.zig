@@ -29,6 +29,7 @@ pub const cli = struct {
     pub const socket_client = @import("cli/socket_client.zig");
     pub const switch_mapping = @import("cli/switch_mapping.zig");
     pub const status = @import("cli/status.zig");
+    pub const doctor = @import("cli/doctor.zig");
     pub const devices = @import("cli/devices.zig");
     pub const dump = @import("cli/dump.zig");
     pub const config = struct {
@@ -93,6 +94,7 @@ pub const io = struct {
 // Verify by adding a deliberately-failing test in
 // `src/test/_meta_wiring_check_test.zig` and confirming CI catches it.
 pub const testing_support = struct {
+    pub const doctor = @import("cli/doctor.zig");
     pub const mock_device_io = @import("test/mock_device_io.zig");
     pub const mock_output = @import("test/mock_output.zig");
     pub const helpers = @import("test/helpers.zig");
@@ -233,6 +235,7 @@ const Cli = struct {
     config_cmd: ?ConfigCmd = null,
     switch_cmd: ?struct { name: ?[]const u8 = null, device_id: ?[]const u8 = null, persist: bool = false } = null,
     status_cmd: bool = false,
+    doctor_cmd: bool = false,
     devices_cmd: bool = false,
     dump_cmd: ?DumpAction = null,
     dump_period: []const u8 = "1d",
@@ -485,6 +488,20 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     return error.UnknownArgument;
                 }
             }
+        } else if (std.mem.eql(u8, arg, "doctor")) {
+            parsed_cli.doctor_cmd = true;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--help") or std.mem.eql(u8, sub_arg, "-h")) {
+                    printHelp();
+                    std.process.exit(0);
+                } else if (std.mem.eql(u8, sub_arg, "--socket")) {
+                    parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                    parsed_cli.socket_explicit = true;
+                } else {
+                    std.log.err("unknown doctor argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
         } else if (std.mem.eql(u8, arg, "devices")) {
             parsed_cli.devices_cmd = true;
             while (args.next()) |sub_arg| {
@@ -586,6 +603,8 @@ fn printHelp() void {
         \\    --device <id>       Apply only to specific device
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  status                Show daemon status (current mapping, devices)
+        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+        \\  doctor                Print self-contained diagnostic (daemon/device/hidraw/scope)
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
         \\  devices               List connected devices via daemon
         \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
@@ -953,6 +972,12 @@ pub fn main() !void {
     // status subcommand
     if (parsed.status_cmd) {
         const rc = cli.status.run(parsed.socket_path, stdout_writer, stderr_writer);
+        std.process.exit(rc);
+    }
+
+    // doctor subcommand
+    if (parsed.doctor_cmd) {
+        const rc = cli.doctor.run(allocator, parsed.socket_path, stdout_writer, stderr_writer);
         std.process.exit(rc);
     }
 
