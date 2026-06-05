@@ -3728,10 +3728,14 @@ test "install: reprobe writes only driverless interfaces" {
         defer f.close();
     }
 
+    // Non-empty block list mirrors the real Vader 5: re-probe must rebind a
+    // driverless interface regardless of block_kernel_drivers, so this fixture
+    // also guards against a `block_kernel_drivers.len != 0` skip in the path.
     const entries = [_]UdevEntry{.{
         .name = "Test Device",
         .vid = 0x37d7,
         .pid = 0x2401,
+        .block_kernel_drivers = &.{"xpad"},
     }};
     probeAndReprobeDrivers(allocator, &entries, tmp_path);
 
