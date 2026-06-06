@@ -167,6 +167,15 @@ pub fn writeAtomic(
     defer buf.deinit(allocator);
     try emitToml(buf.writer(allocator), cfg);
 
+    // Skip the rename when the rendered content matches what's already on disk:
+    // an identical-content write would still fire an inotify MOVED_TO and, via
+    // the daemon's config watch, trigger a destructive reload + driver reattach
+    // that regenerates the hidraw add uevent — a self-sustaining hotplug loop (#355).
+    if (std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024)) |existing| {
+        defer allocator.free(existing);
+        if (std.mem.eql(u8, existing, buf.items)) return;
+    } else |_| {}
+
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{config_path});
     defer allocator.free(tmp_path);
 
@@ -667,6 +676,49 @@ test "writeAtomic leaves no .tmp sidecar after success" {
 
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("config.toml.tmp", .{}));
     try tmp.dir.access("config.toml", .{});
+}
+
+// #355: an identical-content writeAtomic must be a no-op — it must not rename
+// a fresh tmp file onto config.toml, because that rename fires inotify MOVED_TO
+// and drives a destructive daemon reload loop. We prove the no-op via the file's
+// inode: rename(2) replaces the inode, an in-place skip preserves it.
+//
+// Falsifiability: removing the skip-on-identical guard in writeAtomic makes the
+// second (identical-content) write perform the rename, changing the inode, so
+// the `inode_after_same == inode_before` assertion fails.
+test "writeAtomic skips rewrite when content is unchanged (#355)" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path});
+    defer allocator.free(config_path);
+
+    const inodeOf = struct {
+        fn get(path: []const u8) !std.fs.File.INode {
+            var f = try std.fs.openFileAbsolute(path, .{});
+            defer f.close();
+            return (try f.stat()).inode;
+        }
+    }.get;
+
+    const cfg = UserConfig{ .version = CURRENT_VERSION, .supervisor = .{ .suspend_grace_sec = 30 } };
+    try writeAtomic(allocator, config_path, &cfg);
+    const inode_before = try inodeOf(config_path);
+
+    // Identical content → must be a no-op → inode unchanged (no rename).
+    try writeAtomic(allocator, config_path, &cfg);
+    try std.testing.expectEqual(inode_before, try inodeOf(config_path));
+
+    // Differing content → must rewrite → inode changes (rename happened).
+    const cfg2 = UserConfig{ .version = CURRENT_VERSION, .supervisor = .{ .suspend_grace_sec = 45 } };
+    try writeAtomic(allocator, config_path, &cfg2);
+    try std.testing.expect(inode_before != try inodeOf(config_path));
+
+    var reloaded = (try loadFromDir(allocator, dir_path)).?;
+    defer reloaded.deinit();
+    try std.testing.expectEqual(@as(i64, 45), reloaded.value.supervisor.suspend_grace_sec);
 }
 
 test "writeAtomic escapes TOML special characters in device names" {
