@@ -353,7 +353,7 @@ pub fn cleanupLegacyUdevFiles(allocator: std.mem.Allocator, plan: *const Install
 /// Scan all device TOML files in dirs, extract VID/PID/name/block_kernel_drivers,
 /// and deduplicate by VID:PID (preferring entries with richer data).
 /// Caller owns the returned entries and must call freeDeviceEntries when done.
-fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) !std.ArrayList(UdevEntry) {
+pub fn collectDeviceEntries(allocator: std.mem.Allocator, dirs: []const []const u8) !std.ArrayList(UdevEntry) {
     var entries = std.ArrayList(UdevEntry){};
     errdefer {
         for (entries.items) |e| {

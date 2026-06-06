@@ -199,6 +199,9 @@ pub fn run(allocator: std.mem.Allocator, socket_path: []const u8, writer: anytyp
 fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anytype) !void {
     try writer.writeAll("[service]\n");
 
+    const exec_start = queryServiceExecStart(allocator);
+    defer if (exec_start) |es| allocator.free(es);
+
     var sock_buf: [std.fs.max_path_bytes]u8 = undefined;
     const resolved = socket_client.resolveSocketPath(&sock_buf);
     try writer.print("socket: {s}\n", .{resolved});
@@ -219,14 +222,14 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
             try writer.writeAll("daemon: DOWN (no socket / not running)\n");
             try printSentinel(writer);
             try writer.writeByte('\n');
-            try printSupportedDevices(allocator, status_devices, writer);
+            try printSupportedDevices(allocator, status_devices, exec_start, writer);
             return;
         },
         else => {
             try writer.print("daemon: DOWN (connect error: {})\n", .{err});
             try printSentinel(writer);
             try writer.writeByte('\n');
-            try printSupportedDevices(allocator, status_devices, writer);
+            try printSupportedDevices(allocator, status_devices, exec_start, writer);
             return;
         },
     };
@@ -237,7 +240,7 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
         try writer.writeAll("daemon: UP (no status response)\n");
         try printSentinel(writer);
         try writer.writeByte('\n');
-        try printSupportedDevices(allocator, status_devices, writer);
+        try printSupportedDevices(allocator, status_devices, exec_start, writer);
         return;
     };
 
@@ -251,7 +254,7 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
 
     try printSentinel(writer);
     try writer.writeByte('\n');
-    try printSupportedDevices(allocator, status_devices, writer);
+    try printSupportedDevices(allocator, status_devices, exec_start, writer);
 }
 
 fn printSentinel(writer: anytype) !void {
@@ -262,19 +265,106 @@ fn printSentinel(writer: anytype) !void {
     try writer.print("sentinel: present ({s})\n", .{udev.runtime_sentinel_path});
 }
 
-fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const StatusDevice, writer: anytype) !void {
+/// Extract the `--config-dir <path>` argument from a unit ExecStart line.
+/// Returns null when the daemon runs with its default config dir (no flag).
+pub fn configDirFromExecStart(exec_start: []const u8) ?[]const u8 {
+    const flag = "--config-dir";
+    const pos = std.mem.indexOf(u8, exec_start, flag) orelse return null;
+    var rest = exec_start[pos + flag.len ..];
+    rest = std.mem.trimLeft(u8, rest, " \t=");
+    if (rest.len == 0) return null;
+    var end: usize = 0;
+    while (end < rest.len and rest[end] != ' ' and rest[end] != '\t' and rest[end] != '\n' and rest[end] != '\r') end += 1;
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
+/// Resolve the directories doctor scans for supported-device TOMLs, in priority
+/// order. The daemon's live `--config-dir` (parsed from its ExecStart, when the
+/// install used a non-/usr prefix) is the source of truth, followed by the
+/// common install prefixes and the user/system config dirs. `exec_start` is the
+/// raw `systemctl show -p ExecStart` value (or null when unavailable).
+/// Caller owns the returned slice and each element.
+pub fn resolveDoctorDeviceDirs(allocator: std.mem.Allocator, exec_start: ?[]const u8) ![][]const u8 {
+    var dirs: std.ArrayList([]const u8) = .{};
+    errdefer {
+        for (dirs.items) |d| allocator.free(d);
+        dirs.deinit(allocator);
+    }
+
+    const append = struct {
+        fn add(a: std.mem.Allocator, list: *std.ArrayList([]const u8), dir: []const u8) !void {
+            for (list.items) |existing| {
+                if (std.mem.eql(u8, existing, dir)) return;
+            }
+            const owned = try a.dupe(u8, dir);
+            errdefer a.free(owned);
+            try list.append(a, owned);
+        }
+    }.add;
+
+    if (exec_start) |es| {
+        if (configDirFromExecStart(es)) |cfg| try append(allocator, &dirs, cfg);
+    }
+    try append(allocator, &dirs, "/usr/local/share/padctl/devices");
+    try append(allocator, &dirs, "/usr/share/padctl/devices");
+
+    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
+    defer if (config_dirs) |cd| paths.freeConfigDirs(allocator, cd);
+    if (config_dirs) |cd| {
+        for (cd) |d| try append(allocator, &dirs, d);
+    }
+
+    return dirs.toOwnedSlice(allocator);
+}
+
+/// Query the live padctl.service ExecStart so doctor scans the same device dir
+/// the daemon was launched with. Best-effort: returns null on any failure.
+fn queryServiceExecStart(allocator: std.mem.Allocator) ?[]u8 {
+    const argv = [_][]const u8{ "systemctl", "--user", "show", "-p", "ExecStart", "--value", "padctl.service" };
+    const result = std.process.Child.run(.{ .allocator = allocator, .argv = &argv }) catch return null;
+    defer allocator.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) {
+        allocator.free(result.stdout);
+        return null;
+    }
+    return result.stdout;
+}
+
+/// Pick the first directory in `dirs` that exists. A non-existent scan dir makes
+/// scan.scan abort the whole scan with FileNotFound, blanking every hidraw node.
+fn firstExistingDir(dirs: []const []const u8) []const u8 {
+    for (dirs) |d| {
+        std.fs.accessAbsolute(d, .{}) catch continue;
+        return d;
+    }
+    return dirs[0];
+}
+
+fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const StatusDevice, exec_start: ?[]const u8, writer: anytype) !void {
     try writer.writeAll("[supported devices]\n");
 
-    var entries = udev.collectDeviceEntriesForUninstall(allocator, "/usr/share/padctl/devices") catch {
-        try writer.writeAll("note: could not load device list from /usr/share/padctl/devices\n");
+    const dirs = resolveDoctorDeviceDirs(allocator, exec_start) catch {
+        try writer.writeAll("note: could not resolve device config directories\n");
+        return;
+    };
+    defer paths.freeConfigDirs(allocator, dirs);
+
+    var entries = udev.collectDeviceEntries(allocator, dirs) catch {
+        try writer.writeAll("note: could not load device list\n");
         return;
     };
     defer udev.freeDeviceEntries(allocator, &entries);
 
-    const config_dirs = paths.resolveDeviceConfigDirs(allocator) catch null;
-    defer if (config_dirs) |dirs| paths.freeConfigDirs(allocator, dirs);
-    const scan_dir = if (config_dirs) |dirs| dirs[0] else "/usr/share/padctl/devices";
+    try writer.writeAll("scanned:");
+    for (dirs) |d| try writer.print(" {s}", .{d});
+    try writer.print("\nfound {d} device(s)\n", .{entries.items.len});
+    if (entries.items.len == 0) {
+        try writer.writeAll("hint: no device TOMLs found in the scanned directories above; on ostree/immutable distros padctl installs under /usr/local — verify the daemon's --config-dir matches\n");
+        return;
+    }
 
+    const scan_dir = firstExistingDir(dirs);
     const scan_entries = scan.scan(allocator, scan_dir) catch null;
     defer if (scan_entries) |se| scan.freeEntries(allocator, se);
 
@@ -457,6 +547,144 @@ test "doctor: probeUsbPresence: driverless interface" {
     try testing.expect(result.present);
     try testing.expectEqual(@as(usize, 1), result.interfaces.len);
     try testing.expect(result.interfaces[0].driver == null);
+}
+
+test "doctor: configDirFromExecStart: extracts --config-dir arg" {
+    try testing.expectEqualStrings(
+        "/usr/local/share/padctl/devices",
+        configDirFromExecStart("/usr/local/bin/padctl --config-dir /usr/local/share/padctl/devices").?,
+    );
+}
+
+test "doctor: configDirFromExecStart: null when flag absent" {
+    try testing.expect(configDirFromExecStart("/usr/bin/padctl") == null);
+}
+
+test "doctor: resolveDoctorDeviceDirs: ExecStart config-dir is primary candidate" {
+    const allocator = testing.allocator;
+    const dirs = try resolveDoctorDeviceDirs(
+        allocator,
+        "/usr/local/bin/padctl --config-dir /usr/local/share/padctl/devices",
+    );
+    defer paths.freeConfigDirs(allocator, dirs);
+    try testing.expectEqualStrings("/usr/local/share/padctl/devices", dirs[0]);
+    // The hardcoded /usr/share must not be the only/primary search dir.
+    try testing.expect(!std.mem.eql(u8, dirs[0], "/usr/share/padctl/devices"));
+}
+
+test "doctor: resolveDoctorDeviceDirs: ostree devices found outside /usr/share" {
+    // Regression for #355: device TOMLs live ONLY under /usr/local (ostree
+    // prefix). The old code scanned a hardcoded /usr/share and found nothing,
+    // blanking the [supported devices] section. resolveDoctorDeviceDirs must
+    // surface the ExecStart --config-dir so collectDeviceEntries finds them.
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("usr/local/share/padctl/devices");
+    {
+        var f = try tmp.dir.createFile("usr/local/share/padctl/devices/foo.toml", .{});
+        defer f.close();
+        try f.writeAll("[device]\nname = \"foo\"\nvid = 0x1234\npid = 0x5678\n");
+    }
+
+    const cfg_dir = try std.fmt.allocPrint(allocator, "{s}/usr/local/share/padctl/devices", .{tmp_path});
+    defer allocator.free(cfg_dir);
+    const exec_start = try std.fmt.allocPrint(allocator, "{s}/usr/local/bin/padctl --config-dir {s}", .{ tmp_path, cfg_dir });
+    defer allocator.free(exec_start);
+
+    const dirs = try resolveDoctorDeviceDirs(allocator, exec_start);
+    defer paths.freeConfigDirs(allocator, dirs);
+    try testing.expectEqualStrings(cfg_dir, dirs[0]);
+
+    var entries = try udev.collectDeviceEntries(allocator, dirs);
+    defer udev.freeDeviceEntries(allocator, &entries);
+    try testing.expectEqual(@as(usize, 1), entries.items.len);
+    try testing.expectEqual(@as(u16, 0x1234), entries.items[0].vid);
+    try testing.expectEqual(@as(u16, 0x5678), entries.items[0].pid);
+
+    // Falsifiability anchor: a parallel-prefix dir WITHOUT the fixture TOML
+    // (mirroring the old hardcoded /usr/share) yields zero entries, i.e. the
+    // section would have been blank under the old behavior.
+    var tmp2 = testing.tmpDir(.{});
+    defer tmp2.cleanup();
+    const tmp2_path = try tmp2.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp2_path);
+    try tmp2.dir.makePath("share/padctl/devices");
+    const empty_dir = try std.fmt.allocPrint(allocator, "{s}/share/padctl/devices", .{tmp2_path});
+    defer allocator.free(empty_dir);
+
+    var old = try udev.collectDeviceEntries(allocator, &.{empty_dir});
+    defer udev.freeDeviceEntries(allocator, &old);
+    try testing.expectEqual(@as(usize, 0), old.items.len);
+}
+
+test "doctor: printSupportedDevices prints scanned paths and count when zero" {
+    const allocator = testing.allocator;
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+
+    try printSupportedDevices(allocator, &.{}, null, buf.writer(allocator));
+    const out = buf.items;
+
+    // Must not be a blank section: header + observability lines are present.
+    try testing.expect(std.mem.indexOf(u8, out, "[supported devices]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "scanned:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "device(s)") != null);
+}
+
+test "doctor: printSupportedDevices finds device via ExecStart config-dir" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("devices");
+    {
+        var f = try tmp.dir.createFile("devices/foo.toml", .{});
+        defer f.close();
+        try f.writeAll("[device]\nname = \"foo\"\nvid = 0x1234\npid = 0x5678\n");
+    }
+
+    const dev_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{tmp_path});
+    defer allocator.free(dev_dir);
+    const exec_start = try std.fmt.allocPrint(allocator, "{s}/bin/padctl --config-dir {s}", .{ tmp_path, dev_dir });
+    defer allocator.free(exec_start);
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try printSupportedDevices(allocator, &.{}, exec_start, buf.writer(allocator));
+    const out = buf.items;
+
+    try testing.expect(std.mem.indexOf(u8, out, "found 1 device(s)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, dev_dir) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "0x1234:0x5678") != null);
+}
+
+test "doctor: firstExistingDir: skips leading non-existent dir" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.makePath("exists");
+    const exists = try std.fmt.allocPrint(allocator, "{s}/exists", .{tmp_path});
+    defer allocator.free(exists);
+
+    const got = firstExistingDir(&.{ "/nonexistent/padctl/zzz", exists, "/another/missing" });
+    try testing.expectEqualStrings(exists, got);
+}
+
+test "doctor: firstExistingDir: falls back to dirs[0] when none exist" {
+    const got = firstExistingDir(&.{ "/nonexistent/a", "/nonexistent/b" });
+    try testing.expectEqualStrings("/nonexistent/a", got);
 }
 
 test "doctor: probeUsbPresence: not present (different vid)" {
