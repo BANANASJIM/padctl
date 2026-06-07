@@ -102,15 +102,20 @@ pub fn generateDevicePage(
         try writer.writeAll("|------|-----------|----------|\n");
         var it = cmds.map.iterator();
         while (it.next()) |entry| {
-            const c = entry.value_ptr.*;
             const tpl = entry.value_ptr.*.template;
-            const short = if (tpl.len > 60) tpl[0..60] else tpl;
-            _ = c;
-            try writer.print("| `{s}` | {d} | `{s}...` |\n", .{
-                entry.key_ptr.*,
-                entry.value_ptr.*.interface,
-                short,
-            });
+            if (tpl.len > 60) {
+                try writer.print("| `{s}` | {d} | `{s}...` |\n", .{
+                    entry.key_ptr.*,
+                    entry.value_ptr.*.interface,
+                    tpl[0..60],
+                });
+            } else {
+                try writer.print("| `{s}` | {d} | `{s}` |\n", .{
+                    entry.key_ptr.*,
+                    entry.value_ptr.*.interface,
+                    tpl,
+                });
+            }
         }
         try writer.writeByte('\n');
     }
@@ -166,6 +171,7 @@ fn outputFilename(
     toml_path: []const u8,
     dev_name: []const u8,
 ) ![]u8 {
+    _ = dev_name;
     // derive vendor from directory: devices/<vendor>/model.toml -> vendor
     var vendor: []const u8 = "unknown";
     const basename = std.fs.path.basename(toml_path);
@@ -184,24 +190,7 @@ fn outputFilename(
     else
         basename;
 
-    // slugify device name: lowercase, spaces -> hyphens, keep alphanum and hyphen
-    var slug = try allocator.alloc(u8, dev_name.len);
-    defer allocator.free(slug);
-    var slug_len: usize = 0;
-    for (dev_name) |c| {
-        if (std.ascii.isAlphanumeric(c)) {
-            slug[slug_len] = std.ascii.toLower(c);
-            slug_len += 1;
-        } else if (c == ' ' or c == '-' or c == '_') {
-            if (slug_len > 0 and slug[slug_len - 1] != '-') {
-                slug[slug_len] = '-';
-                slug_len += 1;
-            }
-        }
-    }
-    _ = stem;
-
-    return std.fmt.allocPrint(allocator, "{s}-{s}.md", .{ vendor, slug[0..slug_len] });
+    return std.fmt.allocPrint(allocator, "{s}-{s}.md", .{ vendor, stem });
 }
 
 pub fn runDocGen(
@@ -239,9 +228,9 @@ pub fn runDocGen(
         defer file.close();
         try file.writeAll(buf.items);
 
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "wrote ") catch 0;
-        _ = std.posix.write(std.posix.STDOUT_FILENO, out_path) catch 0;
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch 0;
+        const msg = try std.fmt.allocPrint(allocator, "wrote {s}\n", .{out_path});
+        defer allocator.free(msg);
+        _ = std.posix.write(std.posix.STDOUT_FILENO, msg) catch 0;
     }
 }
 
@@ -394,5 +383,5 @@ test "docgen: outputFilename derives vendor-slug" {
     const allocator = std.testing.allocator;
     const fname = try outputFilename(allocator, "devices/sony/dualsense.toml", "Sony DualSense");
     defer allocator.free(fname);
-    try std.testing.expectEqualStrings("sony-sony-dualsense.md", fname);
+    try std.testing.expectEqualStrings("sony-dualsense.md", fname);
 }
