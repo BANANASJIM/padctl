@@ -112,11 +112,12 @@ Start  = "BTN_START"
 Home   = "BTN_MODE"
 LS     = "BTN_THUMBL"
 RS     = "BTN_THUMBR"
-M1     = "BTN_TRIGGER_HAPPY1"
-# Steam Xbox Elite order: usage 22 = P3, usage 23 = P2; swap M2/M3 so Vader M2 lands at P3.
-M2     = "BTN_TRIGGER_HAPPY3"
-M3     = "BTN_TRIGGER_HAPPY2"
-M4     = "BTN_TRIGGER_HAPPY4"
+M1     = "BTN_TRIGGER_HAPPY5"
+# Real Elite 2 exposes back paddles P1-P4 as BTN_TRIGGER_HAPPY5-8 (Linux xpad).
+# Steam reads paddle slots from that layout; M2/M3 swapped so Vader M2 lands at P3, M3 at P2.
+M2     = "BTN_TRIGGER_HAPPY7"
+M3     = "BTN_TRIGGER_HAPPY6"
+M4     = "BTN_TRIGGER_HAPPY8"
 C      = "BTN_TRIGGER_HAPPY9"
 Z      = "BTN_TRIGGER_HAPPY10"
 LM     = "BTN_TRIGGER_HAPPY11"
