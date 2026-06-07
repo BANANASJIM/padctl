@@ -14,7 +14,7 @@ pub var test_probe_alive_override: ?*const fn (path: []const u8) bool = null;
 
 /// Test hook: when non-null, uninstall prefixes runtime paths
 /// (/run/padctl/padctl.sock, .pid) with this root instead of "" so the
-/// PR-2 daemon-stop probe path can be exercised against a tmpdir without
+/// daemon-stop probe path can be exercised against a tmpdir without
 /// flipping the lifecycle scope to .package via opts.destdir.
 pub var test_runtime_root_override: ?[]const u8 = null;
 

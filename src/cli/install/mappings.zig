@@ -218,15 +218,6 @@ pub fn writeBinding(
         }
     }
 
-    if (existing != null and (conflict_mode == .force or conflict_mode == .interactive)) {
-        backupFile(allocator, config_path) catch |err| {
-            var errbuf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&errbuf, "error: cannot create backup of {s}: {}, aborting overwrite\n", .{ config_path, err }) catch "error: backup failed, aborting\n";
-            _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
-            return err;
-        };
-    }
-
     var has_target = false;
     if (devices) |devs| {
         for (devs) |d| {
@@ -235,6 +226,17 @@ pub fn writeBinding(
                 break;
             }
         }
+    }
+
+    // Only back up when an existing entry is actually being overwritten; a
+    // pure add (no matching entry) changes nothing that needs a backup.
+    if (has_target and (conflict_mode == .force or conflict_mode == .interactive)) {
+        backupFile(allocator, config_path) catch |err| {
+            var errbuf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&errbuf, "error: cannot create backup of {s}: {}, aborting overwrite\n", .{ config_path, err }) catch "error: backup failed, aborting\n";
+            _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+            return err;
+        };
     }
     const old_count = if (devices) |d| d.len else 0;
     const new_count = if (has_target) old_count else old_count + 1;

@@ -79,31 +79,8 @@ pub fn writeAll(fd: std.posix.fd_t, s: []const u8) void {
     _ = std.posix.write(fd, s) catch {};
 }
 
-pub fn ensureDir(path: []const u8) !void {
-    std.fs.makeDirAbsolute(path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-}
-
-pub fn ensureDirAll(allocator: std.mem.Allocator, path: []const u8) !void {
-    var components = std.ArrayList([]const u8){};
-    defer components.deinit(allocator);
-
-    var remaining = path;
-    while (remaining.len > 1) {
-        try components.append(allocator, remaining);
-        remaining = std.fs.path.dirname(remaining) orelse break;
-    }
-
-    var i: usize = components.items.len;
-    while (i > 0) {
-        i -= 1;
-        ensureDir(components.items[i]) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-    }
+pub fn ensureDirAll(_: std.mem.Allocator, path: []const u8) !void {
+    try std.fs.cwd().makePath(path);
 }
 
 pub fn dirExistsAbsolute(path: []const u8) bool {
@@ -122,19 +99,9 @@ pub fn dirIsNonEmpty(path: []const u8) bool {
     return false;
 }
 
+// Atomic copy (temp + rename) preserving source mode. No partial dst on failure.
 pub fn copyFile(src: []const u8, dst: []const u8) !void {
-    var src_file = try std.fs.openFileAbsolute(src, .{});
-    defer src_file.close();
-    const stat = try src_file.stat();
-    var dst_file = try std.fs.createFileAbsolute(dst, .{ .truncate = true });
-    defer dst_file.close();
-    try dst_file.chmod(stat.mode & 0o777);
-    var buf: [65536]u8 = undefined;
-    while (true) {
-        const n = try src_file.read(&buf);
-        if (n == 0) break;
-        try dst_file.writeAll(buf[0..n]);
-    }
+    try std.fs.copyFileAbsolute(src, dst, .{});
 }
 
 // Write to {dst}.new then rename(2) over dst — avoids ETXTBSY when dst is currently executing.
@@ -251,7 +218,8 @@ pub fn hostHasInputGroup() bool {
 pub fn userInGroup(name: []const u8) bool {
     const target_gid = groupGid(name) orelse return false;
     if (std.os.linux.getegid() == target_gid) return true;
-    var gids: [64]std.os.linux.gid_t = undefined;
+    // 1024 covers heavy LDAP/AD memberships; getgroups fails (-1) if exceeded.
+    var gids: [1024]std.os.linux.gid_t = undefined;
     const ret = std.os.linux.getgroups(gids.len, &gids[0]);
     if (ret > gids.len) return false;
     for (gids[0..ret]) |g| {
@@ -334,9 +302,8 @@ pub const EnvSnapshot = struct {
 
 /// Single source of truth for every decision `install.run()` makes before it
 /// starts touching the filesystem. All derived axes are computed exactly once
-/// in `compute()` so later phases read a plain struct instead of re-deriving.
-/// All derived axes are computed exactly once so later phases read a plain
-/// struct instead of re-deriving, preventing decision drift between call sites.
+/// in `compute()` so later phases read a plain struct instead of re-deriving,
+/// preventing decision drift between call sites.
 pub const InstallPlan = struct {
     // --- inputs (captured, not re-derived) ---
     opts: InstallOptions,
@@ -348,7 +315,7 @@ pub const InstallPlan = struct {
     // --- single source of truth ---
     scope: LifecycleScope,
 
-    // --- derived axes (computed-from-scope shims; PR-4/PR-5 will remove) ---
+    // --- derived axes ---
     staging_mode: bool,
     effective_user_service: bool,
     immutable_kind: ImmutableKind,
@@ -387,8 +354,7 @@ pub const InstallPlan = struct {
 
         const staging_mode = scope == .package;
 
-        // user-service routing follows scope. Explicit --user-service still wins
-        // for transitional callers; PR-5 removes the orthogonal axis.
+        // user-service routing follows scope. Explicit --user-service still wins.
         const effective_user_service = opts.user_service orelse (scope == .user);
 
         const immutable_kind = detectImmutableOs(allocator, if (staging_mode) destdir else "");

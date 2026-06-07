@@ -978,7 +978,7 @@ test "install: uninstall removes runtime state paths under system scope" {
         defer f.close();
     }
 
-    // PR-3: runtime paths are touched only in non-package scopes. Force
+    // runtime paths are touched only in non-package scopes. Force
     // scope=.system and redirect the path root to the staging tmpdir.
     phase_mod.test_runtime_root_override = staging;
     defer phase_mod.test_runtime_root_override = null;
@@ -2505,6 +2505,45 @@ test "install: writeBinding conflict with force - backup + overwrite" {
     try std.testing.expect(found_bak);
 }
 
+test "install: writeBinding force pure-add does not create backup" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    // Pre-existing config with an UNRELATED device entry.
+    try writeBinding(testing_alloc, destdir, "Vader", "vader_map", .skip, mockPromptKeep);
+
+    // Force-bind a NEW device: pure add, no entry overwritten.
+    try writeBinding(testing_alloc, destdir, "DualSense", "ds_map", .force, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // New entry added, old entry preserved.
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"ds_map\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"vader_map\"") != null);
+
+    // No backup file: nothing was overwritten.
+    const etc_dir = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl", .{destdir});
+    defer testing_alloc.free(etc_dir);
+    var dir = try std.fs.openDirAbsolute(etc_dir, .{ .iterate = true });
+    defer dir.close();
+    var found_bak = false;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "config.toml.bak.")) {
+            found_bak = true;
+            break;
+        }
+    }
+    try std.testing.expect(!found_bak);
+}
+
 test "install: installMapping errors on missing source" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -3951,7 +3990,7 @@ test "uninstall: removes 61-padctl-driver-block.rules" {
 }
 
 // ---------------------------------------------------------------------------
-// PR-3: LifecycleScope integration tests
+// LifecycleScope integration tests
 // ---------------------------------------------------------------------------
 
 const scope_mod = @import("scope.zig");
@@ -4122,7 +4161,7 @@ test "uninstall: user scope routes to user systemctl only" {
         try uninstall(allocator, opts);
     }
 
-    // scope=.user must NOT trigger a system-scope stop. The PR-2 probe-and-stop
+    // scope=.user must NOT trigger a system-scope stop. The probe-and-stop
     // path only fires when probeSocketAlive returns true, and there's no socket
     // here, so stopDaemonScope is never called — calls list stays empty.
     try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);

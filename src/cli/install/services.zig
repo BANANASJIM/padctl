@@ -255,7 +255,10 @@ pub fn buildSystemctlUserArgv(
     if (plan.mode == .skip) return null;
 
     var argv = std.ArrayList([]const u8){};
-    errdefer argv.deinit(allocator);
+    errdefer {
+        for (argv.items) |s| allocator.free(s);
+        argv.deinit(allocator);
+    }
 
     if (plan.mode == .sudo_hop) {
         try argv.append(allocator, try allocator.dupe(u8, "sudo"));
@@ -386,11 +389,16 @@ pub fn stopDaemonScope(allocator: std.mem.Allocator, scope: SystemctlScope) !voi
 
 fn buildSystemctlSystemArgv(allocator: std.mem.Allocator, verbs: []const []const u8) ![][]const u8 {
     var argv = try allocator.alloc([]const u8, 1 + verbs.len);
-    errdefer allocator.free(argv);
+    var filled: usize = 0;
+    errdefer {
+        for (argv[0..filled]) |s| allocator.free(s);
+        allocator.free(argv);
+    }
     argv[0] = try allocator.dupe(u8, "systemctl");
-    errdefer allocator.free(argv[0]);
+    filled = 1;
     for (verbs, 0..) |v, i| {
         argv[1 + i] = try allocator.dupe(u8, v);
+        filled = 2 + i;
     }
     return argv;
 }
