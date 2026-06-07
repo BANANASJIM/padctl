@@ -20,9 +20,9 @@ const HIDIOCGRAWNAME: u32 = blk: {
     break :blk @as(u32, @bitCast(req));
 };
 
-fn readVidPid(config_path: []const u8) !struct { vid: u16, pid: u16 } {
-    const content = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, config_path, 256 * 1024);
-    defer std.heap.page_allocator.free(content);
+fn readVidPid(allocator: std.mem.Allocator, config_path: []const u8) !struct { vid: u16, pid: u16 } {
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024);
+    defer allocator.free(content);
     const vid = scan_mod.extractHexField(content, "vid") orelse return error.MissingVid;
     const pid = scan_mod.extractHexField(content, "pid") orelse return error.MissingPid;
     return .{ .vid = vid, .pid = pid };
@@ -73,7 +73,7 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
 
     const fd = blk: {
         if (config_path) |cp| {
-            const vp = readVidPid(cp) catch |e| {
+            const vp = readVidPid(allocator, cp) catch |e| {
                 std.log.err("failed to read VID/PID from '{s}': {}", .{ cp, e });
                 return e;
             };
@@ -115,36 +115,36 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
         if (n == 0) break;
 
         out.clearRetainingCapacity();
-        try w.print("report[{d}B]:", .{n});
-        for (report_buf[0..n]) |byte| {
-            try w.print(" {x:0>2}", .{byte});
-        }
-
-        if (mapping) |m| {
-            // Show any known remaps as a hint
-            const remap = m.value.remap;
-            if (remap != null) {
-                var it = remap.?.map.iterator();
-                while (it.next()) |entry| {
-                    switch (entry.value_ptr.*) {
-                        .string => |s| try w.print("  {s} -> {s}", .{ entry.key_ptr.*, s }),
-                        .chord_names => |names| {
-                            try w.print("  {s} -> chord[", .{entry.key_ptr.*});
-                            for (names, 0..) |name, i| {
-                                if (i > 0) try w.writeAll(", ");
-                                try w.print("{s}", .{name});
-                            }
-                            try w.writeAll("]");
-                        },
-                        .gesture => try w.print("  {s} -> <gesture>", .{entry.key_ptr.*}),
-                    }
-                }
-            }
-        }
-
-        try w.writeByte('\n');
+        try formatReport(w, report_buf[0..n], if (mapping) |m| m.value.remap else null);
         writer.writeAll(out.items) catch {};
     }
+}
+
+fn formatReport(w: anytype, report: []const u8, remap: ?mapping_mod.RemapMap) !void {
+    try w.print("report[{d}B]:", .{report.len});
+    for (report) |byte| {
+        try w.print(" {x:0>2}", .{byte});
+    }
+
+    if (remap) |r| {
+        var it = r.map.iterator();
+        while (it.next()) |entry| {
+            switch (entry.value_ptr.*) {
+                .string => |s| try w.print("  {s} -> {s}", .{ entry.key_ptr.*, s }),
+                .chord_names => |names| {
+                    try w.print("  {s} -> chord[", .{entry.key_ptr.*});
+                    for (names, 0..) |name, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.print("{s}", .{name});
+                    }
+                    try w.writeAll("]");
+                },
+                .gesture => try w.print("  {s} -> <gesture>", .{entry.key_ptr.*}),
+            }
+        }
+    }
+
+    try w.writeByte('\n');
 }
 
 // --- tests ---
@@ -152,3 +152,35 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
 // "openFirstHidraw returns error when no device" test removed: openFirstHidraw
 // scans /dev/hidraw0..63 and on dev machines an orphaned UHID device causes
 // hid_hw_open D-state even with O_NONBLOCK. The function is exercised via run().
+
+const testing = std.testing;
+
+test "formatReport: hex dump without mapping" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try formatReport(out.writer(testing.allocator), &[_]u8{ 0x01, 0xab, 0x00 }, null);
+    try testing.expectEqualStrings("report[3B]: 01 ab 00\n", out.items);
+}
+
+test "formatReport: appends remap hint" {
+    var map = std.StringHashMap(mapping_mod.RemapValue).init(testing.allocator);
+    defer map.deinit();
+    try map.put("BTN_SOUTH", .{ .string = "KEY_A" });
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try formatReport(out.writer(testing.allocator), &[_]u8{0xff}, .{ .map = map });
+    try testing.expectEqualStrings("report[1B]: ff  BTN_SOUTH -> KEY_A\n", out.items);
+}
+
+test "readVidPid: parses vid/pid from device toml" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "dev.toml", .data = "vid = 0x045e\npid = 0x028e\n" });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("dev.toml", &path_buf);
+    const vp = try readVidPid(testing.allocator, path);
+    try testing.expectEqual(@as(u16, 0x045e), vp.vid);
+    try testing.expectEqual(@as(u16, 0x028e), vp.pid);
+}

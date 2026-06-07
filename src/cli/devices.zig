@@ -28,20 +28,27 @@ pub fn run(socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
 const testing = std.testing;
 
 const TestServer = struct {
-    socket_path: []const u8,
+    listen_fd: posix.fd_t,
     response: []const u8,
 
-    fn run(ctx: *@This()) void {
-        const listen_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
-        defer posix.close(listen_fd);
+    // Bind + listen on the caller's thread so the socket file exists before the
+    // client connects, eliminating the connect/bind race. The accept loop runs
+    // on the spawned thread.
+    fn bind(socket_path: []const u8) !posix.fd_t {
+        const listen_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        errdefer posix.close(listen_fd);
 
         var addr: std.os.linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
-        @memcpy(addr.path[0..ctx.socket_path.len], ctx.socket_path);
-        posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un)) catch return;
-        posix.listen(listen_fd, 1) catch return;
+        @memcpy(addr.path[0..socket_path.len], socket_path);
+        try posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+        try posix.listen(listen_fd, 1);
+        return listen_fd;
+    }
 
-        const client_fd = posix.accept(listen_fd, null, null, 0) catch return;
+    fn run(ctx: *@This()) void {
+        defer posix.close(ctx.listen_fd);
+        const client_fd = posix.accept(ctx.listen_fd, null, null, 0) catch return;
         defer posix.close(client_fd);
         _ = posix.write(client_fd, ctx.response) catch {};
     }
@@ -59,13 +66,11 @@ test "run: ERR response returns 1" {
     const sock_path = try std.fmt.bufPrint(&sock_path_buf, "{s}/devices.sock", .{tmp_path});
 
     var server = TestServer{
-        .socket_path = sock_path,
+        .listen_fd = try TestServer.bind(sock_path),
         .response = "ERR device unavailable\n",
     };
     const thread = try std.Thread.spawn(.{}, TestServer.run, .{&server});
     defer thread.join();
-
-    std.Thread.sleep(10 * std.time.ns_per_ms);
 
     const rc = run(sock_path, std.io.null_writer, std.io.null_writer);
     try testing.expectEqual(@as(u8, 1), rc);
