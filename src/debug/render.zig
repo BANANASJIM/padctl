@@ -76,10 +76,6 @@ const GREEN = "\x1b[32m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
-fn shortenLabel(label: []const u8) []const u8 {
-    return shortenEventCode(label);
-}
-
 pub fn shortenEventCode(label: []const u8) []const u8 {
     const map = .{
         .{ "BTN_SOUTH", "S" },
@@ -242,7 +238,7 @@ pub const RenderConfig = struct {
     }
 
     pub fn btnDisplayLabel(self: *const RenderConfig, btn: ButtonId, default: []const u8) []const u8 {
-        return shortenLabel(self.button_labels[@intFromEnum(btn)] orelse default);
+        return shortenEventCode(self.button_labels[@intFromEnum(btn)] orelse default);
     }
 
     pub fn deriveFromConfig(cfg: *const DeviceConfig) RenderConfig {

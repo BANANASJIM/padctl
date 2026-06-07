@@ -877,8 +877,8 @@ pub fn main() !void {
                     const sys_dst = std.fmt.allocPrint(allocator, "{s}/config.toml", .{sys_dir}) catch null;
                     defer if (sys_dst) |b| allocator.free(b);
                     if (tmp_src != null and sys_dst != null) {
-                        if (runSudoMkdir(sys_dir, stderr_writer)) {
-                            if (runSudoCopy(tmp_src.?, sys_dst.?, stderr_writer)) {
+                        if (runSudoMkdir(allocator, sys_dir, stderr_writer)) {
+                            if (runSudoCopy(allocator, tmp_src.?, sys_dst.?, stderr_writer)) {
                                 config_written = true;
                             }
                         }
@@ -938,10 +938,8 @@ pub fn main() !void {
                 std.process.exit(1);
             }
             // Bare `padctl switch` — read default_mapping from user config.
-            // NOTE: with multiple connected controllers, this resolves
-            // against the first device in the STATUS response. A future
-            // version should require --device in multi-device setups or
-            // add a device-keyed daemon API.
+            // With multiple connected controllers, resolves against the first
+            // device in the STATUS response.
             break :blk resolveDefaultMapping(allocator, parsed.socket_path, stderr_writer);
         };
 
@@ -1293,7 +1291,7 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
     var ok = true;
 
     // Ensure destination directories exist.
-    if (!runSudoMkdir("/etc/padctl/mappings", err_writer)) ok = false;
+    if (!runSudoMkdir(allocator, "/etc/padctl/mappings", err_writer)) ok = false;
 
     // Copy mapping file to /etc/padctl/mappings/
     const mapping_path = mapping_discovery.findMapping(allocator, mapping_name) catch null;
@@ -1302,7 +1300,7 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
         const dst = std.fmt.allocPrint(allocator, "/etc/padctl/mappings/{s}.toml", .{mapping_name}) catch null;
         if (dst) |d| {
             defer allocator.free(d);
-            if (!runSudoCopy(src, d, err_writer)) ok = false;
+            if (!runSudoCopy(allocator, src, d, err_writer)) ok = false;
         } else ok = false;
     } else {
         err_writer.writeAll("warning: mapping file for '") catch {};
@@ -1319,7 +1317,7 @@ fn persistToSystemConfig(allocator: std.mem.Allocator, mapping_name: []const u8,
         defer if (user_config) |p| allocator.free(p);
         if (user_config) |src| {
             if (std.fs.accessAbsolute(src, .{})) |_| {
-                if (!runSudoCopy(src, "/etc/padctl/config.toml", err_writer)) ok = false;
+                if (!runSudoCopy(allocator, src, "/etc/padctl/config.toml", err_writer)) ok = false;
             } else |_| {
                 err_writer.writeAll("warning: no user config.toml to copy\n") catch {};
                 ok = false;
@@ -1352,9 +1350,9 @@ fn copyFileBestEffort(src: []const u8, dst: []const u8) !void {
     }
 }
 
-fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {
+fn runSudoCopy(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, err_writer: anytype) bool {
     const argv = [_][]const u8{ "sudo", "cp", src, dst };
-    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
@@ -1379,9 +1377,9 @@ fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {
     return true;
 }
 
-fn runSudoMkdir(dir: []const u8, err_writer: anytype) bool {
+fn runSudoMkdir(allocator: std.mem.Allocator, dir: []const u8, err_writer: anytype) bool {
     const argv = [_][]const u8{ "sudo", "mkdir", "-p", dir };
-    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
