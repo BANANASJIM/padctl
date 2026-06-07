@@ -75,11 +75,11 @@ pub const GyroProcessor = struct {
         self.ema_x = self.ema_x * cfg.smoothing + fsrc_x * (1.0 - cfg.smoothing);
         self.ema_y = self.ema_y * cfg.smoothing + fsrc_y * (1.0 - cfg.smoothing);
 
-        // [3] normalized curve (vader5): normalize [deadzone,max_val]→[0,1], apply pow, sensitivity scale
+        // [3] normalized curve: normalize [deadzone,max_val]→[0,1], apply pow, sensitivity scale
         const scaled_x = applyCurve(self.ema_x, cfg) * cfg.sensitivity_x;
         const scaled_y = applyCurve(self.ema_y, cfg) * cfg.sensitivity_y;
 
-        // [5] invert
+        // [4] invert
         const final_x = if (cfg.invert_x) -scaled_x else scaled_x;
         const final_y = if (cfg.invert_y) -scaled_y else scaled_y;
 
@@ -100,7 +100,7 @@ pub const GyroProcessor = struct {
             return .{ .rel_x = 0, .rel_y = 0, .joy_x = jx, .joy_y = jy };
         }
 
-        // [6] sub-pixel accumulation
+        // [5] sub-pixel accumulation
         self.accum_x += final_x;
         self.accum_y += final_y;
         const dx: i32 = @intFromFloat(@trunc(self.accum_x));
@@ -158,7 +158,7 @@ fn selectTiltAxis(axis: GyroAxis, ax: i16, ay: i16, az: i16) ?f32 {
         .none => null,
         .pitch => std.math.atan2(fy, @sqrt(fx * fx + fz * fz)) * radians_to_degrees,
         .roll => std.math.atan2(-fx, @sqrt(fy * fy + fz * fz)) * radians_to_degrees,
-        .yaw => 0.0,
+        .yaw => null,
     };
 }
 
@@ -276,6 +276,20 @@ test "gyro: joystick tilt response ignores missing accelerometer vector" {
     try testing.expect(out.joy_y == null);
     try testing.expectEqual(@as(f32, 12.0), g.ema_x);
     try testing.expectEqual(@as(f32, -8.0), g.ema_y);
+}
+
+test "gyro: tilt response yaw axis yields null (no accelerometer representation)" {
+    var g = GyroProcessor{};
+    const cfg = GyroConfig{
+        .mode = "joystick",
+        .response = .tilt,
+        .axis_x = .roll,
+        .axis_y = .yaw,
+        .smoothing = 0.0,
+    };
+    const out = g.processMotion(&cfg, 0, 0, 0, -5735, 0, 8192);
+    try testing.expect(out.joy_x != null);
+    try testing.expect(out.joy_y == null);
 }
 
 test "gyro: joystick rate response can route roll gyro to X axis" {

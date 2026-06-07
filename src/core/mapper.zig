@@ -378,10 +378,10 @@ pub const Mapper = struct {
     pub fn apply(self: *Mapper, delta: GamepadStateDelta, dt_ms: u32, now_ns: i128) !OutputEvents {
         // flush pending tap release from previous frame
         var aux = AuxEventList{};
-        if (self.pending_tap_release) |mask| {
-            self.injected_buttons &= ~mask;
+        // The pending tap bit is simply not re-injected this frame — injected_buttons
+        // is zeroed below before output, so the tap release needs no explicit clear.
+        if (self.pending_tap_release != null) {
             self.pending_tap_release = null;
-            // inject release into emit state at end of this frame
         }
 
         self.state.applyDelta(delta);
@@ -448,6 +448,8 @@ pub const Mapper = struct {
         var gyro_joy_x: ?i16 = null;
         var gyro_joy_y: ?i16 = null;
         var gyro_blend_stick: bool = false;
+        const left_cfg = self.effectiveStickConfig(.left);
+        const right_cfg = self.effectiveStickConfig(.right);
         {
             const gcfg = self.effectiveGyroConfig();
             const activate_spec = blk: {
@@ -490,7 +492,6 @@ pub const Mapper = struct {
                 self.gyro_proc.reset();
             }
 
-            const left_cfg = self.effectiveStickConfig(.left);
             const left_out = self.stick_left.process(&left_cfg, self.state.ax, self.state.ay, dt_ms);
             if (std.mem.eql(u8, left_cfg.mode, "mouse")) {
                 if (left_out.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = left_out.rel_x } }) catch {};
@@ -500,7 +501,6 @@ pub const Mapper = struct {
                 if (left_out.hwheel != 0) aux.append(.{ .rel = .{ .code = REL_HWHEEL, .value = left_out.hwheel } }) catch {};
             }
 
-            const right_cfg = self.effectiveStickConfig(.right);
             const right_out = self.stick_right.process(&right_cfg, self.state.rx, self.state.ry, dt_ms);
             if (std.mem.eql(u8, right_cfg.mode, "mouse")) {
                 if (right_out.rel_x != 0) aux.append(.{ .rel = .{ .code = REL_X, .value = right_out.rel_x } }) catch {};
@@ -640,8 +640,8 @@ pub const Mapper = struct {
         // assemble emit state
         var emit_state = self.state;
         emit_state.buttons = (self.state.buttons & ~self.suppressed_buttons) | self.injected_buttons;
-        // issue #99: macros driving LT/RT raise the analog axis floor; physical
-        // input still wins when the user presses harder than the macro.
+        // macros driving LT/RT raise the analog axis floor; physical input
+        // still wins when the user presses harder than the macro.
         if (macro_axes.lt > emit_state.lt) emit_state.lt = macro_axes.lt;
         if (macro_axes.rt > emit_state.rt) emit_state.rt = macro_axes.rt;
         emit_state.synthesizeDpadAxes();
@@ -673,8 +673,6 @@ pub const Mapper = struct {
         }
 
         // suppress stick axes when mode != gamepad
-        const left_cfg = self.effectiveStickConfig(.left);
-        const right_cfg = self.effectiveStickConfig(.right);
         if (!suppress_left_stick_gyro and (left_cfg.suppress_gamepad or !std.mem.eql(u8, left_cfg.mode, "gamepad"))) {
             emit_state.ax = 0;
             emit_state.ay = 0;
@@ -1383,6 +1381,63 @@ test "mapper: base remap key: source -> KEY_F13 aux event" {
     }
 }
 
+test "mapper: gesture tap remap emits tap key through apply" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y" }
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_mask = buttonBit("A");
+    // Press: no emit yet (tap deferred until release decides leg).
+    _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
+    // Release before hold deadline: tap fires.
+    const ev = try m.apply(.{ .buttons = 0 }, 16, 10 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 1), ev.aux.len);
+    switch (ev.aux.get(0)) {
+        .key => |k| {
+            try testing.expectEqual(@as(u16, 45), k.code); // KEY_X
+            try testing.expect(k.pressed);
+        },
+        else => return error.WrongEventType,
+    }
+}
+
+test "mapper: gesture hold gamepad bit persists then clears on release" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = { tap = "X", hold = "RB", hold_ms = 100 }
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_mask = buttonBit("A");
+    const rb_mask = buttonBit("RB");
+
+    // Press arms the hold timer.
+    _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
+
+    // Hold deadline fires while button still held -> gamepad press staged.
+    _ = m.onMacroTimerExpired(100 * std.time.ns_per_ms + 1);
+    try testing.expect((m.gesture_held_gamepad & rb_mask) != 0);
+
+    // Next frame re-asserts the held bit into output.
+    const held_ev = try m.apply(.{ .buttons = a_mask }, 16, 110 * std.time.ns_per_ms);
+    try testing.expect((held_ev.gamepad.buttons & rb_mask) != 0);
+
+    // Release clears the held bit; output no longer carries RB.
+    const rel_ev = try m.apply(.{ .buttons = 0 }, 16, 120 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), m.gesture_held_gamepad & rb_mask);
+    try testing.expectEqual(@as(u64, 0), rel_ev.gamepad.buttons & rb_mask);
+}
+
 test "mapper: releaseHeldAux releases old trigger-threshold aux down" {
     const allocator = testing.allocator;
     const old_parsed = try makeMapping(
@@ -1691,6 +1746,67 @@ test "mapper: hold_toggle timer transition resets processors" {
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_x);
     try testing.expectEqual(@as(f32, 0), m.stick_left.mouse_accum_x);
     try testing.expectEqual(@as(f32, 0), m.stick_right.scroll_accum);
+}
+
+test "mapper: pause_for_release macro drained on layer deactivation" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\activation = "toggle"
+        \\
+        \\[remap]
+        \\M1 = "macro:shift_hold"
+        \\
+        \\[[macro]]
+        \\name = "shift_hold"
+        \\steps = [
+        \\  { down = "KEY_LEFTSHIFT" },
+        \\  "pause_for_release",
+        \\  { up = "KEY_LEFTSHIFT" },
+        \\]
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const sel_mask = buttonBit("Select");
+    const m1_mask = buttonBit("M1");
+
+    // Toggle the layer on (rising then falling edge on Select).
+    _ = try m.apply(.{ .buttons = sel_mask }, 16, 0);
+    _ = try m.apply(.{ .buttons = 0 }, 16, 0);
+    try testing.expect(m.layer.getActive(m.config.layer.?) != null);
+
+    // Trigger the macro: down LEFTSHIFT fires, pause_for_release halts.
+    const ev_press = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+    try testing.expect(m.active_macros.items[0].waiting_for_release);
+    var saw_press = false;
+    for (ev_press.aux.slice()) |e| switch (e) {
+        .key => |k| if (k.code == 42 and k.pressed) {
+            saw_press = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_press);
+
+    // Toggle the layer off: deactivation drains the paused macro to completion,
+    // emitting the up=LEFTSHIFT release, and clears active_macros.
+    _ = try m.apply(.{ .buttons = m1_mask | sel_mask }, 16, 0);
+    const ev_off = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+    try testing.expect(m.layer.getActive(m.config.layer.?) == null);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+    var saw_release = false;
+    for (ev_off.aux.slice()) |e| switch (e) {
+        .key => |k| if (k.code == 42 and !k.pressed) {
+            saw_release = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_release);
 }
 
 test "mapper: hold_toggle pending preserves macros but sticky transition cancels them" {
