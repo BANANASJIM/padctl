@@ -14,7 +14,7 @@ const ButtonId = state_mod.ButtonId;
 
 /// Analog floor contributed by macros for LT/RT. Mapper merges this into
 /// emit_state.lt/rt via @max so a physical press always wins over the macro
-/// when stronger (issue #99 — digital BTN_TL2 alone is not seen by SDL/games).
+/// when stronger (digital BTN_TL2 alone is not seen by SDL/games).
 pub const AxisInjection = struct {
     lt: u8 = 0,
     rt: u8 = 0,
@@ -82,7 +82,7 @@ pub const MacroPlayer = struct {
     ///   of a .gamepad_button target set or clear bits here.
     /// pending_tap_release: tap bits ORed by this frame; mapper clears them next frame
     ///   (same cadence as the remap tap path — see mapper.emitTapEvent).
-    /// axes: analog LT/RT floor for this frame (issue #99). `.tap` raises the
+    /// axes: analog LT/RT floor for this frame. `.tap` raises the
     ///   floor for one frame; `.down`/`.up` flip the player's held-axis state
     ///   which is re-asserted every frame until cancelled.
     pub fn step(
@@ -187,44 +187,34 @@ pub const MacroPlayer = struct {
     /// Called on layer switch / macro cancel. Drops key-up aux events AND clears
     /// held gamepad bits from injected_buttons.
     pub fn emitPendingReleases(self: *MacroPlayer, aux: *AuxEventList, injected_buttons: *u64) void {
-        // Walk steps up to step_index, track net held state per name (keys / mouse buttons).
-        // Gamepad bits are tracked live in self.held_gamepad_buttons and cleared below.
-        var held: [32]?[]const u8 = [_]?[]const u8{null} ** 32;
-        var held_len: usize = 0;
-
-        for (self.macro.steps[0..self.step_index]) |s| {
-            switch (s) {
-                .down => |name| {
-                    if (held_len < held.len) {
-                        held[held_len] = name;
-                        held_len += 1;
-                    }
-                },
-                .up => |name| {
-                    for (held[0..held_len], 0..) |h, i| {
-                        if (h) |hn| {
-                            if (std.mem.eql(u8, hn, name)) {
-                                held[i] = held[held_len - 1];
-                                held_len -= 1;
-                                break;
-                            }
-                        }
-                    }
-                },
-                .tap => {},
-                .delay, .pause_for_release => {},
-                else => unreachable, // .press is eliminated by expandMacroPress at parse time
+        // Walk executed steps in reverse: a `.down` is net-held unless a later
+        // `.up` (or an already-emitted release for the same name) covers it.
+        // Gamepad bits are tracked live in self.held_gamepad_buttons.
+        const steps = self.macro.steps[0..self.step_index];
+        var i: usize = steps.len;
+        while (i > 0) {
+            i -= 1;
+            const name = switch (steps[i]) {
+                .down => |n| n,
+                else => continue,
+            };
+            var covered = false;
+            for (steps[i + 1 ..]) |later| {
+                const ln = switch (later) {
+                    .up, .down => |n| n,
+                    else => continue,
+                };
+                if (std.mem.eql(u8, ln, name)) {
+                    covered = true;
+                    break;
+                }
             }
-        }
-
-        for (held[0..held_len]) |h| {
-            const name = h orelse continue;
+            if (covered) continue;
             const target = resolveTargetSafe(name) orelse continue;
             switch (target) {
                 .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = false } }) catch {},
                 .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {},
-                .gamepad_button => {},
-                .disabled, .macro, .chord, .gesture => {},
+                .gamepad_button, .disabled, .macro, .chord, .gesture => {},
             }
         }
 
@@ -370,6 +360,27 @@ test "macro_player: emitPendingReleases down without up emits release" {
         .key => |k| try testing.expect(!k.pressed),
         else => return error.WrongType,
     }
+}
+
+test "macro_player: emitPendingReleases releases all held keys beyond 32" {
+    // 40 distinct keys held down, no matching .up — every one must be released.
+    const names = [_][]const u8{
+        "KEY_A", "KEY_B", "KEY_C", "KEY_D", "KEY_E",  "KEY_F",  "KEY_G",  "KEY_H",
+        "KEY_I", "KEY_J", "KEY_K", "KEY_L", "KEY_M",  "KEY_N",  "KEY_O",  "KEY_P",
+        "KEY_Q", "KEY_R", "KEY_S", "KEY_T", "KEY_U",  "KEY_V",  "KEY_W",  "KEY_X",
+        "KEY_Y", "KEY_Z", "KEY_0", "KEY_1", "KEY_2",  "KEY_3",  "KEY_4",  "KEY_5",
+        "KEY_6", "KEY_7", "KEY_8", "KEY_9", "KEY_F1", "KEY_F2", "KEY_F3", "KEY_F4",
+    };
+    var steps: [names.len]MacroStep = undefined;
+    for (names, 0..) |n, i| steps[i] = .{ .down = n };
+    const m = Macro{ .name = "many", .steps = &steps };
+    var player = makePlayer(&m);
+    player.step_index = steps.len;
+
+    var aux = AuxEventList{};
+    var injected: u64 = 0;
+    player.emitPendingReleases(&aux, &injected);
+    try testing.expectEqual(@as(usize, names.len), aux.len);
 }
 
 test "macro_player: shift_hold — down pause_for_release up" {
