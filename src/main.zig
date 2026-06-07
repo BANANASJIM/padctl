@@ -943,7 +943,7 @@ pub fn main() !void {
             break :blk resolveDefaultMapping(allocator, parsed.socket_path, stderr_writer);
         };
 
-        const rc = cli.switch_mapping.run(mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
+        const rc = cli.switch_mapping.run(allocator, mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
         if (rc == 0) {
             // Auto-save to user config so `padctl switch` (no args) can
             // restore the choice. Skipped when --device targets a specific
