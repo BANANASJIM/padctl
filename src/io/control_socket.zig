@@ -3,7 +3,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 const MAX_CLIENTS = 4;
-const BUF_SIZE = 256;
+pub const BUF_SIZE = 256;
 
 /// Suffix joined to the socket's parent directory to advertise the bound path.
 pub const ADVERTISED_FILE_NAME = "socket.advertised";
@@ -147,9 +147,11 @@ pub const ControlSocket = struct {
         }
     }
 
-    pub fn readCommand(self: *ControlSocket, fd: posix.fd_t) ?Command {
-        var buf: [BUF_SIZE]u8 = undefined;
-        const n = posix.read(fd, &buf) catch {
+    /// Reads one command into the caller-provided `buf`. The returned Command's
+    /// `.name`/`.device_id` slice into `buf`, so `buf` must outlive every use of
+    /// the Command (see the Command docstring).
+    pub fn readCommand(self: *ControlSocket, fd: posix.fd_t, buf: []u8) ?Command {
+        const n = posix.read(fd, buf) catch {
             self.removeClient(fd);
             return null;
         };
@@ -178,8 +180,8 @@ pub const CommandTag = enum {
     unknown,
 };
 
-/// Command fields (.name, .device_id) are slices into the caller's buffer.
-/// Only valid for the duration of the current call frame.
+/// Command fields (.name, .device_id) are slices into the caller-owned buffer
+/// passed to readCommand/parseCommand. Valid only while that buffer is alive.
 pub const Command = struct {
     tag: CommandTag,
     name: []const u8 = "",
@@ -402,6 +404,41 @@ test "control_socket: ControlSocket: socketpair read/write" {
     const cmd = parseCommand(buf[0..n]);
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("fps", cmd.name);
+}
+
+// Recursive helper that fills a large stack array with 0xAA so that, under the
+// OLD readCommand (which returned slices into its own buffer), the dead frame
+// would be overwritten and the asserts below would see garbage. Marked noinline
+// so the compiler cannot elide the stack writes.
+noinline fn clobberStack(depth: usize) usize {
+    var scratch: [BUF_SIZE * 2]u8 = undefined;
+    @memset(&scratch, 0xAA);
+    if (depth == 0) return scratch[0];
+    return scratch[depth % scratch.len] +% clobberStack(depth - 1);
+}
+
+// Falsifiability: revert readCommand to the internal-buffer form
+// (`var buf: [BUF_SIZE]u8 = undefined; ... parseCommand(buf[0..n])`) and drop the
+// `buf` parameter — cmd.name/cmd.device_id then slice into readCommand's dead
+// frame, which clobberStack overwrites with 0xAA, and these expectEqualStrings
+// FAIL. With the fix the bytes live in the caller's `buf` and survive.
+test "control_socket: readCommand: name survives stack clobber via caller buffer" {
+    const fds = try testSocketpair();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    _ = try posix.write(fds[1], "SWITCH racing --device hidraw0\n");
+
+    var cs: ControlSocket = undefined;
+    var buf: [BUF_SIZE]u8 = undefined;
+    const cmd = cs.readCommand(fds[0], &buf) orelse return error.NoCommand;
+
+    // Clobber any stack the old internal buffer would have lived in.
+    _ = clobberStack(64);
+
+    try testing.expectEqual(CommandTag.switch_device, cmd.tag);
+    try testing.expectEqualStrings("racing", cmd.name);
+    try testing.expectEqualStrings("hidraw0", cmd.device_id);
 }
 
 test "control_socket: ControlSocket: init creates socket at exact full path" {

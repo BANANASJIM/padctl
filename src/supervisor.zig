@@ -1624,7 +1624,8 @@ pub const Supervisor = struct {
 
     fn handleClientCommand(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
-        const cmd = cs.readCommand(fd) orelse return;
+        var buf: [control_socket.BUF_SIZE]u8 = undefined;
+        const cmd = cs.readCommand(fd, &buf) orelse return;
         switch (cmd.tag) {
             .switch_mapping => self.handleSwitch(fd, cmd.name, null),
             .switch_device => self.handleSwitch(fd, cmd.name, cmd.device_id),
