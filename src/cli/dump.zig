@@ -87,8 +87,7 @@ pub fn runStatus(
         } else |_| {}
     } else |_| {
         // Daemon not running — fall back to config.
-        const user_cfg_mod2 = user_config_mod;
-        if (user_cfg_mod2.load(allocator)) |pr| {
+        if (user_config_mod.load(allocator)) |pr| {
             var ucpr = pr;
             defer ucpr.deinit();
             daemon_state = if (ucpr.value.diagnostics.dump) "enabled (from config)" else "disabled (from config)";

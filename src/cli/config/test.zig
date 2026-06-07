@@ -58,20 +58,6 @@ fn openFirstHidraw() !posix.fd_t {
     return error.NoHidrawDevice;
 }
 
-fn mappingLabel(mapping: *const mapping_mod.MappingConfig, button: []const u8) ?[]const u8 {
-    if (mapping.remap) |remap| {
-        if (remap.map.get(button)) |target| {
-            switch (target) {
-                .string => |s| return s,
-                // Chord arrays don't have a single human label; callers fall
-                // back to the source button name.
-                else => return null,
-            }
-        }
-    }
-    return null;
-}
-
 pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path: ?[]const u8, writer: anytype) !void {
     // Load mapping
     const mapping: ?mapping_mod.ParseResult = blk: {
@@ -162,25 +148,6 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
 }
 
 // --- tests ---
-
-test "test: mappingLabel returns remap target" {
-    const allocator = std.testing.allocator;
-    const toml_str =
-        \\[remap]
-        \\A = "BTN_SOUTH"
-        \\B = "BTN_EAST"
-    ;
-    const parsed = try mapping_mod.parseString(allocator, toml_str);
-    defer parsed.deinit();
-    const label = mappingLabel(&parsed.value, "A");
-    try std.testing.expectEqualStrings("BTN_SOUTH", label.?);
-    try std.testing.expectEqual(@as(?[]const u8, null), mappingLabel(&parsed.value, "X"));
-}
-
-test "test: mappingLabel with no remap returns null" {
-    const m = mapping_mod.MappingConfig{};
-    try std.testing.expectEqual(@as(?[]const u8, null), mappingLabel(&m, "A"));
-}
 
 // "openFirstHidraw returns error when no device" test removed: openFirstHidraw
 // scans /dev/hidraw0..63 and on dev machines an orphaned UHID device causes

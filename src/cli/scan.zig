@@ -7,7 +7,6 @@ const readPhysicalPath = hidraw.readPhysicalPath;
 const readInterfaceId = hidraw.readInterfaceId;
 const toml_extract = @import("toml_extract.zig");
 
-const DEFAULT_CONFIG_DIR = "/usr/share/padctl/devices";
 const MAX_HIDRAW = 64;
 const NAME_BUF_LEN = 128;
 
