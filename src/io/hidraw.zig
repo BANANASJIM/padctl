@@ -254,8 +254,8 @@ pub const HidrawDevice = struct {
         if (self.wedge) |w| w.beginWrite();
         defer if (self.wedge) |w| w.endWrite();
         const rc = linux.ioctl(self.fd, req, @intFromPtr(data.ptr));
-        if (rc < 0) {
-            const errno = posix.errno(rc);
+        const errno = linux.E.init(rc);
+        if (errno != .SUCCESS) {
             if (errno == .NODEV or errno == .PIPE) return DeviceIO.WriteError.Disconnected;
             return DeviceIO.WriteError.Io;
         }
@@ -571,4 +571,20 @@ test "hidraw: discoverWithRoot — nonexistent root returns NotFound for both nu
     try std.testing.expectError(error.NotFound, err2);
     const err3 = HidrawDevice.discoverWithRoot(allocator, 0x37d7, 0x2401, 0, "/nonexistent_hidraw_xyz");
     try std.testing.expectError(error.NotFound, err3);
+}
+
+// featureReport must surface HIDIOCSFEATURE failures. An invalid fd makes the
+// ioctl return EBADF → WriteError.Io.
+// Falsifiability: the old `if (rc < 0)` guard never triggered (linux.ioctl returns
+// usize, never < 0), so featureReport returned void on failure and this fails.
+test "hidraw: featureReport surfaces ioctl errno as error" {
+    var dev = HidrawDevice{
+        .fd = -1,
+        .evdev_fds = .{},
+        .allocator = std.testing.allocator,
+    };
+    const dev_io = dev.deviceIO();
+
+    const payload = [_]u8{ 0x01, 0x02, 0x03 };
+    try std.testing.expectError(DeviceIO.WriteError.Io, dev_io.featureReport(&payload));
 }
