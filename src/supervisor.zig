@@ -25,6 +25,7 @@ const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
 const socket_client = @import("cli/socket_client.zig");
+const event_loop = @import("event_loop.zig");
 
 const RebindDeviceOpener = *const fn (
     ctx: *anyopaque,
@@ -581,20 +582,7 @@ pub const Supervisor = struct {
     /// this helper so tests can drive the clock deterministically.
     pub fn nowNs(self: *const Supervisor) u64 {
         if (self.test_now_override_ns) |t| return t;
-        // std.time.nanoTimestamp is wall-clock; we want a monotonic source.
-        // clock_gettime(CLOCK_MONOTONIC) never goes backwards and is the
-        // right clock for deadline computation.
-        var ts: linux.timespec = undefined;
-        const rc = linux.clock_gettime(.MONOTONIC, &ts);
-        if (rc != 0) {
-            // Extremely unlikely on Linux; fall back to nanoTimestamp so
-            // we still return a plausibly-increasing value.
-            const ns = std.time.nanoTimestamp();
-            return @intCast(if (ns < 0) 0 else ns);
-        }
-        const sec: u64 = @intCast(ts.sec);
-        const nsec: u64 = @intCast(ts.nsec);
-        return sec *| std.time.ns_per_s +| nsec;
+        return @intCast(@max(0, event_loop.monotonicNs()));
     }
 
     /// Clear the grace deadline on a managed entry — called by the rebind
@@ -885,21 +873,14 @@ pub const Supervisor = struct {
         errdefer self.allocator.free(dn_copy);
 
         const dev_copy = try self.allocator.dupe(u8, devname);
-        const phys_copy = self.allocator.dupe(u8, phys) catch |err| {
-            self.allocator.free(dev_copy);
-            return err;
-        };
+        errdefer self.allocator.free(dev_copy);
+
+        const phys_copy = try self.allocator.dupe(u8, phys);
+        errdefer self.allocator.free(phys_copy);
 
         // devname_map takes ownership of dev_copy/phys_copy on success.
-        self.devname_map.put(dev_copy, phys_copy) catch |err| {
-            self.allocator.free(dev_copy);
-            self.allocator.free(phys_copy);
-            return err;
-        };
-        errdefer if (self.devname_map.fetchRemove(dev_copy)) |e| {
-            self.allocator.free(e.key);
-            self.allocator.free(e.value);
-        };
+        try self.devname_map.put(dev_copy, phys_copy);
+        errdefer _ = self.devname_map.remove(dev_copy);
 
         if (builtin.is_test and self.test_fail_rebind_restart) return error.TestInjectedRestartFailure;
         try restartManagedThread(m);
@@ -922,36 +903,79 @@ pub const Supervisor = struct {
         }
     }
 
+    // Clears the mapper and returns to passthrough. Transactional like
+    // handleSwitch: each target is committed (current mapper saved into the tx),
+    // and any restart failure rolls back every already-committed target so no
+    // device is left permanently mapper-less.
+    fn commitSwitchToNone(self: *Supervisor, tx: *SwitchTx) !void {
+        const m = &self.managed.items[tx.idx];
+        tx.old_mapper = m.instance.mapper;
+        tx.old_mapping_cfg = m.instance.mapping_cfg;
+        tx.old_switch_mapping = m.switch_mapping;
+        tx.old_switch_mapping_stem = m.switch_mapping_stem;
+
+        m.instance.stop();
+        m.thread.join();
+
+        if (builtin.is_test and self.test_switch_fail_commit_index != null and self.test_switch_fail_commit_index.? == tx.idx) {
+            self.restoreSwitchTarget(tx, m, false);
+            return error.SwitchFailed;
+        }
+
+        m.instance.quiesceOutputs(.{});
+        m.instance.mapper = null;
+        m.instance.mapping_cfg = null;
+        m.switch_mapping = null;
+        m.switch_mapping_stem = null;
+        restartManagedThread(m) catch |err| {
+            self.restoreSwitchTarget(tx, m, false);
+            return err;
+        };
+        tx.committed = true;
+    }
+
     fn handleSwitchNone(self: *Supervisor, fd: posix.fd_t, device_id: ?[]const u8) void {
         var cs = &self.ctrl_sock.?;
+
+        var txs = std.ArrayList(SwitchTx){};
+        defer {
+            self.cleanupSwitchTxs(txs.items);
+            txs.deinit(self.allocator);
+        }
+
         var found = false;
-        for (self.managed.items) |*m| {
+        for (self.managed.items, 0..) |*m, idx| {
             if (m.suspended) continue;
             if (device_id) |dev_id| {
                 const dn = m.devname orelse continue;
                 if (!std.mem.eql(u8, dn, dev_id)) continue;
             }
             found = true;
-            m.instance.stop();
-            m.thread.join();
-            m.instance.quiesceOutputs(.{});
-            if (m.instance.mapper) |*cur| {
-                cur.deinit();
-                m.instance.mapper = null;
-            }
-            m.instance.mapping_cfg = null;
-            self.clearSwitchMapping(m);
-            restartManagedThread(m) catch |err| {
-                std.log.err("switch none: restart failed for {s}: {}", .{ m.phys_key, err });
-                cs.sendResponse(fd, "ERR restart-failed\n");
+            txs.append(self.allocator, .{ .idx = idx, .new_mapper = null, .parsed_ptr = null }) catch {
+                cs.sendResponse(fd, "ERR oom\n");
                 return;
             };
             if (device_id != null) break;
         }
+
         if (device_id != null and !found) {
             cs.sendResponse(fd, "ERR device-not-found\n");
             return;
         }
+
+        for (txs.items, 0..) |*tx, commit_idx| {
+            if (shouldInjectSwitchFailure(self, commit_idx)) {
+                self.rollbackCommittedSwitches(txs.items);
+                cs.sendResponse(fd, "ERR restart-failed\n");
+                return;
+            }
+            self.commitSwitchToNone(tx) catch {
+                self.rollbackCommittedSwitches(txs.items);
+                cs.sendResponse(fd, "ERR restart-failed\n");
+                return;
+            };
+        }
+
         cs.sendResponse(fd, "OK none\n");
     }
 
@@ -1947,9 +1971,9 @@ pub const Supervisor = struct {
 
             w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len}) catch {};
 
-            // PR-ε.1 wedge instrumentation. write_in_flight_ms=0 when no write is
-            // currently blocked; a sustained non-zero value (hundreds of ms) is the
-            // smoking gun for a kernel-side D-state hang on usb_control_msg.
+            // write_in_flight_ms=0 when no write is currently blocked; a sustained
+            // non-zero value (hundreds of ms) is the smoking gun for a kernel-side
+            // D-state hang on usb_control_msg.
             const inb = m.instance.wedge.loadInbound();
             const outb = m.instance.wedge.loadOutbound();
             const ifs = m.instance.wedge.loadInFlight();
@@ -3307,6 +3331,133 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
     try testing.expect(sup.managed.items[1].switch_mapping == null);
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[0].instance.stopped, .acquire));
     try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[1].instance.stopped, .acquire));
+}
+
+test "supervisor: global SWITCH none rolls back all devices on failure" {
+    // Regression guard: before the transactional fix, handleSwitchNone cleared
+    // each device's mapper in-place and returned ERR on the first restart
+    // failure, leaving already-processed devices permanently mapper-less. The
+    // fix mirrors handleSwitch: on commit failure every already-committed device
+    // is rolled back to its previous mapper.
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    const old_parsed = try mapping_mod.parseString(allocator,
+        \\[[layer]]
+        \\name = "old"
+        \\trigger = "LT"
+        \\activation = "toggle"
+    );
+    defer old_parsed.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    inst_a.mapper = try mapper_mod.Mapper.init(&old_parsed.value, inst_a.loop.macro_timer_fd, allocator);
+    inst_a.mapping_cfg = &old_parsed.value;
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    inst_b.mapper = try mapper_mod.Mapper.init(&old_parsed.value, inst_b.loop.macro_timer_fd, allocator);
+    inst_b.mapping_cfg = &old_parsed.value;
+    try sup.spawnInstance("usb-1-1", inst_a, null);
+    try sup.spawnInstance("usb-1-2", inst_b, null);
+
+    sup.test_switch_fail_commit_index = 1;
+
+    sup.handleSwitch(resp_fds[0], "none", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR restart-failed\n", resp_buf[0..n]);
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+    // Device 0 was committed-to-none then rolled back: its old mapper must be
+    // restored, not left null (the bug being guarded against).
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
+    try testing.expectEqual(@as(?*const mapping_mod.MappingConfig, &old_parsed.value), sup.managed.items[0].instance.mapping_cfg);
+    // Device 1 failed mid-commit and was restored too.
+    try testing.expect(sup.managed.items[1].instance.mapper != null);
+    try testing.expectEqual(@as(?*const mapping_mod.MappingConfig, &old_parsed.value), sup.managed.items[1].instance.mapping_cfg);
+    try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[0].instance.stopped, .acquire));
+    try testing.expectEqual(false, @atomicLoad(bool, &sup.managed.items[1].instance.stopped, .acquire));
+}
+
+test "supervisor: global SWITCH none clears all mappers on success" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+    const old_parsed = try mapping_mod.parseString(allocator,
+        \\[[layer]]
+        \\name = "old"
+        \\trigger = "LT"
+        \\activation = "toggle"
+    );
+    defer old_parsed.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    inst_a.mapper = try mapper_mod.Mapper.init(&old_parsed.value, inst_a.loop.macro_timer_fd, allocator);
+    inst_a.mapping_cfg = &old_parsed.value;
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    inst_b.mapper = try mapper_mod.Mapper.init(&old_parsed.value, inst_b.loop.macro_timer_fd, allocator);
+    inst_b.mapping_cfg = &old_parsed.value;
+    try sup.spawnInstance("usb-1-1", inst_a, null);
+    try sup.spawnInstance("usb-1-2", inst_b, null);
+
+    sup.handleSwitch(resp_fds[0], "none", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("OK none\n", resp_buf[0..n]);
+    try testing.expect(sup.managed.items[0].instance.mapper == null);
+    try testing.expect(sup.managed.items[0].instance.mapping_cfg == null);
+    try testing.expect(sup.managed.items[1].instance.mapper == null);
+    try testing.expect(sup.managed.items[1].instance.mapping_cfg == null);
 }
 
 test "supervisor: switch to mapping with new aux KEY_* rebuilds aux caps" {
