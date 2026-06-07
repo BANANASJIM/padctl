@@ -14,8 +14,13 @@ pub const MappingProfile = struct {
 pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
     const dirs = try paths.resolveMappingConfigDirs(allocator);
     defer paths.freeConfigDirs(allocator, dirs);
+    return discoverMappingsFromDirs(allocator, dirs);
+}
 
-    const sources = [_]Source{ .user, .system, .package };
+/// Scan the given dirs in priority order (first wins), deduplicate by name.
+/// dirs and sources are positional: dirs[i] is tagged with sources[i].
+pub fn discoverMappingsFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8) ![]MappingProfile {
+    const all_sources = [_]Source{ .user, .system, .package };
 
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
@@ -29,7 +34,8 @@ pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
         list.deinit(allocator);
     }
 
-    for (dirs, sources) |dir_path, source| {
+    for (dirs, 0..) |dir_path, i| {
+        const source = if (i < all_sources.len) all_sources[i] else .package;
         var dir = if (std.fs.path.isAbsolute(dir_path))
             std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue
         else
@@ -50,8 +56,10 @@ pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
             errdefer allocator.free(full_path);
 
-            try list.append(allocator, .{ .name = owned_name, .path = full_path, .source = source });
+            // Register in seen before list.append so only one cleanup path
+            // owns these pointers at a time (avoids double-free on OOM).
             try seen.put(owned_name, {});
+            try list.append(allocator, .{ .name = owned_name, .path = full_path, .source = source });
         }
     }
 
@@ -88,58 +96,29 @@ test "discoverMappings: empty dirs returns empty" {
 test "discoverMappings: temp dir with profiles" {
     const allocator = std.testing.allocator;
 
-    const base = "/tmp/padctl_test_mapping_discovery";
-    const user_dir = base ++ "/user/mappings";
-    const sys_dir = base ++ "/system/mappings";
-    const pkg_dir = base ++ "/package/mappings";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
 
-    // Clean up from previous runs
-    std.fs.deleteTreeAbsolute(base) catch {};
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{base});
+    defer allocator.free(user_dir);
+    const sys_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{base});
+    defer allocator.free(sys_dir);
+    const pkg_dir = try std.fmt.allocPrint(allocator, "{s}/package", .{base});
+    defer allocator.free(pkg_dir);
 
-    // Create directories
-    try std.fs.makeDirAbsolute(base);
-    for ([_][]const u8{ base ++ "/user", user_dir, base ++ "/system", sys_dir, base ++ "/package", pkg_dir }) |d| {
-        try std.fs.makeDirAbsolute(d);
-    }
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    try tmp.dir.makeDir("user");
+    try tmp.dir.makeDir("system");
+    try tmp.dir.makeDir("package");
 
-    // Create mapping files
-    for ([_][]const u8{ user_dir ++ "/fps.toml", sys_dir ++ "/racing.toml", pkg_dir ++ "/fps.toml" }) |p| {
-        const f = try std.fs.createFileAbsolute(p, .{});
+    for ([_][]const u8{ "user/fps.toml", "system/racing.toml", "package/fps.toml" }) |p| {
+        const f = try tmp.dir.createFile(p, .{});
         f.close();
     }
 
-    // Override paths by calling the internal scan logic directly
-    var seen = std.StringHashMap(void).init(allocator);
-    defer seen.deinit();
-
-    var list: std.ArrayList(MappingProfile) = .{};
-
     const dirs = [_][]const u8{ user_dir, sys_dir, pkg_dir };
-    const sources = [_]Source{ .user, .system, .package };
-
-    for (dirs, sources) |dir_path, source| {
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
-
-        var it = dir.iterate();
-        while (try it.next()) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
-
-            const name = entry.name[0 .. entry.name.len - ".toml".len];
-            if (seen.contains(name)) continue;
-
-            const owned_name = try allocator.dupe(u8, name);
-            errdefer allocator.free(owned_name);
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
-            errdefer allocator.free(full_path);
-            try list.append(allocator, .{ .name = owned_name, .path = full_path, .source = source });
-            try seen.put(owned_name, {});
-        }
-    }
-
-    const profiles = try list.toOwnedSlice(allocator);
+    const profiles = try discoverMappingsFromDirs(allocator, &dirs);
     defer freeProfiles(allocator, profiles);
 
     // "fps" should appear once (user wins), "racing" from system
@@ -160,6 +139,30 @@ test "discoverMappings: temp dir with profiles" {
     }
     try std.testing.expect(found_fps);
     try std.testing.expect(found_racing);
+}
+
+fn discoverAndFree(allocator: std.mem.Allocator, dirs: []const []const u8) !void {
+    const profiles = try discoverMappingsFromDirs(allocator, dirs);
+    freeProfiles(allocator, profiles);
+}
+
+test "discoverMappingsFromDirs: no leak or double-free under allocation failure" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    for ([_][]const u8{ "a.toml", "b.toml", "c.toml" }) |p| {
+        const f = try tmp.dir.createFile(p, .{});
+        f.close();
+    }
+
+    const dirs = [_][]const u8{base};
+    // Injects OOM at each allocation point in turn; a double-free or leak
+    // on the seen.put/list.append path fails this check.
+    try std.testing.checkAllAllocationFailures(allocator, discoverAndFree, .{&dirs});
 }
 
 test "findMapping: returns null for nonexistent" {

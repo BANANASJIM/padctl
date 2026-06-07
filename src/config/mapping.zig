@@ -102,7 +102,7 @@ pub const RemapMap = struct {
 pub const DerivedAuxCaps = struct {
     needs_rel: bool = false, // REL_X/Y/WHEEL/HWHEEL (gyro mouse, stick mouse/scroll)
     needs_keyboard: bool = false, // KEY_* remaps, dpad arrows
-    // bitmask: bit0=BTN_LEFT bit1=BTN_RIGHT bit2=BTN_MIDDLE bit3=BTN_SIDE bit4=BTN_EXTRA
+    // bitmask: bit0=BTN_LEFT bit1=BTN_RIGHT bit2=BTN_MIDDLE bit3=BTN_SIDE bit4=BTN_EXTRA bit5=BTN_FORWARD bit6=BTN_BACK
     mouse_buttons: u8 = 0,
 
     pub fn needsAux(self: DerivedAuxCaps) bool {
@@ -211,7 +211,7 @@ fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *co
 }
 
 // Maximum EV_KEY codes that buildAuxKeyCodes may produce: all key_table entries (97) + 7 mouse buttons
-pub const AUX_KEY_CODES_MAX = 106;
+pub const AUX_KEY_CODES_MAX = 104;
 
 /// Build a key_codes slice for AuxDevice.create() from derived caps.
 /// buf must be at least AUX_KEY_CODES_MAX elements.
@@ -577,36 +577,20 @@ const valid_gyro_targets = [_][]const u8{ "right_stick", "left_stick" };
 const valid_gyro_responses = [_][]const u8{ "rate", "tilt" };
 const valid_gyro_axes = [_][]const u8{ "none", "pitch", "yaw", "roll" };
 
+fn strIsOneOf(s: []const u8, opts: []const []const u8) bool {
+    for (opts) |v| if (std.mem.eql(u8, s, v)) return true;
+    return false;
+}
+
 fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
-    var mode_ok = false;
-    for (valid_gyro_modes) |v| {
-        if (std.mem.eql(u8, g.mode, v)) {
-            mode_ok = true;
-            break;
-        }
-    }
-    if (!mode_ok) return error.InvalidConfig;
+    if (!strIsOneOf(g.mode, &valid_gyro_modes)) return error.InvalidConfig;
 
     if (g.target) |t| {
-        var target_ok = false;
-        for (valid_gyro_targets) |v| {
-            if (std.mem.eql(u8, t, v)) {
-                target_ok = true;
-                break;
-            }
-        }
-        if (!target_ok) return error.InvalidConfig;
+        if (!strIsOneOf(t, &valid_gyro_targets)) return error.InvalidConfig;
     }
 
     if (g.response) |r| {
-        var response_ok = false;
-        for (valid_gyro_responses) |v| {
-            if (std.mem.eql(u8, r, v)) {
-                response_ok = true;
-                break;
-            }
-        }
-        if (!response_ok) return error.InvalidConfig;
+        if (!strIsOneOf(r, &valid_gyro_responses)) return error.InvalidConfig;
         if (std.mem.eql(u8, r, "tilt") and !std.mem.eql(u8, g.mode, "joystick")) return error.InvalidConfig;
     }
 
@@ -643,10 +627,7 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
 }
 
 fn gyroAxisValid(axis: []const u8) bool {
-    for (valid_gyro_axes) |v| {
-        if (std.mem.eql(u8, axis, v)) return true;
-    }
-    return false;
+    return strIsOneOf(axis, &valid_gyro_axes);
 }
 
 // Returns true when LT/RT appear in any remap but trigger_threshold is not set.
@@ -2286,4 +2267,14 @@ test "gesture back-compat: chord array remap still parses as chord_names" {
     try std.testing.expectEqual(@as(usize, 2), names.len);
     try std.testing.expectEqualStrings("KEY_K", names[0]);
     try std.testing.expectEqualStrings("KEY_L", names[1]);
+}
+
+test "AUX_KEY_CODES_MAX equals all key codes plus all mouse buttons" {
+    // 7 = mouse_left/right/middle/side/extra/forward/back (see scanTarget/buildAuxKeyCodes)
+    try std.testing.expectEqual(input_codes.key_table.len + 7, AUX_KEY_CODES_MAX);
+
+    var buf: [AUX_KEY_CODES_MAX]u16 = undefined;
+    const caps = DerivedAuxCaps{ .needs_keyboard = true, .mouse_buttons = 0xFF };
+    const codes = buildAuxKeyCodes(caps, &buf);
+    try std.testing.expectEqual(AUX_KEY_CODES_MAX, codes.len);
 }
