@@ -176,6 +176,15 @@ pub const OutputConfig = struct {
     touchpad: ?TouchpadConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
     imu: ?ImuConfig = null,
+    // Route the main pad to the UHID backend independently of imu/ffb. A UHID
+    // primary presents a real HID report descriptor, which lets hidapi-based
+    // hosts (e.g. Steam's Elite-2 paddle detection) see a HID device rather
+    // than a descriptor-less uinput evdev node. "uinput" (default) | "uhid".
+    backend: []const u8 = "uinput",
+    // When true and the primary is on UHID, the card presents `vid`/`pid`
+    // (the `[output]` masquerade identity) instead of the daemon identity
+    // 0xFADE:0xC001. Opt-in so existing UHID devices keep their identity.
+    present_output_id: bool = false,
 };
 
 pub const WasmOverridesConfig = struct {
@@ -448,6 +457,20 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             } else {
                 return error.InvalidConfig;
             }
+        }
+    }
+
+    // Output backend selector. Only "uinput" or "uhid" are legal; unknown
+    // strings fail closed. present_output_id requires non-zero vid/pid and is
+    // only meaningful on the UHID path.
+    if (cfg.output) |out| {
+        const is_uinput_out = std.mem.eql(u8, out.backend, "uinput");
+        const is_uhid_out = std.mem.eql(u8, out.backend, "uhid");
+        if (!is_uinput_out and !is_uhid_out) return error.InvalidConfig;
+        if (out.present_output_id) {
+            const vid = out.vid orelse 0;
+            const pid = out.pid orelse 0;
+            if (vid == 0 or pid == 0) return error.InvalidConfig;
         }
     }
 
@@ -1536,6 +1559,78 @@ test "device: fuzz parseString: no panic on arbitrary input" {
             if (result) |r| r.deinit() else |_| {}
         }
     }.run, .{});
+}
+
+// Output backend / present_output_id validate cases.
+
+test "validate: [output] backend=uhid + present_output_id=true is legal" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 0x37d7
+        \\pid = 0x2401
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Elite"
+        \\vid = 0x045e
+        \\pid = 0x0b00
+        \\backend = "uhid"
+        \\present_output_id = true
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("uhid", result.value.output.?.backend);
+    try std.testing.expect(result.value.output.?.present_output_id);
+}
+
+test "validate: [output] backend=unknown is error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\backend = "xyz"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: present_output_id=true requires non-zero output vid/pid" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\backend = "uhid"
+        \\present_output_id = true
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
 // ImuConfig validate cases.

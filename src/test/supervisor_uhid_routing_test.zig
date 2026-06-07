@@ -479,3 +479,146 @@ test "clone_vid_pid=true → primary UHID vid=device.vid pid=device.pid" {
     try testing.expectEqual(@as(u32, 0x11FF), primary_ev.payload.vendor);
     try testing.expectEqual(@as(u32, 0x1211), primary_ev.payload.product);
 }
+
+// --- [output] backend=uhid + present_output_id routing (Vader 5 paddles) ----
+
+// Vader-representative: main pad on UHID, masquerade identity presented, no IMU
+// card, rumble FFB (sidecar skipped in the test seam). M1-M4 -> the four
+// BTN_TRIGGER_HAPPY paddle codes that buildFromOutput emits as Button usages.
+const TEST_TOML_OUTPUT_UHID =
+    \\[device]
+    \\name = "Paddle Pad"
+    \\vid = 0x37d7
+    \\pid = 0x2401
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "input"
+    \\interface = 0
+    \\size = 8
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\left_x = { offset = 1, type = "i8" }
+    \\[output]
+    \\name = "Xbox Elite Series 2"
+    \\vid = 0x045e
+    \\pid = 0x0b00
+    \\backend = "uhid"
+    \\present_output_id = true
+    \\axes = { left_x = { code = "ABS_X", min = -128, max = 127 } }
+    \\buttons = { A = "BTN_SOUTH", M1 = "BTN_TRIGGER_HAPPY1", M2 = "BTN_TRIGGER_HAPPY3", M3 = "BTN_TRIGGER_HAPPY2", M4 = "BTN_TRIGGER_HAPPY4" }
+    \\[output.force_feedback]
+    \\type = "rumble"
+;
+
+fn initOutputUhid(
+    allocator: std.mem.Allocator,
+    parsed: anytype,
+    mock: *MockDeviceIO,
+    primary_fd: posix.fd_t,
+) !DeviceInstance {
+    const devices = try allocator.alloc(DeviceIO, 1);
+    devices[0] = mock.deviceIO();
+    var counter: u16 = 1;
+    return DeviceInstance.init(allocator, &parsed.value, null, null, &counter, .{
+        .test_primary_uhid_fd = primary_fd,
+        .test_devices_override = devices,
+        .test_skip_ff_sidecar = true,
+    });
+}
+
+test "output backend=uhid routes main pad to UHID (Vader paddles)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const primary_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(primary_fds[0]);
+
+    const parsed = try device_mod.parseString(allocator, TEST_TOML_OUTPUT_UHID);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try initOutputUhid(allocator, parsed, &mock, primary_fds[1]);
+    defer inst.deinit();
+
+    // Reverse-verification: dropping backend="uhid" from the TOML flips owner
+    // to .uinput, failing this assertion.
+    switch (inst.owner) {
+        .uhid => {},
+        else => {
+            std.debug.print("owner was {s}, expected .uhid\n", .{@tagName(inst.owner)});
+            try testing.expect(false);
+        },
+    }
+    // No [output.imu] -> no IMU companion card.
+    try testing.expect(inst.imu_dev == null);
+}
+
+test "present_output_id=true presents [output] vid/pid not daemon FADE:C001" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const primary_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(primary_fds[0]);
+
+    const parsed = try device_mod.parseString(allocator, TEST_TOML_OUTPUT_UHID);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try initOutputUhid(allocator, parsed, &mock, primary_fds[1]);
+    defer inst.deinit();
+
+    const scratch = try allocator.alloc(u8, uhid.UHID_EVENT_SIZE);
+    defer allocator.free(scratch);
+
+    const primary_ev = try readCreate2(primary_fds[0], scratch);
+    // Masquerade identity, NOT the 0xFADE:0xC001 default and NOT device id.
+    try testing.expectEqual(@as(u32, 0x045e), primary_ev.payload.vendor);
+    try testing.expectEqual(@as(u32, 0x0b00), primary_ev.payload.product);
+    try testing.expect(primary_ev.payload.vendor != 0xFADE);
+    try testing.expect(primary_ev.payload.product != 0xC001);
+}
+
+test "UHID primary descriptor declares the four paddle Button usages" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const primary_fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(primary_fds[0]);
+
+    const parsed = try device_mod.parseString(allocator, TEST_TOML_OUTPUT_UHID);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var inst = try initOutputUhid(allocator, parsed, &mock, primary_fds[1]);
+    defer inst.deinit();
+
+    const scratch = try allocator.alloc(u8, uhid.UHID_EVENT_SIZE);
+    defer allocator.free(scratch);
+
+    const primary_ev = try readCreate2(primary_fds[0], scratch);
+    const rd = primary_ev.payload.rd_data[0..primary_ev.payload.rd_size];
+
+    // buildFromOutput maps BTN_TRIGGER_HAPPY1-4 to HID Button usages 17-20.
+    // Each appears as a Usage short item `0x09 <usage>`. Reverse-verification:
+    // removing the M1-M4 button mappings from the TOML drops these usages and
+    // fails the assertions.
+    const paddle_usages = [_][2]u8{
+        .{ 0x09, 17 }, // BTN_TRIGGER_HAPPY1 (M1)
+        .{ 0x09, 18 }, // BTN_TRIGGER_HAPPY2 (M3)
+        .{ 0x09, 19 }, // BTN_TRIGGER_HAPPY3 (M2)
+        .{ 0x09, 20 }, // BTN_TRIGGER_HAPPY4 (M4)
+    };
+    for (paddle_usages) |pu| {
+        try testing.expect(containsBytes(rd, &pu));
+    }
+}

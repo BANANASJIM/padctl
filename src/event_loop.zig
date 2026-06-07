@@ -290,6 +290,10 @@ pub const EventLoopContext = struct {
     /// Primary UHID device to drain for UHID_OUTPUT events.
     /// Set when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     uhid_primary: ?*UhidDevice = null,
+    /// Dedicated FF output. Set when the primary is on UHID but rumble must
+    /// arrive over a uinput EV_FF sidecar (UHID has no FF output collection).
+    /// When null, rumble polling falls back to `output`.
+    ff_output: ?OutputDevice = null,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {
@@ -593,7 +597,8 @@ pub const EventLoop = struct {
             // Check uinput FF fd.
             if (self.uinput_ff_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
-                    const ff_result = ctx.output.pollFf() catch |err| blk: {
+                    const ff_dev = ctx.ff_output orelse ctx.output;
+                    const ff_result = ff_dev.pollFf() catch |err| blk: {
                         rumble_log.debug("[{s}] FF_ERROR: pollFf failed err={}", .{ ctx.device_tag, err });
                         break :blk null;
                     };

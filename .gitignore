@@ -8,6 +8,7 @@ zig-pkg/
 *.o
 *.a
 *.deb
+core.*
 kcov-output/
 .worktrees/
 

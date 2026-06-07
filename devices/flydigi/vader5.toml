@@ -87,10 +87,21 @@ offset = 8
 # --- Output device ---
 # Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and
 # most games apply Xbox button mappings without additional configuration.
+#
+# backend="uhid" + present_output_id=true: present the masquerade identity as a
+# real HID device with a report descriptor that declares the four back paddles
+# (M1-M4 -> BTN_TRIGGER_HAPPY1-4) as Button usages. Steam's hidapi-based
+# Elite-2 detection unlocks the paddle config UI only for a real HID device;
+# the prior uinput path exposed a descriptor-less evdev node and no paddle UI.
+# Rumble keeps working via an automatic uinput EV_FF sidecar (see
+# [output.force_feedback]) because a UHID gamepad descriptor carries no FF
+# output collection.
 [output]
 name = "Xbox Elite Series 2"
 vid = 0x045e
 pid = 0x0b00
+backend = "uhid"
+present_output_id = true
 
 [output.axes]
 left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }

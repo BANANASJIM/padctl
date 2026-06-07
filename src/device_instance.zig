@@ -143,6 +143,10 @@ pub const InitOptions = struct {
     /// Test-only: substitute for the physical hidraw write-end used by FfbForwarder.
     /// When non-null, FfbForwarder.init receives this fd instead of the real device fd.
     test_physical_hidraw_fd: ?posix.fd_t = null,
+    /// Test-only: skip the uinput rumble FF sidecar (it would open /dev/uinput,
+    /// unavailable on CI). Routing/identity tests set this; sidecar wiring is
+    /// covered by event-loop rumble tests and real-hardware validation.
+    test_skip_ff_sidecar: bool = false,
 };
 
 /// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
@@ -210,6 +214,12 @@ pub const DeviceInstance = struct {
     poll_timeout_ms: ?u32 = null,
     /// Active only when force_feedback.backend="uhid" + kind="pid".
     ffb_forwarder: ?FfbForwarder = null,
+    /// uinput FF sidecar. Created when the primary is on UHID but FFB is rumble
+    /// (uinput backend): a UHID gamepad descriptor declares no FF output
+    /// collection, so the kernel would synthesize no evdev FF device and game
+    /// rumble would never reach padctl. This sidecar exposes an EV_FF-capable
+    /// uinput node solely to receive rumble effects; it emits no input state.
+    ff_sidecar: ?*UinputDevice = null,
     /// PR-ε.1 wedge instrumentation. Bumped by hidraw + ffb_forwarder; read by
     /// Supervisor.handleStatus. Inert until consumers attach (see attachWedges).
     wedge: WedgeAtomics = .{},
@@ -305,6 +315,7 @@ pub const DeviceInstance = struct {
         var imu_output: ?OutputDevice = null;
         var imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
         var ffb_fwd: ?FfbForwarder = null;
+        var ff_sidecar_ptr: ?*UinputDevice = null;
         var imu_name_ptr: ?[]const u8 = null;
         var aux_dev: ?AuxDevice = null;
         var touchpad_dev: ?TouchpadDevice = null;
@@ -318,9 +329,12 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
-            // Enter UHID path when IMU backend=uhid (gamepad+IMU pair) OR
-            // when force_feedback.backend=uhid (racing wheel PID FFB).
+            // Enter UHID path when [output] backend=uhid (main pad as a real
+            // HID device, e.g. Steam Elite-2 paddle detection) OR IMU
+            // backend=uhid (gamepad+IMU pair) OR force_feedback.backend=uhid
+            // (racing wheel PID FFB).
             const use_uhid = blk: {
+                if (std.mem.eql(u8, out_cfg.backend, "uhid")) break :blk true;
                 if (imu_cfg_opt) |imu_cfg| {
                     if (std.mem.eql(u8, imu_cfg.backend, "uhid")) break :blk true;
                 }
@@ -352,19 +366,30 @@ pub const DeviceInstance = struct {
                 defer allocator.free(primary_descriptor);
 
                 const ffb_cfg = out_cfg.force_feedback orelse device_cfg.ForceFeedbackConfig{};
-                // clone_vid_pid=true: wheel's real VID/PID (hid-universal-pidff modalias binding).
-                // clone_vid_pid=false (default): daemon identity so non-PID devices stay as FADE:C001.
-                const effective_vid: u16 = if (ffb_cfg.clone_vid_pid)
+                // Identity precedence:
+                //   present_output_id=true → [output] masquerade vid/pid (e.g.
+                //     045e:0b00 so Steam sees a real Elite-2 HID device).
+                //   clone_vid_pid=true → device's real VID/PID (hid-universal-pidff
+                //     modalias binding for racing wheels).
+                //   default → daemon identity FADE:C001 (SDL #81 IMU pairing).
+                const effective_vid: u16 = if (out_cfg.present_output_id)
+                    @intCast(out_cfg.vid orelse 0)
+                else if (ffb_cfg.clone_vid_pid)
                     @intCast(cfg.device.vid)
                 else
                     0xFADE;
-                const effective_pid: u16 = if (ffb_cfg.clone_vid_pid)
+                const effective_pid: u16 = if (out_cfg.present_output_id)
+                    @intCast(out_cfg.pid orelse 0)
+                else if (ffb_cfg.clone_vid_pid)
                     @intCast(cfg.device.pid)
                 else
                     0xC001;
 
                 const primary_cfg = uhid_mod.Config{
-                    .name = cfg.device.name,
+                    // When presenting the masquerade identity, also present its
+                    // name: SDL/Steam derive the controller GUID from bus+vid+pid+
+                    // name, so a mismatched name defeats profile matching.
+                    .name = if (out_cfg.present_output_id) (out_cfg.name orelse cfg.device.name) else cfg.device.name,
                     .uniq = std.mem.sliceTo(uniq_z, 0),
                     .vid = effective_vid,
                     .pid = effective_pid,
@@ -430,6 +455,34 @@ pub const DeviceInstance = struct {
                             ffb_fwd = FfbForwarder.init(phys_fd);
                             try loop.addUhidOutput(primary_uhid.fd);
                         }
+                    }
+                }
+
+                // Rumble FF sidecar: the UHID gamepad descriptor has no FF
+                // output collection, so rumble cannot arrive on the UHID node.
+                // Spawn an FF-only uinput node so games' rumble effects still
+                // reach the event loop and get forwarded to the physical
+                // device. Only for rumble (uinput) FFB; PID FFB uses the
+                // UHID_OUTPUT path above. The sidecar config strips axes /
+                // buttons / dpad so the node carries EV_FF only — no phantom
+                // duplicate input pad next to the UHID primary.
+                if (out_cfg.force_feedback) |rumble_ffb| {
+                    if (!opts.test_skip_ff_sidecar and
+                        std.mem.eql(u8, rumble_ffb.backend, "uinput") and
+                        std.mem.eql(u8, rumble_ffb.kind, "rumble"))
+                    {
+                        var ff_only_cfg = out_cfg.*;
+                        ff_only_cfg.axes = null;
+                        ff_only_cfg.buttons = null;
+                        ff_only_cfg.dpad = null;
+                        const sidecar = try UinputDevice.initBoxed(allocator, &ff_only_cfg);
+                        errdefer {
+                            sidecar.close();
+                            allocator.destroy(sidecar);
+                        }
+                        sidecar.log_tag = cfg.device.name;
+                        ff_sidecar_ptr = sidecar;
+                        try loop.addUinputFf(sidecar.pollFfFd());
                     }
                 }
             } else {
@@ -518,6 +571,7 @@ pub const DeviceInstance = struct {
             .pending_mapping = null,
             .stopped = false,
             .ffb_forwarder = ffb_fwd,
+            .ff_sidecar = ff_sidecar_ptr,
         };
     }
 
@@ -564,6 +618,10 @@ pub const DeviceInstance = struct {
             },
         }
         if (self.ffb_forwarder) |*fwd| fwd.deinit();
+        if (self.ff_sidecar) |p| {
+            p.close();
+            self.allocator.destroy(p);
+        }
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
         if (self.generic_uinput) |*gu| gu.close();
@@ -632,6 +690,7 @@ pub const DeviceInstance = struct {
                     .uhid => |p| p,
                     else => null,
                 },
+                .ff_output = if (self.ff_sidecar) |p| p.outputDevice() else null,
             }) catch |err| {
                 std.log.err("event loop failed: {}", .{err});
                 break;
