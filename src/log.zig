@@ -319,7 +319,7 @@ fn wallClockTimestamp(buf: *[32]u8) []const u8 {
 
     const result = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
         yd.year,
-        @as(u32, @intFromEnum(md.month)) + 1,
+        @as(u32, @intFromEnum(md.month)),
         @as(u32, md.day_index) + 1,
         ds.getHoursIntoDay(),
         ds.getMinutesIntoHour(),

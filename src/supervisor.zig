@@ -1801,13 +1801,16 @@ pub const Supervisor = struct {
                 return;
             };
             parsed_ptr.* = parsed;
-            const new_mapper = Mapper.init(&parsed_ptr.value, m.instance.loop.macro_timer_fd, self.allocator) catch {
+            var new_mapper = Mapper.init(&parsed_ptr.value, m.instance.loop.macro_timer_fd, self.allocator) catch {
                 parsed_ptr.deinit();
                 self.allocator.destroy(parsed_ptr);
                 cs.sendResponse(fd, "ERR switch-failed\n");
                 return;
             };
             const stem_copy = self.allocator.dupe(u8, resolved_stem) catch {
+                new_mapper.deinit();
+                parsed_ptr.deinit();
+                self.allocator.destroy(parsed_ptr);
                 cs.sendResponse(fd, "ERR oom\n");
                 return;
             };
@@ -1818,6 +1821,9 @@ pub const Supervisor = struct {
                 .path_stem = stem_copy,
             }) catch {
                 self.allocator.free(stem_copy);
+                new_mapper.deinit();
+                parsed_ptr.deinit();
+                self.allocator.destroy(parsed_ptr);
                 cs.sendResponse(fd, "ERR oom\n");
                 return;
             };

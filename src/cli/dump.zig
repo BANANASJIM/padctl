@@ -405,7 +405,7 @@ fn formatTimestamp(buf: *[23]u8, epoch_secs: u64) []const u8 {
     const ds = es.getDaySeconds();
     const result = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.000", .{
         yd.year,
-        @as(u32, @intFromEnum(md.month)) + 1,
+        @as(u32, @intFromEnum(md.month)),
         @as(u32, md.day_index) + 1,
         ds.getHoursIntoDay(),
         ds.getMinutesIntoHour(),
@@ -916,6 +916,13 @@ test "dump: parsePeriod valid durations" {
     try testing.expectEqual(@as(u64, 3600), parsePeriod("1h").?);
     try testing.expectEqual(@as(u64, 86400), parsePeriod("1d").?);
     try testing.expectEqual(@as(u64, 86400 * 30), parsePeriod("30d").?);
+}
+
+test "dump: formatTimestamp month is 1-based (June prints 06 not 07)" {
+    var buf: [23]u8 = undefined;
+    // 1717200000 == 2024-06-01T00:00:00 UTC.
+    const out = formatTimestamp(&buf, 1717200000);
+    try testing.expectEqualStrings("2024-06-01T00:00:00.000", out);
 }
 
 test "dump: parsePeriod rejects invalid" {

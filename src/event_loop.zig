@@ -114,7 +114,7 @@ fn armRumbleStopFd(fd: posix.fd_t, deadline_ns: ?i128) void {
     };
     const rc = linux.timerfd_settime(fd, .{ .ABSTIME = true }, &spec, null);
     if (rc != 0) {
-        const errno = std.posix.errno(rc);
+        const errno = linux.E.init(rc);
         rumble_log.debug("TIMERFD: timerfd_settime FAILED errno={s} deadline={d}", .{
             @tagName(errno), target,
         });
