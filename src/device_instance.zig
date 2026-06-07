@@ -405,6 +405,15 @@ pub const DeviceInstance = struct {
                 owner = .{ .uhid = primary_uhid };
                 primary_output = primary_uhid.outputDevice();
 
+                // Register the primary UHID fd with the event loop for ALL
+                // UHID main pads, not just PID-FFB devices. The kernel issues
+                // UHID_GET_REPORT / UHID_SET_REPORT during HID probe; if the
+                // daemon never drains /dev/uhid those pile up and the device
+                // never goes live (zero input events — e.g. Vader 5 with plain
+                // rumble FFB). The PID-FFB path below only adds the output_cb
+                // wiring on top of this registration.
+                try loop.addUhidOutput(primary_uhid.fd);
+
                 if (imu_cfg_opt) |imu_cfg| {
                     const imu_desc = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(allocator, imu_cfg);
                     defer allocator.free(imu_desc);
@@ -452,8 +461,10 @@ pub const DeviceInstance = struct {
                         const phys_fd = opts.test_physical_hidraw_fd orelse
                             if (devices.len > 0) devices[0].pollfd().fd else -1;
                         if (phys_fd >= 0) {
+                            // primary_uhid.fd is already registered with the
+                            // loop above; PID FFB only adds the forwarder that
+                            // routes UHID_OUTPUT reports to the physical fd.
                             ffb_fwd = FfbForwarder.init(phys_fd);
-                            try loop.addUhidOutput(primary_uhid.fd);
                         }
                     }
                 }

@@ -557,6 +557,14 @@ test "output backend=uhid routes main pad to UHID (Vader paddles)" {
     }
     // No [output.imu] -> no IMU companion card.
     try testing.expect(inst.imu_dev == null);
+
+    // Regression: the primary UHID fd MUST be registered with the event loop
+    // for ALL UHID main pads, not only PID-FFB devices. This Vader config has
+    // plain rumble FFB (not PID); before the fix the fd was registered only
+    // inside the PID block, so /dev/uhid was never drained and the kernel HID
+    // probe stalled (zero input events). uhid_output_slot != null proves the
+    // unconditional registration.
+    try testing.expect(inst.loop.uhid_output_slot != null);
 }
 
 test "present_output_id=true presents [output] vid/pid not daemon FADE:C001" {

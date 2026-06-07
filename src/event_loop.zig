@@ -682,17 +682,24 @@ pub const EventLoop = struct {
                 }
             }
 
-            // Drain UHID_OUTPUT events. Only active when uhid_output_slot is set
-            // (backend=uhid, kind=pid).
+            // Drain the primary UHID fd. Registered for ALL UHID main-pad
+            // devices, not just PID-FFB: the kernel issues GET/SET_REPORT
+            // requests during HID probe that must be answered or the device
+            // never goes live (zero input events). drainEvent answers those
+            // and forwards UHID_OUTPUT (rumble/FFB) via output_cb when wired.
             if (self.uhid_output_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
                     if (ctx.uhid_primary) |uhid_dev| {
                         var uhid_buf: [uhid_mod.UHID_EVENT_SIZE]u8 = undefined;
                         while (true) {
-                            const report = uhid_dev.pollOutputReport(&uhid_buf) catch break;
-                            const r = report orelse break;
-                            if (uhid_dev.output_cb) |cb| {
-                                cb(uhid_dev.output_ctx.?, r);
+                            const ev = uhid_dev.drainEvent(&uhid_buf) catch break;
+                            switch (ev orelse break) {
+                                .output => |r| {
+                                    if (uhid_dev.output_cb) |cb| {
+                                        cb(uhid_dev.output_ctx.?, r);
+                                    }
+                                },
+                                .handled => {},
                             }
                         }
                     }

@@ -151,10 +151,48 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
     write_exact.writeExact(fd, &buf) catch {};
 }
 
-// --- UHID_OUTPUT types -------------------------------------------------------
+// --- Kernel→userspace event types ------------------------------------------
+//
+// After `UHID_CREATE2` the kernel drives the device through a lifecycle and
+// may issue report requests. A primary fd that is never drained back-pressures
+// the kernel's HID probe, so the device never goes live and emits no input.
+// These mirror `enum uhid_event_type` in the kernel UAPI.
 
+/// Device started — kernel is ready to receive input. Lifecycle, no reply.
+pub const UHID_START: u32 = 2;
+/// Device stopped. Lifecycle, no reply.
+pub const UHID_STOP: u32 = 3;
+/// A reader opened the hidraw/evdev node. Lifecycle, no reply.
+pub const UHID_OPEN: u32 = 4;
+/// The last reader closed the node. Lifecycle, no reply.
+pub const UHID_CLOSE: u32 = 5;
 /// Kernel sends `UHID_OUTPUT` when the HID driver writes an output report.
 pub const UHID_OUTPUT: u32 = 6;
+/// Kernel requests a feature/input report; userspace must answer with
+/// `UHID_GET_REPORT_REPLY` echoing the same `id`, or the kernel blocks.
+pub const UHID_GET_REPORT: u32 = 9;
+/// Userspace answer to `UHID_GET_REPORT`.
+pub const UHID_GET_REPORT_REPLY: u32 = 10;
+/// Kernel forwards a SET_REPORT request; userspace must answer with
+/// `UHID_SET_REPORT_REPLY` echoing the same `id`.
+pub const UHID_SET_REPORT: u32 = 13;
+/// Userspace answer to `UHID_SET_REPORT`.
+pub const UHID_SET_REPORT_REPLY: u32 = 14;
+
+// `struct uhid_get_report_req` / `struct uhid_set_report_req` both begin with
+// a `u32 id` at event offset 4 — the only field we need (read directly from the
+// byte buffer in drainEvent, since the event buffer is only byte-aligned).
+
+/// Outcome of draining one event from the primary fd.
+pub const DrainEvent = union(enum) {
+    /// A `UHID_OUTPUT` report (rumble / FFB effect data) for forwarding.
+    output: OutputReport,
+    /// A lifecycle or report-request event that was handled internally
+    /// (lifecycle ignored, GET/SET answered). No caller action needed.
+    handled,
+};
+
+// --- UHID_OUTPUT types -------------------------------------------------------
 
 /// Mirror of `struct uhid_output_req` from the kernel UAPI.
 /// The kernel struct is __packed__ (4099 bytes); Zig extern struct is 4100 bytes
@@ -469,6 +507,73 @@ pub const UhidDevice = struct {
             .report_id = if (sz > 0) req.data[0] else 0,
             .data = req.data[0..sz],
         };
+    }
+
+    /// Read and handle one kernel→userspace event from the primary UHID fd.
+    ///
+    /// Returns null when no event is pending (`WouldBlock`). Otherwise:
+    ///   - `UHID_OUTPUT` → returns `.output` for the caller to forward.
+    ///   - `UHID_GET_REPORT` / `UHID_SET_REPORT` → answers the kernel with an
+    ///     empty reply (err=0) echoing the request `id`, returns `.handled`.
+    ///   - lifecycle events (START/OPEN/CLOSE/STOP) and any other type →
+    ///     ignored, returns `.handled`.
+    ///
+    /// Unlike `pollOutputReport`, this never silently swallows GET/SET report
+    /// requests: leaving those unanswered back-pressures the kernel HID probe
+    /// so the device never goes live (zero input events). The caller should
+    /// loop until null to drain every pending event each wakeup.
+    pub fn drainEvent(self: *UhidDevice, buf: []u8) !?DrainEvent {
+        if (buf.len < UHID_EVENT_SIZE) return null;
+        const n = posix.read(self.fd, buf[0..UHID_EVENT_SIZE]) catch |err| switch (err) {
+            error.WouldBlock => return null,
+            else => return err,
+        };
+        if (n < UHID_EVENT_SIZE) return error.IncompleteUhidEvent;
+        const ev_type = std.mem.readInt(u32, buf[0..4], .little);
+        switch (ev_type) {
+            UHID_OUTPUT => {
+                const req: *const UhidOutputReq = @ptrCast(@alignCast(&buf[4]));
+                const sz = @min(@as(usize, req.size), UHID_DATA_MAX);
+                return DrainEvent{ .output = .{
+                    .report_id = if (sz > 0) req.data[0] else 0,
+                    .data = req.data[0..sz],
+                } };
+            },
+            UHID_GET_REPORT, UHID_SET_REPORT => {
+                // Both request structs begin with `u32 id` at offset 4. Read it
+                // straight from the byte buffer — the event buffer is only
+                // byte-aligned, so casting to an alignment-4 struct would trap.
+                const id = std.mem.readInt(u32, buf[4..8], .little);
+                if (ev_type == UHID_GET_REPORT)
+                    self.replyGetReport(id) catch {}
+                else
+                    self.replySetReport(id) catch {};
+                return .handled;
+            },
+            else => return .handled, // START/OPEN/CLOSE/STOP and unknowns
+        }
+    }
+
+    /// Answer a `UHID_GET_REPORT` with an empty report (err=0), echoing `id`.
+    /// "I have nothing but don't block" — enough to let the kernel HID probe
+    /// finish so the device goes live.
+    fn replyGetReport(self: *UhidDevice, id: u32) !void {
+        // struct uhid_get_report_reply_req { u32 id; u16 err; u16 size; u8 data[]; }
+        var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+        std.mem.writeInt(u32, buf[0..4], UHID_GET_REPORT_REPLY, .little);
+        std.mem.writeInt(u32, buf[4..8], id, .little);
+        // err (buf[8..10]) and size (buf[10..12]) stay 0.
+        try write_exact.writeExact(self.fd, &buf);
+    }
+
+    /// Answer a `UHID_SET_REPORT` with err=0, echoing `id`.
+    fn replySetReport(self: *UhidDevice, id: u32) !void {
+        // struct uhid_set_report_reply_req { u32 id; u16 err; }
+        var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+        std.mem.writeInt(u32, buf[0..4], UHID_SET_REPORT_REPLY, .little);
+        std.mem.writeInt(u32, buf[4..8], id, .little);
+        // err (buf[8..10]) stays 0.
+        try write_exact.writeExact(self.fd, &buf);
     }
 
     /// Always returns `null` — FF output reports from the kernel are consumed
@@ -1011,6 +1116,117 @@ test "uhid: pollOutputReport returns null on WouldBlock (empty pipe)" {
     var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
     const report = try dev.pollOutputReport(&read_buf);
     try testing.expectEqual(@as(?OutputReport, null), report);
+}
+
+test "uhid: drainEvent answers UHID_GET_REPORT with a reply echoing id" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    // socketpair so dev.fd is read+write: drainEvent reads the request and
+    // writes the reply back on the same fd; we read the reply from the peer.
+    var sv: [2]posix.fd_t = undefined;
+    {
+        const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sv);
+        if (rc != 0) return error.SkipZigTest;
+    }
+    defer posix.close(sv[0]);
+    defer posix.close(sv[1]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-getreport-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, sv[0], cfg);
+    defer alloc.destroy(dev);
+
+    // Hand-craft a UHID_GET_REPORT event: u32 type=9, then uhid_get_report_req
+    // { u32 id; u8 rnum; u8 rtype; } at offset 4.
+    var ev_buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+    std.mem.writeInt(u32, ev_buf[0..4], UHID_GET_REPORT, .little);
+    std.mem.writeInt(u32, ev_buf[4..8], 0xABCD, .little); // id
+    _ = try posix.write(sv[1], &ev_buf);
+
+    var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const ev = try dev.drainEvent(&read_buf);
+    try testing.expect(ev != null);
+    try testing.expectEqual(DrainEvent.handled, ev.?);
+
+    // The reply must have landed on the peer end: type + echoed id.
+    var reply: [UHID_EVENT_SIZE]u8 = undefined;
+    const n = try posix.read(sv[1], &reply);
+    try testing.expectEqual(@as(usize, UHID_EVENT_SIZE), n);
+    try testing.expectEqual(UHID_GET_REPORT_REPLY, std.mem.readInt(u32, reply[0..4], .little));
+    try testing.expectEqual(@as(u32, 0xABCD), std.mem.readInt(u32, reply[4..8], .little));
+}
+
+test "uhid: drainEvent handles lifecycle events without error or reply" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-lifecycle-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[0], cfg);
+    defer alloc.destroy(dev);
+
+    for ([_]u32{ UHID_START, UHID_OPEN, UHID_CLOSE, UHID_STOP }) |ev_type| {
+        var ev_buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+        std.mem.writeInt(u32, ev_buf[0..4], ev_type, .little);
+        _ = try posix.write(fds[1], &ev_buf);
+
+        var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+        const ev = try dev.drainEvent(&read_buf);
+        try testing.expectEqual(DrainEvent.handled, ev.?);
+    }
+
+    // Empty pipe → null (drained).
+    var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+    try testing.expectEqual(@as(?DrainEvent, null), try dev.drainEvent(&read_buf));
+}
+
+test "uhid: drainEvent returns .output for UHID_OUTPUT" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const fds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const cfg = Config{
+        .vid = 0xFADE,
+        .pid = 0xCAFE,
+        .name = "padctl-drain-output-test",
+        .descriptor = &[_]u8{ 0x05, 0x01, 0xC0 },
+    };
+    const dev = try UhidDevice.initWithFd(alloc, fds[0], cfg);
+    defer alloc.destroy(dev);
+
+    var ev_buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
+    std.mem.writeInt(u32, ev_buf[0..4], UHID_OUTPUT, .little);
+    ev_buf[4] = 0x0A; // report_id
+    ev_buf[5] = 0x55;
+    std.mem.writeInt(u16, ev_buf[4100..4102], 2, .little); // size
+    _ = try posix.write(fds[1], &ev_buf);
+
+    var read_buf: [UHID_EVENT_SIZE]u8 = undefined;
+    const ev = try dev.drainEvent(&read_buf);
+    try testing.expect(ev != null);
+    switch (ev.?) {
+        .output => |r| {
+            try testing.expectEqual(@as(u8, 0x0A), r.report_id);
+            try testing.expectEqualSlices(u8, &[_]u8{ 0x0A, 0x55 }, r.data);
+        },
+        .handled => return error.TestUnexpectedResult,
+    }
 }
 
 test "uhid: openUhid sets O_NONBLOCK on the fd" {
