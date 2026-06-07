@@ -99,6 +99,13 @@ fn resolveSubdirDirs(allocator: Allocator, subdir: []const u8) ![][]const u8 {
     return @ptrCast(dirs);
 }
 
+/// The builtin (data) dir is always the last element of a resolved dirs slice,
+/// regardless of whether the user dir was present. Safe for the NoHomeDir case
+/// where the slice has only two entries.
+pub fn builtinDir(dirs: []const []const u8) []const u8 {
+    return dirs[dirs.len - 1];
+}
+
 pub fn freeConfigDirs(allocator: Allocator, dirs: [][]const u8) void {
     for (dirs) |d| allocator.free(d);
     allocator.free(dirs);
@@ -170,6 +177,26 @@ test "resolveDeviceConfigDirs: priority order" {
     );
     try std.testing.expectEqualStrings("/etc/padctl/devices", dirs[1]);
     try std.testing.expectEqualStrings("/usr/share/padctl/devices", dirs[2]);
+}
+
+test "builtinDir: returns last element for a three-entry slice" {
+    const dirs = [_][]const u8{
+        "/home/u/.config/padctl/devices",
+        "/etc/padctl/devices",
+        "/usr/share/padctl/devices",
+    };
+    try std.testing.expectEqualStrings("/usr/share/padctl/devices", builtinDir(&dirs));
+}
+
+test "builtinDir: NoHomeDir two-entry slice stays in bounds (regression: init indexed [2])" {
+    // Mirrors the resolveSubdirDirs NoHomeDir branch shape: [system, data].
+    // Old init.zig used dirs[2], which is out of bounds here and panics in
+    // ReleaseSafe. builtinDir must return the data dir (element [1]) instead.
+    const dirs = [_][]const u8{
+        "/etc/padctl/devices",
+        "/usr/share/padctl/devices",
+    };
+    try std.testing.expectEqualStrings("/usr/share/padctl/devices", builtinDir(&dirs));
 }
 
 test "findConfig: returns null when no dir contains the file" {
