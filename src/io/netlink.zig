@@ -62,10 +62,7 @@ pub fn parseUevent(buf: []const u8) Uevent {
 pub fn drainNetlink(fd: posix.fd_t, ctx: anytype, comptime callback: fn (@TypeOf(ctx), UeventAction, []const u8) void) void {
     var buf: [2048]u8 = undefined;
     while (true) {
-        const n = posix.recv(fd, &buf, 0) catch |err| switch (err) {
-            error.WouldBlock => return,
-            else => return,
-        };
+        const n = posix.recv(fd, &buf, 0) catch return;
         if (n == 0) return;
         const ev = parseUevent(buf[0..n]);
         if (ev.action == .other) continue;

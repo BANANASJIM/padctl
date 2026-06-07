@@ -116,10 +116,10 @@ pub fn uhidCreate(
     ev.payload.country = 0;
     @memcpy(ev.payload.rd_data[0..rd_data.len], rd_data);
 
-    const bytes = std.mem.asBytes(&ev);
+    comptime std.debug.assert(@sizeOf(UhidCreate2Event) <= UHID_EVENT_SIZE);
     var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
-    const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
-    @memcpy(buf[0..copy_len], bytes[0..copy_len]);
+    const bytes = std.mem.asBytes(&ev);
+    @memcpy(buf[0..bytes.len], bytes);
     try write_exact.writeExact(fd, &buf);
 }
 
@@ -136,10 +136,10 @@ pub fn uhidInput(fd: posix.fd_t, data: []const u8) !void {
     ev.payload.size = @intCast(data.len);
     @memcpy(ev.payload.data[0..data.len], data);
 
-    const bytes = std.mem.asBytes(&ev);
+    comptime std.debug.assert(@sizeOf(UhidInput2Event) <= UHID_EVENT_SIZE);
     var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
-    const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
-    @memcpy(buf[0..copy_len], bytes[0..copy_len]);
+    const bytes = std.mem.asBytes(&ev);
+    @memcpy(buf[0..bytes.len], bytes);
     try write_exact.writeExact(fd, &buf);
 }
 
@@ -346,10 +346,10 @@ pub const UhidDevice = struct {
         ev.payload.country = cfg.country;
         @memcpy(ev.payload.rd_data[0..cfg.descriptor.len], cfg.descriptor);
 
-        const bytes = std.mem.asBytes(&ev);
+        comptime std.debug.assert(@sizeOf(UhidCreate2Event) <= UHID_EVENT_SIZE);
         var buf: [UHID_EVENT_SIZE]u8 = std.mem.zeroes([UHID_EVENT_SIZE]u8);
-        const copy_len = @min(bytes.len, UHID_EVENT_SIZE);
-        @memcpy(buf[0..copy_len], bytes[0..copy_len]);
+        const bytes = std.mem.asBytes(&ev);
+        @memcpy(buf[0..bytes.len], bytes);
         write_exact.writeExact(fd, &buf) catch return error.UhidCreateFailed;
     }
 
@@ -459,7 +459,6 @@ pub const UhidDevice = struct {
         // field lives past offset 4100, so even a read of 4095 bytes would let us
         // parse a garbage size and walk off the end of data[].
         if (n < UHID_EVENT_SIZE) return error.IncompleteUhidEvent;
-        if (n < 4) return null;
         const ev_type = std.mem.readInt(u32, buf[0..4], .little);
         if (ev_type != UHID_OUTPUT) return null;
         // kernel struct uhid_event: { u32 type; union payload; }

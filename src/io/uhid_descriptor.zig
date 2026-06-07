@@ -100,9 +100,7 @@ const PID_MANDATORY_REPORT_IDS = [_]u8{
     PID_POOL_REPORT_ID, // 15
 };
 
-/// Input report ID used for the main gamepad report. Kept `1` so a simple
-/// gamepad (no output/feature reports) could legally omit the ID prefix; we
-/// still emit it for forward-compat with FFB output reports.
+/// Input report ID for the main gamepad report.
 pub const INPUT_REPORT_ID: u8 = 1;
 
 /// Output report ID used for the FFB rumble output report. 2 byte payload
@@ -2072,10 +2070,7 @@ test "buildForPid: stays within HID_MAX_DESCRIPTOR_SIZE" {
     try testing.expect(desc.len <= uhid.HID_MAX_DESCRIPTOR_SIZE);
 }
 
-// TODO: pin the byte sequence emitted by buildForPid against a known-good
-// reference once real-hardware validates kernel `hid-universal-pidff` FFB init
-// (no `pidff_find_reports -ENODEV`). Until then this test is intentionally skipped.
-test "buildForPid: matches reference PID descriptor (Moza R5)" {
+test "buildForPid: golden fixture pending real-hw validation" {
     return error.SkipZigTest;
 }
 

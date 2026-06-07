@@ -67,6 +67,35 @@ pub const RingBuffer = struct {
     }
 };
 
+// Init libusb, open the device, detach any kernel driver, and claim the
+// interface. On any failure the partially-acquired state is rolled back and
+// the error is returned; on success the caller owns ctx + handle and the
+// claimed interface.
+fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
+    ctx: *c.libusb_context,
+    handle: *c.libusb_device_handle,
+} {
+    var ctx: ?*c.libusb_context = null;
+    if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
+
+    const handle = c.libusb_open_device_with_vid_pid(ctx, vid, pid) orelse {
+        c.libusb_exit(ctx);
+        return error.NotFound;
+    };
+
+    _ = c.libusb_detach_kernel_driver(handle, interface_id);
+
+    const rc = c.libusb_claim_interface(handle, interface_id);
+    if (rc != 0) {
+        _ = c.libusb_attach_kernel_driver(handle, interface_id);
+        c.libusb_close(handle);
+        c.libusb_exit(ctx);
+        return if (rc == c.LIBUSB_ERROR_BUSY) error.Busy else error.ClaimFailed;
+    }
+
+    return .{ .ctx = ctx.?, .handle = handle };
+}
+
 pub const UsbrawDevice = struct {
     handle: *c.libusb_device_handle,
     ctx: *c.libusb_context,
@@ -89,29 +118,9 @@ pub const UsbrawDevice = struct {
         ep_in: u8,
         ep_out: u8,
     ) !*UsbrawDevice {
-        var ctx: ?*c.libusb_context = null;
-        if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
-
-        const handle = c.libusb_open_device_with_vid_pid(ctx, vid, pid) orelse {
-            c.libusb_exit(ctx);
-            return error.NotFound;
-        };
-
-        _ = c.libusb_detach_kernel_driver(handle, interface_id);
-
-        const rc = c.libusb_claim_interface(handle, interface_id);
-        if (rc == c.LIBUSB_ERROR_BUSY) {
-            _ = c.libusb_attach_kernel_driver(handle, interface_id);
-            c.libusb_close(handle);
-            c.libusb_exit(ctx);
-            return error.Busy;
-        }
-        if (rc != 0) {
-            _ = c.libusb_attach_kernel_driver(handle, interface_id);
-            c.libusb_close(handle);
-            c.libusb_exit(ctx);
-            return error.ClaimFailed;
-        }
+        const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
+        const ctx = claimed.ctx;
+        const handle = claimed.handle;
 
         // Claim succeeded; release it and restore the kernel driver on any later
         // failure so the interface is never leaked claimed-but-unowned.
@@ -119,7 +128,7 @@ pub const UsbrawDevice = struct {
             _ = c.libusb_release_interface(handle, interface_id);
             _ = c.libusb_attach_kernel_driver(handle, interface_id);
             c.libusb_close(handle);
-            c.libusb_exit(ctx.?);
+            c.libusb_exit(ctx);
         }
 
         const pipe_fds = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
@@ -130,7 +139,7 @@ pub const UsbrawDevice = struct {
         errdefer alloc.destroy(self);
         self.* = .{
             .handle = handle,
-            .ctx = ctx.?,
+            .ctx = ctx,
             .ep_in = ep_in,
             .ep_out = ep_out,
             .interface_id = @intCast(interface_id),
@@ -262,29 +271,9 @@ pub const UsbrawSuppress = struct {
         pid: u16,
         interface_id: u8,
     ) !*UsbrawSuppress {
-        var ctx: ?*c.libusb_context = null;
-        if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
-
-        const handle = c.libusb_open_device_with_vid_pid(ctx, vid, pid) orelse {
-            c.libusb_exit(ctx);
-            return error.NotFound;
-        };
-
-        _ = c.libusb_detach_kernel_driver(handle, interface_id);
-
-        const rc = c.libusb_claim_interface(handle, interface_id);
-        if (rc == c.LIBUSB_ERROR_BUSY) {
-            _ = c.libusb_attach_kernel_driver(handle, interface_id);
-            c.libusb_close(handle);
-            c.libusb_exit(ctx);
-            return error.Busy;
-        }
-        if (rc != 0) {
-            _ = c.libusb_attach_kernel_driver(handle, interface_id);
-            c.libusb_close(handle);
-            c.libusb_exit(ctx);
-            return error.ClaimFailed;
-        }
+        const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
+        const ctx = claimed.ctx;
+        const handle = claimed.handle;
 
         const self = alloc.create(UsbrawSuppress) catch |err| {
             _ = c.libusb_release_interface(handle, interface_id);
@@ -295,7 +284,7 @@ pub const UsbrawSuppress = struct {
         };
         self.* = .{
             .handle = handle,
-            .ctx = ctx.?,
+            .ctx = ctx,
             .interface_id = @intCast(interface_id),
             .allocator = alloc,
         };
