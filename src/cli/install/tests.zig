@@ -26,6 +26,7 @@ const parseYesNoDefaultYes = plan_mod.parseYesNoDefaultYes;
 const planSystemctlUser = plan_mod.planSystemctlUser;
 const installWillStartUserService = plan_mod.installWillStartUserService;
 const atomicInstallBinary = plan_mod.atomicInstallBinary;
+const copyFile = plan_mod.copyFile;
 const userInGroup = plan_mod.userInGroup;
 const ensureDirAll = plan_mod.ensureDirAll;
 const SystemctlUserMode = plan_mod.SystemctlUserMode;
@@ -2714,6 +2715,36 @@ test "install: atomicInstallBinary replaces destination atomically" {
     // Mode must be 0o755.
     const stat = try std.fs.cwd().statFile(dst_path);
     try testing.expectEqual(@as(u32, 0o755), stat.mode & 0o777);
+}
+
+test "install: copyFile preserves source mode regardless of umask" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src.toml", .{dir});
+    defer allocator.free(src_path);
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.toml", .{dir});
+    defer allocator.free(dst_path);
+
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{ .mode = 0o644 });
+        defer f.close();
+        try f.writeAll("name = \"x\"\n");
+    }
+    try std.posix.fchmodat(std.posix.AT.FDCWD, src_path, 0o644, 0);
+
+    // Restrictive umask would mask 0o644 down to 0o600 without an explicit chmod.
+    const prev_umask = std.os.linux.syscall1(.umask, 0o077);
+    defer _ = std.os.linux.syscall1(.umask, prev_umask);
+
+    try copyFile(src_path, dst_path);
+
+    const stat = try std.fs.cwd().statFile(dst_path);
+    try testing.expectEqual(@as(u32, 0o644), stat.mode & 0o777);
 }
 
 test "install: atomicInstallBinary rename succeeds while dst has open readers" {

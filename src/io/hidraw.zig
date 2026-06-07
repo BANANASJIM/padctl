@@ -139,6 +139,7 @@ pub const HidrawDevice = struct {
             if (dev_vid != vid or dev_pid != pid) continue;
 
             const owned = try allocator.dupe(u8, path);
+            errdefer allocator.free(owned);
             try paths.append(allocator, owned);
         }
 

@@ -100,8 +100,12 @@ pub fn dirIsNonEmpty(path: []const u8) bool {
 }
 
 // Atomic copy (temp + rename) preserving source mode. No partial dst on failure.
+// copyFileAbsolute creates dst via open(O_CREAT) subject to umask, so the source
+// permission bits are re-applied explicitly to keep the result deterministic.
 pub fn copyFile(src: []const u8, dst: []const u8) !void {
+    const src_stat = try std.fs.cwd().statFile(src);
     try std.fs.copyFileAbsolute(src, dst, .{});
+    try std.posix.fchmodat(std.posix.AT.FDCWD, dst, @intCast(src_stat.mode & 0o777), 0);
 }
 
 // Write to {dst}.new then rename(2) over dst — avoids ETXTBSY when dst is currently executing.
