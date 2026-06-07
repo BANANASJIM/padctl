@@ -1,4 +1,5 @@
 const std = @import("std");
+const linux = std.os.linux;
 const state = @import("../core/state.zig");
 const device = @import("../config/device.zig");
 const input_codes = @import("../config/input_codes.zig");
@@ -30,8 +31,8 @@ const UI_END_FF_ERASE = ioctl_constants.UI_END_FF_ERASE;
 const MAX_EVENTS = 64;
 
 fn ioctlInt(fd: std.posix.fd_t, request: u32, val: c_int) !void {
-    const rc = std.os.linux.ioctl(fd, request, @intCast(val));
-    return switch (std.posix.errno(rc)) {
+    const rc = linux.ioctl(fd, request, @intCast(val));
+    return switch (linux.E.init(rc)) {
         .SUCCESS => {},
         .PERM => error.PermissionDenied,
         else => |e| std.posix.unexpectedErrno(e),
@@ -39,8 +40,8 @@ fn ioctlInt(fd: std.posix.fd_t, request: u32, val: c_int) !void {
 }
 
 fn ioctlPtr(fd: std.posix.fd_t, request: u32, ptr: usize) !void {
-    const rc = std.os.linux.ioctl(fd, request, ptr);
-    return switch (std.posix.errno(rc)) {
+    const rc = linux.ioctl(fd, request, ptr);
+    return switch (linux.E.init(rc)) {
         .SUCCESS => {},
         .PERM => error.PermissionDenied,
         else => |e| std.posix.unexpectedErrno(e),
@@ -1743,4 +1744,20 @@ test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
     try std.testing.expectEqual(r1.strong, r2.strong);
     try std.testing.expectEqual(r1.weak, r2.weak);
     try std.testing.expectEqual(r1.duration_ms, r2.duration_ms);
+}
+
+// ioctlInt/ioctlPtr decode the raw `linux.ioctl` return with `linux.E.init`,
+// not `std.posix.errno`. Under libc, `posix.errno` reads the C errno global
+// (always SUCCESS for a raw syscall that never literally returns -1), so a
+// failing ioctl was silently swallowed and the function returned void.
+// Driving the ioctl over fd=-1 yields EBADF, which must now surface as error.
+// Falsifiability: restoring `std.posix.errno(rc)` makes both tests fail —
+// the ioctl returns void instead of the expected error.
+test "uinput: ioctlInt surfaces ioctl errno as error (EBADF on bad fd)" {
+    try std.testing.expectError(error.Unexpected, ioctlInt(-1, UI_SET_EVBIT, c.EV_KEY));
+}
+
+test "uinput: ioctlPtr surfaces ioctl errno as error (EBADF on bad fd)" {
+    var setup = std.mem.zeroes(c.uinput_setup);
+    try std.testing.expectError(error.Unexpected, ioctlPtr(-1, UI_DEV_SETUP, @intFromPtr(&setup)));
 }

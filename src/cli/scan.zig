@@ -75,8 +75,9 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
 
         var name_buf: [NAME_BUF_LEN]u8 = std.mem.zeroes([NAME_BUF_LEN]u8);
         const name_rc = linux.ioctl(fd, HIDIOCGRAWNAME, @intFromPtr(&name_buf));
-        if (std.posix.errno(name_rc) != .SUCCESS) {
-            std.log.warn("scan: HIDIOCGRAWNAME failed for {s}: {}", .{ path, std.posix.errno(name_rc) });
+        const name_errno = linux.E.init(name_rc);
+        if (name_errno != .SUCCESS) {
+            std.log.warn("scan: HIDIOCGRAWNAME failed for {s}: {s}", .{ path, @tagName(name_errno) });
         }
         const name_raw = std.mem.sliceTo(&name_buf, 0);
 

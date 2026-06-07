@@ -27,6 +27,15 @@ fn BoundedArray(comptime T: type, comptime cap: usize) type {
     };
 }
 
+/// EVIOCGRAB the evdev fd and decode the raw `linux.ioctl` return with
+/// `linux.E.init`. Under libc, `std.posix.errno` reads the C errno global
+/// (always SUCCESS for a raw syscall that never literally returns -1), so a
+/// failing grab was silently swallowed and the un-grabbed fd was still kept.
+fn evdevGrabErrno(evfd: posix.fd_t) linux.E {
+    const rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, 1);
+    return linux.E.init(rc);
+}
+
 pub const HidrawDevice = struct {
     fd: posix.fd_t,
     evdev_fds: BoundedArray(posix.fd_t, MAX_EVDEV_GRABS),
@@ -71,7 +80,8 @@ pub const HidrawDevice = struct {
         var i: u8 = 0;
         while (i < 64) : (i += 1) {
             const path = try std.fmt.allocPrint(allocator, "{s}/hidraw{d}", .{ dev_root, i });
-            defer allocator.free(path);
+            var keep_path = false;
+            defer if (!keep_path) allocator.free(path);
 
             const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
             defer posix.close(fd);
@@ -89,7 +99,8 @@ pub const HidrawDevice = struct {
                 if (iface != required_iface) continue;
             }
 
-            return try std.fmt.allocPrint(allocator, "{s}/hidraw{d}", .{ dev_root, i });
+            keep_path = true;
+            return path;
         }
         return error.NotFound;
     }
@@ -193,8 +204,7 @@ pub const HidrawDevice = struct {
                 std.log.warn("evdev grab: open {s} failed: {}", .{ dev_path, err });
                 continue;
             };
-            const grab_rc = linux.ioctl(evfd, ioctl.EVIOCGRAB, 1);
-            const grab_errno = posix.errno(grab_rc);
+            const grab_errno = evdevGrabErrno(evfd);
             if (grab_errno != .SUCCESS) {
                 std.log.warn("evdev grab: EVIOCGRAB {s} failed: {s}", .{ dev_path, @tagName(grab_errno) });
                 posix.close(evfd);
@@ -527,10 +537,11 @@ test "hidraw: grabAssociatedEvdev: matches event by phys prefix" {
 
     var dev = HidrawDevice.init(allocator);
     // Only event7 matches the phys prefix; event9 and event11 are excluded.
+    // event7 is a regular file, so its EVIOCGRAB returns ENOTTY — now correctly
+    // surfaced via linux.E.init, so the un-grabbed fd is NOT appended (count 0).
+    // The phys-prefix matching is still exercised: only event7 reaches the grab.
     dev.grabAssociatedEvdevWithRoot("/dev/hidraw3", tmp_path, input_dev_root) catch {};
-    // On regular files with O_RDWR, EVIOCGRAB returns 0 (harmless no-op),
-    // so exactly the 1 matching event (event7) is grabbed.
-    try std.testing.expectEqual(@as(usize, 1), dev.evdev_fds.len);
+    try std.testing.expectEqual(@as(usize, 0), dev.evdev_fds.len);
     for (dev.evdev_fds.constSlice()) |fd| posix.close(fd);
     dev.evdev_fds.len = 0;
 }
@@ -587,4 +598,16 @@ test "hidraw: featureReport surfaces ioctl errno as error" {
 
     const payload = [_]u8{ 0x01, 0x02, 0x03 };
     try std.testing.expectError(DeviceIO.WriteError.Io, dev_io.featureReport(&payload));
+}
+
+// EVIOCGRAB over a bad fd (-1) returns EBADF. evdevGrabErrno must decode this
+// via linux.E.init and surface it as a non-SUCCESS errno, so the caller skips
+// appending the un-grabbed fd.
+// Falsifiability: with the old `posix.errno(grab_rc)` decode this returns
+// .SUCCESS under libc (C errno is untouched by the raw syscall), so the
+// assertion below fails.
+test "hidraw: evdevGrabErrno surfaces ioctl errno on bad fd" {
+    const e = evdevGrabErrno(-1);
+    try std.testing.expect(e != .SUCCESS);
+    try std.testing.expectEqual(linux.E.BADF, e);
 }
