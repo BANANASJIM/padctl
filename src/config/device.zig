@@ -264,6 +264,13 @@ fn isSuppressInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
     return false;
 }
 
+fn interfaceExists(cfg: *const DeviceConfig, iface_id: i64) bool {
+    for (cfg.device.interface) |iface| {
+        if (iface.id == iface_id) return true;
+    }
+    return false;
+}
+
 /// Number of interfaces opened into the devices[] array (everything except
 /// suppress-class interfaces). Suppress interfaces are claimed separately and
 /// consume no DeviceIO slot.
@@ -314,18 +321,22 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     if (openedInterfaceCount(cfg) == 0) return error.InvalidConfig;
 
     // A suppress interface is claimed only to evict the kernel driver; it is
-    // never read or written, so no report/command/init may reference it.
+    // never read or written, so no report/command/init may reference it. Every
+    // referenced interface id must also exist in [[device.interface]].
     for (cfg.report) |report| {
+        if (!interfaceExists(cfg, report.interface)) return error.InvalidConfig;
         if (isSuppressInterface(cfg, report.interface)) return error.InvalidConfig;
     }
     if (cfg.commands) |cmds| {
         var it = cmds.map.iterator();
         while (it.next()) |entry| {
+            if (!interfaceExists(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
         }
     }
     if (cfg.device.init) |init_cfg| {
         if (init_cfg.interface) |iface_id| {
+            if (!interfaceExists(cfg, iface_id)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, iface_id)) return error.InvalidConfig;
         }
     }
@@ -1874,4 +1885,56 @@ test "validate: clone_vid_pid=false with zero device.vid is legal" {
     const result = try parseString(allocator, toml_zero_vid_no_clone);
     defer result.deinit();
     try std.testing.expect(!result.value.output.?.force_feedback.?.clone_vid_pid);
+}
+
+test "device: report referencing nonexistent interface id is rejected" {
+    const allocator = std.testing.allocator;
+    const bad_ref_toml =
+        \\[device]
+        \\name = "Bad Ref"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 9
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_ref_toml));
+}
+
+test "device: command referencing nonexistent interface id is rejected" {
+    const allocator = std.testing.allocator;
+    const bad_cmd_toml =
+        \\[device]
+        \\name = "Bad Cmd Ref"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[commands.rumble]
+        \\interface = 7
+        \\template = "00 {strong} {weak}"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_cmd_toml));
 }
