@@ -45,6 +45,19 @@ fn openDeviceWithRetryForRebind(
     return openDeviceWithRetry(allocator, iface, vid, pid);
 }
 
+/// True when a client-supplied absolute mapping path resides directly in one of
+/// the trusted mapping config dirs. Rejects arbitrary absolute paths so a local
+/// caller on the world-reachable control socket cannot make the daemon parse
+/// (and leak parse diagnostics from) files outside the mapping search path.
+fn absolutePathInMappingDirs(path: []const u8, dirs: []const []const u8) bool {
+    const parent = std.fs.path.dirname(path) orelse return false;
+    for (dirs) |dir| {
+        const trimmed = std.mem.trimRight(u8, dir, "/");
+        if (std.mem.eql(u8, parent, trimmed)) return true;
+    }
+    return false;
+}
+
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
     phys_key: []const u8,
@@ -1091,6 +1104,11 @@ pub const Supervisor = struct {
             std.log.warn("rebuildAuxIfChanged during switch: {}", .{err});
         };
         restartManagedThread(m) catch |err| {
+            if (tx.old_mapping_cfg) |old_cfg| {
+                m.instance.rebuildAuxIfChanged(old_cfg, &tx.parsed_ptr.?.value) catch |rollback_aux_err| {
+                    std.log.warn("rebuildAuxIfChanged rollback during switch: {}", .{rollback_aux_err});
+                };
+            }
             if (m.instance.mapper) |*cur| {
                 cur.deinit();
                 m.instance.mapper = null;
@@ -1728,18 +1746,26 @@ pub const Supervisor = struct {
             return;
         }
 
-        // If the name is an absolute path, use it directly (client-resolved).
-        // Otherwise, do server-side lookup from config dirs.
-        const path: ?[]const u8 = if (name.len > 0 and name[0] == '/')
-            (self.allocator.dupe(u8, name) catch {
-                cs.sendResponse(fd, "ERR oom\n");
-                return;
-            })
-        else
-            self.lookupSwitchMappingPath(name) catch {
+        // If the name is an absolute path, accept it only when it resides in a
+        // trusted mapping config dir; otherwise do server-side name lookup.
+        const path: ?[]const u8 = if (name.len > 0 and name[0] == '/') blk: {
+            const dirs = config_paths.resolveMappingConfigDirs(self.allocator) catch {
                 cs.sendResponse(fd, "ERR mapping-lookup-failed\n");
                 return;
             };
+            defer config_paths.freeConfigDirs(self.allocator, dirs);
+            if (!absolutePathInMappingDirs(name, dirs)) {
+                cs.sendResponse(fd, "ERR mapping-not-allowed\n");
+                return;
+            }
+            break :blk (self.allocator.dupe(u8, name) catch {
+                cs.sendResponse(fd, "ERR oom\n");
+                return;
+            });
+        } else self.lookupSwitchMappingPath(name) catch {
+            cs.sendResponse(fd, "ERR mapping-lookup-failed\n");
+            return;
+        };
         if (path == null) {
             cs.sendResponse(fd, "ERR mapping-not-found\n");
             return;
@@ -3552,6 +3578,85 @@ test "supervisor: switch to mapping with new aux KEY_* rebuilds aux caps" {
     try testing.expect(caps.needs_keyboard);
 }
 
+test "supervisor: switch restart failure reverts aux caps on rollback" {
+    // Regression guard: commitSwitchTarget rebuilds aux caps for the new mapping
+    // before restarting the worker. When that restart fails, the rollback must
+    // also call rebuildAuxIfChanged to revert the aux device back to the old
+    // mapping's caps — otherwise the daemon keeps an aux device shaped for a
+    // mapping that never took effect. The reload path already does this; this
+    // mirrors it for the switch path.
+    //
+    // Like the forward-path test, this uses a device config with no [output]
+    // section so rebuildAuxIfChanged short-circuits and is observed via the
+    // rebuild_aux_calls counter. Forward call = 1, rollback revert = 2.
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    // Base mapping the instance starts on, so commitSwitchTarget captures a
+    // non-null old_mapping_cfg and the rollback has something to revert to.
+    const base_map = try mapping_mod.parseString(allocator, "");
+    defer base_map.deinit();
+
+    const base_dir = "/tmp/padctl_supervisor_test_switch_rollback_aux";
+    std.fs.deleteTreeAbsolute(base_dir) catch {};
+    try std.fs.makeDirAbsolute(base_dir);
+    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+
+    const mappings_dir = try std.fmt.allocPrint(allocator, "{s}/mappings", .{base_dir});
+    defer allocator.free(mappings_dir);
+    try std.fs.makeDirAbsolute(mappings_dir);
+    const mapping_path = try std.fmt.allocPrint(allocator, "{s}/keys.toml", .{mappings_dir});
+    defer allocator.free(mapping_path);
+    {
+        const f = try std.fs.createFileAbsolute(mapping_path, .{});
+        defer f.close();
+        try f.writeAll("[remap]\nC = \"KEY_G\"\n");
+    }
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    inst.mapping_cfg = &base_map.value;
+    try sup.spawnInstance("usb-1-1", inst, null);
+
+    try testing.expectEqual(@as(usize, 0), sup.managed.items[0].instance.rebuild_aux_calls);
+
+    sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+
+    // Forward restart fails → commitSwitchTarget takes its rollback branch.
+    test_fail_next_restart_managed = true;
+    sup.handleSwitch(resp_fds[0], "keys", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR switch-failed\n", resp_buf[0..n]);
+
+    // Forward rebuild (new caps) + rollback revert (old caps) = 2 calls.
+    try testing.expectEqual(@as(usize, 2), sup.managed.items[0].instance.rebuild_aux_calls);
+}
+
 test "supervisor: Supervisor: SWITCH with no devices returns no-devices" {
     const allocator = testing.allocator;
 
@@ -5349,4 +5454,62 @@ test "supervisor: resolveEvdevNodesAt returns all matching nodes with device nam
     try testing.expect(std.mem.indexOf(u8, s, "/dev/input/event5") != null);
     try testing.expect(std.mem.indexOf(u8, s, "/dev/input/event7") != null);
     try testing.expect(std.mem.indexOf(u8, s, "Vader 5 Pro IMU") != null);
+}
+
+// Falsifiability: drop the absolutePathInMappingDirs guard (or invert it) and the
+// negative cases below accept arbitrary absolute paths, failing these asserts.
+test "supervisor: absolutePathInMappingDirs accepts only files in trusted dirs" {
+    const dirs = [_][]const u8{
+        "/home/u/.config/padctl/mappings",
+        "/etc/padctl/mappings/",
+        "/usr/share/padctl/mappings",
+    };
+    try testing.expect(absolutePathInMappingDirs("/home/u/.config/padctl/mappings/fps.toml", &dirs));
+    try testing.expect(absolutePathInMappingDirs("/etc/padctl/mappings/racing.toml", &dirs));
+    try testing.expect(absolutePathInMappingDirs("/usr/share/padctl/mappings/x.toml", &dirs));
+    try testing.expect(!absolutePathInMappingDirs("/etc/passwd", &dirs));
+    try testing.expect(!absolutePathInMappingDirs("/home/u/.config/padctl/mappings/sub/fps.toml", &dirs));
+    try testing.expect(!absolutePathInMappingDirs("/home/u/.ssh/id_rsa", &dirs));
+    try testing.expect(!absolutePathInMappingDirs("/usr/share/padctl/devices/x.toml", &dirs));
+}
+
+// Falsifiability: revert handleSwitch to dupe any absolute path unconditionally
+// and this test FAILS — the daemon would attempt parseFile("/etc/passwd") and
+// reply "ERR mapping-parse-failed" instead of refusing the path outright.
+test "supervisor: SWITCH rejects absolute path outside mapping dirs" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    try sup.spawnInstance("usb-1-1", inst, null);
+
+    sup.handleSwitch(resp_fds[0], "/etc/passwd", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR mapping-not-allowed\n", resp_buf[0..n]);
 }

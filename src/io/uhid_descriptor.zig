@@ -1281,12 +1281,15 @@ pub fn encodeReport(
     }
 
     // --- Touchpad (per-finger tip + X + Y) ---
-    if (cfg.touchpad) |_| {
-        const finger0 = [_]struct { active: bool, x: i16, y: i16 }{
+    if (cfg.touchpad) |tp| {
+        const fingers = [_]struct { active: bool, x: i16, y: i16 }{
             .{ .active = gs.touch0_active, .x = gs.touch0_x, .y = gs.touch0_y },
             .{ .active = gs.touch1_active, .x = gs.touch1_x, .y = gs.touch1_y },
         };
-        for (finger0) |f| {
+        // Finger count must match the descriptor, which clamps max_slots to
+        // [1, MAX_TOUCH_CONTACTS]; a mismatch desyncs the wire length.
+        const slots: usize = if (tp.max_slots) |s| @intCast(@min(@max(s, 1), MAX_TOUCH_CONTACTS)) else MAX_TOUCH_CONTACTS;
+        for (fingers[0..slots]) |f| {
             if (pos + 5 > buf.len) return error.ReportTooLong;
             buf[pos] = if (f.active) 1 else 0;
             pos += 1;
@@ -2212,6 +2215,42 @@ test "encodeReport: Steam Deck TOML produces a non-empty report with correct ID"
     // sticks(4×2=8) + triggers(2) + touchpad(2 fingers × 5=10) = 25.
     try testing.expect(r.len > 1);
     try testing.expect(r.len <= MAX_REPORT_BYTES);
+}
+
+test "encodeReport: touchpad finger count matches descriptor max_slots" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const axes = try makeAxesMap(a, &.{
+        .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = -32768, .max = 32767 } },
+    });
+
+    const cases = [_]struct { max_slots: ?i64, fingers: usize }{
+        .{ .max_slots = 1, .fingers = 1 },
+        .{ .max_slots = 2, .fingers = 2 },
+        .{ .max_slots = null, .fingers = MAX_TOUCH_CONTACTS },
+    };
+
+    for (cases) |tc| {
+        const out = device.OutputConfig{
+            .name = "touch",
+            .axes = axes,
+            .touchpad = .{
+                .x_min = -32768,
+                .x_max = 32767,
+                .y_min = -32768,
+                .y_max = 32767,
+                .max_slots = tc.max_slots,
+            },
+        };
+
+        var buf: [MAX_REPORT_BYTES]u8 = undefined;
+        const r = try encodeReport(out, .{}, &buf);
+        // Non-touchpad region: ID(1) + sticks(ABS_X → 2). Touchpad finger = 5 bytes.
+        const expected_len: usize = 1 + 2 + tc.fingers * 5;
+        try testing.expectEqual(expected_len, r.len);
+    }
 }
 
 test "encodeReport: empty config is rejected by descriptor builder, encoder never sees it" {

@@ -7,7 +7,6 @@ const runtime_mod = @import("runtime.zig");
 const WasmPlugin = runtime_mod.WasmPlugin;
 const LoadError = runtime_mod.LoadError;
 const ProcessResult = runtime_mod.ProcessResult;
-const GamepadStateDelta = @import("../core/state.zig").GamepadStateDelta;
 
 const wasm_log = std.log.scoped(.wasm3);
 
@@ -132,7 +131,10 @@ pub const Wasm3Plugin = struct {
 
         if (ret >= 0) {
             memcpyFromWasm(out, mem, output_offset) orelse return .drop;
-            return .{ .override = deltaFromBytes(out) };
+            // No structured wasm-to-delta ABI yet, so an override here would carry
+            // an empty delta that freezes the pad. Fall back to passthrough until
+            // the ABI lands; the raw report still drives the interpreter.
+            return .passthrough;
         } else {
             return .drop;
         }
@@ -340,18 +342,6 @@ pub const Wasm3Plugin = struct {
             unload(@ptrCast(s));
         }
     }
-
-    // -- helpers --
-
-    fn deltaFromBytes(buf: []const u8) GamepadStateDelta {
-        // GamepadStateDelta has Zig-private layout (optionals), so we cannot @bitCast
-        // raw plugin output bytes into it. Current plugins (IMU calibration, echo)
-        // write the modified raw HID report into `out`; downstream parses that buffer
-        // directly via the device protocol path. The override delta payload is unused
-        // until a structured wasm-to-delta ABI is defined.
-        _ = buf;
-        return .{};
-    }
 };
 
 // --- tests ---
@@ -385,7 +375,7 @@ test "wasm3: initDevice returns true" {
     try testing.expect(plugin.initDevice());
 }
 
-test "wasm3: processReport echo round-trip returns override" {
+test "wasm3: processReport echo round-trip writes out buffer and passes through" {
     const t = try testCreate();
     const plugin = t.plugin;
     defer plugin.destroy(testing.allocator);
@@ -394,12 +384,25 @@ test "wasm3: processReport echo round-trip returns override" {
     try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
     const input = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
     var out: [4]u8 = undefined;
-    const result = plugin.processReport(&input, &out);
-    switch (result) {
-        .override => {},
-        else => return error.ExpectedOverride,
-    }
+    try testing.expectEqual(ProcessResult.passthrough, plugin.processReport(&input, &out));
     try testing.expectEqualSlices(u8, &input, &out);
+}
+
+test "wasm3: processReport never returns an empty-delta override (fail-safe passthrough)" {
+    // deltaFromBytes has no structured wasm-to-delta ABI, so it always yields an
+    // empty delta. Returning that as `.override` makes the event loop apply a
+    // no-op delta and skip interpreter parsing, freezing the pad. Until the ABI
+    // lands, a successful plugin call must fall back to passthrough so the raw
+    // report still drives the interpreter.
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+    const input = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    var out: [4]u8 = undefined;
+    try testing.expectEqual(ProcessResult.passthrough, plugin.processReport(&input, &out));
 }
 
 test "wasm3: no exports returns false/passthrough" {
@@ -604,11 +607,7 @@ test "imu_cal: init_device reads calibration via device_read" {
     writeI16le(&raw, 22, 1000); // accel_x
 
     var out: [64]u8 = undefined;
-    const result = plugin.processReport(&raw, &out);
-    switch (result) {
-        .override => {},
-        else => return error.ExpectedOverride,
-    }
+    try testing.expectEqual(ProcessResult.passthrough, plugin.processReport(&raw, &out));
 
     // Gyro: 10 * 1024000 / 2000 = 5120
     try testing.expectEqual(@as(i16, 5120), readI16le(&out, 16));
@@ -643,11 +642,7 @@ test "imu_cal: process_calibration path and calibrated output" {
     raw[1] = 0xAB;
 
     var out: [64]u8 = undefined;
-    const result = plugin.processReport(&raw, &out);
-    switch (result) {
-        .override => {},
-        else => return error.ExpectedOverride,
-    }
+    try testing.expectEqual(ProcessResult.passthrough, plugin.processReport(&raw, &out));
 
     // Gyro: calibrated = raw * 1024000 / 2000 = raw * 512
     try testing.expectEqual(@as(i16, 10 * 512), readI16le(&out, 16)); // 5120
@@ -688,11 +683,7 @@ test "imu_cal: zero denominator fallback" {
     writeI16le(&raw, 22, 100); // accel_x
 
     var out: [64]u8 = undefined;
-    const result = plugin.processReport(&raw, &out);
-    switch (result) {
-        .override => {},
-        else => return error.ExpectedOverride,
-    }
+    try testing.expectEqual(ProcessResult.passthrough, plugin.processReport(&raw, &out));
 
     // Gyro fallback: 100 * 2097152 / 32767 = 6400 (truncated integer division)
     const gyro_expected: i16 = @intCast(@divTrunc(@as(i64, 100) * 2097152, 32767));
