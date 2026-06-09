@@ -63,7 +63,7 @@ pub const ControlSocket = struct {
         try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
         errdefer std.fs.deleteFileAbsolute(path) catch {};
 
-        const rc = linux.chmod(path_z.ptr, 0o666);
+        const rc = linux.chmod(path_z.ptr, 0o660);
         if (linux.E.init(rc) != .SUCCESS) return error.ChmodFailed;
 
         try posix.listen(fd, 4);
@@ -560,6 +560,30 @@ test "control_socket: ControlSocket: init writes advertised file with socket pat
     var buf: [256]u8 = undefined;
     const n = try file.readAll(&buf);
     try testing.expectEqualStrings(socket_path, buf[0..n]);
+}
+
+// Falsifiability: restore the chmod argument to 0o666 in ControlSocket.init and
+// this test FAILS — the world-write bit (0o002) is set on the bound socket,
+// which is the local-privilege-escalation surface this hardening removes.
+test "control_socket: ControlSocket: init binds socket without world-write" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const socket_path = try std.fs.path.join(allocator, &.{ root, "perm.sock" });
+    defer allocator.free(socket_path);
+
+    var cs = ControlSocket.init(allocator, socket_path) catch |err| {
+        if (err == error.AccessDenied) return;
+        return err;
+    };
+    defer cs.deinit();
+
+    const st = try posix.fstatat(posix.AT.FDCWD, socket_path, 0);
+    try testing.expectEqual(@as(u32, 0), st.mode & 0o002);
 }
 
 // Falsifiability: drop the deleteFileAbsolute(self.advertised_path) branch in
