@@ -1104,6 +1104,11 @@ pub const Supervisor = struct {
             std.log.warn("rebuildAuxIfChanged during switch: {}", .{err});
         };
         restartManagedThread(m) catch |err| {
+            if (tx.old_mapping_cfg) |old_cfg| {
+                m.instance.rebuildAuxIfChanged(old_cfg, &tx.parsed_ptr.?.value) catch |rollback_aux_err| {
+                    std.log.warn("rebuildAuxIfChanged rollback during switch: {}", .{rollback_aux_err});
+                };
+            }
             if (m.instance.mapper) |*cur| {
                 cur.deinit();
                 m.instance.mapper = null;
@@ -3571,6 +3576,85 @@ test "supervisor: switch to mapping with new aux KEY_* rebuilds aux caps" {
     const new_mcfg = sup.managed.items[0].instance.mapping_cfg.?;
     const caps = mapping_mod.deriveAuxFromMapping(new_mcfg);
     try testing.expect(caps.needs_keyboard);
+}
+
+test "supervisor: switch restart failure reverts aux caps on rollback" {
+    // Regression guard: commitSwitchTarget rebuilds aux caps for the new mapping
+    // before restarting the worker. When that restart fails, the rollback must
+    // also call rebuildAuxIfChanged to revert the aux device back to the old
+    // mapping's caps — otherwise the daemon keeps an aux device shaped for a
+    // mapping that never took effect. The reload path already does this; this
+    // mirrors it for the switch path.
+    //
+    // Like the forward-path test, this uses a device config with no [output]
+    // section so rebuildAuxIfChanged short-circuits and is observed via the
+    // rebuild_aux_calls counter. Forward call = 1, rollback revert = 2.
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    // Base mapping the instance starts on, so commitSwitchTarget captures a
+    // non-null old_mapping_cfg and the rollback has something to revert to.
+    const base_map = try mapping_mod.parseString(allocator, "");
+    defer base_map.deinit();
+
+    const base_dir = "/tmp/padctl_supervisor_test_switch_rollback_aux";
+    std.fs.deleteTreeAbsolute(base_dir) catch {};
+    try std.fs.makeDirAbsolute(base_dir);
+    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+
+    const mappings_dir = try std.fmt.allocPrint(allocator, "{s}/mappings", .{base_dir});
+    defer allocator.free(mappings_dir);
+    try std.fs.makeDirAbsolute(mappings_dir);
+    const mapping_path = try std.fmt.allocPrint(allocator, "{s}/keys.toml", .{mappings_dir});
+    defer allocator.free(mapping_path);
+    {
+        const f = try std.fs.createFileAbsolute(mapping_path, .{});
+        defer f.close();
+        try f.writeAll("[remap]\nC = \"KEY_G\"\n");
+    }
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+
+    const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
+    inst.mapping_cfg = &base_map.value;
+    try sup.spawnInstance("usb-1-1", inst, null);
+
+    try testing.expectEqual(@as(usize, 0), sup.managed.items[0].instance.rebuild_aux_calls);
+
+    sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+
+    // Forward restart fails → commitSwitchTarget takes its rollback branch.
+    test_fail_next_restart_managed = true;
+    sup.handleSwitch(resp_fds[0], "keys", null);
+
+    var resp_buf: [64]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR switch-failed\n", resp_buf[0..n]);
+
+    // Forward rebuild (new caps) + rollback revert (old caps) = 2 calls.
+    try testing.expectEqual(@as(usize, 2), sup.managed.items[0].instance.rebuild_aux_calls);
 }
 
 test "supervisor: Supervisor: SWITCH with no devices returns no-devices" {

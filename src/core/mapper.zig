@@ -751,15 +751,20 @@ pub const Mapper = struct {
                         continue;
                     }
                     // step() didn't finish (delay after pause_for_release, etc.) — cancel.
+                    self.timer_queue.cancel(p.timer_token, now_ns);
                     p.emitPendingReleases(aux, &self.injected_buttons);
                     _ = self.active_macros.swapRemove(0);
                 } else {
+                    self.timer_queue.cancel(p.timer_token, now_ns);
                     p.emitPendingReleases(aux, &self.injected_buttons);
                     _ = self.active_macros.swapRemove(0);
                 }
             }
         } else {
-            for (self.active_macros.items) |*p| p.emitPendingReleases(aux, &self.injected_buttons);
+            for (self.active_macros.items) |*p| {
+                self.timer_queue.cancel(p.timer_token, now_ns);
+                p.emitPendingReleases(aux, &self.injected_buttons);
+            }
             self.active_macros.clearRetainingCapacity();
         }
         releasePendingAuxTapReleases(self, aux, now_ns);
@@ -1807,6 +1812,49 @@ test "mapper: pause_for_release macro drained on layer deactivation" {
         else => {},
     };
     try testing.expect(saw_release);
+}
+
+test "mapper: layer change cancels macro delay timer in timer_queue" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\activation = "toggle"
+        \\
+        \\[remap]
+        \\M1 = "macro:hold_x"
+        \\
+        \\[[macro]]
+        \\name = "hold_x"
+        \\steps = [
+        \\  { down = "X" },
+        \\  { delay = 100000 },
+        \\  { up = "X" },
+        \\]
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const sel_mask = buttonBit("Select");
+    const m1_mask = buttonBit("M1");
+
+    // Arm the macro: the long delay step schedules the macro's timer_token in
+    // timer_queue and the macro stays active across the delay window.
+    _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+    try testing.expectEqual(@as(usize, 1), m.timer_queue.heap.count());
+
+    // Toggle the layer on (rising then falling edge on Select) while M1 stays
+    // held. The falling edge fires active_changed, which cancels the active
+    // macro. The macro's delay timer must be cancelled too — otherwise a stale
+    // token fires after the macro is gone.
+    _ = try m.apply(.{ .buttons = m1_mask | sel_mask }, 16, 0);
+    _ = try m.apply(.{ .buttons = m1_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+    try testing.expectEqual(@as(usize, 0), m.timer_queue.heap.count());
 }
 
 test "mapper: hold_toggle pending preserves macros but sticky transition cancels them" {
