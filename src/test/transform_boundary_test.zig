@@ -164,3 +164,50 @@ test "negate/abs single-point saturation matches Lean oracle" {
         try testing.expectEqual(@as(i64, 2147483647), interpreter.runTransformChain(-2147483648, &abs_));
     }
 }
+
+fn makeTriggerToml(comptime field: []const u8, comptime transform: []const u8) []const u8 {
+    return "[device]\nname = \"T\"\nvid = 1\npid = 2\n" ++
+        "[[device.interface]]\nid = 0\nclass = \"hid\"\n" ++
+        "[[report]]\nname = \"r\"\ninterface = 0\nsize = 4\n" ++
+        "[report.match]\noffset = 0\nexpect = [0x01]\n" ++
+        "[report.fields]\n" ++ field ++ " = { offset = 2, type = \"u8\", transform = \"" ++ transform ++ "\" }\n";
+}
+
+// lt/rt/battery_level overshoot past 255 after a transform must saturate to
+// the u8 max, not silently wrap via `& 0xff`. scale(0, 300) maps raw 255 to
+// 300; `300 & 0xff == 44` is the wrong wrapped value, saturate gives 255.
+test "boundary: lt saturates instead of wrapping after overshoot" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, makeTriggerToml("lt", "scale(0, 300)"));
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 4;
+    raw[0] = 0x01;
+    raw[2] = 255;
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 255), delta.lt);
+}
+
+test "boundary: rt saturates instead of wrapping after overshoot" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, makeTriggerToml("rt", "scale(0, 300)"));
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 4;
+    raw[0] = 0x01;
+    raw[2] = 255;
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 255), delta.rt);
+}
+
+test "boundary: battery_level saturates instead of wrapping after overshoot" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, makeTriggerToml("battery_level", "scale(0, 300)"));
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 4;
+    raw[0] = 0x01;
+    raw[2] = 255;
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 255), delta.battery_level);
+}

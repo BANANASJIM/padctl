@@ -126,8 +126,8 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .ay => delta.ay = saturateCast(i16, val),
         .rx => delta.rx = saturateCast(i16, val),
         .ry => delta.ry = saturateCast(i16, val),
-        .lt => delta.lt = @intCast(val & 0xff),
-        .rt => delta.rt = @intCast(val & 0xff),
+        .lt => delta.lt = saturateCast(u8, val),
+        .rt => delta.rt = saturateCast(u8, val),
         .gyro_x => delta.gyro_x = saturateCast(i16, val),
         .gyro_y => delta.gyro_y = saturateCast(i16, val),
         .gyro_z => delta.gyro_z = saturateCast(i16, val),
@@ -140,7 +140,7 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .touch1_y => delta.touch1_y = saturateCast(i16, val),
         .touch0_active => delta.touch0_active = val != 0,
         .touch1_active => delta.touch1_active = val != 0,
-        .battery_level => delta.battery_level = @intCast(val & 0xff),
+        .battery_level => delta.battery_level = saturateCast(u8, val),
         .dpad => {
             const decoded = decodeDpadHat(val);
             delta.dpad_x = decoded.x;
