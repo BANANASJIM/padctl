@@ -462,7 +462,10 @@ fn expandMacroStepDelays(result: *ParseResult) !void {
 pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     const content = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
     defer allocator.free(content);
-    return parseString(allocator, content);
+    var result = try parseString(allocator, content);
+    errdefer result.deinit();
+    try validate(&result.value);
+    return result;
 }
 
 fn macroExists(cfg: *const MappingConfig, name: []const u8) bool {
@@ -603,6 +606,12 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
 
     if (g.degrees_full) |v| {
         if (v <= 0.0 or v > 180.0) return error.InvalidConfig;
+    }
+
+    // deadzone is cast to i16 at runtime (mapper.resolveGyroConfig); accept
+    // only the non-negative i16 range to avoid @intCast panic in Safe builds.
+    if (g.deadzone) |dz| {
+        if (dz < 0 or dz > std.math.maxInt(i16)) return error.InvalidConfig;
     }
 
     if (g.activate) |spec| {
@@ -882,6 +891,21 @@ fn warnLintFindings(findings: []const LintFinding) void {
     }
 }
 
+// Stick deadzone is cast to i16 at runtime (mapper.resolveStickConfig); accept
+// only the non-negative i16 range. sensitivity feeds an f32 accumulator that
+// integrates per-frame; cap it so the accumulator cannot overflow into the
+// @intFromFloat used in stick mouse/scroll modes.
+const stick_sensitivity_max: f64 = 1000.0;
+
+fn validateStick(s: *const StickConfig) !void {
+    if (s.deadzone) |dz| {
+        if (dz < 0 or dz > std.math.maxInt(i16)) return error.InvalidConfig;
+    }
+    if (s.sensitivity) |sens| {
+        if (!(sens >= 0.0) or sens > stick_sensitivity_max) return error.InvalidConfig;
+    }
+}
+
 pub fn validate(cfg: *const MappingConfig) !void {
     if (cfg.remap) |*m| {
         try checkRemapMacros(cfg, m);
@@ -890,6 +914,11 @@ pub fn validate(cfg: *const MappingConfig) !void {
     }
     if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
     if (cfg.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
+
+    if (cfg.stick) |*pair| {
+        if (pair.left) |*s| try validateStick(s);
+        if (pair.right) |*s| try validateStick(s);
+    }
 
     if (needsTriggerThresholdWarn(cfg)) {
         std.log.warn("config: LT/RT used in [remap] or [layer.remap] without trigger_threshold — analog triggers are not synthesized into button events; add trigger_threshold = 128 (or your preferred 0-255 value) to enable", .{});
@@ -936,6 +965,8 @@ pub fn validate(cfg: *const MappingConfig) !void {
         }
         if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
         if (layer.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
+        if (layer.stick_left) |*s| try validateStick(s);
+        if (layer.stick_right) |*s| try validateStick(s);
     }
 }
 
@@ -2113,6 +2144,39 @@ test "validate: layer gyro valid mode passes" {
     try validate(&result.value);
 }
 
+test "validate: gyro deadzone out of i16 range returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = 100000
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro deadzone negative returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = -1
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro deadzone at i16 max is valid" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = 32767
+    );
+    defer result.deinit();
+    try validate(&result.value);
+}
+
 test "chord remap: layer-level chord too long is rejected by validate" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator,
@@ -2277,4 +2341,52 @@ test "AUX_KEY_CODES_MAX equals all key codes plus all mouse buttons" {
     const caps = DerivedAuxCaps{ .needs_keyboard = true, .mouse_buttons = 0xFF };
     const codes = buildAuxKeyCodes(caps, &buf);
     try std.testing.expectEqual(AUX_KEY_CODES_MAX, codes.len);
+}
+
+test "validate: stick deadzone out of i16 range is rejected" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[stick.left]
+        \\deadzone = 100000
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: stick sensitivity above bound is rejected" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[stick.right]
+        \\mode = "mouse"
+        \\sensitivity = 1.0e12
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: in-range stick deadzone and sensitivity accepted" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[stick.left]
+        \\deadzone = 128
+        \\sensitivity = 2.0
+    );
+    defer result.deinit();
+    try validate(&result.value);
+}
+
+test "parseFile: invalid mapping is rejected fail-closed" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{
+        .sub_path = "bad.toml",
+        .data =
+        \\[stick.left]
+        \\deadzone = 100000
+        ,
+    });
+    const path = try tmp.dir.realpathAlloc(allocator, "bad.toml");
+    defer allocator.free(path);
+    try std.testing.expectError(error.InvalidConfig, parseFile(allocator, path));
 }

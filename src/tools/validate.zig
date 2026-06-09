@@ -148,7 +148,11 @@ pub fn validateFile(
 
     switch (detectFileKind(content)) {
         .device => {
-            const parsed = device.parseString(allocator, content) catch |err| {
+            // Parse without validate() so validateExtended can emit detailed
+            // diagnostics (e.g. "interface 99 not declared") that validate()'s
+            // fail-closed error.InvalidConfig would otherwise mask. Then run
+            // validate() to surface any remaining fail-closed checks.
+            const parsed = device.parseStringRaw(allocator, content) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "parse/schema error: {}", .{err});
                 const file_copy = try allocator.dupe(u8, path);
                 try errors.append(allocator, .{ .file = file_copy, .message = msg });
@@ -156,6 +160,13 @@ pub fn validateFile(
             };
             defer parsed.deinit();
             try validateExtended(&parsed.value, path, &errors, allocator);
+            if (errors.items.len == 0) {
+                device.validate(&parsed.value) catch |err| {
+                    const msg = try std.fmt.allocPrint(allocator, "schema error: {}", .{err});
+                    const file_copy = try allocator.dupe(u8, path);
+                    try errors.append(allocator, .{ .file = file_copy, .message = msg });
+                };
+            }
         },
         .mapping => {
             const parsed = mapping.parseString(allocator, content) catch |err| {
