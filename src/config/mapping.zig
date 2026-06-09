@@ -608,6 +608,12 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
         if (v <= 0.0 or v > 180.0) return error.InvalidConfig;
     }
 
+    // deadzone is cast to i16 at runtime (mapper.resolveGyroConfig); accept
+    // only the non-negative i16 range to avoid @intCast panic in Safe builds.
+    if (g.deadzone) |dz| {
+        if (dz < 0 or dz > std.math.maxInt(i16)) return error.InvalidConfig;
+    }
+
     if (g.activate) |spec| {
         const btn_name = if (std.mem.startsWith(u8, spec, "hold_"))
             spec["hold_".len..]
@@ -2133,6 +2139,39 @@ test "validate: layer gyro valid mode passes" {
         \\
         \\[layer.gyro]
         \\mode = "mouse"
+    );
+    defer result.deinit();
+    try validate(&result.value);
+}
+
+test "validate: gyro deadzone out of i16 range returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = 100000
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro deadzone negative returns error" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = -1
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: gyro deadzone at i16 max is valid" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = 32767
     );
     defer result.deinit();
     try validate(&result.value);

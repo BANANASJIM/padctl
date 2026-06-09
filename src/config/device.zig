@@ -492,7 +492,11 @@ pub fn validate(cfg: *const DeviceConfig) !void {
 
 pub const ParseResult = toml.Parsed(DeviceConfig);
 
-pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
+// Parse + apply presets without running validate(). The CLI lint tool needs the
+// parsed config to emit detailed diagnostics (e.g. "interface 99 not declared")
+// before validate()'s fail-closed error.InvalidConfig masks them. Daemon/CLI
+// load paths must use parseString/parseFile, which stay fail-closed.
+pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
     var parser = toml.Parser(DeviceConfig).init(allocator);
     defer parser.deinit();
     var result = try parser.parseString(content);
@@ -504,6 +508,11 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
             };
         }
     }
+    return result;
+}
+
+pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
+    var result = try parseStringRaw(allocator, content);
     validate(&result.value) catch |err| {
         result.deinit();
         return err;
@@ -1937,4 +1946,32 @@ test "device: command referencing nonexistent interface id is rejected" {
         \\template = "00 {strong} {weak}"
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_cmd_toml));
+}
+
+test "device: init referencing nonexistent interface id is rejected" {
+    const allocator = std.testing.allocator;
+    const bad_init_toml =
+        \\[device]
+        \\name = "Bad Init Ref"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[device.init]
+        \\interface = 5
+        \\commands = ["5aa5"]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_init_toml));
 }
