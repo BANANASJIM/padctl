@@ -25,7 +25,6 @@ pub const DetectInput = struct {
     destdir: []const u8 = "",
     forced_scope: ?LifecycleScope = null,
     install_phase_env: ?[]const u8 = null,
-    destdir_env: ?[]const u8 = null,
     euid: u32,
     sudo_user_env: ?[]const u8 = null,
     prefix: []const u8 = "/usr/local",
@@ -42,14 +41,11 @@ fn rejectsSystemPrefix(prefix: []const u8) bool {
 
 pub fn detect(input: DetectInput) ScopeError!LifecycleScope {
     // 1. Package mode is unconditional — any packager-set signal wins.
-    //    Empty-but-set env vars (common in Makefiles: `export DESTDIR=`) do
-    //    NOT count as a signal; require non-empty content.
+    //    Only the explicit --destdir flag selects it; an empty --destdir ""
+    //    does NOT count as a signal. The ambient DESTDIR env var is ignored.
     if (input.destdir.len > 0) return .package;
     if (input.install_phase_env) |v| {
         if (std.mem.eql(u8, v, "package")) return .package;
-    }
-    if (input.destdir_env) |v| {
-        if (v.len > 0) return .package;
     }
 
     // 2. Explicit --scope override, validated against current privilege.
@@ -83,9 +79,17 @@ test "scope: package via PADCTL_INSTALL_PHASE env" {
     try std.testing.expectEqual(LifecycleScope.package, got);
 }
 
-test "scope: package via DESTDIR env" {
-    const got = try detect(.{ .destdir_env = "/tmp/staging", .euid = 0 });
-    try std.testing.expectEqual(LifecycleScope.package, got);
+// Regression #355: only --destdir flag or PADCTL_INSTALL_PHASE=package may produce .package.
+// Root + empty destdir + no phase env must resolve to .system (not .package).
+test "scope: flag-only contract — ambient env cannot force .package (#355)" {
+    const system_scope = try detect(.{ .euid = 0, .prefix = "/usr", .destdir = "" });
+    try std.testing.expectEqual(LifecycleScope.system, system_scope);
+
+    const pkg_via_flag = try detect(.{ .euid = 0, .prefix = "/usr", .destdir = "/tmp/staging" });
+    try std.testing.expectEqual(LifecycleScope.package, pkg_via_flag);
+
+    const pkg_via_phase = try detect(.{ .euid = 0, .prefix = "/usr", .install_phase_env = "package" });
+    try std.testing.expectEqual(LifecycleScope.package, pkg_via_phase);
 }
 
 test "scope: system auto when root" {
@@ -134,10 +138,10 @@ test "scope: forced package always works regardless of euid" {
     try std.testing.expectEqual(LifecycleScope.package, got_user);
 }
 
-test "scope: empty DESTDIR env does not force .package" {
+test "scope: empty destdir does not force .package" {
     const got = try detect(.{
         .euid = 0,
-        .destdir_env = "",
+        .destdir = "",
         .prefix = "/usr",
     });
     try std.testing.expectEqual(LifecycleScope.system, got);

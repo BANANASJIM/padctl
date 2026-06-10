@@ -290,7 +290,6 @@ pub const EnvSnapshot = struct {
     sudo_user: ?[]const u8,
     sudo_uid: ?[]const u8,
     install_phase: ?[]const u8 = null,
-    destdir_env: ?[]const u8 = null,
 
     pub fn fromProcess() EnvSnapshot {
         return .{
@@ -299,7 +298,6 @@ pub const EnvSnapshot = struct {
             .sudo_user = std.posix.getenv("SUDO_USER"),
             .sudo_uid = std.posix.getenv("SUDO_UID"),
             .install_phase = std.posix.getenv("PADCTL_INSTALL_PHASE"),
-            .destdir_env = std.posix.getenv("DESTDIR"),
         };
     }
 };
@@ -350,7 +348,6 @@ pub const InstallPlan = struct {
             .destdir = destdir,
             .forced_scope = opts.scope,
             .install_phase_env = env.install_phase,
-            .destdir_env = env.destdir_env,
             .euid = @intCast(env.uid),
             .sudo_user_env = env.sudo_user,
             .prefix = opts.prefix,
