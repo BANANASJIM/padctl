@@ -92,29 +92,16 @@ fn createDeviceIO(
     return error.UnknownInterfaceClass;
 }
 
+/// Single open attempt. Transient failures are NOT retried here: a blocking
+/// sleep/retry loop on the supervisor thread stalls the control socket (issue
+/// #397). Retries are scheduled by the supervisor's event-driven hotplug queue.
 pub fn openDeviceWithRetry(
     allocator: std.mem.Allocator,
     iface: InterfaceConfig,
     vid: u16,
     pid: u16,
 ) !DeviceIO {
-    const delays = [_]u64{ 1, 2, 4 };
-    var attempt: usize = 0;
-    while (true) {
-        return createDeviceIO(allocator, iface, vid, pid) catch |err| {
-            // A missing-libusb build is a permanent condition; retrying just
-            // delays the inevitable skip. Fail fast with a single line upstream.
-            if (err == error.LibusbUnavailable) return err;
-            if (attempt >= delays.len) {
-                std.log.err("failed to open interface {d} after retries: {}", .{ iface.id, err });
-                return err;
-            }
-            std.log.warn("open interface {d} failed ({}), retrying in {}s...", .{ iface.id, err, delays[attempt] });
-            std.Thread.sleep(delays[attempt] * std.time.ns_per_s);
-            attempt += 1;
-            continue;
-        };
-    }
+    return createDeviceIO(allocator, iface, vid, pid);
 }
 
 /// Primary output ownership. T3 introduces the union so T4 can route the
@@ -134,7 +121,7 @@ pub const Owner = union(enum) {
 /// `test_devices_override` skips the interface-opening loop entirely and
 /// installs the caller-provided `DeviceIO` slice. Needed so a Layer 1 test
 /// can drive `DeviceInstance.init` end-to-end without a real `/dev/hidraw*`
-/// node — otherwise `HidrawDevice.discover` would retry for ~7s and fail in
+/// node — otherwise the legacy in-thread open retry blocked ~7s and failed in
 /// CI before the routing switch is reached. The slice is consumed (stored in
 /// `DeviceInstance.devices`) and freed by `deinit`; caller must not free it.
 /// If `init` returns an error, no instance exists and the caller still owns
@@ -1679,4 +1666,25 @@ test "DeviceInstance: rebindDeviceIO rejects device count mismatch" {
 
     var empty = [_]DeviceIO{};
     try testing.expectError(error.DeviceCountMismatch, inst.rebindDeviceIO(&empty));
+}
+
+// issue #397: openDeviceWithRetry must NOT sleep/retry on the supervisor
+// thread. A failing open must return promptly so the supervisor poll loop can
+// keep servicing the control socket (`padctl status`). The legacy loop slept
+// 1+2+4=7s before returning the error.
+test "openDeviceWithRetry returns promptly on a failing open (no in-thread sleep)" {
+    const allocator = testing.allocator;
+
+    // VID/PID 0xFFFF/0xFFFF matches no real device, so hidraw discover fails
+    // with error.NotFound. The old retry loop classified this as retryable and
+    // slept 7s; the fix returns the error on the first attempt.
+    const iface = InterfaceConfig{ .id = 0, .class = "hid" };
+
+    var timer = try std.time.Timer.start();
+    const result = openDeviceWithRetry(allocator, iface, 0xFFFF, 0xFFFF);
+    const elapsed_ns = timer.read();
+
+    try testing.expectError(error.NotFound, result);
+    // Old code: >= 7s. New code: a bare /dev scan, well under 3s.
+    try testing.expect(elapsed_ns < 3 * std.time.ns_per_s);
 }

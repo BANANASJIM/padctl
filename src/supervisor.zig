@@ -2371,6 +2371,8 @@ pub const Supervisor = struct {
             error.AccessDenied,
             error.PermissionDenied,
             error.DeviceBusy,
+            error.Busy,
+            error.ClaimFailed,
             error.FileNotFound,
             error.NoDevice,
             error.NotFound,
@@ -2958,6 +2960,17 @@ test "supervisor: cold scan does not queue retry without hidraw candidates" {
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
     try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
     try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
+}
+
+// issue #397: a libusb claim race (error.Busy) or claim failure on a
+// vendor-class wheel must be classified transient so cold scan/attach queues
+// it for an event-driven retry instead of dropping it.
+test "supervisor: libusb claim races are transient (issue #397)" {
+    try testing.expect(Supervisor.isTransientOpenError(error.Busy));
+    try testing.expect(Supervisor.isTransientOpenError(error.ClaimFailed));
+    try testing.expect(Supervisor.isTransientOpenError(error.AccessDenied));
+    try testing.expect(!Supervisor.isTransientOpenError(error.LibusbUnavailable));
+    try testing.expect(!Supervisor.isTransientOpenError(error.LibusbInit));
 }
 
 test "supervisor: hotplug rawinfo failure is transient" {
