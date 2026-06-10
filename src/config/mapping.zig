@@ -892,6 +892,8 @@ fn warnLintFindings(findings: []const LintFinding) void {
 // existing user configs keep loading.
 const deadzone_max: i64 = std.math.maxInt(i16);
 const sensitivity_max: f64 = 1000.0;
+// Anti-overflow guard only; gyro users legitimately need very high values (#359).
+const gyro_sensitivity_max: f64 = 1.0e6;
 
 fn clampDeadzone(field: []const u8, dz: *?i64) void {
     const v = dz.* orelse return;
@@ -918,8 +920,28 @@ fn clampStick(field: []const u8, s: *StickConfig) void {
     clampSensitivity(field, &s.sensitivity);
 }
 
-fn clampNumericRanges(cfg: *MappingConfig) void {
-    if (cfg.gyro) |*g| clampDeadzone("gyro", &g.deadzone);
+fn clampGyroSensField(field: []const u8, sens: *?f64) void {
+    const v = sens.* orelse return;
+    if (!(v >= 0.0)) {
+        std.log.warn("config: {s}.sensitivity {d} invalid, clamped to 0", .{ field, v });
+        sens.* = 0.0;
+    } else if (v > gyro_sensitivity_max) {
+        std.log.warn("config: {s}.sensitivity {d} out of range [0, {d}], clamped to {d}", .{ field, v, gyro_sensitivity_max, gyro_sensitivity_max });
+        sens.* = gyro_sensitivity_max;
+    }
+}
+
+fn clampGyroSensitivities(field: []const u8, g: *GyroConfig) void {
+    clampGyroSensField(field, &g.sensitivity);
+    clampGyroSensField(field, &g.sensitivity_x);
+    clampGyroSensField(field, &g.sensitivity_y);
+}
+
+pub fn clampNumericRanges(cfg: *MappingConfig) void {
+    if (cfg.gyro) |*g| {
+        clampDeadzone("gyro", &g.deadzone);
+        clampGyroSensitivities("gyro", g);
+    }
     if (cfg.stick) |*pair| {
         if (pair.left) |*s| clampStick("stick.left", s);
         if (pair.right) |*s| clampStick("stick.right", s);
@@ -927,7 +949,10 @@ fn clampNumericRanges(cfg: *MappingConfig) void {
     const layers = cfg.layer orelse return;
     // Arena-owned parse output; mutation through the const slice is safe.
     for (@constCast(layers)) |*layer| {
-        if (layer.gyro) |*g| clampDeadzone("layer.gyro", &g.deadzone);
+        if (layer.gyro) |*g| {
+            clampDeadzone("layer.gyro", &g.deadzone);
+            clampGyroSensitivities("layer.gyro", g);
+        }
         if (layer.stick_left) |*s| clampStick("layer.stick_left", s);
         if (layer.stick_right) |*s| clampStick("layer.stick_right", s);
     }
@@ -2463,6 +2488,38 @@ test "parseFile: per-layer stick and gyro values are clamped and loads" {
     try std.testing.expectEqual(@as(?i64, 32767), layer.gyro.?.deadzone);
     try std.testing.expectEqual(@as(?i64, 0), layer.stick_left.?.deadzone);
     try std.testing.expectEqual(@as(?f64, 1000.0), layer.stick_left.?.sensitivity);
+}
+
+test "parseFile: gyro sensitivity overflow is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity = 1.0e40
+        \\sensitivity_x = -5.0
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?f64, 1.0e6), result.value.gyro.?.sensitivity);
+    try std.testing.expectEqual(@as(?f64, 0.0), result.value.gyro.?.sensitivity_x);
+}
+
+test "parseFile: per-layer gyro sensitivity overflow is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\[layer.gyro]
+        \\mode = "joystick"
+        \\sensitivity_y = 1.0e40
+    );
+    defer result.deinit();
+    const layer = result.value.layer.?[0];
+    try std.testing.expectEqual(@as(?f64, 1.0e6), layer.gyro.?.sensitivity_y);
 }
 
 test "shipped mappings parse, clamp, and validate" {

@@ -176,6 +176,7 @@ pub fn validateFile(
                 return errors.toOwnedSlice(allocator);
             };
             defer parsed.deinit();
+            mapping.clampNumericRanges(@constCast(&parsed.value));
             mapping.validate(&parsed.value) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "mapping validation error: {}", .{err});
                 const file_copy = try allocator.dupe(u8, path);
@@ -554,4 +555,17 @@ test "validate: mapping with bad layer activation fails" {
     const errors = try validateString(allocator, bad);
     defer freeErrors(errors, allocator);
     try testing.expect(errors.len > 0);
+}
+
+test "validate: mapping with overflow gyro sensitivity passes (clamped before validate)" {
+    const allocator = testing.allocator;
+    const toml_content =
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity = 1.0e40
+        \\
+    ;
+    const errors = try validateString(allocator, toml_content);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 0), errors.len);
 }
