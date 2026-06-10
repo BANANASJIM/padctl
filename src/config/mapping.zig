@@ -464,6 +464,7 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     defer allocator.free(content);
     var result = try parseString(allocator, content);
     errdefer result.deinit();
+    clampNumericRanges(&result.value);
     try validate(&result.value);
     return result;
 }
@@ -606,12 +607,6 @@ fn validateGyroConfig(g: *const GyroConfig, trigger_threshold: ?u8) !void {
 
     if (g.degrees_full) |v| {
         if (v <= 0.0 or v > 180.0) return error.InvalidConfig;
-    }
-
-    // deadzone is cast to i16 at runtime (mapper.resolveGyroConfig); accept
-    // only the non-negative i16 range to avoid @intCast panic in Safe builds.
-    if (g.deadzone) |dz| {
-        if (dz < 0 or dz > std.math.maxInt(i16)) return error.InvalidConfig;
     }
 
     if (g.activate) |spec| {
@@ -891,18 +886,75 @@ fn warnLintFindings(findings: []const LintFinding) void {
     }
 }
 
-// Stick deadzone is cast to i16 at runtime (mapper.resolveStickConfig); accept
-// only the non-negative i16 range. sensitivity feeds an f32 accumulator that
-// integrates per-frame; cap it so the accumulator cannot overflow into the
-// @intFromFloat used in stick mouse/scroll modes.
-const stick_sensitivity_max: f64 = 1000.0;
+// Deadzone is cast to i16 at runtime (mapper resolve paths); sensitivity feeds
+// an f32 per-frame accumulator that must not overflow @intFromFloat in stick
+// mouse/scroll modes. Out-of-range values are clamped with a warning so
+// existing user configs keep loading.
+const deadzone_max: i64 = std.math.maxInt(i16);
+const sensitivity_max: f64 = 1000.0;
+// Anti-overflow guard only; gyro users legitimately need very high values (#359).
+const gyro_sensitivity_max: f64 = 1.0e6;
 
-fn validateStick(s: *const StickConfig) !void {
-    if (s.deadzone) |dz| {
-        if (dz < 0 or dz > std.math.maxInt(i16)) return error.InvalidConfig;
+fn clampDeadzone(field: []const u8, dz: *?i64) void {
+    const v = dz.* orelse return;
+    const c = std.math.clamp(v, 0, deadzone_max);
+    if (c != v) {
+        std.log.warn("config: {s}.deadzone {d} out of range [0, {d}], clamped to {d}", .{ field, v, deadzone_max, c });
+        dz.* = c;
     }
-    if (s.sensitivity) |sens| {
-        if (!(sens >= 0.0) or sens > stick_sensitivity_max) return error.InvalidConfig;
+}
+
+fn clampSensitivity(field: []const u8, sens: *?f64) void {
+    const v = sens.* orelse return;
+    if (!(v >= 0.0)) {
+        std.log.warn("config: {s}.sensitivity {d} invalid, clamped to 0", .{ field, v });
+        sens.* = 0.0;
+    } else if (v > sensitivity_max) {
+        std.log.warn("config: {s}.sensitivity {d} out of range [0, {d}], clamped to {d}", .{ field, v, sensitivity_max, sensitivity_max });
+        sens.* = sensitivity_max;
+    }
+}
+
+fn clampStick(field: []const u8, s: *StickConfig) void {
+    clampDeadzone(field, &s.deadzone);
+    clampSensitivity(field, &s.sensitivity);
+}
+
+fn clampGyroSensField(field: []const u8, sens: *?f64) void {
+    const v = sens.* orelse return;
+    if (!(v >= 0.0)) {
+        std.log.warn("config: {s}.sensitivity {d} invalid, clamped to 0", .{ field, v });
+        sens.* = 0.0;
+    } else if (v > gyro_sensitivity_max) {
+        std.log.warn("config: {s}.sensitivity {d} out of range [0, {d}], clamped to {d}", .{ field, v, gyro_sensitivity_max, gyro_sensitivity_max });
+        sens.* = gyro_sensitivity_max;
+    }
+}
+
+fn clampGyroSensitivities(field: []const u8, g: *GyroConfig) void {
+    clampGyroSensField(field, &g.sensitivity);
+    clampGyroSensField(field, &g.sensitivity_x);
+    clampGyroSensField(field, &g.sensitivity_y);
+}
+
+pub fn clampNumericRanges(cfg: *MappingConfig) void {
+    if (cfg.gyro) |*g| {
+        clampDeadzone("gyro", &g.deadzone);
+        clampGyroSensitivities("gyro", g);
+    }
+    if (cfg.stick) |*pair| {
+        if (pair.left) |*s| clampStick("stick.left", s);
+        if (pair.right) |*s| clampStick("stick.right", s);
+    }
+    const layers = cfg.layer orelse return;
+    // Arena-owned parse output; mutation through the const slice is safe.
+    for (@constCast(layers)) |*layer| {
+        if (layer.gyro) |*g| {
+            clampDeadzone("layer.gyro", &g.deadzone);
+            clampGyroSensitivities("layer.gyro", g);
+        }
+        if (layer.stick_left) |*s| clampStick("layer.stick_left", s);
+        if (layer.stick_right) |*s| clampStick("layer.stick_right", s);
     }
 }
 
@@ -914,11 +966,6 @@ pub fn validate(cfg: *const MappingConfig) !void {
     }
     if (cfg.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
     if (cfg.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
-
-    if (cfg.stick) |*pair| {
-        if (pair.left) |*s| try validateStick(s);
-        if (pair.right) |*s| try validateStick(s);
-    }
 
     if (needsTriggerThresholdWarn(cfg)) {
         std.log.warn("config: LT/RT used in [remap] or [layer.remap] without trigger_threshold — analog triggers are not synthesized into button events; add trigger_threshold = 128 (or your preferred 0-255 value) to enable", .{});
@@ -965,8 +1012,6 @@ pub fn validate(cfg: *const MappingConfig) !void {
         }
         if (layer.adaptive_trigger) |*at| try validateAdaptiveTrigger(at);
         if (layer.gyro) |*g| try validateGyroConfig(g, cfg.trigger_threshold);
-        if (layer.stick_left) |*s| try validateStick(s);
-        if (layer.stick_right) |*s| try validateStick(s);
     }
 }
 
@@ -2144,37 +2189,17 @@ test "validate: layer gyro valid mode passes" {
     try validate(&result.value);
 }
 
-test "validate: gyro deadzone out of i16 range returns error" {
+test "clamp: gyro deadzone at i16 max is kept as-is" {
     const allocator = std.testing.allocator;
-    const result = try parseString(allocator,
-        \\[gyro]
-        \\mode = "joystick"
-        \\deadzone = 100000
-    );
-    defer result.deinit();
-    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
-}
-
-test "validate: gyro deadzone negative returns error" {
-    const allocator = std.testing.allocator;
-    const result = try parseString(allocator,
-        \\[gyro]
-        \\mode = "joystick"
-        \\deadzone = -1
-    );
-    defer result.deinit();
-    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
-}
-
-test "validate: gyro deadzone at i16 max is valid" {
-    const allocator = std.testing.allocator;
-    const result = try parseString(allocator,
+    var result = try parseString(allocator,
         \\[gyro]
         \\mode = "joystick"
         \\deadzone = 32767
     );
     defer result.deinit();
+    clampNumericRanges(&result.value);
     try validate(&result.value);
+    try std.testing.expectEqual(@as(?i64, 32767), result.value.gyro.?.deadzone);
 }
 
 test "chord remap: layer-level chord too long is rejected by validate" {
@@ -2343,50 +2368,173 @@ test "AUX_KEY_CODES_MAX equals all key codes plus all mouse buttons" {
     try std.testing.expectEqual(AUX_KEY_CODES_MAX, codes.len);
 }
 
-test "validate: stick deadzone out of i16 range is rejected" {
+test "clamp: in-range stick deadzone and sensitivity kept as-is" {
     const allocator = std.testing.allocator;
-    const result = try parseString(allocator,
-        \\[stick.left]
-        \\deadzone = 100000
-    );
-    defer result.deinit();
-    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
-}
-
-test "validate: stick sensitivity above bound is rejected" {
-    const allocator = std.testing.allocator;
-    const result = try parseString(allocator,
-        \\[stick.right]
-        \\mode = "mouse"
-        \\sensitivity = 1.0e12
-    );
-    defer result.deinit();
-    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
-}
-
-test "validate: in-range stick deadzone and sensitivity accepted" {
-    const allocator = std.testing.allocator;
-    const result = try parseString(allocator,
+    var result = try parseString(allocator,
         \\[stick.left]
         \\deadzone = 128
         \\sensitivity = 2.0
     );
     defer result.deinit();
+    clampNumericRanges(&result.value);
     try validate(&result.value);
+    try std.testing.expectEqual(@as(?i64, 128), result.value.stick.?.left.?.deadzone);
+    try std.testing.expectEqual(@as(?f64, 2.0), result.value.stick.?.left.?.sensitivity);
 }
 
-test "parseFile: invalid mapping is rejected fail-closed" {
+test "parseFile: structurally invalid mapping is rejected fail-closed" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{
         .sub_path = "bad.toml",
         .data =
-        \\[stick.left]
-        \\deadzone = 100000
+        \\[gyro]
+        \\mode = "bogus"
         ,
     });
     const path = try tmp.dir.realpathAlloc(allocator, "bad.toml");
     defer allocator.free(path);
     try std.testing.expectError(error.InvalidConfig, parseFile(allocator, path));
+}
+
+fn parseTmpFile(tmp: *std.testing.TmpDir, allocator: std.mem.Allocator, data: []const u8) !ParseResult {
+    try tmp.dir.writeFile(.{ .sub_path = "m.toml", .data = data });
+    const path = try tmp.dir.realpathAlloc(allocator, "m.toml");
+    defer allocator.free(path);
+    return parseFile(allocator, path);
+}
+
+test "parseFile: oversized stick deadzone is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[stick.left]
+        \\deadzone = 50000
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?i64, 32767), result.value.stick.?.left.?.deadzone);
+}
+
+test "parseFile: oversized stick sensitivity is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[stick.right]
+        \\mode = "mouse"
+        \\sensitivity = 1.0e12
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?f64, 1000.0), result.value.stick.?.right.?.sensitivity);
+}
+
+test "parseFile: negative stick sensitivity is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[stick.left]
+        \\sensitivity = -2.0
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?f64, 0.0), result.value.stick.?.left.?.sensitivity);
+}
+
+test "parseFile: oversized gyro deadzone is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = 100000
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?i64, 32767), result.value.gyro.?.deadzone);
+}
+
+test "parseFile: negative gyro deadzone is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\deadzone = -1
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?i64, 0), result.value.gyro.?.deadzone);
+}
+
+test "parseFile: per-layer stick and gyro values are clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\[layer.gyro]
+        \\mode = "joystick"
+        \\deadzone = 40000
+        \\[layer.stick_left]
+        \\deadzone = -5
+        \\sensitivity = 2000.0
+    );
+    defer result.deinit();
+    const layer = result.value.layer.?[0];
+    try std.testing.expectEqual(@as(?i64, 32767), layer.gyro.?.deadzone);
+    try std.testing.expectEqual(@as(?i64, 0), layer.stick_left.?.deadzone);
+    try std.testing.expectEqual(@as(?f64, 1000.0), layer.stick_left.?.sensitivity);
+}
+
+test "parseFile: gyro sensitivity overflow is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity = 1.0e40
+        \\sensitivity_x = -5.0
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?f64, 1.0e6), result.value.gyro.?.sensitivity);
+    try std.testing.expectEqual(@as(?f64, 0.0), result.value.gyro.?.sensitivity_x);
+}
+
+test "parseFile: per-layer gyro sensitivity overflow is clamped and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try parseTmpFile(&tmp, allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\[layer.gyro]
+        \\mode = "joystick"
+        \\sensitivity_y = 1.0e40
+    );
+    defer result.deinit();
+    const layer = result.value.layer.?[0];
+    try std.testing.expectEqual(@as(?f64, 1.0e6), layer.gyro.?.sensitivity_y);
+}
+
+test "shipped mappings parse, clamp, and validate" {
+    const allocator = std.testing.allocator;
+    const shipped = [_][]const u8{
+        @embedFile("../../examples/mappings/chord-output.toml"),
+        @embedFile("../../examples/mappings/chord-switch-mapping-a.toml"),
+        @embedFile("../../examples/mappings/comprehensive.toml"),
+        @embedFile("../../mappings/vader5.toml"),
+        @embedFile("../../mappings/vader5-test-mapping.toml"),
+    };
+    for (shipped) |content| {
+        var result = try parseString(allocator, content);
+        defer result.deinit();
+        clampNumericRanges(&result.value);
+        try validate(&result.value);
+    }
 }
