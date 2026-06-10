@@ -7,6 +7,10 @@
             .url = "https://github.com/sam701/zig-toml/archive/24e0deeceaad1b7f1b12027ebae1c65ff1d86e33.tar.gz",
             .hash = "toml-0.3.0-bV14BVqIAQANb68hDuVPZ72hrcIhT-fv_fcIbetQIAyg",
         },
+        .libusb = .{
+            .url = "git+https://github.com/allyourcodebase/libusb?ref=v1.0.26-zig#363c73885e5b04384bd4702605c613e67da45797",
+            .hash = "libusb-0.0.1-P02YQmeOFwBE3lScFnBmBaOrz-EKAMHX3r9YIDh7ZSul",
+        },
     },
     .minimum_zig_version = "0.15.0",
     .paths = .{""},

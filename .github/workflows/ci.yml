@@ -271,7 +271,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build musl-static padctl
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -Dlibusb=false
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
       - name: Upload musl binary
         uses: actions/upload-artifact@v4
         with:

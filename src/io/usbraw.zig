@@ -3,6 +3,11 @@ const io = @import("device_io.zig");
 
 const builtin = @import("builtin");
 const is_test = builtin.is_test;
+const build_options = @import("build_options");
+
+// True when the binary was compiled with real libusb. When false the compat
+// stub is linked and any USB-claiming path fails fast with LibusbUnavailable.
+pub const have_libusb = build_options.use_libusb;
 
 // Zig's futex-based Mutex lacks TSan annotations, so pthread_mutex is
 // used when ThreadSanitizer is active to provide proper happens-before edges.
@@ -75,6 +80,8 @@ fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
     ctx: *c.libusb_context,
     handle: *c.libusb_device_handle,
 } {
+    if (!have_libusb) return error.LibusbUnavailable;
+
     var ctx: ?*c.libusb_context = null;
     if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
 

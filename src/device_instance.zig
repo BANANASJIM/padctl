@@ -102,6 +102,9 @@ pub fn openDeviceWithRetry(
     var attempt: usize = 0;
     while (true) {
         return createDeviceIO(allocator, iface, vid, pid) catch |err| {
+            // A missing-libusb build is a permanent condition; retrying just
+            // delays the inevitable skip. Fail fast with a single line upstream.
+            if (err == error.LibusbUnavailable) return err;
             if (attempt >= delays.len) {
                 std.log.err("failed to open interface {d} after retries: {}", .{ iface.id, err });
                 return err;

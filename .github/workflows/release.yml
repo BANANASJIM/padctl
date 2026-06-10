@@ -89,7 +89,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build native (musl to avoid glibc errno gaps)
-        run: zig build -Doptimize=ReleaseSafe -Dlibusb=false -Dtarget=x86_64-linux-musl
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+
+      - name: verify release binary has real libusb
+        run: ./zig-out/bin/padctl --version | grep -q '(libusb)' || exit 1
 
       - name: Generate install artifacts
         # The container runs as root, so the previous `sudo` prefix is both
@@ -141,7 +144,7 @@ jobs:
           path: staging/
 
       - name: Build
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
 
       - name: Package
         env:

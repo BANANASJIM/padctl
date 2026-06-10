@@ -2394,7 +2394,15 @@ pub const Supervisor = struct {
     /// likely cause and remedy instead, since it almost always means the raw
     /// USB device node is not accessible to the unprivileged daemon.
     fn logBindFailure(cfg: *const DeviceConfig, key: []const u8, err: anyerror) void {
-        if (config_device.usesLibusb(cfg) and isLibusbClaimError(err)) {
+        if (err == error.LibusbUnavailable) {
+            std.log.warn(
+                "device \"{s}\" requires libusb but this padctl build has no libusb support " ++
+                    "(-Dlibusb=false); use an official release or rebuild with -Dlibusb=true",
+                .{cfg.device.name},
+            );
+        } else if (err == error.LibusbInit) {
+            std.log.warn("libusb context initialization failed ({})", .{err});
+        } else if (config_device.usesLibusb(cfg) and isLibusbClaimError(err)) {
             std.log.warn(
                 "cannot claim \"{s}\" via libusb ({}): the raw USB device node is not accessible. " ++
                     "Install the padctl udev rules and add your user to the 'input' group (or run the daemon privileged), then replug.",

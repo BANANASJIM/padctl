@@ -1,11 +1,37 @@
 const std = @import("std");
 
+const VendorLib = struct { lib: *std.Build.Step.Compile, inc: std.Build.LazyPath };
+
+fn applyLibusb(b: *std.Build, c: *std.Build.Step.Compile, use_libusb: bool, vendored: ?VendorLib) void {
+    if (vendored) |v| {
+        c.addIncludePath(v.inc);
+        c.linkLibrary(v.lib);
+    } else if (use_libusb) {
+        c.linkSystemLibrary("usb-1.0");
+    } else {
+        c.addIncludePath(b.path("compat"));
+    }
+}
+
+// The libusb @cImport lives inside the src module; its header include path must
+// be on the module itself (not just the linking artifact) so translate-c sees
+// it. Linkage is still applied to the artifact via applyLibusb.
+fn applyLibusbInclude(b: *std.Build, mod: *std.Build.Module, use_libusb: bool, vendored: ?VendorLib) void {
+    if (vendored) |v| {
+        mod.addIncludePath(v.inc);
+    } else if (!use_libusb) {
+        mod.addIncludePath(b.path("compat"));
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // -Dlibusb=false disables libusb linkage for musl cross-compile
-    const use_libusb = b.option(bool, "libusb", "Link libusb-1.0 (default: true)") orelse true;
+    // -Dlibusb=true (default) compiles a vendored static libusb into every
+    // artifact; no system usb-1.0 linkage. -Dlibusb=false keeps the compat
+    // stub (dev-only escape hatch — UsbrawDevice then fails fast at open()).
+    const use_libusb = b.option(bool, "libusb", "Compile vendored static libusb (default: true)") orelse true;
     const use_wasm = b.option(bool, "wasm", "Link wasm3 runtime (default: true)") orelse true;
     const coverage = b.option(bool, "test-coverage", "Run tests with kcov coverage") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Substring filter passed to addTest.filters (local dev)");
@@ -25,7 +51,28 @@ pub fn build(b: *std.Build) void {
 
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "use_wasm", use_wasm);
+    build_opts.addOption(bool, "use_libusb", use_libusb);
     build_opts.addOption([]const u8, "version", version);
+
+    // Vendored static libusb (allyourcodebase/libusb, v1.0.26). musl static
+    // builds skip libudev (netlink hotplug); sanitize_c is disabled on the C
+    // artifact because UBSan-call mode leaves __ubsan_handle_* undefined at the
+    // final test link, same treatment wasm3 already gets. The dependency ships
+    // its header at libusb/libusb.h; padctl @cIncludes libusb-1.0/libusb.h, so
+    // a WriteFiles shim re-exposes it under the expected prefix.
+    const vendored: ?VendorLib = if (use_libusb) blk: {
+        const dep = b.dependency("libusb", .{
+            .target = target,
+            .optimize = optimize,
+            .@"system-libudev" = false,
+            .linkage = std.builtin.LinkMode.static,
+        });
+        const lib = dep.artifact("usb");
+        lib.root_module.sanitize_c = .off;
+        const wf = b.addWriteFiles();
+        _ = wf.addCopyFile(dep.path("libusb/libusb.h"), "libusb-1.0/libusb.h");
+        break :blk .{ .lib = lib, .inc = wf.getDirectory() };
+    } else null;
 
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
@@ -39,14 +86,11 @@ pub fn build(b: *std.Build) void {
     });
     src_mod.addImport("toml", toml_mod);
     src_mod.addImport("build_options", build_opts.createModule());
+    applyLibusbInclude(b, src_mod, use_libusb, vendored);
     if (use_wasm) addWasm3(b, src_mod, wasm3_c_flags);
 
     const exe = b.addExecutable(.{ .name = "padctl", .root_module = src_mod });
-    if (use_libusb) {
-        exe.linkSystemLibrary("usb-1.0");
-    } else {
-        exe.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, exe, use_libusb, vendored);
     exe.linkLibC();
     b.installArtifact(exe);
 
@@ -59,11 +103,7 @@ pub fn build(b: *std.Build) void {
     debug_mod.addImport("src", src_mod);
 
     const debug_exe = b.addExecutable(.{ .name = "padctl-debug", .root_module = debug_mod });
-    if (use_libusb) {
-        debug_exe.linkSystemLibrary("usb-1.0");
-    } else {
-        debug_exe.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, debug_exe, use_libusb, vendored);
     debug_exe.linkLibC();
     b.installArtifact(debug_exe);
 
@@ -114,11 +154,7 @@ pub fn build(b: *std.Build) void {
     if (use_wasm) addWasm3(b, unit_mod, wasm3_c_flags);
     const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
     const unit_tests = b.addTest(.{ .root_module = unit_mod, .filters = test_filters });
-    if (use_libusb) {
-        unit_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        unit_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, unit_tests, use_libusb, vendored);
     unit_tests.linkLibC();
     if (coverage) unit_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     const test_step = b.step("test", "Run Layer 0 + Layer 1 tests (CI)");
@@ -128,11 +164,7 @@ pub fn build(b: *std.Build) void {
     const tsan_mod = createTestRootModule(b, target, optimize, true, toml_mod, capture_analyse_mod, capture_toml_gen_mod, capture_resolve_mod, build_opts);
     if (use_wasm) addWasm3(b, tsan_mod, wasm3_c_flags);
     const tsan_tests = b.addTest(.{ .root_module = tsan_mod, .filters = test_filters });
-    if (use_libusb) {
-        tsan_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        tsan_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, tsan_tests, use_libusb, vendored);
     tsan_tests.linkLibC();
     const tsan_step = b.step("test-tsan", "Run tests with ThreadSanitizer");
     tsan_step.dependOn(&b.addRunArtifact(tsan_tests).step);
@@ -141,11 +173,7 @@ pub fn build(b: *std.Build) void {
     const safe_mod = createTestRootModule(b, target, .ReleaseSafe, false, toml_mod, capture_analyse_mod, capture_toml_gen_mod, capture_resolve_mod, build_opts);
     if (use_wasm) addWasm3(b, safe_mod, wasm3_c_flags);
     const safe_tests = b.addTest(.{ .root_module = safe_mod, .filters = test_filters });
-    if (use_libusb) {
-        safe_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        safe_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, safe_tests, use_libusb, vendored);
     safe_tests.linkLibC();
     const safe_step = b.step("test-safe", "Run tests with ReleaseSafe (optimized + safety checks)");
     safe_step.dependOn(&b.addRunArtifact(safe_tests).step);
@@ -179,7 +207,7 @@ pub fn build(b: *std.Build) void {
     // cli_smoke: run the just-built artifact, not a possibly stale zig-out binary.
     const smoke_version = b.addRunArtifact(exe);
     smoke_version.addArg("--version");
-    smoke_version.expectStdOutEqual(b.fmt("padctl {s}\n", .{version}));
+    smoke_version.expectStdOutEqual(b.fmt("padctl {s} ({s})\n", .{ version, if (use_libusb) "libusb" else "no-libusb" }));
     test_step.dependOn(&smoke_version.step);
 
     const smoke_help = b.addRunArtifact(exe);
@@ -212,11 +240,7 @@ pub fn build(b: *std.Build) void {
     integ_mod.addImport("toml", toml_mod);
     integ_mod.addImport("src", src_mod);
     const integ_tests = b.addTest(.{ .root_module = integ_mod, .filters = test_filters });
-    if (use_libusb) {
-        integ_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        integ_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, integ_tests, use_libusb, vendored);
     integ_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(integ_tests).step);
 
@@ -230,11 +254,7 @@ pub fn build(b: *std.Build) void {
     alldev_mod.addImport("toml", toml_mod);
     alldev_mod.addImport("src", src_mod);
     const alldev_tests = b.addTest(.{ .root_module = alldev_mod, .filters = test_filters });
-    if (use_libusb) {
-        alldev_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        alldev_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, alldev_tests, use_libusb, vendored);
     alldev_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(alldev_tests).step);
 
@@ -250,11 +270,7 @@ pub fn build(b: *std.Build) void {
     deck_e2e_mod.addImport("toml", toml_mod);
     deck_e2e_mod.addImport("src", src_mod);
     const deck_e2e_tests = b.addTest(.{ .root_module = deck_e2e_mod, .filters = test_filters });
-    if (use_libusb) {
-        deck_e2e_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        deck_e2e_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, deck_e2e_tests, use_libusb, vendored);
     deck_e2e_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(deck_e2e_tests).step);
 
@@ -270,11 +286,7 @@ pub fn build(b: *std.Build) void {
     grace_int_mod.addImport("toml", toml_mod);
     grace_int_mod.addImport("src", src_mod);
     const grace_int_tests = b.addTest(.{ .root_module = grace_int_mod, .filters = test_filters });
-    if (use_libusb) {
-        grace_int_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        grace_int_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, grace_int_tests, use_libusb, vendored);
     grace_int_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(grace_int_tests).step);
 
@@ -290,16 +302,12 @@ pub fn build(b: *std.Build) void {
     routing_mod.addImport("toml", toml_mod);
     routing_mod.addImport("src", src_mod);
     const routing_tests = b.addTest(.{ .root_module = routing_mod, .filters = test_filters });
-    if (use_libusb) {
-        routing_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        routing_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, routing_tests, use_libusb, vendored);
     routing_tests.linkLibC();
     test_step.dependOn(&b.addRunArtifact(routing_tests).step);
-    const routing_safe_tests = addSupervisorUhidRoutingTests(b, target, .ReleaseSafe, false, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, test_filters);
+    const routing_safe_tests = addSupervisorUhidRoutingTests(b, target, .ReleaseSafe, false, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, vendored, test_filters);
     safe_step.dependOn(&b.addRunArtifact(routing_safe_tests).step);
-    const routing_tsan_tests = addSupervisorUhidRoutingTests(b, target, optimize, true, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, test_filters);
+    const routing_tsan_tests = addSupervisorUhidRoutingTests(b, target, optimize, true, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, vendored, test_filters);
     tsan_step.dependOn(&b.addRunArtifact(routing_tsan_tests).step);
 
     // uhid_output_dispatch_test and pidff_e2e_test are imported into
@@ -317,11 +325,7 @@ pub fn build(b: *std.Build) void {
     });
     e2e_mod.addImport("src", src_mod);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod, .filters = test_filters });
-    if (use_libusb) {
-        e2e_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        e2e_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, e2e_tests, use_libusb, vendored);
     e2e_tests.linkLibC();
     e2e_step.dependOn(&b.addRunArtifact(e2e_tests).step);
 
@@ -335,11 +339,7 @@ pub fn build(b: *std.Build) void {
     gen_e2e_mod.addImport("src", src_mod);
     gen_e2e_mod.addImport("toml", toml_mod);
     const gen_e2e_tests = b.addTest(.{ .root_module = gen_e2e_mod, .filters = test_filters });
-    if (use_libusb) {
-        gen_e2e_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        gen_e2e_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, gen_e2e_tests, use_libusb, vendored);
     gen_e2e_tests.linkLibC();
     e2e_step.dependOn(&b.addRunArtifact(gen_e2e_tests).step);
 
@@ -357,11 +357,7 @@ pub fn build(b: *std.Build) void {
     });
     uhid_mod.addImport("toml", toml_mod);
     const uhid_tests = b.addTest(.{ .root_module = uhid_mod, .filters = test_filters });
-    if (use_libusb) {
-        uhid_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        uhid_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, uhid_tests, use_libusb, vendored);
     uhid_tests.linkLibC();
     uhid_step.dependOn(&b.addRunArtifact(uhid_tests).step);
 
@@ -415,6 +411,7 @@ fn createSrcModule(
     use_wasm: bool,
     wasm3_c_flags: []const []const u8,
     use_libusb: bool,
+    vendored: ?VendorLib,
 ) *std.Build.Module {
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -425,7 +422,7 @@ fn createSrcModule(
     });
     mod.addImport("toml", toml_mod);
     mod.addImport("build_options", build_opts.createModule());
-    if (!use_libusb) mod.addIncludePath(b.path("compat"));
+    applyLibusbInclude(b, mod, use_libusb, vendored);
     if (use_wasm) addWasm3(b, mod, wasm3_c_flags);
     return mod;
 }
@@ -440,9 +437,10 @@ fn addSupervisorUhidRoutingTests(
     use_wasm: bool,
     wasm3_c_flags: []const []const u8,
     use_libusb: bool,
+    vendored: ?VendorLib,
     test_filters: []const []const u8,
 ) *std.Build.Step.Compile {
-    const src_mod = createSrcModule(b, target, optimize, sanitize_thread, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb);
+    const src_mod = createSrcModule(b, target, optimize, sanitize_thread, toml_mod, build_opts, use_wasm, wasm3_c_flags, use_libusb, vendored);
     const routing_mod = b.createModule(.{
         .root_source_file = b.path("src/test/supervisor_uhid_routing_test.zig"),
         .target = target,
@@ -453,11 +451,7 @@ fn addSupervisorUhidRoutingTests(
     routing_mod.addImport("toml", toml_mod);
     routing_mod.addImport("src", src_mod);
     const routing_tests = b.addTest(.{ .root_module = routing_mod, .filters = test_filters });
-    if (use_libusb) {
-        routing_tests.linkSystemLibrary("usb-1.0");
-    } else {
-        routing_tests.addIncludePath(b.path("compat"));
-    }
+    applyLibusb(b, routing_tests, use_libusb, vendored);
     routing_tests.linkLibC();
     return routing_tests;
 }

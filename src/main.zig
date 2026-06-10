@@ -153,6 +153,7 @@ pub const testing_support = struct {
     pub const supervisor_suspended_attach_takeover_test = @import("test/supervisor_suspended_attach_takeover_test.zig");
     pub const supervisor_suspend_output_continuity_test = @import("test/supervisor_suspend_output_continuity_test.zig");
     pub const wedge_instrumentation_test = @import("test/wedge_instrumentation_test.zig");
+    pub const libusb_capability_test = @import("test/libusb_capability_test.zig");
     // Permanent canary — proves test discovery walks into testing_support.
     // If the discovery mechanism breaks again, this test stops running and
     // we can prove the regression with a deliberate failure.
@@ -183,6 +184,8 @@ const Supervisor = supervisor.Supervisor;
 const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
 const VERSION = @import("build_options").version;
+const VERSION_LINE = "padctl " ++ VERSION ++
+    (if (@import("build_options").use_libusb) " (libusb)" else " (no-libusb)") ++ "\n";
 
 pub const DumpAction = enum { enable, disable, status, @"export", clear };
 
@@ -272,7 +275,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             printHelp();
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            _ = std.posix.write(std.posix.STDOUT_FILENO, "padctl " ++ VERSION ++ "\n") catch 0;
+            _ = std.posix.write(std.posix.STDOUT_FILENO, VERSION_LINE) catch 0;
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "install")) {
             var opts = cli.install.InstallOptions{};
