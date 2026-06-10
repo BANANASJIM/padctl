@@ -2109,7 +2109,10 @@ pub const Supervisor = struct {
             };
         };
         defer self.allocator.free(path);
-        const result = mapping_cfg.parseFile(self.allocator, path) catch return null;
+        const result = mapping_cfg.parseFile(self.allocator, path) catch |err| {
+            std.log.warn("skipping default mapping {s}: {}", .{ path, err });
+            return null;
+        };
         const stem = self.allocator.dupe(u8, std.fs.path.stem(path)) catch {
             var r = result;
             r.deinit();
@@ -2165,7 +2168,7 @@ pub const Supervisor = struct {
             const toml_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path });
 
             const parsed = config_device.parseFile(self.allocator, toml_path) catch |err| {
-                std.log.debug("skip {s}: {}", .{ entry.path, err });
+                std.log.warn("skipping device config {s}: {}", .{ toml_path, err });
                 continue;
             };
             const cfg_ptr = try self.allocator.create(config_device.ParseResult);
