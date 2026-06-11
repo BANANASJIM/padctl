@@ -78,6 +78,7 @@ pub const io = struct {
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
     pub const write_exact = @import("io/write_exact.zig");
     pub const netlink = @import("io/netlink.zig");
+    pub const shadow_grab = @import("io/shadow_grab.zig");
     pub const ffb_forwarder = @import("io/ffb_forwarder.zig");
 };
 
@@ -154,6 +155,7 @@ pub const testing_support = struct {
     pub const supervisor_suspend_output_continuity_test = @import("test/supervisor_suspend_output_continuity_test.zig");
     pub const wedge_instrumentation_test = @import("test/wedge_instrumentation_test.zig");
     pub const libusb_capability_test = @import("test/libusb_capability_test.zig");
+    pub const shadow_grab_integration_test = @import("test/shadow_grab_integration_test.zig");
     // Permanent canary — proves test discovery walks into testing_support.
     // If the discovery mechanism breaks again, this test stops running and
     // we can prove the regression with a deliberate failure.

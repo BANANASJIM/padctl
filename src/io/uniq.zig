@@ -19,6 +19,10 @@ const std = @import("std");
 
 pub const MAX_UNIQ_LEN: usize = 64;
 
+/// Shared prefix of every padctl-created UHID uniq; lets other modules
+/// recognise padctl's own virtual devices (see `src/io/shadow_grab.zig`).
+pub const PREFIX = "padctl/";
+
 /// Build the shared uniq string. Caller owns the returned NUL-terminated
 /// buffer and must free it.
 ///
@@ -42,7 +46,7 @@ pub fn buildUniq(
         break :blk std.fmt.bufPrint(&inst_buf, "ctr{x:0>4}", .{counter}) catch unreachable;
     };
 
-    const body = try std.fmt.allocPrint(allocator, "padctl/{s}-{s}", .{ device_id, instance });
+    const body = try std.fmt.allocPrint(allocator, PREFIX ++ "{s}-{s}", .{ device_id, instance });
     defer allocator.free(body);
     const out = try allocator.allocSentinel(u8, body.len, 0);
     @memcpy(out, body);

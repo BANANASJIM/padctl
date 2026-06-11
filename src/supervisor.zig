@@ -16,6 +16,7 @@ const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
 const netlink = @import("io/netlink.zig");
+const shadow_grab = @import("io/shadow_grab.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
 const mapping_discovery = @import("config/mapping_discovery.zig");
@@ -74,6 +75,10 @@ pub const ManagedInstance = struct {
     /// `gcExpiredGrace()` tears the entry down. Set by `detach()` when
     /// `suspend_grace_sec > 0`; cleared on successful rebind.
     grace_deadline_ns: ?u64 = null,
+    /// Grabbed shadow /dev/input/event* fds of kernel drivers (e.g. xpad)
+    /// bound to this managed device (issue #406). Released on suspend and
+    /// teardown; refilled by the sweep on spawn/resume.
+    shadow_grabs: shadow_grab.GrabList = .{},
 };
 
 /// Config snapshot used for hot-reload diffing.
@@ -574,6 +579,7 @@ pub const Supervisor = struct {
             m.thread.join();
             m.instance.quiesceOutputs(.{ .reset_input_state = true, .reset_mapper_state = true });
             m.instance.closeDeviceIO();
+            m.shadow_grabs.releaseAll();
             m.suspended = true;
             // Schedule grace deadline. Saturating add keeps us safe against
             // pathological `suspend_grace_sec` values.
@@ -801,6 +807,7 @@ pub const Supervisor = struct {
             .switch_mapping = null,
             .default_mapping_pr = default_pr,
         });
+        sweepShadowNodes(&self.managed.items[self.managed.items.len - 1]);
     }
 
     fn pruneStaleSuspendedForId(self: *Supervisor, vid: u16, pid: u16, keep_phys: []const u8) void {
@@ -826,6 +833,7 @@ pub const Supervisor = struct {
     }
 
     fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {
+        m.shadow_grabs.releaseAll();
         if (m.switch_mapping) |pm| {
             pm.deinit();
             self.allocator.destroy(pm);
@@ -902,6 +910,7 @@ pub const Supervisor = struct {
         m.suspended = false;
         m.grace_deadline_ns = null;
         self.armGraceTimer();
+        sweepShadowNodes(m);
     }
 
     fn clearSwitchMapping(self: *Supervisor, m: *ManagedInstance) void {
@@ -1334,18 +1343,51 @@ pub const Supervisor = struct {
         }
     }
 
-    fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
-        switch (action) {
-            .add => self.attach(devname) catch |err| {
-                if (err == error.HotplugTransient) {
-                    self.enqueueHotplugRetry(devname);
-                } else {
-                    std.log.warn("hotplug attach {s}: {}", .{ devname, err });
-                }
+    fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, subsystem: netlink.Subsystem, devname: []const u8) void {
+        switch (subsystem) {
+            .hidraw => switch (action) {
+                .add => self.attach(devname) catch |err| {
+                    if (err == error.HotplugTransient) {
+                        self.enqueueHotplugRetry(devname);
+                    } else {
+                        std.log.warn("hotplug attach {s}: {}", .{ devname, err });
+                    }
+                },
+                .remove => self.detach(devname),
+                .other => {},
             },
-            .remove => self.detach(devname),
-            .other => {},
+            .input => if (action == .add) self.handleInputNodeAdd(devname),
         }
+    }
+
+    fn shadowParams(m: *const ManagedInstance) shadow_grab.Params {
+        const cfg = m.instance.device_cfg;
+        var p: shadow_grab.Params = .{
+            .phys_vendor = @intCast(cfg.device.vid),
+            .phys_product = @intCast(cfg.device.pid),
+        };
+        if (cfg.output) |out| {
+            if (out.vid) |v| p.output_vendor = @intCast(v);
+            if (out.pid) |v| p.output_product = @intCast(v);
+        }
+        return p;
+    }
+
+    /// Netlink saw a new /dev/input/event* node: grab it if it shadows an
+    /// active managed device.
+    fn handleInputNodeAdd(self: *Supervisor, devname: []const u8) void {
+        const node = std.fs.path.basename(devname);
+        for (self.managed.items) |*m| {
+            if (m.suspended) continue;
+            if (shadow_grab.tryGrabNode(&m.shadow_grabs, "/dev/input", node, shadowParams(m))) return;
+        }
+    }
+
+    /// Grab pre-existing shadow nodes when an instance becomes active (spawn
+    /// and resume) — a shadow that predates the daemon never produces a
+    /// netlink ADD.
+    fn sweepShadowNodes(m: *ManagedInstance) void {
+        shadow_grab.sweepDir(&m.shadow_grabs, "/dev/input", shadowParams(m));
     }
 
     fn drainNetlink(self: *Supervisor) void {

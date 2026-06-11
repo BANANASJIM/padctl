@@ -57,9 +57,12 @@ pub fn parseUevent(buf: []const u8) Uevent {
     return .{ .action = action, .devname = devname, .subsystem = subsystem };
 }
 
-/// Drain all pending uevent messages from fd, calling callback for each hidraw add/remove.
+pub const Subsystem = enum { hidraw, input };
+
+/// Drain all pending uevent messages from fd, calling callback for each
+/// hidraw add/remove and each input-subsystem event-node add.
 /// Stops when recv returns WouldBlock (EAGAIN).
-pub fn drainNetlink(fd: posix.fd_t, ctx: anytype, comptime callback: fn (@TypeOf(ctx), UeventAction, []const u8) void) void {
+pub fn drainNetlink(fd: posix.fd_t, ctx: anytype, comptime callback: fn (@TypeOf(ctx), UeventAction, Subsystem, []const u8) void) void {
     var buf: [2048]u8 = undefined;
     while (true) {
         const n = posix.recv(fd, &buf, 0) catch return;
@@ -67,9 +70,14 @@ pub fn drainNetlink(fd: posix.fd_t, ctx: anytype, comptime callback: fn (@TypeOf
         const ev = parseUevent(buf[0..n]);
         if (ev.action == .other) continue;
         const sub = ev.subsystem orelse continue;
-        if (!std.mem.eql(u8, sub, "hidraw")) continue;
         const name = ev.devname orelse continue;
-        callback(ctx, ev.action, name);
+        if (std.mem.eql(u8, sub, "hidraw")) {
+            callback(ctx, ev.action, .hidraw, name);
+        } else if (ev.action == .add and std.mem.eql(u8, sub, "input") and
+            std.mem.startsWith(u8, name, "input/event"))
+        {
+            callback(ctx, ev.action, .input, name);
+        }
     }
 }
 
@@ -111,6 +119,57 @@ test "parseUevent: missing DEVNAME" {
     try testing.expectEqual(UeventAction.add, ev.action);
     try testing.expect(ev.devname == null);
     try testing.expectEqualStrings("hidraw", ev.subsystem.?);
+}
+
+const DrainRecorder = struct {
+    actions: [8]UeventAction = undefined,
+    subsystems: [8]Subsystem = undefined,
+    names: [8][32]u8 = undefined,
+    name_lens: [8]usize = undefined,
+    count: usize = 0,
+
+    fn record(self: *@This(), action: UeventAction, subsystem: Subsystem, devname: []const u8) void {
+        if (self.count >= self.actions.len) return;
+        self.actions[self.count] = action;
+        self.subsystems[self.count] = subsystem;
+        @memcpy(self.names[self.count][0..devname.len], devname);
+        self.name_lens[self.count] = devname.len;
+        self.count += 1;
+    }
+};
+
+fn drainTestPair() ![2]posix.fd_t {
+    var fds: [2]i32 = undefined;
+    if (linux.E.init(linux.socketpair(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK, 0, &fds)) != .SUCCESS)
+        return error.SocketPairFailed;
+    return fds;
+}
+
+test "drainNetlink: hidraw events pass with .hidraw, input event-node add passes with .input" {
+    const pair = try drainTestPair();
+    defer posix.close(pair[0]);
+    defer posix.close(pair[1]);
+
+    _ = try posix.send(pair[1], "add@/devices/x/hidraw3\x00SUBSYSTEM=hidraw\x00DEVNAME=hidraw3\x00", 0);
+    _ = try posix.send(pair[1], "add@/devices/x/input/input9/event5\x00SUBSYSTEM=input\x00DEVNAME=input/event5\x00", 0);
+    // Non-event input node (the inputN parent) must be filtered out.
+    _ = try posix.send(pair[1], "add@/devices/x/input/input9\x00SUBSYSTEM=input\x00DEVNAME=input/input9\x00", 0);
+    // Input REMOVE must be filtered out (only ADD is forwarded for input).
+    _ = try posix.send(pair[1], "remove@/devices/x/input/input9/event5\x00SUBSYSTEM=input\x00DEVNAME=input/event5\x00", 0);
+    _ = try posix.send(pair[1], "remove@/devices/x/hidraw3\x00SUBSYSTEM=hidraw\x00DEVNAME=hidraw3\x00", 0);
+
+    var rec = DrainRecorder{};
+    drainNetlink(pair[0], &rec, DrainRecorder.record);
+
+    try testing.expectEqual(@as(usize, 3), rec.count);
+    try testing.expectEqual(UeventAction.add, rec.actions[0]);
+    try testing.expectEqual(Subsystem.hidraw, rec.subsystems[0]);
+    try testing.expectEqualStrings("hidraw3", rec.names[0][0..rec.name_lens[0]]);
+    try testing.expectEqual(UeventAction.add, rec.actions[1]);
+    try testing.expectEqual(Subsystem.input, rec.subsystems[1]);
+    try testing.expectEqualStrings("input/event5", rec.names[1][0..rec.name_lens[1]]);
+    try testing.expectEqual(UeventAction.remove, rec.actions[2]);
+    try testing.expectEqual(Subsystem.hidraw, rec.subsystems[2]);
 }
 
 test "parseUevent: libudev header (defensive)" {
