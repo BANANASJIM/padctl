@@ -840,9 +840,18 @@ pub const Mapper = struct {
         var suppressed: u64 = 0;
         var injected: u64 = self.gesture_held_gamepad | self.layer_held_gamepad;
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
+        var inject_axes: remap_mod.AxisFloor = .{};
+
+        // Mirror apply(): hold masks and macro holds driving LT/RT raise the
+        // analog axis floor so timer-emitted frames match regular frames.
+        const held_gamepad = self.gesture_held_gamepad | self.layer_held_gamepad;
+        if (held_gamepad & buttonBit("LT") != 0) inject_axes.lt = 255;
+        if (held_gamepad & buttonBit("RT") != 0) inject_axes.rt = 255;
 
         for (self.active_macros.items) |player| {
             injected |= player.held_gamepad_buttons;
+            if (player.held_axis_lt > inject_axes.lt) inject_axes.lt = player.held_axis_lt;
+            if (player.held_axis_rt > inject_axes.rt) inject_axes.rt = player.held_axis_rt;
         }
 
         for (configs) |*cfg| {
@@ -868,7 +877,13 @@ pub const Mapper = struct {
             if ((self.state.buttons & src_mask) == 0) continue;
             const target = per_src_inject[i] orelse continue;
             switch (target) {
-                .gamepad_button => |dst| injected |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst))),
+                .gamepad_button => |dst| {
+                    injected |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst)));
+                    if (remap_mod.axisFloorOf(target)) |f| {
+                        if (f.lt > inject_axes.lt) inject_axes.lt = f.lt;
+                        if (f.rt > inject_axes.rt) inject_axes.rt = f.rt;
+                    }
+                },
                 else => {},
             }
         }
@@ -885,6 +900,8 @@ pub const Mapper = struct {
 
         var emit_state = self.state;
         emit_state.buttons = (self.state.buttons & ~suppressed) | injected;
+        if (inject_axes.lt > emit_state.lt) emit_state.lt = inject_axes.lt;
+        if (inject_axes.rt > emit_state.rt) emit_state.rt = inject_axes.rt;
         emit_state.synthesizeDpadAxes();
         if (suppress_dpad_hat) {
             emit_state.dpad_x = 0;
@@ -2122,6 +2139,52 @@ test "mapper: hold_toggle timer frame recomputes held source remaps" {
     try testing.expectEqual(@as(u64, 0), timer_off.gamepad.?.buttons & lt_mask);
     try testing.expect((timer_off.gamepad.?.buttons & x_mask) != 0);
     try testing.expectEqual(@as(u64, 0), timer_off.gamepad.?.buttons & y_mask);
+}
+
+test "mapper: hold_toggle timer frame raises remapped RT axis floor" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "race"
+        \\trigger = "LB"
+        \\activation = "hold_toggle"
+        \\hold_timeout = 200
+        \\
+        \\[layer.remap]
+        \\A = "RT"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    _ = try m.apply(.{ .buttons = buttonBit("A") | buttonBit("LB") }, 16, 10_000_000);
+    const timer_on = m.onLayerTimerExpiredAt(210_000_000);
+    try testing.expect(timer_on.gamepad != null);
+    try testing.expect((timer_on.gamepad.?.buttons & buttonBit("RT")) != 0);
+    try testing.expectEqual(@as(u8, 255), timer_on.gamepad.?.rt);
+}
+
+test "mapper: layer hold RT timer frame raises analog axis floor" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "race"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\hold = "RT"
+        \\hold_timeout = 200
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    _ = try m.apply(.{ .buttons = buttonBit("LB") }, 16, 0);
+    const timer = m.onLayerTimerExpiredAt(210_000_000);
+    try testing.expect(timer.gamepad != null);
+    try testing.expect((timer.gamepad.?.buttons & buttonBit("RT")) != 0);
+    try testing.expectEqual(@as(u8, 255), timer.gamepad.?.rt);
 }
 
 test "mapper: hold_toggle timer frame preserves chord selector suppression" {
