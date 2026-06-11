@@ -15,21 +15,7 @@ const ButtonId = state_mod.ButtonId;
 /// Analog floor contributed by macros for LT/RT. Mapper merges this into
 /// emit_state.lt/rt via @max so a physical press always wins over the macro
 /// when stronger (digital BTN_TL2 alone is not seen by SDL/games).
-pub const AxisInjection = struct {
-    lt: u8 = 0,
-    rt: u8 = 0,
-};
-
-fn axisFloorOf(target: RemapTargetResolved) ?struct { lt: u8, rt: u8 } {
-    return switch (target) {
-        .gamepad_button => |b| switch (b) {
-            .LT => .{ .lt = 255, .rt = 0 },
-            .RT => .{ .lt = 0, .rt = 255 },
-            else => null,
-        },
-        else => null,
-    };
-}
+pub const AxisInjection = remap.AxisFloor;
 
 fn raiseAxis(dst: *u8, value: u8) void {
     if (value > dst.*) dst.* = value;
@@ -125,7 +111,7 @@ pub const MacroPlayer = struct {
                 .tap => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
                     remap.applyTarget(target, .tap, aux, injected_buttons, pending_tap_release, null);
-                    if (axisFloorOf(target)) |f| {
+                    if (remap.axisFloorOf(target)) |f| {
                         raiseAxis(&axes.lt, f.lt);
                         raiseAxis(&axes.rt, f.rt);
                     }
@@ -133,7 +119,7 @@ pub const MacroPlayer = struct {
                 .down => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
                     remap.applyTarget(target, .press, aux, injected_buttons, null, &self.held_gamepad_buttons);
-                    if (axisFloorOf(target)) |f| {
+                    if (remap.axisFloorOf(target)) |f| {
                         raiseAxis(&self.held_axis_lt, f.lt);
                         raiseAxis(&self.held_axis_rt, f.rt);
                     }
@@ -141,7 +127,7 @@ pub const MacroPlayer = struct {
                 .up => |name| {
                     const target = resolveTargetSafe(name) orelse continue;
                     remap.applyTarget(target, .release, aux, injected_buttons, null, &self.held_gamepad_buttons);
-                    if (axisFloorOf(target)) |f| {
+                    if (remap.axisFloorOf(target)) |f| {
                         if (f.lt != 0) self.held_axis_lt = 0;
                         if (f.rt != 0) self.held_axis_rt = 0;
                     }

@@ -538,6 +538,8 @@ pub const Mapper = struct {
             }
         }
 
+        var inject_axes: remap_mod.AxisFloor = .{};
+
         for (0..BUTTON_COUNT) |i| {
             const src_mask: u64 = @as(u64, 1) << @as(u6, @intCast(i));
             const pressed = (self.state.buttons & src_mask) != 0;
@@ -571,7 +573,13 @@ pub const Mapper = struct {
                 .gamepad_button => {
                     // Level-triggered: OR bit each frame while held;
                     // `injected_buttons` is reset at frame start so release is implicit.
-                    if (pressed) remap_mod.applyTarget(target, .press, &aux, &self.injected_buttons, null, null);
+                    if (pressed) {
+                        remap_mod.applyTarget(target, .press, &aux, &self.injected_buttons, null, null);
+                        if (remap_mod.axisFloorOf(target)) |f| {
+                            if (f.lt > inject_axes.lt) inject_axes.lt = f.lt;
+                            if (f.rt > inject_axes.rt) inject_axes.rt = f.rt;
+                        }
+                    }
                 },
                 .key, .mouse_button => {
                     if (pressed and !prev_pressed) {
@@ -598,6 +606,12 @@ pub const Mapper = struct {
 
         // Re-assert the active layer's `hold` passthrough gamepad bit each frame.
         self.injected_buttons |= self.layer_held_gamepad;
+
+        // Gesture hold legs and layer hold passthrough drive LT/RT via these
+        // masks rather than per_src_inject; give them the same analog floor.
+        const held_gamepad = self.gesture_held_gamepad | self.layer_held_gamepad;
+        if (held_gamepad & buttonBit("LT") != 0) inject_axes.lt = 255;
+        if (held_gamepad & buttonBit("RT") != 0) inject_axes.rt = 255;
 
         if (action.tap_event) |tap| {
             emitTapEvent(self, tap, &aux, now_ns);
@@ -640,10 +654,12 @@ pub const Mapper = struct {
         // assemble emit state
         var emit_state = self.state;
         emit_state.buttons = (self.state.buttons & ~self.suppressed_buttons) | self.injected_buttons;
-        // macros driving LT/RT raise the analog axis floor; physical input
-        // still wins when the user presses harder than the macro.
+        // macros and remaps driving LT/RT raise the analog axis floor; physical
+        // input still wins when the user presses harder.
         if (macro_axes.lt > emit_state.lt) emit_state.lt = macro_axes.lt;
         if (macro_axes.rt > emit_state.rt) emit_state.rt = macro_axes.rt;
+        if (inject_axes.lt > emit_state.lt) emit_state.lt = inject_axes.lt;
+        if (inject_axes.rt > emit_state.rt) emit_state.rt = inject_axes.rt;
         emit_state.synthesizeDpadAxes();
         if (suppress_dpad_hat) {
             emit_state.dpad_x = 0;
@@ -1587,6 +1603,117 @@ test "mapper: inject last-write wins: layer inject overrides base inject for sam
 
     try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << x_idx));
     try testing.expect((events.gamepad.buttons & (@as(u64, 1) << y_idx)) != 0);
+}
+
+test "mapper: remap to RT raises analog axis while held, drops on release" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\M1 = "RT"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const held = try m.apply(.{ .buttons = buttonBit("M1") }, 16, 0);
+    try testing.expect((held.gamepad.buttons & buttonBit("RT")) != 0);
+    try testing.expectEqual(@as(u8, 255), held.gamepad.rt);
+
+    const released = try m.apply(.{ .buttons = 0 }, 16, 0);
+    try testing.expectEqual(@as(u8, 0), released.gamepad.rt);
+}
+
+test "mapper: remap to LT raises analog axis while held" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\M2 = "LT"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const held = try m.apply(.{ .buttons = buttonBit("M2") }, 16, 0);
+    try testing.expect((held.gamepad.buttons & buttonBit("LT")) != 0);
+    try testing.expectEqual(@as(u8, 255), held.gamepad.lt);
+    try testing.expectEqual(@as(u8, 0), held.gamepad.rt);
+}
+
+test "mapper: remap axis floor max-merges with physical trigger" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = "RT"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const events = try m.apply(.{ .buttons = buttonBit("A"), .rt = 200 }, 16, 0);
+    try testing.expectEqual(@as(u8, 255), events.gamepad.rt);
+}
+
+test "mapper: physical trigger unchanged without remap" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping("", allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const events = try m.apply(.{ .rt = 200 }, 16, 0);
+    try testing.expectEqual(@as(u8, 200), events.gamepad.rt);
+}
+
+test "mapper: layer remap to RT raises analog axis" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\
+        \\[layer.remap]
+        \\A = "RT"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const configs = parsed.value.layer.?;
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
+    _ = m.layer.onTimerExpired();
+
+    const events = try m.apply(.{ .buttons = buttonBit("A") }, 16, 0);
+    try testing.expect((events.gamepad.buttons & buttonBit("RT")) != 0);
+    try testing.expectEqual(@as(u8, 255), events.gamepad.rt);
+}
+
+test "mapper: gesture hold to RT raises analog axis while held" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = { tap = "X", hold = "RT", hold_ms = 100 }
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_mask = buttonBit("A");
+    _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
+    _ = m.onMacroTimerExpired(100 * std.time.ns_per_ms + 1);
+
+    const held = try m.apply(.{ .buttons = a_mask }, 16, 110 * std.time.ns_per_ms);
+    try testing.expect((held.gamepad.buttons & buttonBit("RT")) != 0);
+    try testing.expectEqual(@as(u8, 255), held.gamepad.rt);
+
+    const released = try m.apply(.{ .buttons = 0 }, 16, 120 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u8, 0), released.gamepad.rt);
 }
 
 test "mapper: prev frame masking: suppress produces correct diff" {
