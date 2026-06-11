@@ -61,10 +61,7 @@ const parseHexOrDec = _udev.parseHexOrDec;
 const generateUdevRules = _udev.generateUdevRules;
 const generateDriverBlockRules = _udev.generateDriverBlockRules;
 const generateDriverBlockRulesFromEntries = _udev.generateDriverBlockRulesFromEntries;
-const sentinelPath = udev_mod.sentinelPath;
-const runtime_sentinel_path = udev_mod.runtime_sentinel_path;
-const writeServiceSentinel = udev_mod.writeServiceSentinel;
-const removeServiceSentinel = udev_mod.removeServiceSentinel;
+const daemon_socket_guard = udev_mod.daemon_socket_guard;
 const shouldProactiveUnbind = udev_mod.shouldProactiveUnbind;
 
 // migration.zig
@@ -1865,11 +1862,11 @@ test "install: generateDriverBlockRules skips when no drivers configured" {
     return error.TestUnexpectedResult;
 }
 
-// --- conditional driver-block + service-enabled sentinel ---
+// --- conditional driver-block + daemon socket guard ---
 
-// Builds a single-driver entry list and generates the driver-block rules with
-// an explicit sentinel path. Caller owns nothing extra; entries are stack-lived.
-fn genIssue137Rules(allocator: std.mem.Allocator, rules_path: []const u8, sentinel: []const u8) !void {
+// Builds a single-driver entry list and generates the driver-block rules.
+// Caller owns nothing extra; entries are stack-lived.
+fn genIssue137Rules(allocator: std.mem.Allocator, rules_path: []const u8) !void {
     const drivers = [_][]const u8{"xpad"};
     const entries = [_]UdevEntry{.{
         .name = "Test Pad",
@@ -1877,7 +1874,7 @@ fn genIssue137Rules(allocator: std.mem.Allocator, rules_path: []const u8, sentin
         .pid = 0x00c1,
         .block_kernel_drivers = &drivers,
     }};
-    try generateDriverBlockRulesFromEntries(allocator, &entries, rules_path, sentinel);
+    try generateDriverBlockRulesFromEntries(allocator, &entries, rules_path);
 }
 
 fn readRulesFile(allocator: std.mem.Allocator, rules_path: []const u8) ![]u8 {
@@ -1887,10 +1884,10 @@ fn readRulesFile(allocator: std.mem.Allocator, rules_path: []const u8) ![]u8 {
 }
 
 // (1) MUTATION-CI-PROOF: every line that performs an `unbind` must be guarded
-// by a `test -e <sentinel> &&` predicate. FAILS if the sentinel predicate is
-// removed from the unbind RUN+= line in generateDriverBlockRulesFromEntries
-// (reverting to the unconditional `echo %k > .../unbind` shape).
-test "install: #137 every unbind line is sentinel-gated" {
+// by the daemon-socket predicate. FAILS if the guard is removed from the
+// unbind RUN+= line in generateDriverBlockRulesFromEntries (reverting to the
+// unconditional `echo %k > .../unbind` shape).
+test "install: #406 every unbind line is daemon-socket-gated" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -1901,27 +1898,27 @@ test "install: #137 every unbind line is sentinel-gated" {
 
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
     defer allocator.free(rules_path);
-    const sentinel = "/etc/padctl/service-enabled";
-    try genIssue137Rules(allocator, rules_path, sentinel);
+    try genIssue137Rules(allocator, rules_path);
 
     const content = try readRulesFile(allocator, rules_path);
     defer allocator.free(content);
 
-    const guard = try std.fmt.allocPrint(allocator, "test -e {s} &&", .{sentinel});
+    const guard = try std.fmt.allocPrint(allocator, "{s} &&", .{daemon_socket_guard});
     defer allocator.free(guard);
     try testing.expect(std.mem.indexOf(u8, content, guard) != null);
 
     var it = std.mem.splitScalar(u8, content, '\n');
     while (it.next()) |line| {
         if (std.mem.indexOf(u8, line, "unbind") == null) continue;
-        try testing.expect(std.mem.indexOf(u8, line, "test -e ") != null);
-        try testing.expect(std.mem.indexOf(u8, line, sentinel) != null);
+        try testing.expect(std.mem.indexOf(u8, line, daemon_socket_guard) != null);
     }
 }
 
-// (2) FAILS if the ACTION=="remove" rebind loop is deleted from
-// generateDriverBlockRulesFromEntries.
-test "install: #137 generates ACTION==remove rebind line" {
+// (2) FAILS if the ACTION=="remove" rule regresses to the sentinel-era shape:
+// it must modprobe only when no daemon socket exists, and must never echo into
+// the driver's `bind` attribute (always a no-op for a removed device, and the
+// failing echo used to chain into modprobe on every unplug).
+test "install: #406 remove rule modprobes only without daemon socket" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -1932,16 +1929,50 @@ test "install: #137 generates ACTION==remove rebind line" {
 
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
     defer allocator.free(rules_path);
-    try genIssue137Rules(allocator, rules_path, "/etc/padctl/service-enabled");
+    try genIssue137Rules(allocator, rules_path);
 
     const content = try readRulesFile(allocator, rules_path);
     defer allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, "ACTION==\"remove\"") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "/bind") != null);
+    const fallback = try std.fmt.allocPrint(allocator, "{s} || /sbin/modprobe xpad", .{daemon_socket_guard});
+    defer allocator.free(fallback);
+
+    var seen_remove = false;
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "ACTION==\"remove\"") == null) continue;
+        seen_remove = true;
+        try testing.expect(std.mem.indexOf(u8, line, fallback) != null);
+        try testing.expect(std.mem.indexOf(u8, line, "echo") == null);
+        try testing.expect(std.mem.indexOf(u8, line, "/bind") == null);
+    }
+    try testing.expect(seen_remove);
 }
 
-test "install: staged driver-block udev rule uses runtime sentinel path" {
+// (3) FAILS if any install-time sentinel reference creeps back into the rules.
+test "install: #406 rules carry socket globs and no sentinel" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const rules_path = try std.fmt.allocPrint(allocator, "{s}/61.rules", .{tmp_path});
+    defer allocator.free(rules_path);
+    try genIssue137Rules(allocator, rules_path);
+
+    const content = try readRulesFile(allocator, rules_path);
+    defer allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "/run/user/*/padctl.sock") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/run/padctl/padctl.sock") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "service-enabled") == null);
+    try testing.expect(std.mem.indexOf(u8, content, "test -e") == null);
+}
+
+test "install: staged driver-block udev rule uses runtime socket paths" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -1974,38 +2005,13 @@ test "install: staged driver-block udev rule uses runtime sentinel path" {
     const content = try readRulesFile(allocator, rules_path);
     defer allocator.free(content);
 
-    try testing.expect(std.mem.indexOf(u8, content, runtime_sentinel_path) != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/run/user/*/padctl.sock") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/run/padctl/padctl.sock") != null);
     try testing.expect(std.mem.indexOf(u8, content, destdir) == null);
 }
 
-// (3) FAILS if writeServiceSentinel stops writing or sentinelPath diverges
-// from the file actually written when the plan is enabling & not --no-enable.
-test "install: #137 writeServiceSentinel creates the gating file" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(destdir);
-
-    const opts = InstallOptions{ .destdir = destdir };
-    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
-    const plan = try InstallPlan.compute(allocator, opts, env);
-    defer plan.deinit(allocator);
-    // destdir set → staging → do_enable_systemctl=false; force the enabling
-    // shape this test is about by checking shouldProactiveUnbind precondition
-    // directly is covered by test (7); here we exercise the writer/path pair.
-    try writeServiceSentinel(allocator, &plan);
-
-    const path = try sentinelPath(allocator, destdir);
-    defer allocator.free(path);
-    try std.fs.accessAbsolute(path, .{});
-}
-
-// (4) FAILS if the install path writes a sentinel under --no-enable. Drives
-// the predicate that gates writeServiceSentinel in phase.zig.
-test "install: #137 no sentinel under --no-enable" {
+// (4) FAILS if the install path proactively unbinds under --no-enable.
+test "install: #137 no proactive unbind under --no-enable" {
     const testing = std.testing;
     const opts = InstallOptions{ .no_enable = true, .prefix = "/home/alice/.local" };
     const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
@@ -2015,8 +2021,8 @@ test "install: #137 no sentinel under --no-enable" {
 }
 
 // (5) FAILS if shouldProactiveUnbind returns true when do_enable_systemctl is
-// false (staged build), which would write a sentinel for a non-running install.
-test "install: #137 no sentinel when do_enable_systemctl false" {
+// false (staged build), which would unbind for a non-running install.
+test "install: #137 no proactive unbind when do_enable_systemctl false" {
     const testing = std.testing;
     const opts = InstallOptions{ .destdir = "/tmp/staging137" };
     const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
@@ -2024,33 +2030,6 @@ test "install: #137 no sentinel when do_enable_systemctl false" {
     defer plan.deinit(testing.allocator);
     try testing.expect(!plan.do_enable_systemctl);
     try testing.expect(!shouldProactiveUnbind(&plan));
-}
-
-// (6) FAILS if removeServiceSentinel does not delete the file, or is not
-// idempotent (panics / errors on the second call when already absent).
-test "install: #137 removeServiceSentinel deletes and is idempotent" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(destdir);
-
-    const opts = InstallOptions{ .destdir = destdir };
-    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
-    const plan = try InstallPlan.compute(allocator, opts, env);
-    defer plan.deinit(allocator);
-    try writeServiceSentinel(allocator, &plan);
-
-    const path = try sentinelPath(allocator, destdir);
-    defer allocator.free(path);
-    try std.fs.accessAbsolute(path, .{});
-
-    removeServiceSentinel(allocator, destdir);
-    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(path, .{}));
-    removeServiceSentinel(allocator, destdir); // idempotent: must not error/panic
-    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(path, .{}));
 }
 
 // (7) FAILS if shouldProactiveUnbind is not exactly

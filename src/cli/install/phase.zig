@@ -159,17 +159,6 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         mapping_failed = mapping_failed or binding_failed;
     }
 
-    // Sentinel gates the conditional driver-block udev rule:
-    // present ⇒ unbind fires; absent ⇒ xpad keeps the device so a
-    // non-enabled install never leaves the controller ownerless. Always
-    // clear it on the non-enable path so a re-install with --no-enable over
-    // a previously-enabled install does not leave a stale sentinel.
-    if (udev.shouldProactiveUnbind(&plan)) {
-        udev.writeServiceSentinel(allocator, &plan) catch {};
-    } else {
-        udev.removeServiceSentinel(allocator, plan.opts.destdir);
-    }
-
     // Order is load-bearing: reload the udev ruleset, THEN mutate live driver
     // state, THEN start the service. applyDriverState re-probes driverless
     // interfaces, which generates bind uevents udevd evaluates against its
@@ -387,14 +376,17 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
-    // Drop the service-enabled sentinel so a future replug of a
-    // block_kernel_drivers device is not unbound by a stale udev rule.
-    udev.removeServiceSentinel(allocator, destdir);
+    // Remove the legacy service-enabled sentinel left by older installs.
+    {
+        const legacy_sentinel = try std.fmt.allocPrint(allocator, "{s}/etc/padctl/service-enabled", .{destdir});
+        defer allocator.free(legacy_sentinel);
+        std.fs.deleteFileAbsolute(legacy_sentinel) catch {};
+    }
 
-    // The 61-padctl-driver-block rule + sentinel are now gone, so a
-    // controller still plugged in and currently unbound from xpad would
-    // otherwise stay unbound until a physical replug (the REMOVE-side modprobe
-    // only fires on a real `remove` uevent). Actively rebind it to the kernel
+    // The 61-padctl-driver-block rule is now gone, so a controller still
+    // plugged in and currently unbound from xpad would otherwise stay
+    // unbound until a physical replug (the REMOVE-side modprobe only fires
+    // on a real `remove` uevent). Actively rebind it to the kernel
     // driver. Only on a live root uninstall (a destdir staging uninstall has no
     // real sysfs to act on). The share dir is read here before it is removed
     // below; collectDeviceEntriesForUninstall also reads /etc/padctl/devices.

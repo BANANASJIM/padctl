@@ -139,14 +139,14 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
     const connect_fd = socket_client.connectToSocket(socket_path) catch |err| switch (err) {
         error.FileNotFound, error.ConnectionRefused => {
             try writer.writeAll("daemon: DOWN (no socket / not running)\n");
-            try printSentinel(writer);
+            try printDriverBlock(writer);
             try writer.writeByte('\n');
             try printSupportedDevices(allocator, status_devices, exec_start, writer);
             return;
         },
         else => {
             try writer.print("daemon: DOWN (connect error: {})\n", .{err});
-            try printSentinel(writer);
+            try printDriverBlock(writer);
             try writer.writeByte('\n');
             try printSupportedDevices(allocator, status_devices, exec_start, writer);
             return;
@@ -157,7 +157,7 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
     var resp_buf: [4096]u8 = undefined;
     const resp = socket_client.sendCommand(connect_fd, "STATUS\n", &resp_buf) catch {
         try writer.writeAll("daemon: UP (no status response)\n");
-        try printSentinel(writer);
+        try printDriverBlock(writer);
         try writer.writeByte('\n');
         try printSupportedDevices(allocator, status_devices, exec_start, writer);
         return;
@@ -171,17 +171,31 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
         });
     }
 
-    try printSentinel(writer);
+    try printDriverBlock(writer);
     try writer.writeByte('\n');
     try printSupportedDevices(allocator, status_devices, exec_start, writer);
 }
 
-fn printSentinel(writer: anytype) !void {
-    std.fs.accessAbsolute(udev.runtime_sentinel_path, .{}) catch {
-        try writer.print("sentinel: ABSENT ({s}) — driver-block rules fail-safe disabled\n", .{udev.runtime_sentinel_path});
-        return;
-    };
-    try writer.print("sentinel: present ({s})\n", .{udev.runtime_sentinel_path});
+// Mirrors the daemon_socket_guard glob in the generated driver-block rules.
+fn daemonSocketPresent() bool {
+    if (std.fs.accessAbsolute("/run/padctl/padctl.sock", .{})) |_| return true else |_| {}
+    var dir = std.fs.openDirAbsolute("/run/user", .{ .iterate = true }) catch return false;
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "/run/user/{s}/padctl.sock", .{entry.name}) catch continue;
+        if (std.fs.accessAbsolute(path, .{})) |_| return true else |_| {}
+    }
+    return false;
+}
+
+fn printDriverBlock(writer: anytype) !void {
+    if (daemonSocketPresent()) {
+        try writer.writeAll("driver-block: armed (daemon socket present)\n");
+    } else {
+        try writer.writeAll("driver-block: idle (no daemon socket — kernel drivers keep devices)\n");
+    }
 }
 
 /// Extract the `--config-dir <path>` argument from a unit ExecStart line.

@@ -131,13 +131,9 @@ sudo udevadm control --reload-rules
 ```
 
 If your controller config uses `block_kernel_drivers` (currently Flydigi Vader
-5), also enable padctl's driver-block sentinel and then unplug/replug the
-controller:
-
-```sh
-sudo install -d -m 0755 /etc/padctl
-printf 'padctl service-enabled sentinel v1\nprefix=/usr\nwritten-by=package-manager setup\n' | sudo tee /etc/padctl/service-enabled >/dev/null
-```
+5), the driver-block udev rules act on their own: they unbind the kernel driver
+only while a padctl daemon is running (its control socket exists), so just
+unplug/replug the controller after starting the service.
 
 ### From Source
 

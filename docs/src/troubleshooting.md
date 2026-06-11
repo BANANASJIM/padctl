@@ -101,18 +101,12 @@ If your device is not listed, capture it and open a device-config contribution.
 systemctl --user daemon-reload
 systemctl --user enable --now padctl.service
 sudo udevadm control --reload-rules
-sudo install -d -m 0755 /etc/padctl
-printf 'padctl service-enabled sentinel v1\nprefix=/usr\nwritten-by=package-manager setup\n' | sudo tee /etc/padctl/service-enabled >/dev/null
 ```
 
-Then unplug and replug the controller. The sentinel activates the
-driver-block udev rule for devices whose TOML sets `block_kernel_drivers`.
-Remove it if you later disable or remove padctl:
-
-```sh
-systemctl --user disable --now padctl.service
-sudo rm -f /etc/padctl/service-enabled
-```
+Then unplug and replug the controller. The driver-block udev rule unbinds the
+kernel driver only while a padctl daemon is running (its control socket exists),
+so no extra setup step is needed — and a stopped daemon means the kernel driver
+keeps the device.
 
 **Source install fix:**
 
@@ -122,10 +116,10 @@ systemctl --user restart padctl.service
 ```
 
 Then unplug and replug the controller. For devices with `block_kernel_drivers`,
-the source installer writes the driver-block sentinel when it enables the user
-service, installs udev rules, and also tries to unbind already attached matching
-devices during install. Do not use `sudo padctl install` as the normal fix for
-AUR or `.deb` installs because it rewrites files that the package manager owns.
+the source installer installs the udev rules and also tries to unbind already
+attached matching devices during install. Do not use `sudo padctl install` as
+the normal fix for AUR or `.deb` installs because it rewrites files that the
+package manager owns.
 
 ---
 
