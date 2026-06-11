@@ -20,9 +20,9 @@ const NAME_CAP = 24;
 pub const Params = struct {
     phys_vendor: u16,
     phys_product: u16,
-    output_vendor: ?u16 = null,
-    output_product: ?u16 = null,
 };
+
+pub const GrabResult = enum { grabbed, skipped, access_denied };
 
 const Grab = struct {
     fd: posix.fd_t,
@@ -50,21 +50,45 @@ pub const GrabList = struct {
         for (self.grabs[0..self.len]) |*g| posix.close(g.fd);
         self.len = 0;
     }
+
+    /// Drop the grab on `node` (the kernel reuses eventN names, so a stale
+    /// entry would block grabbing a new shadow with the same name).
+    pub fn evict(self: *GrabList, node: []const u8) bool {
+        for (self.grabs[0..self.len], 0..) |*g, i| {
+            if (!std.mem.eql(u8, g.name(), node)) continue;
+            posix.close(g.fd);
+            self.len -= 1;
+            self.grabs[i] = self.grabs[self.len];
+            return true;
+        }
+        return false;
+    }
+
+    /// Evict entries whose device is gone (fd answers ENODEV).
+    pub fn pruneDead(self: *GrabList) void {
+        var i: usize = 0;
+        while (i < self.len) {
+            var id: ioctl.InputId = undefined;
+            if (linux.E.init(linux.ioctl(self.grabs[i].fd, ioctl.EVIOCGID, @intFromPtr(&id))) == .NODEV) {
+                posix.close(self.grabs[i].fd);
+                self.len -= 1;
+                self.grabs[i] = self.grabs[self.len];
+            } else {
+                i += 1;
+            }
+        }
+    }
 };
 
 /// Pure decision seam: grab when the node carries the managed device's
 /// physical VID/PID and is not one of padctl's own outputs — virtual-bus
-/// uinput, "padctl/"-uniq UHID, or the configured [output] identity.
+/// uinput or "padctl/"-uniq UHID. The [output] identity is deliberately not
+/// excluded: configs often clone the physical VID/PID, and padctl's outputs
+/// are already covered by the bus/uniq checks.
 pub fn shouldGrab(id: ioctl.InputId, uniq: []const u8, p: Params) bool {
     if (id.bustype == BUS_VIRTUAL) return false;
     if (std.mem.startsWith(u8, uniq, uniq_mod.PREFIX)) return false;
-    if (id.vendor != p.phys_vendor or id.product != p.phys_product) return false;
-    if (p.output_vendor) |ov| {
-        if (p.output_product) |op| {
-            if (id.vendor == ov and id.product == op) return false;
-        }
-    }
-    return true;
+    return id.vendor == p.phys_vendor and id.product == p.phys_product;
 }
 
 fn readUniq(fd: posix.fd_t, buf: *[uniq_mod.MAX_UNIQ_LEN]u8) []const u8 {
@@ -82,26 +106,30 @@ fn driverName(node: []const u8, buf: []u8) ?[]const u8 {
 }
 
 /// Probe one event node and grab it when it shadows the managed device.
-/// Returns true when the node was grabbed into `list`.
-pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: Params) bool {
-    if (node.len == 0 or node.len > NAME_CAP) return false;
-    if (list.contains(node)) return false;
-    if (list.len >= list.grabs.len) return false;
+/// `.access_denied` flags nodes whose udev permissions are not applied yet
+/// so the caller can retry.
+pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: Params) GrabResult {
+    if (node.len == 0 or node.len > NAME_CAP) return .skipped;
+    if (list.contains(node)) return .skipped;
+    if (list.len >= list.grabs.len) return .skipped;
 
     var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ input_dir, node }) catch return false;
-    const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch return false;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ input_dir, node }) catch return .skipped;
+    const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| switch (err) {
+        error.AccessDenied => return .access_denied,
+        else => return .skipped,
+    };
 
     var id: ioctl.InputId = undefined;
     if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGID, @intFromPtr(&id))) != .SUCCESS) {
         posix.close(fd);
-        return false;
+        return .skipped;
     }
     var uniq_buf: [uniq_mod.MAX_UNIQ_LEN]u8 = undefined;
     const uniq = readUniq(fd, &uniq_buf);
     if (!shouldGrab(id, uniq, p)) {
         posix.close(fd);
-        return false;
+        return .skipped;
     }
 
     const grab_errno = linux.E.init(linux.ioctl(fd, ioctl.EVIOCGRAB, 1));
@@ -114,7 +142,7 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
             std.log.warn("shadow grab: EVIOCGRAB {s} failed: {s}", .{ path, @tagName(grab_errno) });
         }
         posix.close(fd);
-        return false;
+        return .skipped;
     }
 
     list.grabs[list.len] = .{ .fd = fd, .name_buf = undefined, .name_len = @intCast(node.len) };
@@ -127,13 +155,14 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
     } else {
         std.log.warn("shadow input node {s} ({x:0>4}:{x:0>4}) grabbed; kernel driver bound to a managed device", .{ path, id.vendor, id.product });
     }
-    return true;
+    return .grabbed;
 }
 
 /// Enumerate `input_dir` and grab every shadow node of the managed device.
 /// Catches shadows that predate the daemon (the netlink watch only sees new
-/// nodes).
+/// nodes). Dead grabs are pruned first so reused eventN names stay grabbable.
 pub fn sweepDir(list: *GrabList, input_dir: []const u8, p: Params) void {
+    list.pruneDead();
     var dir = std.fs.openDirAbsolute(input_dir, .{ .iterate = true }) catch return;
     defer dir.close();
     var it = dir.iterate();
@@ -154,8 +183,6 @@ fn nodeId(bustype: u16, vendor: u16, product: u16) ioctl.InputId {
 const vader5: Params = .{
     .phys_vendor = 0x37d7,
     .phys_product = 0x2401,
-    .output_vendor = 0x045e,
-    .output_product = 0x0b00,
 };
 
 test "shadow_grab: shouldGrab takes xpad shadow node (BUS_USB, physical VID/PID)" {
@@ -174,21 +201,16 @@ test "shadow_grab: shouldGrab skips padctl UHID outputs by uniq prefix" {
     try testing.expect(!shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "padctl/vader-5-pro-1a2b", vader5));
 }
 
-test "shadow_grab: shouldGrab skips the configured output identity" {
-    var p = vader5;
-    p.phys_vendor = 0x045e;
-    p.phys_product = 0x0b00;
-    try testing.expect(!shouldGrab(nodeId(0x03, 0x045e, 0x0b00), "", p));
+test "shadow_grab: shouldGrab takes shadows when [output] clones the physical identity" {
+    // xbox-elite-style config: [output] vid/pid equals the physical vid/pid,
+    // so a genuine xpad shadow carries the output identity too.
+    const p: Params = .{ .phys_vendor = 0x045e, .phys_product = 0x0b00 };
+    try testing.expect(shouldGrab(nodeId(0x03, 0x045e, 0x0b00), "", p));
 }
 
 test "shadow_grab: shouldGrab skips unrelated devices" {
     try testing.expect(!shouldGrab(nodeId(0x03, 0x046d, 0xc52b), "", vader5));
     try testing.expect(!shouldGrab(nodeId(0x05, 0x37d7, 0x2402), "", vader5));
-}
-
-test "shadow_grab: shouldGrab without configured output ids still takes shadows" {
-    const p: Params = .{ .phys_vendor = 0x37d7, .phys_product = 0x2401 };
-    try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", p));
 }
 
 test "shadow_grab: GrabList contains/releaseAll bookkeeping" {
@@ -208,13 +230,57 @@ test "shadow_grab: GrabList contains/releaseAll bookkeeping" {
 
 test "shadow_grab: tryGrabNode rejects oversized, duplicate, and unopenable nodes" {
     var list = GrabList{};
-    try testing.expect(!tryGrabNode(&list, "/dev/input", "event-name-way-too-long-to-fit", vader5));
-    try testing.expect(!tryGrabNode(&list, "/nonexistent_input_dir_xyz", "event0", vader5));
+    try testing.expectEqual(GrabResult.skipped, tryGrabNode(&list, "/dev/input", "event-name-way-too-long-to-fit", vader5));
+    try testing.expectEqual(GrabResult.skipped, tryGrabNode(&list, "/nonexistent_input_dir_xyz", "event0", vader5));
     list.grabs[0] = .{ .fd = -1, .name_buf = undefined, .name_len = 6 };
     @memcpy(list.grabs[0].name_buf[0..6], "event7");
     list.len = 1;
-    try testing.expect(!tryGrabNode(&list, "/nonexistent_input_dir_xyz", "event7", vader5));
+    try testing.expectEqual(GrabResult.skipped, tryGrabNode(&list, "/nonexistent_input_dir_xyz", "event7", vader5));
     list.len = 0;
+}
+
+test "shadow_grab: tryGrabNode reports unreadable nodes as access_denied" {
+    if (linux.geteuid() == 0) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    (try tmp.dir.createFile("event0", .{ .mode = 0 })).close();
+    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir_path);
+
+    var list = GrabList{};
+    try testing.expectEqual(GrabResult.access_denied, tryGrabNode(&list, dir_path, "event0", vader5));
+    try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "shadow_grab: evict closes the named grab and frees the name for reuse" {
+    var list = GrabList{};
+    inline for (.{ "event3", "event4" }, 0..) |n, i| {
+        const fd = try posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+        list.grabs[i] = .{ .fd = fd, .name_buf = undefined, .name_len = n.len };
+        @memcpy(list.grabs[i].name_buf[0..n.len], n);
+    }
+    list.len = 2;
+
+    try testing.expect(!list.evict("event9"));
+    try testing.expect(list.evict("event3"));
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(!list.contains("event3"));
+    try testing.expect(list.contains("event4"));
+
+    // A reused kernel name is grabbable again: contains() no longer blocks it.
+    try testing.expect(!list.evict("event3"));
+    list.releaseAll();
+}
+
+test "shadow_grab: pruneDead keeps live fds" {
+    var list = GrabList{};
+    const fd = try posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+    list.grabs[0] = .{ .fd = fd, .name_buf = undefined, .name_len = 6 };
+    @memcpy(list.grabs[0].name_buf[0..6], "event3");
+    list.len = 1;
+    list.pruneDead();
+    try testing.expectEqual(@as(usize, 1), list.len);
+    list.releaseAll();
 }
 
 test "shadow_grab: sweepDir on nonexistent dir is a no-op" {

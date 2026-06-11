@@ -60,7 +60,7 @@ pub fn parseUevent(buf: []const u8) Uevent {
 pub const Subsystem = enum { hidraw, input };
 
 /// Drain all pending uevent messages from fd, calling callback for each
-/// hidraw add/remove and each input-subsystem event-node add.
+/// hidraw add/remove and each input-subsystem event-node add/remove.
 /// Stops when recv returns WouldBlock (EAGAIN).
 pub fn drainNetlink(fd: posix.fd_t, ctx: anytype, comptime callback: fn (@TypeOf(ctx), UeventAction, Subsystem, []const u8) void) void {
     var buf: [2048]u8 = undefined;
@@ -73,9 +73,7 @@ pub fn drainNetlink(fd: posix.fd_t, ctx: anytype, comptime callback: fn (@TypeOf
         const name = ev.devname orelse continue;
         if (std.mem.eql(u8, sub, "hidraw")) {
             callback(ctx, ev.action, .hidraw, name);
-        } else if (ev.action == .add and std.mem.eql(u8, sub, "input") and
-            std.mem.startsWith(u8, name, "input/event"))
-        {
+        } else if (std.mem.eql(u8, sub, "input") and std.mem.startsWith(u8, name, "input/event")) {
             callback(ctx, ev.action, .input, name);
         }
     }
@@ -145,7 +143,7 @@ fn drainTestPair() ![2]posix.fd_t {
     return fds;
 }
 
-test "drainNetlink: hidraw events pass with .hidraw, input event-node add passes with .input" {
+test "drainNetlink: hidraw events pass with .hidraw, input event-node add/remove pass with .input" {
     const pair = try drainTestPair();
     defer posix.close(pair[0]);
     defer posix.close(pair[1]);
@@ -154,14 +152,14 @@ test "drainNetlink: hidraw events pass with .hidraw, input event-node add passes
     _ = try posix.send(pair[1], "add@/devices/x/input/input9/event5\x00SUBSYSTEM=input\x00DEVNAME=input/event5\x00", 0);
     // Non-event input node (the inputN parent) must be filtered out.
     _ = try posix.send(pair[1], "add@/devices/x/input/input9\x00SUBSYSTEM=input\x00DEVNAME=input/input9\x00", 0);
-    // Input REMOVE must be filtered out (only ADD is forwarded for input).
+    // Input REMOVE must pass so stale shadow grabs can be evicted.
     _ = try posix.send(pair[1], "remove@/devices/x/input/input9/event5\x00SUBSYSTEM=input\x00DEVNAME=input/event5\x00", 0);
     _ = try posix.send(pair[1], "remove@/devices/x/hidraw3\x00SUBSYSTEM=hidraw\x00DEVNAME=hidraw3\x00", 0);
 
     var rec = DrainRecorder{};
     drainNetlink(pair[0], &rec, DrainRecorder.record);
 
-    try testing.expectEqual(@as(usize, 3), rec.count);
+    try testing.expectEqual(@as(usize, 4), rec.count);
     try testing.expectEqual(UeventAction.add, rec.actions[0]);
     try testing.expectEqual(Subsystem.hidraw, rec.subsystems[0]);
     try testing.expectEqualStrings("hidraw3", rec.names[0][0..rec.name_lens[0]]);
@@ -169,7 +167,10 @@ test "drainNetlink: hidraw events pass with .hidraw, input event-node add passes
     try testing.expectEqual(Subsystem.input, rec.subsystems[1]);
     try testing.expectEqualStrings("input/event5", rec.names[1][0..rec.name_lens[1]]);
     try testing.expectEqual(UeventAction.remove, rec.actions[2]);
-    try testing.expectEqual(Subsystem.hidraw, rec.subsystems[2]);
+    try testing.expectEqual(Subsystem.input, rec.subsystems[2]);
+    try testing.expectEqualStrings("input/event5", rec.names[2][0..rec.name_lens[2]]);
+    try testing.expectEqual(UeventAction.remove, rec.actions[3]);
+    try testing.expectEqual(Subsystem.hidraw, rec.subsystems[3]);
 }
 
 test "parseUevent: libudev header (defensive)" {

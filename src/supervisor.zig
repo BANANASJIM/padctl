@@ -189,7 +189,10 @@ const HotplugPending = struct {
     devname: [64]u8,
     len: u8,
     retries: u8,
+    kind: PendingKind,
 };
+
+const PendingKind = enum { hidraw, input_grab };
 
 // 8 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
 pub const SUPERVISOR_MAX_FDS: usize = 8 + 1 + 4;
@@ -1356,30 +1359,52 @@ pub const Supervisor = struct {
                 .remove => self.detach(devname),
                 .other => {},
             },
-            .input => if (action == .add) self.handleInputNodeAdd(devname),
+            .input => switch (action) {
+                .add => self.handleInputNodeAdd(devname),
+                .remove => self.handleInputNodeRemove(devname),
+                .other => {},
+            },
         }
     }
 
     fn shadowParams(m: *const ManagedInstance) shadow_grab.Params {
         const cfg = m.instance.device_cfg;
-        var p: shadow_grab.Params = .{
+        return .{
             .phys_vendor = @intCast(cfg.device.vid),
             .phys_product = @intCast(cfg.device.pid),
         };
-        if (cfg.output) |out| {
-            if (out.vid) |v| p.output_vendor = @intCast(v);
-            if (out.pid) |v| p.output_product = @intCast(v);
+    }
+
+    /// Offer `node` to every active managed instance. `.access_denied` means
+    /// the open raced udev permission setup and a retry may succeed.
+    fn tryGrabForManaged(self: *Supervisor, node: []const u8) shadow_grab.GrabResult {
+        var denied = false;
+        for (self.managed.items) |*m| {
+            if (m.suspended) continue;
+            switch (shadow_grab.tryGrabNode(&m.shadow_grabs, "/dev/input", node, shadowParams(m))) {
+                .grabbed => return .grabbed,
+                .access_denied => denied = true,
+                .skipped => {},
+            }
         }
-        return p;
+        return if (denied) .access_denied else .skipped;
     }
 
     /// Netlink saw a new /dev/input/event* node: grab it if it shadows an
     /// active managed device.
     fn handleInputNodeAdd(self: *Supervisor, devname: []const u8) void {
         const node = std.fs.path.basename(devname);
+        if (self.tryGrabForManaged(node) == .access_denied) {
+            self.enqueueRetry(.input_grab, node);
+        }
+    }
+
+    /// Netlink saw a /dev/input/event* node disappear: drop any stale grab so
+    /// a future node reusing the same eventN name stays grabbable.
+    fn handleInputNodeRemove(self: *Supervisor, devname: []const u8) void {
+        const node = std.fs.path.basename(devname);
         for (self.managed.items) |*m| {
-            if (m.suspended) continue;
-            if (shadow_grab.tryGrabNode(&m.shadow_grabs, "/dev/input", node, shadowParams(m))) return;
+            if (m.shadow_grabs.evict(node)) return;
         }
     }
 
@@ -1405,15 +1430,20 @@ pub const Supervisor = struct {
     }
 
     fn enqueueHotplugRetry(self: *Supervisor, devname: []const u8) void {
+        self.enqueueRetry(.hidraw, devname);
+    }
+
+    fn enqueueRetry(self: *Supervisor, kind: PendingKind, devname: []const u8) void {
         if (self.hotplug_retry_fd < 0) return;
         for (self.hotplug_pending.items) |pending| {
-            if (std.mem.eql(u8, pending.devname[0..pending.len], devname)) return;
+            if (pending.kind == kind and std.mem.eql(u8, pending.devname[0..pending.len], devname)) return;
         }
         var entry: HotplugPending = undefined;
         const n = @min(devname.len, entry.devname.len);
         @memcpy(entry.devname[0..n], devname[0..n]);
         entry.len = @intCast(n);
         entry.retries = 0;
+        entry.kind = kind;
         self.hotplug_pending.append(self.allocator, entry) catch return;
         const spec = linux.itimerspec{
             .it_value = .{ .sec = 0, .nsec = 300_000_000 },
@@ -1457,6 +1487,20 @@ pub const Supervisor = struct {
         while (i < self.hotplug_pending.items.len) {
             const p = &self.hotplug_pending.items[i];
             const name = p.devname[0..p.len];
+            if (p.kind == .input_grab) {
+                if (self.tryGrabForManaged(name) == .access_denied) {
+                    p.retries += 1;
+                    if (p.retries >= 3) {
+                        std.log.debug("shadow grab: giving up on {s} after 3 retries", .{name});
+                        _ = self.hotplug_pending.swapRemove(i);
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    _ = self.hotplug_pending.swapRemove(i);
+                }
+                continue;
+            }
             self.attach(name) catch |err| {
                 if (err != error.HotplugTransient) {
                     std.log.warn("hotplug retry {s}: {}, dropping", .{ name, err });
@@ -2938,6 +2982,28 @@ test "supervisor: cold-scan retry queues hidraw basename" {
     try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
     const item = sup.hotplug_pending.items[0];
     try testing.expectEqualStrings("hidraw2", item.devname[0..item.len]);
+}
+
+test "supervisor: input grab retry dedups per kind and drains non-denied nodes" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    sup.enqueueRetry(.input_grab, "event5");
+    sup.enqueueRetry(.input_grab, "event5");
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+    try testing.expectEqual(PendingKind.input_grab, sup.hotplug_pending.items[0].kind);
+
+    // Same name under a different kind is a distinct entry.
+    sup.enqueueRetry(.hidraw, "event5");
+    try testing.expectEqual(@as(usize, 2), sup.hotplug_pending.items.len);
+    _ = sup.hotplug_pending.swapRemove(1);
+
+    // Node gone (or readable but not a shadow): the retry entry is dropped.
+    sup.drainHotplugRetry();
+    try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
 }
 
 test "supervisor: cold-scan retry is inert when retry timer is unavailable" {

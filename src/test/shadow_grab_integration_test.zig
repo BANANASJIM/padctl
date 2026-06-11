@@ -89,12 +89,7 @@ test "shadow_grab: sweep grabs a USB-bus shadow node exclusively and releases it
     try testing.expect(!list.contains(node));
     list.releaseAll();
 
-    const params: shadow_grab.Params = .{
-        .phys_vendor = vid,
-        .phys_product = pid,
-        .output_vendor = 0x045e,
-        .output_product = 0x0b00,
-    };
+    const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
     shadow_grab.sweepDir(&list, "/dev/input", params);
     try testing.expect(list.contains(node));
 
@@ -114,6 +109,29 @@ test "shadow_grab: sweep grabs a USB-bus shadow node exclusively and releases it
     list.releaseAll();
     try testing.expectEqual(linux.E.SUCCESS, linux.E.init(linux.ioctl(probe, ioctl.EVIOCGRAB, 1)));
     _ = linux.ioctl(probe, ioctl.EVIOCGRAB, 0);
+}
+
+test "shadow_grab: sweep prunes a grab whose device is gone (ENODEV)" {
+    const vid: u16 = 0xFAD7;
+    const pid: u16 = 0x24FC;
+    const ufd = try createPad(BUS_USB, vid, pid);
+    var destroyed = false;
+    defer if (!destroyed) destroyPad(ufd);
+
+    var name_buf: [24]u8 = undefined;
+    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+
+    var list = shadow_grab.GrabList{};
+    defer list.releaseAll();
+    const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
+    shadow_grab.sweepDir(&list, "/dev/input", params);
+    try testing.expect(list.contains(node));
+
+    destroyPad(ufd);
+    destroyed = true;
+
+    shadow_grab.sweepDir(&list, "/dev/input", params);
+    try testing.expect(!list.contains(node));
 }
 
 test "shadow_grab: sweep skips virtual-bus nodes (padctl's own uinput outputs)" {
