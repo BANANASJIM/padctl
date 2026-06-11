@@ -105,9 +105,16 @@ fn driverName(node: []const u8, buf: []u8) ?[]const u8 {
     return std.fs.path.basename(target);
 }
 
-/// Probe one event node and grab it when it shadows the managed device.
 /// `.access_denied` flags nodes whose udev permissions are not applied yet
-/// so the caller can retry.
+/// so the caller can retry; any other open failure is not retryable.
+fn classifyOpenError(err: posix.OpenError) GrabResult {
+    return switch (err) {
+        error.AccessDenied => .access_denied,
+        else => .skipped,
+    };
+}
+
+/// Probe one event node and grab it when it shadows the managed device.
 pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: Params) GrabResult {
     if (node.len == 0 or node.len > NAME_CAP) return .skipped;
     if (list.contains(node)) return .skipped;
@@ -115,10 +122,7 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
 
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ input_dir, node }) catch return .skipped;
-    const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| switch (err) {
-        error.AccessDenied => return .access_denied,
-        else => return .skipped,
-    };
+    const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| return classifyOpenError(err);
 
     var id: ioctl.InputId = undefined;
     if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGID, @intFromPtr(&id))) != .SUCCESS) {
@@ -239,17 +243,10 @@ test "shadow_grab: tryGrabNode rejects oversized, duplicate, and unopenable node
     list.len = 0;
 }
 
-test "shadow_grab: tryGrabNode reports unreadable nodes as access_denied" {
-    if (linux.geteuid() == 0) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    (try tmp.dir.createFile("event0", .{ .mode = 0 })).close();
-    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(dir_path);
-
-    var list = GrabList{};
-    try testing.expectEqual(GrabResult.access_denied, tryGrabNode(&list, dir_path, "event0", vader5));
-    try testing.expectEqual(@as(usize, 0), list.len);
+test "shadow_grab: classifyOpenError marks only AccessDenied retryable" {
+    try testing.expectEqual(GrabResult.access_denied, classifyOpenError(error.AccessDenied));
+    try testing.expectEqual(GrabResult.skipped, classifyOpenError(error.FileNotFound));
+    try testing.expectEqual(GrabResult.skipped, classifyOpenError(error.DeviceBusy));
 }
 
 test "shadow_grab: evict closes the named grab and frees the name for reuse" {
