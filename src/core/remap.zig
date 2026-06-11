@@ -96,6 +96,22 @@ pub fn applyTarget(
     }
 }
 
+pub const AxisFloor = struct { lt: u8 = 0, rt: u8 = 0 };
+
+/// Digital LT/RT targets imply a full analog pull — games read ABS_Z/ABS_RZ,
+/// not BTN_TL2/BTN_TR2. Callers max-merge the floor into emitted lt/rt so
+/// physical input still wins when stronger.
+pub fn axisFloorOf(target: RemapTargetResolved) ?AxisFloor {
+    return switch (target) {
+        .gamepad_button => |b| switch (b) {
+            .LT => .{ .lt = 255 },
+            .RT => .{ .rt = 255 },
+            else => null,
+        },
+        else => null,
+    };
+}
+
 pub const CHORD_MIN_KEYS: usize = 2;
 pub const CHORD_MAX_KEYS: usize = 4;
 

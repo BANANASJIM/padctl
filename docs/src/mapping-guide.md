@@ -130,6 +130,7 @@ Available target types:
 | Value | Effect |
 |-------|--------|
 | `"A"`, `"B"`, `"LB"`, … | Remap to another gamepad button |
+| `"LT"` / `"RT"` | Remap to a trigger — emits the digital press plus a full analog pull (axis 255) while held; tap/double gesture legs emit only the digital press, so use a plain remap or a `hold` leg for an analog pull |
 | `"KEY_*"` | Emit a Linux keyboard key (e.g. `"KEY_F13"`, `"KEY_LEFTSHIFT"`) |
 | `"mouse_left"` / `"mouse_right"` / `"mouse_middle"` / `"mouse_side"` / `"mouse_extra"` | Emit a mouse button |
 | `"mouse_forward"` / `"mouse_back"` | Emit mouse forward/back (button 4/5) |
