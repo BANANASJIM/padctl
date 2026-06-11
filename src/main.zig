@@ -748,7 +748,7 @@ pub fn main() !void {
     if (parsed.scan) {
         if (parsed.scan_config_dir) |dir| {
             const dirs = [_][]const u8{dir};
-            cli.scan.run(allocator, &dirs, stdout_writer) catch |err| {
+            cli.scan.run(allocator, &dirs, parsed.socket_path, stdout_writer) catch |err| {
                 std.log.err("scan failed: {}", .{err});
                 std.process.exit(1);
             };
@@ -758,7 +758,7 @@ pub fn main() !void {
                 std.process.exit(1);
             };
             defer config.paths.freeConfigDirs(allocator, dirs);
-            cli.scan.run(allocator, dirs, stdout_writer) catch |err| {
+            cli.scan.run(allocator, dirs, parsed.socket_path, stdout_writer) catch |err| {
                 std.log.err("scan failed: {}", .{err});
                 std.process.exit(1);
             };

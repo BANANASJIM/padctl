@@ -5,20 +5,9 @@ const udev = @import("install/udev.zig");
 const scan = @import("scan.zig");
 const paths = @import("../config/paths.zig");
 
-pub const StatusDevice = struct {
-    name: []const u8,
-    state: []const u8,
-    vid: u16,
-    pid: u16,
-    output_kind: []const u8,
-    output_fd_alive: bool,
-
-    pub fn deinit(self: StatusDevice, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.state);
-        allocator.free(self.output_kind);
-    }
-};
+pub const StatusDevice = socket_client.StatusDevice;
+pub const parseStatusLine = socket_client.parseStatusLine;
+pub const freeStatusDevices = socket_client.freeStatusDevices;
 
 pub const UsbInterface = struct {
     iface: []const u8,
@@ -116,76 +105,6 @@ pub fn probeUsbPresence(allocator: std.mem.Allocator, vid: u16, pid: u16, sys_ro
     }
 
     return UsbPresence{ .present = false, .bus_id = try allocator.dupe(u8, ""), .interfaces = &.{} };
-}
-
-/// Parse the STATUS wire line into a slice of StatusDevice.
-/// Caller owns result; call freeStatusDevices when done.
-pub fn parseStatusLine(line: []const u8, allocator: std.mem.Allocator) ![]StatusDevice {
-    const trimmed = std.mem.trim(u8, line, " \t\r\n");
-    if (!std.mem.startsWith(u8, trimmed, "STATUS")) return error.InvalidResponse;
-
-    var devices: std.ArrayList(StatusDevice) = .{};
-    errdefer {
-        for (devices.items) |d| d.deinit(allocator);
-        devices.deinit(allocator);
-    }
-
-    const rest = trimmed["STATUS".len..];
-    if (rest.len == 0 or std.mem.trim(u8, rest, " \t\r\n").len == 0) {
-        return devices.toOwnedSlice(allocator);
-    }
-
-    var chunks = std.mem.splitSequence(u8, rest, " device=");
-    _ = chunks.next(); // skip leading empty or "STATUS" prefix
-    while (chunks.next()) |chunk| {
-        const name_end = std.mem.indexOfScalar(u8, chunk, ' ') orelse chunk.len;
-        const name = try allocator.dupe(u8, chunk[0..name_end]);
-        errdefer allocator.free(name);
-
-        const state = try extractField(allocator, chunk, "state=");
-        errdefer allocator.free(state);
-        const output_kind = try extractField(allocator, chunk, "output_kind=");
-        errdefer allocator.free(output_kind);
-        const vid = parseHexField(chunk, "vid=0x") orelse 0;
-        const pid = parseHexField(chunk, "pid=0x") orelse 0;
-        const output_fd_alive = std.mem.indexOf(u8, chunk, "output_fd_alive=true") != null;
-
-        try devices.append(allocator, .{
-            .name = name,
-            .state = state,
-            .vid = vid,
-            .pid = pid,
-            .output_kind = output_kind,
-            .output_fd_alive = output_fd_alive,
-        });
-    }
-
-    return devices.toOwnedSlice(allocator);
-}
-
-fn extractField(allocator: std.mem.Allocator, chunk: []const u8, key: []const u8) ![]const u8 {
-    const start_pos = std.mem.indexOf(u8, chunk, key) orelse return allocator.dupe(u8, "");
-    const val_start = start_pos + key.len;
-    const val_end = blk: {
-        var i = val_start;
-        while (i < chunk.len and chunk[i] != ' ' and chunk[i] != '\n' and chunk[i] != '\r') i += 1;
-        break :blk i;
-    };
-    return allocator.dupe(u8, chunk[val_start..val_end]);
-}
-
-fn parseHexField(chunk: []const u8, key: []const u8) ?u16 {
-    const pos = std.mem.indexOf(u8, chunk, key) orelse return null;
-    const val_start = pos + key.len;
-    var end = val_start;
-    while (end < chunk.len and std.ascii.isHex(chunk[end])) end += 1;
-    if (end == val_start) return null;
-    return std.fmt.parseInt(u16, chunk[val_start..end], 16) catch null;
-}
-
-pub fn freeStatusDevices(allocator: std.mem.Allocator, devices: []StatusDevice) void {
-    for (devices) |d| d.deinit(allocator);
-    allocator.free(devices);
 }
 
 pub fn run(allocator: std.mem.Allocator, socket_path: []const u8, writer: anytype, _: anytype) u8 {
@@ -445,45 +364,6 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
 // --- tests ---
 
 const testing = std.testing;
-
-test "doctor: parseStatusLine: bare STATUS returns empty" {
-    const devices = try parseStatusLine("STATUS\n", testing.allocator);
-    defer freeStatusDevices(testing.allocator, devices);
-    try testing.expectEqual(@as(usize, 0), devices.len);
-}
-
-test "doctor: parseStatusLine: bare STATUS no newline" {
-    const devices = try parseStatusLine("STATUS", testing.allocator);
-    defer freeStatusDevices(testing.allocator, devices);
-    try testing.expectEqual(@as(usize, 0), devices.len);
-}
-
-test "doctor: parseStatusLine: one device" {
-    const line = "STATUS device=vader5 state=active mapping=default phys_key=usb-1 vid=0x37d7 pid=0x2401 output_kind=uhid output_fd_alive=true evdev_node=/dev/input/event5 hotplug_pending=0 last_inbound_ms_ago=12 last_outbound_ms_ago=8 write_in_flight_ms=0\n";
-    const devices = try parseStatusLine(line, testing.allocator);
-    defer freeStatusDevices(testing.allocator, devices);
-    try testing.expectEqual(@as(usize, 1), devices.len);
-    try testing.expectEqualStrings("vader5", devices[0].name);
-    try testing.expectEqual(@as(u16, 0x37d7), devices[0].vid);
-    try testing.expectEqual(@as(u16, 0x2401), devices[0].pid);
-    try testing.expectEqualStrings("active", devices[0].state);
-    try testing.expectEqualStrings("uhid", devices[0].output_kind);
-    try testing.expect(devices[0].output_fd_alive);
-}
-
-test "doctor: parseStatusLine: two devices" {
-    const line = "STATUS device=vader5 state=active mapping=fps vid=0x37d7 pid=0x2401 output_kind=uhid output_fd_alive=true evdev_node=/dev/input/event5 hotplug_pending=0 last_inbound_ms_ago=1 last_outbound_ms_ago=1 write_in_flight_ms=0 device=wheel state=suspended mapping=racing vid=0x044f pid=0xb67f output_kind=uinput output_fd_alive=false evdev_node=/dev/input/event6 hotplug_pending=0 last_inbound_ms_ago=100 last_outbound_ms_ago=100 write_in_flight_ms=0\n";
-    const devices = try parseStatusLine(line, testing.allocator);
-    defer freeStatusDevices(testing.allocator, devices);
-    try testing.expectEqual(@as(usize, 2), devices.len);
-    try testing.expectEqualStrings("vader5", devices[0].name);
-    try testing.expectEqual(@as(u16, 0x37d7), devices[0].vid);
-    try testing.expectEqualStrings("wheel", devices[1].name);
-    try testing.expectEqual(@as(u16, 0x044f), devices[1].vid);
-    try testing.expectEqual(@as(u16, 0xb67f), devices[1].pid);
-    try testing.expectEqualStrings("suspended", devices[1].state);
-    try testing.expect(!devices[1].output_fd_alive);
-}
 
 test "doctor: probeUsbPresence: device present with driver" {
     const allocator = testing.allocator;

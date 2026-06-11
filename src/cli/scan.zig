@@ -6,9 +6,12 @@ const hidraw = @import("../io/hidraw.zig");
 const readPhysicalPath = hidraw.readPhysicalPath;
 const readInterfaceId = hidraw.readInterfaceId;
 const toml_extract = @import("toml_extract.zig");
+const socket_client = @import("socket_client.zig");
+const StatusDevice = socket_client.StatusDevice;
 
 const MAX_HIDRAW = 64;
 const NAME_BUF_LEN = 128;
+const DAEMON_QUERY_TIMEOUT_MS = 500;
 
 // HIDIOCGRAWNAME(128): dir=READ('H', 0x04, 128)
 const HIDIOCGRAWNAME: u32 = blk: {
@@ -298,7 +301,7 @@ fn padRight(buf: []u8, s: []const u8, width: usize) []const u8 {
     return buf[0..width];
 }
 
-pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer: anytype) !void {
+pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, socket_path: []const u8, writer: anytype) !void {
     var all_entries: std.ArrayList(ScanEntry) = .{};
     defer {
         for (all_entries.items) |e| freeEntry(allocator, e);
@@ -354,14 +357,34 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
         }
     }
 
-    const entries = all_entries.items;
+    const daemon_devices = socket_client.queryStatusDevices(allocator, socket_path, DAEMON_QUERY_TIMEOUT_MS);
+    defer if (daemon_devices) |dd| socket_client.freeStatusDevices(allocator, dd);
 
-    if (entries.len == 0) {
+    try render(writer, all_entries.items, daemon_devices orelse &.{});
+}
+
+fn visibleInHidraw(d: StatusDevice, entries: []const ScanEntry) bool {
+    for (entries) |e| {
+        if (e.vid == d.vid and e.pid == d.pid) return true;
+    }
+    return false;
+}
+
+/// Render scan results. Daemon-managed devices whose hidraw nodes are gone
+/// (the libusb claim detached the kernel driver) are merged in as
+/// "(claimed by padctl)" rows, deduplicated by vid:pid.
+fn render(writer: anytype, entries: []const ScanEntry, daemon_devices: []const StatusDevice) !void {
+    var claimed: usize = 0;
+    for (daemon_devices) |d| {
+        if (!visibleInHidraw(d, entries)) claimed += 1;
+    }
+
+    if (entries.len == 0 and claimed == 0) {
         try writer.writeAll("No HID devices found.\n");
         return;
     }
 
-    const path_w = 18;
+    const path_w = 19; // fits "(claimed by padctl)"
     const vidpid_w = 9;
     const name_w = 32;
     const pad_total = path_w + vidpid_w + name_w;
@@ -392,10 +415,25 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
         if (e.config_path == null) unmatched += 1;
     }
 
+    for (daemon_devices) |d| {
+        if (visibleInHidraw(d, entries)) continue;
+        var vidpid_buf: [9]u8 = undefined;
+        const vidpid = std.fmt.bufPrint(&vidpid_buf, "{x:0>4}:{x:0>4}", .{ d.vid, d.pid }) catch unreachable;
+
+        var row_pad: [pad_total]u8 = undefined;
+        try writer.print("{s} {s} {s} state={s} mapping={s}\n", .{
+            padRight(row_pad[0..path_w], "(claimed by padctl)", path_w),
+            padRight(row_pad[path_w .. path_w + vidpid_w], vidpid, vidpid_w),
+            padRight(row_pad[path_w + vidpid_w .. pad_total], d.name, name_w),
+            d.state,
+            d.mapping,
+        });
+    }
+
     try writer.writeByte('\n');
     try writer.print("{d} device(s) found, {d} matched, {d} unmatched.\n", .{
-        entries.len,
-        entries.len - unmatched,
+        entries.len + claimed,
+        entries.len - unmatched + claimed,
         unmatched,
     });
 
@@ -513,5 +551,74 @@ test "scan: run: explicit single missing config dir surfaces FileNotFound" {
     var buf: [256]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const dirs = [_][]const u8{"/nonexistent/padctl/devices/path/for/test"};
-    try std.testing.expectError(error.FileNotFound, run(std.testing.allocator, &dirs, fbs.writer()));
+    try std.testing.expectError(error.FileNotFound, run(std.testing.allocator, &dirs, "/tmp/padctl-nonexistent-test.sock", fbs.writer()));
+}
+
+test "scan: run: daemon unreachable degrades to plain scan output" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const dirs = [_][]const u8{tmp_path};
+    try run(allocator, &dirs, "/tmp/padctl-nonexistent-test.sock", fbs.writer());
+    try std.testing.expect(std.mem.indexOf(u8, fbs.getWritten(), "(claimed by padctl)") == null);
+}
+
+test "scan: render: daemon-claimed device shown when absent from hidraw" {
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const daemon = [_]StatusDevice{.{
+        .name = "Flydigi Vader 5 Pro",
+        .state = "active",
+        .mapping = "Crimson Desert:Vader 5 Pro",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .output_kind = "uinput",
+        .output_fd_alive = true,
+    }};
+    try render(fbs.writer(), &.{}, &daemon);
+    const out = fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, out, "No HID devices found.") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(claimed by padctl)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "37d7:2401") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Flydigi Vader 5 Pro") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "state=active mapping=Crimson Desert:Vader 5 Pro") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "1 device(s) found, 1 matched, 0 unmatched.") != null);
+}
+
+test "scan: render: daemon device deduped against hidraw entry with same vid:pid" {
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const entries = [_]ScanEntry{.{
+        .path = "/dev/hidraw3",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .name = "Flydigi Vader 5 Pro",
+        .phys = "usb-0000:10:00.0-3/input1",
+        .config_path = "devices/vader5.toml",
+    }};
+    const daemon = [_]StatusDevice{.{
+        .name = "Flydigi Vader 5 Pro",
+        .state = "active",
+        .mapping = "fps",
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .output_kind = "uinput",
+        .output_fd_alive = true,
+    }};
+    try render(fbs.writer(), &entries, &daemon);
+    const out = fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, out, "(claimed by padctl)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "1 device(s) found, 1 matched, 0 unmatched.") != null);
+}
+
+test "scan: render: no entries and no daemon devices prints No HID devices found" {
+    var buf: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try render(fbs.writer(), &.{}, &.{});
+    try std.testing.expectEqualStrings("No HID devices found.\n", fbs.getWritten());
 }
