@@ -59,7 +59,7 @@ Without `trigger_threshold`, `LT` / `RT` emit analog axis events only and do not
 
 Top-level button remapping (active when no layer overrides). Keys are ButtonId names, values are target button names, `KEY_*` codes, `mouse_left`/`mouse_right`/`mouse_middle`/`mouse_side`/`mouse_extra`/`mouse_forward`/`mouse_back`, `disabled`, or `macro:<name>`.
 
-`LT` / `RT` as targets emit the digital trigger press plus a full analog pull (ABS_Z / ABS_RZ = 255) while the source button is held.
+`LT` / `RT` as targets emit the digital trigger press plus a full analog pull (ABS_Z / ABS_RZ = 255) while the source button is held. Tap/double gesture legs targeting `LT` / `RT` emit only the digital press; use a plain remap or a `hold` leg for an analog pull.
 
 > **Note:** `BTN_*` values (e.g. `"BTN_SOUTH"`) are routed to the virtual **mouse** device, not the gamepad. To target a gamepad button use a friendly `ButtonId` name (`"A"`, `"Select"`, etc.) instead.
 
