@@ -10,7 +10,7 @@ Device configs are TOML files in `devices/<vendor>/<model>.toml`.
 | `vid` | integer | yes | USB vendor ID (hex literal ok: `0x054c`) |
 | `pid` | integer | yes | USB product ID |
 | `mode` | string | no | Device mode identifier |
-| `block_kernel_drivers` | string[] | no | Kernel driver names to unbind via udev, e.g. `block_kernel_drivers = ["xpad"]`. The generated rule is gated by `/etc/padctl/service-enabled` so padctl only detaches the kernel driver after the service has been enabled. When `padctl install` runs as root, it writes that sentinel and also walks `/sys/bus/usb/drivers/<driver>/unbind` for matching VID:PID pairs immediately. |
+| `block_kernel_drivers` | string[] | no | Kernel driver names to unbind via udev, e.g. `block_kernel_drivers = ["xpad"]`. The generated rule only detaches the kernel driver while a padctl daemon is running (its control socket exists), so a stopped daemon leaves the device to the kernel driver. When `padctl install` runs as root, it also walks `/sys/bus/usb/drivers/<driver>/unbind` for matching VID:PID pairs immediately. |
 
 ### `[[device.interface]]`
 

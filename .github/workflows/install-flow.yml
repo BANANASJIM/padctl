@@ -166,79 +166,83 @@ jobs:
                 exit 1
               fi
 
-              # ---- Scenario A: enabled install => sentinel-gated rule + predicate-true reaches unbind ----
+              # ---- Scenario A: install => socket-gated rule + guard tracks daemon socket ----
               # Sandbox install: sudo SUDO_USER=testuser ... padctl install --prefix /usr/local
               #   - is_root=true (sudo), destdir="" => staging_mode=false
-              #   - detectImmutableOs("")=.none in privileged debian:12 (writable /usr,
-              #     no /run/ostree-booted) => effective_immutable=false
               #   - resolveUdevDir(destdir="",prefix="/usr/local",imm=false)
               #     => /usr/local/lib/udev/rules.d  (plan.zig:65-70)
-              #   - installWillStartUserService(true,null,"","testuser")=true
-              #     => do_enable_systemctl = !staging && true = true  (plan.zig:383)
-              #   - shouldProactiveUnbind = do_enable_systemctl && !no_enable = true
-              #     => writeServiceSentinel runs (sentinelPath("")=/etc/padctl/service-enabled),
-              #        independent of the systemctl --user warn-fail (no user bus)
               #   - device TOMLs pre-staged at /usr/local/share/padctl/devices => vader5
-              #     block_kernel_drivers=["xpad"] => 61 rule emitted, sentinel-gated.
-              echo "=== sentinel mechanism invariants (Scenario A: enabled install) ==="
+              #     block_kernel_drivers=["xpad"] => 61 rule emitted, gated on the
+              #     runtime daemon socket (issue #406), never on an install-time file.
+              echo "=== socket-guard invariants (Scenario A: enabled install) ==="
               FAIL=0
 
               # Literal single quotes inside this docker -c argument (the whole
               # script is single-quoted by the host runner shell) would prematurely
               # close the host single-quote and corrupt parsing. Keep every check
-              # predicate single-quote-free: the sentinel-gate substring lives in a
-              # double-quoted variable and grep -F matches it verbatim.
-              SENTINEL=/etc/padctl/service-enabled
-              SENTINEL_GATE="test -e ${SENTINEL} && "
+              # predicate single-quote-free: the guard substring lives in a
+              # double-quoted variable; grep -F matches it verbatim and sh -c
+              # evaluates it (globs expand there).
+              GUARD="(ls /run/user/*/padctl.sock || ls /run/padctl/padctl.sock) >/dev/null 2>&1"
               RULE=/usr/local/lib/udev/rules.d/61-padctl-driver-block.rules
 
               check "61 driver-block rule exists" \
                 "[ -f \"\$RULE\" ]"
 
-              check "61 rule unbind is sentinel-gated" \
-                "grep -qF -- \"\$SENTINEL_GATE\" \"\$RULE\""
+              check "61 rule unbind is socket-gated" \
+                "grep -qF -- \"\$GUARD && \" \"\$RULE\""
 
-              check "sentinel present after enabled install" \
-                "[ -e \"\$SENTINEL\" ]"
+              check "61 rule remove action falls back to modprobe" \
+                "grep -qF -- \"\$GUARD || /sbin/modprobe xpad\" \"\$RULE\""
 
-              mkdir -p /tmp/fakesys && : > /tmp/fakesys/unbind
-              check "predicate-true reaches unbind" \
-                "{ [ -e \"\$SENTINEL\" ] && printf %s 1-1:1.0 > /tmp/fakesys/unbind; }; [ -s /tmp/fakesys/unbind ]"
+              check "61 rule carries no sentinel reference" \
+                "! grep -q service-enabled \"\$RULE\""
+
+              check "no sentinel file written by install" \
+                "[ ! -e /etc/padctl/service-enabled ]"
+
+              check "guard false with no daemon socket" \
+                "! sh -c \"\$GUARD\""
+
+              mkdir -p /run/user/1234 && : > /run/user/1234/padctl.sock
+              check "guard true with user-scope socket" \
+                "sh -c \"\$GUARD\""
+              rm -rf /run/user/1234
+
+              mkdir -p /run/padctl && : > /run/padctl/padctl.sock
+              check "guard true with system-scope socket" \
+                "sh -c \"\$GUARD\""
+              rm -rf /run/padctl
 
               if [ $FAIL -ne 0 ]; then
                 echo "=== SCENARIO A FAILED ==="
                 exit 1
               fi
 
-              # ---- Scenario B: --no-enable install => no sentinel => predicate-false skips unbind ----
+              # ---- Scenario B: --no-enable install => identical socket-gated rule ----
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
                 /usr/local/bin/padctl install --prefix /usr/local --no-enable 2>&1"
 
-              echo "=== sentinel mechanism invariants (Scenario B: --no-enable install) ==="
+              echo "=== socket-guard invariants (Scenario B: --no-enable install) ==="
               FAIL=0
 
-              check "61 rule still sentinel-gated after --no-enable" \
-                "grep -qF -- \"\$SENTINEL_GATE\" \"\$RULE\""
+              check "61 rule still socket-gated after --no-enable" \
+                "grep -qF -- \"\$GUARD && \" \"\$RULE\""
 
-              check "NO sentinel under --no-enable" \
-                "[ ! -e \"\$SENTINEL\" ]"
-
-              : > /tmp/fakesys/unbind
-              check "predicate-false skips unbind" \
-                "{ [ -e \"\$SENTINEL\" ] && printf %s X > /tmp/fakesys/unbind; }; [ ! -s /tmp/fakesys/unbind ]"
+              check "still no sentinel file under --no-enable" \
+                "[ ! -e /etc/padctl/service-enabled ]"
 
               if [ $FAIL -ne 0 ]; then
                 echo "=== SCENARIO B FAILED ==="
                 exit 1
               fi
 
-              rm -rf /tmp/fakesys
-
-              # Re-install with enabled so sentinel exists for uninstall to remove (Scenario C)
+              # Re-install enabled; plant a legacy sentinel for uninstall to clean (Scenario C)
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
                 /usr/local/bin/padctl install --prefix /usr/local 2>&1"
+              mkdir -p /etc/padctl && : > /etc/padctl/service-enabled
 
               # ---- uninstall ----
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
@@ -254,8 +258,8 @@ jobs:
               check "/etc/systemd/user/padctl.service removed after uninstall" \
                 "[ ! -f /etc/systemd/user/padctl.service ]"
 
-              # ---- Scenario C: uninstall removes the sentinel ----
-              check "sentinel removed after uninstall" \
+              # ---- Scenario C: uninstall removes a legacy sentinel ----
+              check "legacy sentinel removed after uninstall" \
                 "[ ! -e /etc/padctl/service-enabled ]"
 
               # ---- issue #137: uninstall removes the generated driver-block
