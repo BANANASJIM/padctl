@@ -251,7 +251,7 @@ padctl reload [--pid <pid>]                # send SIGHUP to reload configs
 padctl config list                         # show XDG config search paths
 padctl config init [--device] [--preset <name>]  # interactive mapping creator; valid preset names: xbox-360, xbox-elite2, dualsense, switch-pro
 padctl config edit [name]                  # open mapping in $VISUAL/$EDITOR
-padctl config test [--config] [--mapping]  # live input preview
+padctl config test [--config] [--mapping]  # live input preview; prints decoded named events by default, --raw restores hex dump
 padctl dump enable|disable                 # toggle diagnostic logging (persists)
 padctl dump status                         # show dump state, log path, size, time span
 padctl dump export --period Nm|Nh|Nd [-o file]  # export filtered log window

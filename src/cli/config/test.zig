@@ -289,10 +289,6 @@ fn formatReport(w: anytype, report: []const u8, remap: ?mapping_mod.RemapMap) !v
 
 // --- tests ---
 
-// "openFirstHidraw returns error when no device" test removed: openAutoResolved
-// scans /dev/hidraw0..63 and on dev machines an orphaned UHID device causes
-// hid_hw_open D-state even with O_NONBLOCK. The function is exercised via run().
-
 const testing = std.testing;
 
 test "formatReport: hex dump without mapping" {
