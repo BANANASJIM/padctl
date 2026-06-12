@@ -575,7 +575,6 @@ test "hidraw: discover interface filter — null matches any, explicit must matc
 test "hidraw: discoverWithRoot — nonexistent root returns NotFound for both null and explicit interface" {
     // Layer-0 reachable: no real hidraw nodes → NotFound regardless of interface filter.
     // This confirms the null-interface path reaches the same NotFound without crashing.
-    // Falsifiability: if null interface_id caused a panic or wrong error, this fails.
     const allocator = std.testing.allocator;
     const err1 = HidrawDevice.discoverWithRoot(allocator, 0x37d7, 0x2401, null, "/nonexistent_hidraw_xyz");
     try std.testing.expectError(error.NotFound, err1);
@@ -587,8 +586,6 @@ test "hidraw: discoverWithRoot — nonexistent root returns NotFound for both nu
 
 // featureReport must surface HIDIOCSFEATURE failures. An invalid fd makes the
 // ioctl return EBADF → WriteError.Io.
-// Falsifiability: the old `if (rc < 0)` guard never triggered (linux.ioctl returns
-// usize, never < 0), so featureReport returned void on failure and this fails.
 test "hidraw: featureReport surfaces ioctl errno as error" {
     var dev = HidrawDevice{
         .fd = -1,
@@ -604,9 +601,6 @@ test "hidraw: featureReport surfaces ioctl errno as error" {
 // EVIOCGRAB over a bad fd (-1) returns EBADF. evdevGrabErrno must decode this
 // via linux.E.init and surface it as a non-SUCCESS errno, so the caller skips
 // appending the un-grabbed fd.
-// Falsifiability: with the old `posix.errno(grab_rc)` decode this returns
-// .SUCCESS under libc (C errno is untouched by the raw syscall), so the
-// assertion below fails.
 test "hidraw: evdevGrabErrno surfaces ioctl errno on bad fd" {
     const e = evdevGrabErrno(-1);
     try std.testing.expect(e != .SUCCESS);

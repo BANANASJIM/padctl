@@ -472,10 +472,9 @@ test "layer: processLayerTriggers: Hold press → PENDING, arm timer" {
 }
 
 test "layer: hold PENDING entry does not signal active_changed" {
-    // Regression: PENDING entry must not trigger mapper's active_changed reset
+    // PENDING entry must not trigger mapper's active_changed reset
     // path (gyro/stick reset + macro release emission). Only real transitions
     // (PENDING→ACTIVE, ACTIVE→IDLE, tap-resolve, toggle) signal active_changed.
-    // PENDING entry must not signal active_changed.
     const hold_cfg = LayerConfig{ .name = "aim", .trigger = "LM", .activation = "hold", .hold_timeout = 200 };
     var ls = LayerState.init(testing.allocator);
     defer ls.deinit();

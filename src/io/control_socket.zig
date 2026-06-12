@@ -417,11 +417,6 @@ noinline fn clobberStack(depth: usize) usize {
     return scratch[depth % scratch.len] +% clobberStack(depth - 1);
 }
 
-// Falsifiability: revert readCommand to the internal-buffer form
-// (`var buf: [BUF_SIZE]u8 = undefined; ... parseCommand(buf[0..n])`) and drop the
-// `buf` parameter — cmd.name/cmd.device_id then slice into readCommand's dead
-// frame, which clobberStack overwrites with 0xAA, and these expectEqualStrings
-// FAIL. With the fix the bytes live in the caller's `buf` and survive.
 test "control_socket: readCommand: name survives stack clobber via caller buffer" {
     const fds = try testSocketpair();
     defer posix.close(fds[0]);
@@ -531,9 +526,6 @@ test "control_socket: ControlSocket: init rejects overly long unix socket path" 
     try testing.expectError(error.PathTooLong, ControlSocket.init(allocator, socket_path));
 }
 
-// Falsifiability: delete the writeAdvertisedFile call in ControlSocket.init,
-// and this test must FAIL — the advertised file will not exist and
-// accessAbsolute returns error.FileNotFound.
 test "control_socket: ControlSocket: init writes advertised file with socket path" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
@@ -562,9 +554,6 @@ test "control_socket: ControlSocket: init writes advertised file with socket pat
     try testing.expectEqualStrings(socket_path, buf[0..n]);
 }
 
-// Falsifiability: restore the chmod argument to 0o666 in ControlSocket.init and
-// this test FAILS — the world-write bit (0o002) is set on the bound socket,
-// which is the local-privilege-escalation surface this hardening removes.
 test "control_socket: ControlSocket: init binds socket without world-write" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
@@ -586,8 +575,6 @@ test "control_socket: ControlSocket: init binds socket without world-write" {
     try testing.expectEqual(@as(u32, 0), st.mode & 0o002);
 }
 
-// Falsifiability: drop the deleteFileAbsolute(self.advertised_path) branch in
-// deinit, and this test must FAIL — accessAbsolute will succeed.
 test "control_socket: ControlSocket: deinit removes advertised file" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});

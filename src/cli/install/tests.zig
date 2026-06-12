@@ -3711,9 +3711,7 @@ test "uninstall: probeAndRebindDrivers binds unbound matching interface only" {
 }
 
 // Re-probe must write only the driverless interface to drivers_probe, skip
-// already-bound interfaces, and ignore non-matching devices. Falsifiability:
-// dropping the `accessAbsolute(driver_link)` skip in reprobeInterfaces makes
-// 1.0 appear; dropping the VID:PID match makes the non-matching iface appear.
+// already-bound interfaces, and ignore non-matching devices.
 test "install: reprobe writes only driverless interfaces" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -3840,8 +3838,7 @@ test "install: reprobe no-ops when all bound / missing tree" {
 }
 
 // A mode switch must sweep the stale war-rule from the non-active tree while
-// leaving the freshly written active rule intact. Falsifiability: removing the
-// std.mem.eql guard would delete the active /usr/lib copy too.
+// leaving the freshly written active rule intact.
 test "install: mode switch sweeps stale rule from non-target tree" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -3885,8 +3882,7 @@ test "install: mode switch sweeps stale rule from non-target tree" {
 }
 
 // Normal-mode uninstall must remove the /etc udev rules and modules-load.d
-// conf even though they are not immutable-gated. Falsifiability: dropping the
-// always-run /etc sweep in uninstall() leaves these files behind.
+// conf even though they are not immutable-gated.
 test "uninstall: removes /etc udev rules in normal mode" {
     const testing = std.testing;
     const allocator = testing.allocator;

@@ -4839,9 +4839,7 @@ test "supervisor: Supervisor: status uses file stem when mapping name field is n
     sup.handleStatus(resp_fds[0]);
     var resp_buf: [256]u8 = undefined;
     const n = try posix.read(resp_fds[1], &resp_buf);
-    // Must show file stem, not "(none)". Falsifiability: revert the
-    // `if (m.switch_mapping_stem) |s| break :blk s;` line in handleStatus
-    // and this assertion fails because the response will contain "mapping=(none)".
+    // Must show file stem, not "(none)".
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=my-pad") != null);
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
 
@@ -4930,9 +4928,6 @@ test "supervisor: Supervisor: status uses default-mapping file stem when name fi
     sup.handleStatus(resp_fds[0]);
     var resp_buf: [256]u8 = undefined;
     const n = try posix.read(resp_fds[1], &resp_buf);
-    // Falsifiability: revert the `if (m.default_mapping_stem) |s| break :blk s;`
-    // line in handleStatus's `default_mapping_pr` branch and this fails
-    // because the response will contain "mapping=(none)".
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=mypad") != null);
     try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "mapping=(none)") == null);
 }
@@ -4947,14 +4942,6 @@ test "supervisor: Supervisor: status uses default-mapping file stem when name fi
 // unavailable without hardware. This test exercises: TOML dir scan → config
 // parsed → buildDefaultMapping real file read → stem derived → spawnInstance
 // → handleStatus stem branch.
-//
-// Falsifiability:
-//   - Reverting the `if (m.default_mapping_stem) |s| break :blk s;` line in
-//     handleStatus → response contains "mapping=(none)" → test fails.
-//   - Breaking buildDefaultMapping stem extraction (e.g. returning null stem)
-//     → default_dm.?.stem assertion fails → test fails.
-//   - If startFromDirWithRoot silently drops the parsed config
-//     → sup.configs.items.len == 0 assertion fails → test fails.
 test "supervisor: Supervisor: status stem fallback — config parsed from TOML dir, name-less mapping file" {
     const allocator = testing.allocator;
 
@@ -5474,9 +5461,6 @@ test "supervisor: lookupChordMappingName: deterministic order when two profiles 
 }
 
 // Test 1: trace_lifecycle field correctly reflects PADCTL_TRACE_LIFECYCLE env at init.
-// Falsifiability: without `trace_lifecycle` field initialisation in initForTest, this
-// assertion cannot be constructed; the field would remain at its default (false) even
-// when the caller sets it, and the test below demonstrates the field is read correctly.
 test "supervisor: trace_lifecycle flag initialised from field (gate check)" {
     const allocator = testing.allocator;
     var sup = try Supervisor.initForTest(allocator);
@@ -5495,8 +5479,6 @@ test "supervisor: trace_lifecycle flag initialised from field (gate check)" {
 }
 
 // Test 2: handleStatus output contains new diagnostic fields.
-// Falsifiability: reverting the phys_key/vid/pid/output_kind/output_fd_alive/hotplug_pending
-// additions to handleStatus causes these assertions to fail (fields absent from response).
 test "supervisor: handleStatus includes diagnostic fields (issue #236)" {
     const allocator = testing.allocator;
 
@@ -5548,8 +5530,6 @@ test "supervisor: handleStatus includes diagnostic fields (issue #236)" {
 
 test "supervisor: resolveEvdevNodesAt returns all matching nodes with device name" {
     // Build a synthetic sysfs tree under /tmp with two event nodes sharing the same VID:PID.
-    // Falsifiability: the old single-return impl would yield only one event path; this test
-    // asserts both event5 and event7 appear, so it would FAIL pre-fix.
     const base = "/tmp/padctl_test_evdev_multi";
     std.fs.deleteTreeAbsolute(base) catch {};
     defer std.fs.deleteTreeAbsolute(base) catch {};
@@ -5590,8 +5570,6 @@ test "supervisor: resolveEvdevNodesAt returns all matching nodes with device nam
     try testing.expect(std.mem.indexOf(u8, s, "Vader 5 Pro IMU") != null);
 }
 
-// Falsifiability: drop the absolutePathInMappingDirs guard (or invert it) and the
-// negative cases below accept arbitrary absolute paths, failing these asserts.
 test "supervisor: absolutePathInMappingDirs accepts only files in trusted dirs" {
     const dirs = [_][]const u8{
         "/home/u/.config/padctl/mappings",
@@ -5607,9 +5585,6 @@ test "supervisor: absolutePathInMappingDirs accepts only files in trusted dirs" 
     try testing.expect(!absolutePathInMappingDirs("/usr/share/padctl/devices/x.toml", &dirs));
 }
 
-// Falsifiability: revert handleSwitch to dupe any absolute path unconditionally
-// and this test FAILS — the daemon would attempt parseFile("/etc/passwd") and
-// reply "ERR mapping-parse-failed" instead of refusing the path outright.
 test "supervisor: SWITCH rejects absolute path outside mapping dirs" {
     const allocator = testing.allocator;
 

@@ -1284,11 +1284,6 @@ test "interpreter: button_group batch extraction" {
     try testing.expect(btns & (@as(u64, 1) << y_bit) == 0); // Y not pressed
 }
 
-// Regression: Steam Deck's TOML maps L4/R4 at bit indices 41/42 within an
-// 8-byte button_group source. Before widening `CompiledButtonEntry.bit_idx`
-// from `u5` to `u6`, compileReport panicked with "integer does not fit in
-// destination type" the first time this device TOML was loaded, aborting
-// DeviceInstance.init before any `device ready` log emitted.
 test "interpreter: button_group accepts bit_idx >= 32 (Steam Deck L4/R4)" {
     const allocator = testing.allocator;
     const toml_str =
@@ -1324,10 +1319,6 @@ test "interpreter: button_group accepts bit_idx >= 32 (Steam Deck L4/R4)" {
     try testing.expect(btns & (@as(u64, 1) << m3_bit) != 0); // M3 pressed
 }
 
-// Regression: every bit index in [32, 63] must round-trip through
-// compileReport without panic or truncation. This exercises the full
-// upper half of a u64 button_group source which was unreachable while
-// `bit_idx` was `u5`.
 test "interpreter: button_group full u6 range (bits 32..63) compiles" {
     const allocator = testing.allocator;
     const toml_str =
