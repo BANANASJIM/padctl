@@ -4176,3 +4176,151 @@ test "uninstall: user scope routes to user systemctl only" {
     // here, so stopDaemonScope is never called — calls list stays empty.
     try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);
 }
+
+// --- finding C25: post-install daemon verification gate ---
+
+// Gate decision per InstallPlan branch, mirroring the case A-E matrix above.
+// Falsifiability: replace shouldVerifyDaemon's body with `return false` (the
+// pre-C25 blind-success behavior) and cases A/B/G fail; `return true` and
+// cases C/D/E/F fail.
+test "install: verify gate case A — non-root default install verifies daemon" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local" };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case B — sudo_hop install verifies daemon" {
+    const testing = std.testing;
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case C — staged build (destdir) skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .destdir = "/tmp/staging" };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case D — --no-user-service skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = false };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case E — root --user-service without SUDO_USER skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = true };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    // systemctl_plan.mode == .skip: no start was attempted, nothing to verify.
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case F — --no-start skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local", .no_start = true };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case G — --no-enable still starts, still verifies" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local", .no_enable = true };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.shouldVerifyDaemon());
+}
+
+fn verifyServerThread(listen_fd: std.posix.fd_t, reply: []const u8) void {
+    const cfd = std.posix.accept(listen_fd, null, null, 0) catch return;
+    defer std.posix.close(cfd);
+    var buf: [256]u8 = undefined;
+    _ = std.posix.read(cfd, &buf) catch return;
+    _ = std.posix.write(cfd, reply) catch {};
+}
+
+fn bindTestSocket(path: []const u8) !std.posix.fd_t {
+    const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+    errdefer std.posix.close(fd);
+    var addr: std.os.linux.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    if (path.len >= addr.path.len) return error.PathTooLong;
+    @memcpy(addr.path[0..path.len], path);
+    try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+    try std.posix.listen(fd, 1);
+    return fd;
+}
+
+// Falsifiability: replace statusRoundTrip's body with `return true` (or with
+// a bare connect() probe) and the unreachable/garbage cases fail; replace it
+// with `return false` and the STATUS case fails.
+test "install: waitDaemonResponding true when daemon answers STATUS" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/v.sock", .{root});
+    defer allocator.free(sock_path);
+
+    const listen_fd = bindTestSocket(sock_path) catch |err| {
+        if (err == error.AccessDenied) return error.SkipZigTest;
+        return err;
+    };
+    defer std.posix.close(listen_fd);
+    const t = try std.Thread.spawn(.{}, verifyServerThread, .{ listen_fd, "STATUS\n" });
+    defer t.join();
+
+    try testing.expect(phase_mod.waitDaemonResponding(sock_path, 3000, 50));
+}
+
+test "install: waitDaemonResponding false on unreachable socket" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/missing.sock", .{root});
+    defer allocator.free(sock_path);
+
+    try testing.expect(!phase_mod.waitDaemonResponding(sock_path, 300, 50));
+}
+
+test "install: waitDaemonResponding false when daemon answers garbage" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/g.sock", .{root});
+    defer allocator.free(sock_path);
+
+    const listen_fd = bindTestSocket(sock_path) catch |err| {
+        if (err == error.AccessDenied) return error.SkipZigTest;
+        return err;
+    };
+    defer std.posix.close(listen_fd);
+    const t = try std.Thread.spawn(.{}, verifyServerThread, .{ listen_fd, "ERR not-padctl\n" });
+    defer t.join();
+
+    try testing.expect(!phase_mod.waitDaemonResponding(sock_path, 300, 50));
+}

@@ -6,6 +6,7 @@ const udev = @import("udev.zig");
 const migration = @import("migration.zig");
 const mappings = @import("mappings.zig");
 const control_socket = @import("../../io/control_socket.zig");
+const socket_client = @import("../socket_client.zig");
 
 /// Test hook: when non-null, `probeSocketAlive` calls this instead of probing.
 /// Lets uninstall tests simulate a live daemon (and toggle aliveness between
@@ -179,8 +180,74 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         return error.MappingInstallFailed;
     }
 
+    if (plan.shouldVerifyDaemon()) {
+        var sock_buf: [256]u8 = undefined;
+        const sock_path = verifySocketPath(&plan, &sock_buf);
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nWaiting for the daemon to respond...\n") catch {};
+        if (!waitDaemonResponding(sock_path, 5000, 250)) {
+            printVerifyFailure(allocator, &plan);
+            return error.DaemonNotResponding;
+        }
+    }
+
     printCompletionHint(&plan);
     printInputGroupHint();
+}
+
+/// Liveness check that proves the daemon is serving requests, not merely
+/// that a socket file exists: full STATUS round-trip with a bounded read.
+pub fn statusRoundTrip(path: []const u8) bool {
+    const fd = socket_client.connectToSocket(path) catch return false;
+    defer std.posix.close(fd);
+    var buf: [4096]u8 = undefined;
+    const resp = socket_client.sendCommandTimeout(fd, "STATUS\n", &buf, 1000) catch return false;
+    return std.mem.startsWith(u8, resp, "STATUS");
+}
+
+pub fn waitDaemonResponding(path: []const u8, timeout_ms: i64, poll_interval_ms: u64) bool {
+    const deadline = std.time.milliTimestamp() + timeout_ms;
+    while (true) {
+        if (statusRoundTrip(path)) return true;
+        if (std.time.milliTimestamp() >= deadline) return false;
+        std.Thread.sleep(poll_interval_ms * std.time.ns_per_ms);
+    }
+}
+
+/// Resolve the socket the just-started user service will bind. Under
+/// sudo_hop the invoking user's runtime dir is derived from SUDO_UID since
+/// the process env belongs to root.
+fn verifySocketPath(plan: *const InstallPlan, buf: []u8) []const u8 {
+    if (plan.systemctl_plan.mode == .sudo_hop) {
+        var xrd_buf: [64]u8 = undefined;
+        const xrd: ?[]const u8 = std.fmt.bufPrint(&xrd_buf, "/run/user/{s}", .{plan.systemctl_plan.sudo_uid}) catch null;
+        return socket_client.resolveSocketPathFor(buf, null, xrd, socket_client.SYSTEM_RUNTIME_DIR, false);
+    }
+    return socket_client.resolveSocketPath(buf);
+}
+
+fn printVerifyFailure(allocator: std.mem.Allocator, plan: *const InstallPlan) void {
+    _ = std.posix.write(std.posix.STDERR_FILENO,
+        \\
+        \\error: install completed but the daemon is not responding.
+        \\
+        \\Recent service log:
+        \\
+    ) catch {};
+    if (plan.systemctl_plan.mode == .sudo_hop) {
+        const xrd = std.fmt.allocPrint(allocator, "XDG_RUNTIME_DIR=/run/user/{s}", .{plan.systemctl_plan.sudo_uid}) catch return;
+        defer allocator.free(xrd);
+        const dbus = std.fmt.allocPrint(allocator, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{s}/bus", .{plan.systemctl_plan.sudo_uid}) catch return;
+        defer allocator.free(dbus);
+        runCmd(&.{ "sudo", "-u", plan.systemctl_plan.sudo_user, xrd, dbus, "journalctl", "--user", "-u", "padctl.service", "-n", "10", "--no-pager" });
+    } else {
+        runCmd(&.{ "journalctl", "--user", "-u", "padctl.service", "-n", "10", "--no-pager" });
+    }
+    _ = std.posix.write(std.posix.STDERR_FILENO,
+        \\
+        \\Inspect with: journalctl --user -u padctl.service
+        \\Diagnose with: padctl doctor
+        \\
+    ) catch {};
 }
 
 fn printCompletionHint(plan: *const InstallPlan) void {

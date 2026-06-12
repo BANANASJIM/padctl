@@ -215,6 +215,7 @@ fn reportScopeOrLog(err: anyerror, phase_name: []const u8) void {
                 \\
             ) catch {};
         },
+        error.DaemonNotResponding => {},
         else => std.log.err("{s} failed: {}", .{ phase_name, err }),
     }
 }
