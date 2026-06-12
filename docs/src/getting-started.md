@@ -149,6 +149,9 @@ padctl list-mappings
 lists connected HID devices and shows whether a matching device config was found
 for each. `padctl list-mappings` verifies the mapping search paths are readable.
 
+If `padctl status` fails, run `padctl doctor` — it checks the daemon, the
+systemd service state, and every supported device, and prints next-step hints.
+
 ## Run as Service
 
 If you built from source, run the installer first — `zig build` alone does **not** install the service file:

@@ -4,7 +4,7 @@ const socket_client = @import("socket_client.zig");
 
 pub fn run(socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
     const fd = socket_client.connectToSocket(socket_path) catch {
-        err_writer.writeAll("error: cannot connect to padctl daemon\n") catch {};
+        socket_client.reportConnectFailure(err_writer, socket_path);
         return 1;
     };
     defer posix.close(fd);

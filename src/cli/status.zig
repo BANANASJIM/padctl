@@ -4,7 +4,7 @@ const socket_client = @import("socket_client.zig");
 
 pub fn run(socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
     const fd = socket_client.connectToSocket(socket_path) catch {
-        err_writer.writeAll("error: cannot connect to padctl daemon\n") catch {};
+        socket_client.reportConnectFailure(err_writer, socket_path);
         return 1;
     };
     defer posix.close(fd);
@@ -74,4 +74,21 @@ test "run: ERR response returns 1" {
 test "run: connection failure returns 1" {
     const rc = run("/tmp/padctl-nonexistent-test.sock", std.io.null_writer, std.io.null_writer);
     try testing.expectEqual(@as(u8, 1), rc);
+}
+
+// Regression: connect failure must print the actionable hints, not the old
+// bare one-liner that dead-ended users (no service check, no doctor pointer).
+test "run: connection failure prints socket path and doctor hint" {
+    var err_buf: std.ArrayList(u8) = .{};
+    defer err_buf.deinit(testing.allocator);
+
+    const rc = run("/tmp/padctl-nonexistent-test.sock", std.io.null_writer, err_buf.writer(testing.allocator));
+    try testing.expectEqual(@as(u8, 1), rc);
+    try testing.expectEqualStrings(
+        "error: cannot connect to padctl daemon at /tmp/padctl-nonexistent-test.sock\n" ++
+            "hint: check the service: systemctl --user status padctl.service\n" ++
+            "hint: package installs need a one-time: systemctl --user enable --now padctl.service\n" ++
+            "hint: run `padctl doctor` for full diagnosis\n",
+        err_buf.items,
+    );
 }

@@ -139,6 +139,7 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
     const connect_fd = socket_client.connectToSocket(socket_path) catch |err| switch (err) {
         error.FileNotFound, error.ConnectionRefused => {
             try writer.writeAll("daemon: DOWN (no socket / not running)\n");
+            try printServiceHints(allocator, writer);
             try printDriverBlock(writer);
             try writer.writeByte('\n');
             try printSupportedDevices(allocator, status_devices, exec_start, writer);
@@ -146,6 +147,7 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
         },
         else => {
             try writer.print("daemon: DOWN (connect error: {})\n", .{err});
+            try printServiceHints(allocator, writer);
             try printDriverBlock(writer);
             try writer.writeByte('\n');
             try printSupportedDevices(allocator, status_devices, exec_start, writer);
@@ -174,6 +176,105 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
     try printDriverBlock(writer);
     try writer.writeByte('\n');
     try printSupportedDevices(allocator, status_devices, exec_start, writer);
+}
+
+pub const ServiceState = struct {
+    load_state: []const u8 = "",
+    active_state: []const u8 = "",
+    sub_state: []const u8 = "",
+    exec_main_status: []const u8 = "",
+};
+
+/// Parse `systemctl show <unit> -p LoadState,ActiveState,SubState,ExecMainStatus`
+/// key=value output. Returned slices alias `output`.
+pub fn parseServiceShow(output: []const u8) ServiceState {
+    var st: ServiceState = .{};
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (std.mem.startsWith(u8, line, "LoadState=")) {
+            st.load_state = line["LoadState=".len..];
+        } else if (std.mem.startsWith(u8, line, "ActiveState=")) {
+            st.active_state = line["ActiveState=".len..];
+        } else if (std.mem.startsWith(u8, line, "SubState=")) {
+            st.sub_state = line["SubState=".len..];
+        } else if (std.mem.startsWith(u8, line, "ExecMainStatus=")) {
+            st.exec_main_status = line["ExecMainStatus=".len..];
+        }
+    }
+    return st;
+}
+
+/// Print the service line plus a next-step hint tailored to the unit state.
+pub fn printServiceDiagnosis(writer: anytype, st: ServiceState, user_scope: bool) !void {
+    const scope: []const u8 = if (user_scope) "user" else "system";
+    if (std.mem.eql(u8, st.load_state, "not-found")) {
+        try writer.writeAll("service: padctl.service not installed\n");
+        try writer.writeAll("hint: run: sudo padctl install\n");
+    } else if (std.mem.eql(u8, st.active_state, "failed")) {
+        try writer.print("service: {s} scope failed (sub={s} exec_status={s})\n", .{ scope, st.sub_state, st.exec_main_status });
+        if (user_scope) {
+            try writer.writeAll("hint: inspect: journalctl --user -u padctl.service -n 80 — see the troubleshooting guide\n");
+        } else {
+            try writer.writeAll("hint: inspect: journalctl -u padctl.service -n 80 — see the troubleshooting guide\n");
+        }
+    } else if (std.mem.eql(u8, st.active_state, "inactive")) {
+        try writer.print("service: {s} scope inactive\n", .{scope});
+        if (user_scope) {
+            try writer.writeAll("hint: start it: systemctl --user enable --now padctl.service\n");
+        } else {
+            try writer.writeAll("hint: start it: sudo systemctl enable --now padctl.service\n");
+        }
+    } else {
+        try writer.print("service: {s} scope {s}/{s}\n", .{ scope, st.active_state, st.sub_state });
+    }
+}
+
+const ScopedServiceState = struct {
+    raw: []u8,
+    state: ServiceState,
+    user_scope: bool,
+};
+
+fn runSystemctlShow(allocator: std.mem.Allocator, user_scope: bool) ?[]u8 {
+    const argv_user = [_][]const u8{ "systemctl", "--user", "show", "padctl.service", "-p", "LoadState,ActiveState,SubState,ExecMainStatus" };
+    const argv_system = [_][]const u8{ "systemctl", "show", "padctl.service", "-p", "LoadState,ActiveState,SubState,ExecMainStatus" };
+    const argv: []const []const u8 = if (user_scope) &argv_user else &argv_system;
+    const result = std.process.Child.run(.{ .allocator = allocator, .argv = argv }) catch return null;
+    defer allocator.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) {
+        allocator.free(result.stdout);
+        return null;
+    }
+    return result.stdout;
+}
+
+/// Query padctl.service state in user scope first, falling back to system
+/// scope when the user unit does not exist. Null when systemctl is unusable.
+fn queryServiceState(allocator: std.mem.Allocator) ?ScopedServiceState {
+    const user_raw = runSystemctlShow(allocator, true) orelse {
+        const sys_raw = runSystemctlShow(allocator, false) orelse return null;
+        return .{ .raw = sys_raw, .state = parseServiceShow(sys_raw), .user_scope = false };
+    };
+    const user_state = parseServiceShow(user_raw);
+    if (!std.mem.eql(u8, user_state.load_state, "not-found")) {
+        return .{ .raw = user_raw, .state = user_state, .user_scope = true };
+    }
+    if (runSystemctlShow(allocator, false)) |sys_raw| {
+        const sys_state = parseServiceShow(sys_raw);
+        if (!std.mem.eql(u8, sys_state.load_state, "not-found")) {
+            allocator.free(user_raw);
+            return .{ .raw = sys_raw, .state = sys_state, .user_scope = false };
+        }
+        allocator.free(sys_raw);
+    }
+    return .{ .raw = user_raw, .state = user_state, .user_scope = true };
+}
+
+fn printServiceHints(allocator: std.mem.Allocator, writer: anytype) !void {
+    const q = queryServiceState(allocator) orelse return;
+    defer allocator.free(q.raw);
+    try printServiceDiagnosis(writer, q.state, q.user_scope);
 }
 
 // Mirrors the daemon_socket_guard glob in the generated driver-block rules.
@@ -441,6 +542,79 @@ test "doctor: probeUsbPresence: driverless interface" {
     try testing.expect(result.present);
     try testing.expectEqual(@as(usize, 1), result.interfaces.len);
     try testing.expect(result.interfaces[0].driver == null);
+}
+
+test "doctor: parseServiceShow: canned systemctl show output" {
+    const st = parseServiceShow(
+        "LoadState=loaded\nActiveState=failed\nSubState=failed\nExecMainStatus=218\n",
+    );
+    try testing.expectEqualStrings("loaded", st.load_state);
+    try testing.expectEqualStrings("failed", st.active_state);
+    try testing.expectEqualStrings("failed", st.sub_state);
+    try testing.expectEqualStrings("218", st.exec_main_status);
+}
+
+test "doctor: parseServiceShow: missing keys yield empty fields" {
+    const st = parseServiceShow("LoadState=not-found\n");
+    try testing.expectEqualStrings("not-found", st.load_state);
+    try testing.expectEqualStrings("", st.active_state);
+    try testing.expectEqualStrings("", st.sub_state);
+    try testing.expectEqualStrings("", st.exec_main_status);
+}
+
+// Falsifiability: each branch below pins the exact tailored hint; collapsing
+// the diagnosis to a generic message fails all three.
+test "doctor: printServiceDiagnosis: not-found suggests install" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    const st = parseServiceShow("LoadState=not-found\nActiveState=inactive\nSubState=dead\nExecMainStatus=0\n");
+    try printServiceDiagnosis(buf.writer(testing.allocator), st, true);
+    try testing.expectEqualStrings(
+        "service: padctl.service not installed\nhint: run: sudo padctl install\n",
+        buf.items,
+    );
+}
+
+test "doctor: printServiceDiagnosis: failed prints substate and journal pointer" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    const st = parseServiceShow("LoadState=loaded\nActiveState=failed\nSubState=failed\nExecMainStatus=218\n");
+    try printServiceDiagnosis(buf.writer(testing.allocator), st, true);
+    try testing.expectEqualStrings(
+        "service: user scope failed (sub=failed exec_status=218)\n" ++
+            "hint: inspect: journalctl --user -u padctl.service -n 80 — see the troubleshooting guide\n",
+        buf.items,
+    );
+}
+
+test "doctor: printServiceDiagnosis: inactive suggests enable --now" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    const st = parseServiceShow("LoadState=loaded\nActiveState=inactive\nSubState=dead\nExecMainStatus=0\n");
+    try printServiceDiagnosis(buf.writer(testing.allocator), st, true);
+    try testing.expectEqualStrings(
+        "service: user scope inactive\nhint: start it: systemctl --user enable --now padctl.service\n",
+        buf.items,
+    );
+}
+
+test "doctor: printServiceDiagnosis: system scope uses sudo systemctl" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    const st = parseServiceShow("LoadState=loaded\nActiveState=inactive\nSubState=dead\nExecMainStatus=0\n");
+    try printServiceDiagnosis(buf.writer(testing.allocator), st, false);
+    try testing.expectEqualStrings(
+        "service: system scope inactive\nhint: start it: sudo systemctl enable --now padctl.service\n",
+        buf.items,
+    );
+}
+
+test "doctor: printServiceDiagnosis: active state prints status without hint" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    const st = parseServiceShow("LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nExecMainStatus=1\n");
+    try printServiceDiagnosis(buf.writer(testing.allocator), st, true);
+    try testing.expectEqualStrings("service: user scope activating/auto-restart\n", buf.items);
 }
 
 test "doctor: configDirFromExecStart: extracts --config-dir arg" {

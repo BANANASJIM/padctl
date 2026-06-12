@@ -1,5 +1,10 @@
 # Troubleshooting
 
+Run `padctl doctor` first and paste its output in bug reports. It checks the
+daemon socket, the systemd service state, kernel driver bindings, and every
+supported device in one pass, and prints next-step hints. The manual flows
+below remain as fallback when `doctor` is unavailable or inconclusive.
+
 Common runtime failures that have generated repeat issue reports, with diagnostics and workarounds.
 
 ---
@@ -76,12 +81,23 @@ Log out and back in after changing groups.
 
 **Check installed configs:**
 
+`padctl doctor` resolves the daemon's real device config directories and lists
+every device TOML it finds — prefer it over a hardcoded path, because the
+install prefix differs by platform (ostree/immutable distros install under
+`/usr/local/share/padctl/devices`, not `/usr/share/padctl/devices`):
+
 ```sh
-find /usr/share/padctl/devices -name '*.toml' | sort
+padctl doctor
+```
+
+To inspect a specific config manually, validate it from the directory doctor
+reported, e.g.:
+
+```sh
 padctl --validate /usr/share/padctl/devices/sony/dualsense.toml
 ```
 
-If `/usr/share/padctl/devices` is missing or empty, reinstall the current package.
+If doctor finds zero device TOMLs, reinstall the current package.
 If your device is not listed, capture it and open a device-config contribution.
 
 ---

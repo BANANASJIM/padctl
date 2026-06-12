@@ -5,7 +5,7 @@ const mapping_discovery = @import("../config/mapping_discovery.zig");
 
 pub fn run(allocator: std.mem.Allocator, name: []const u8, device_id: ?[]const u8, socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
     const fd = socket_client.connectToSocket(socket_path) catch {
-        err_writer.writeAll("error: cannot connect to padctl daemon\n") catch {};
+        socket_client.reportConnectFailure(err_writer, socket_path);
         return 1;
     };
     defer posix.close(fd);

@@ -77,6 +77,13 @@ fn readAdvertised(out: []u8, advertised_path: []const u8) ?[]const u8 {
     return out[0..trimmed.len];
 }
 
+pub fn reportConnectFailure(writer: anytype, socket_path: []const u8) void {
+    writer.print("error: cannot connect to padctl daemon at {s}\n", .{socket_path}) catch {};
+    writer.writeAll("hint: check the service: systemctl --user status padctl.service\n") catch {};
+    writer.writeAll("hint: package installs need a one-time: systemctl --user enable --now padctl.service\n") catch {};
+    writer.writeAll("hint: run `padctl doctor` for full diagnosis\n") catch {};
+}
+
 pub const ConnectError = posix.SocketError || posix.ConnectError || error{ PathTooLong, InvalidPath };
 
 pub fn connectToSocket(path: []const u8) ConnectError!posix.fd_t {
@@ -460,6 +467,22 @@ test "socket_client: parseStatusLine: device and mapping names with spaces" {
     try testing.expectEqual(@as(u16, 0x37d7), devices[0].vid);
     try testing.expectEqual(@as(u16, 0x2401), devices[0].pid);
     try testing.expectEqualStrings("active", devices[0].state);
+}
+
+// Falsifiability: dropping any of the four lines (or reverting callers to the
+// old bare "cannot connect" message) breaks the exact-output expectation.
+test "socket_client: reportConnectFailure: exact four-line output" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+
+    reportConnectFailure(buf.writer(testing.allocator), "/run/user/1000/padctl.sock");
+    try testing.expectEqualStrings(
+        "error: cannot connect to padctl daemon at /run/user/1000/padctl.sock\n" ++
+            "hint: check the service: systemctl --user status padctl.service\n" ++
+            "hint: package installs need a one-time: systemctl --user enable --now padctl.service\n" ++
+            "hint: run `padctl doctor` for full diagnosis\n",
+        buf.items,
+    );
 }
 
 test "socket_client: queryStatusDevices: unreachable socket returns null" {

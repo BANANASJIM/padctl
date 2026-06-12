@@ -173,6 +173,7 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | Command | Description |
 |---------|-------------|
 | `padctl status` | Show daemon state and active devices |
+| `padctl doctor` | Diagnose daemon, service, and device problems with next-step hints |
 | `padctl devices` | List detected HID/USB devices |
 | `padctl list-mappings` | Show available mapping profiles |
 | `padctl switch <name>` | Switch to a named mapping profile |
