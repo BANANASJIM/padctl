@@ -5,17 +5,16 @@
 ### Arch Linux (AUR)
 
 ```sh
-yay -S padctl-git
+yay -S padctl-bin   # prebuilt binary
+yay -S padctl-git   # build from source
 ```
-
-A prebuilt binary package (`padctl-bin`) is also available in the AUR.
 
 If you previously installed from source with `sudo padctl install`, remove that
 manual install before switching to AUR so pacman can own the files:
 
 ```sh
 sudo padctl uninstall --prefix /usr --no-immutable
-yay -S padctl-git   # or: yay -S padctl-bin
+yay -S padctl-bin   # or: yay -S padctl-git
 ```
 
 ### Debian / Ubuntu
