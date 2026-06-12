@@ -176,7 +176,7 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | `padctl devices` | List detected HID/USB devices |
 | `padctl list-mappings` | Show available mapping profiles |
 | `padctl switch <name>` | Switch to a named mapping profile |
-| `padctl config init [--preset <name>]` | Interactively create a new mapping file in `~/.config/padctl/mappings/`. Valid `--preset` values: `xbox-360`, `xbox-elite2`, `dualsense`, `switch-pro`. |
+| `padctl config init [--device <name>]` | Interactively create a new mapping file in `~/.config/padctl/mappings/` from a template (`default`, `fps`, `racing`, `fighting`) |
 | `padctl config edit <mapping>` | Open mapping in `$VISUAL` or `$EDITOR` |
 | `padctl config test <mapping>` | Live input preview against the mapping (no apply) |
 | `padctl scan` | Re-scan for connected devices |
