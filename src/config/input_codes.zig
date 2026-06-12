@@ -50,7 +50,7 @@ const abs_table = [_]CodeEntry{
     .{ .name = "ABS_MT_TOOL_Y", .code = c.ABS_MT_TOOL_Y },
 };
 
-const btn_table = [_]CodeEntry{
+pub const btn_table = [_]CodeEntry{
     .{ .name = "BTN_MISC", .code = c.BTN_MISC },
     .{ .name = "BTN_0", .code = c.BTN_0 },
     .{ .name = "BTN_1", .code = c.BTN_1 },
@@ -269,7 +269,7 @@ pub const key_table = [_]CodeEntry{
 };
 
 // Mouse button shortcuts (vader5 compat)
-const mouse_table = [_]CodeEntry{
+pub const mouse_table = [_]CodeEntry{
     .{ .name = "mouse_left", .code = c.BTN_LEFT },
     .{ .name = "mouse_right", .code = c.BTN_RIGHT },
     .{ .name = "mouse_middle", .code = c.BTN_MIDDLE },

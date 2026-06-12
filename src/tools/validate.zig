@@ -182,6 +182,13 @@ pub fn validateFile(
                 const file_copy = try allocator.dupe(u8, path);
                 try errors.append(allocator, .{ .file = file_copy, .message = msg });
             };
+            var remap_findings = try mapping.collectRemapFindings(allocator, &parsed.value);
+            defer remap_findings.deinit(allocator);
+            for (remap_findings.items) |f| {
+                const msg = try mapping.remapFindingMessage(allocator, f);
+                defer allocator.free(msg);
+                try addError(&errors, allocator, path, "{s}", .{msg});
+            }
         },
     }
     return errors.toOwnedSlice(allocator);
@@ -551,6 +558,94 @@ test "validate: mapping with bad layer activation fails" {
     const errors = try validateString(allocator, bad);
     defer freeErrors(errors, allocator);
     try testing.expect(errors.len > 0);
+}
+
+test "validate: mapping with unknown remap key reports error with suggestion" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[remap]
+        \\M11 = "KEY_F13"
+        \\
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings(
+        "[remap] key 'M11' is not a button name (did you mean 'M1'?)",
+        errors[0].message,
+    );
+}
+
+test "validate: mapping with unknown remap string target reports error with suggestion" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[remap]
+        \\M1 = "KEY_F13X"
+        \\
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings(
+        "[remap] target 'KEY_F13X' for key 'M1' is not a valid target (did you mean 'KEY_F13'?)",
+        errors[0].message,
+    );
+}
+
+test "validate: mapping with unknown key in [layer.remap] reports layer.remap location" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\M11 = "KEY_F1"
+        \\
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 1), errors.len);
+    try testing.expectEqualStrings(
+        "[layer.remap] key 'M11' is not a button name (did you mean 'M1'?)",
+        errors[0].message,
+    );
+}
+
+test "validate: mapping with unknown remap key/target without close match has no suggestion" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[remap]
+        \\Bogus99 = "totally_unknown"
+        \\
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expectEqual(@as(usize, 2), errors.len);
+    for (errors) |e| {
+        try testing.expect(std.mem.indexOf(u8, e.message, "did you mean") == null);
+    }
+}
+
+test "validate: all shipped examples/mappings/*.toml validate clean" {
+    const allocator = testing.allocator;
+    var dir = try std.fs.cwd().openDir("examples/mappings", .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    var checked: usize = 0;
+    while (try it.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".toml")) continue;
+        const path = try std.fmt.allocPrint(allocator, "examples/mappings/{s}", .{entry.name});
+        defer allocator.free(path);
+        const errors = try validateFile(path, allocator);
+        defer freeErrors(errors, allocator);
+        if (errors.len > 0) {
+            for (errors) |e| std.debug.print("  {s}: {s}\n", .{ e.file, e.message });
+        }
+        try testing.expectEqual(@as(usize, 0), errors.len);
+        checked += 1;
+    }
+    try testing.expect(checked >= 3);
 }
 
 test "validate: mapping with overflow gyro sensitivity passes (clamped before validate)" {
