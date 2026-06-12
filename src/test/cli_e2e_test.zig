@@ -186,6 +186,6 @@ test "config test: no hidraw device error" {
         var it = d.iterate();
         if ((it.next() catch null) != null) return error.SkipZigTest;
     }
-    const result = config_test_mod.run(testing.allocator, null, null, std.io.null_writer);
+    const result = config_test_mod.run(testing.allocator, null, null, false, std.io.null_writer);
     try testing.expectError(error.NoHidrawDevice, result);
 }

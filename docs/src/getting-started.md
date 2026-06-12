@@ -5,17 +5,16 @@
 ### Arch Linux (AUR)
 
 ```sh
-yay -S padctl-git
+yay -S padctl-bin   # prebuilt binary
+yay -S padctl-git   # build from source
 ```
-
-A prebuilt binary package (`padctl-bin`) is also available in the AUR.
 
 If you previously installed from source with `sudo padctl install`, remove that
 manual install before switching to AUR so pacman can own the files:
 
 ```sh
 sudo padctl uninstall --prefix /usr --no-immutable
-yay -S padctl-git   # or: yay -S padctl-bin
+yay -S padctl-bin   # or: yay -S padctl-git
 ```
 
 ### Debian / Ubuntu
@@ -249,9 +248,9 @@ padctl devices [--socket <path>]           # list connected devices
 padctl list-mappings [--config-dir <dir>]  # list available mapping profiles
 padctl reload [--pid <pid>]                # send SIGHUP to reload configs
 padctl config list                         # show XDG config search paths
-padctl config init [--device] [--preset <name>]  # interactive mapping creator; valid preset names: xbox-360, xbox-elite2, dualsense, switch-pro
+padctl config init [--device <name>]       # interactive mapping creator; templates: default, fps, racing, fighting
 padctl config edit [name]                  # open mapping in $VISUAL/$EDITOR
-padctl config test [--config] [--mapping]  # live input preview
+padctl config test [--config] [--mapping]  # live input preview; prints decoded named events by default, --raw restores hex dump
 padctl dump enable|disable                 # toggle diagnostic logging (persists)
 padctl dump status                         # show dump state, log path, size, time span
 padctl dump export --period Nm|Nh|Nd [-o file]  # export filtered log window
