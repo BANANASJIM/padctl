@@ -117,9 +117,12 @@ jobs:
               # Run as testuser so SUDO_USER is set when they call sudo padctl install.
               # udevadm/systemctl calls inside padctl will fail silently (no daemon) —
               # that is expected; file installation and ensureUserXdgDirs still execute.
+              # --no-start: this sandbox has no systemd, so a started install would
+              # (correctly) fail the post-install daemon verification gate. The gate
+              # itself is exercised in Scenario D below.
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
-                /usr/local/bin/padctl install --prefix /usr/local 2>&1"
+                /usr/local/bin/padctl install --prefix /usr/local --no-start 2>&1"
 
               # ---- invariant checks ----
               FAIL=0
@@ -222,7 +225,7 @@ jobs:
               # ---- Scenario B: --no-enable install => identical socket-gated rule ----
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
-                /usr/local/bin/padctl install --prefix /usr/local --no-enable 2>&1"
+                /usr/local/bin/padctl install --prefix /usr/local --no-enable --no-start 2>&1"
 
               echo "=== socket-guard invariants (Scenario B: --no-enable install) ==="
               FAIL=0
@@ -238,10 +241,31 @@ jobs:
                 exit 1
               fi
 
+              # ---- Scenario D: verify gate — a started install whose daemon never
+              # answers STATUS must exit non-zero instead of reporting blind
+              # success. No systemd runs in this sandbox, so the
+              # service is the degenerate "broken unit": start is attempted but
+              # the daemon can never come up.
+              echo "=== verify-gate invariant (Scenario D: started install, daemon cannot run) ==="
+              RC=0
+              su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
+                HOME=/home/testuser \
+                /usr/local/bin/padctl install --prefix /usr/local 2>&1" \
+                | tee /tmp/verify-gate.log || RC=$?
+              if [ "$RC" -eq 0 ]; then
+                echo "FAIL: install reported success though the daemon is not responding"
+                exit 1
+              fi
+              if ! grep -q "daemon is not responding" /tmp/verify-gate.log; then
+                echo "FAIL: missing daemon-not-responding diagnostic in install output"
+                exit 1
+              fi
+              echo "  PASS: started install without responsive daemon exits non-zero (rc=$RC)"
+
               # Re-install enabled; plant a legacy sentinel for uninstall to clean (Scenario C)
               su - testuser -c "sudo SUDO_USER=testuser SUDO_UID=$(id -u testuser) \
                 HOME=/home/testuser \
-                /usr/local/bin/padctl install --prefix /usr/local 2>&1"
+                /usr/local/bin/padctl install --prefix /usr/local --no-start 2>&1"
               mkdir -p /etc/padctl && : > /etc/padctl/service-enabled
 
               # ---- uninstall ----

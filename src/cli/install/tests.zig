@@ -282,8 +282,6 @@ test "install: generateServiceContent never emits SupplementaryGroups (issues #2
     // cannot apply SupplementaryGroups=; the directive aborts startup with
     // status=216/GROUP. It must never appear in the user unit, on any host
     // shape — whether or not the host has an 'input' group.
-    // Falsifiability: re-add the SupplementaryGroups line to
-    // generateServiceContent and this test fails.
     const testing = std.testing;
     const allocator = testing.allocator;
     for ([_][]const u8{ "/usr", "/usr/local" }) |prefix| {
@@ -357,7 +355,6 @@ test "install: generateUdevRules produces valid output" {
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"input\"") != null);
     // hidraw line keeps uaccess and adds GROUP="input", MODE="0660" for
     // headless/linger fallback, VID/PID-scoped.
-    // Falsifiability: revert udev.zig hidraw format-string append → this fails.
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"37d7\", ATTRS{idProduct}==\"2401\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "GROUP=\"input\", MODE=\"0660\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "KERNEL==\"uinput\"") != null);
@@ -713,7 +710,6 @@ test "install: generateSystemServiceContent grants /dev/uhid DeviceAllow" {
 }
 
 test "install: generateSystemServiceContent emits SupplementaryGroups=input when input group exists" {
-    // Falsifiability: remove the has_input_group branch in generateSystemServiceContent → this fails.
     const testing = std.testing;
     const allocator = testing.allocator;
     const content = try generateSystemServiceContent(allocator, "/usr", true);
@@ -723,7 +719,6 @@ test "install: generateSystemServiceContent emits SupplementaryGroups=input when
 
 test "install: generateSystemServiceContent omits SupplementaryGroups=input when input group absent" {
     // Regression test for issue #279: same guard applies to the legacy system unit.
-    // Falsifiability: make generateSystemServiceContent always emit the line → this fails.
     const testing = std.testing;
     const allocator = testing.allocator;
     const content = try generateSystemServiceContent(allocator, "/usr", false);
@@ -750,22 +745,16 @@ test "install: system unit declares RuntimeDirectory=padctl + Mode=0755 + Preser
 }
 
 test "install: inputGroupHintNeeded suppressed when host has no input group" {
-    // Falsifiability: remove the has_group guard in inputGroupHintNeeded → this fails.
-    // Distros without an input group (e.g. Bazzite/Fedora) must not show usermod advice.
     try std.testing.expect(!inputGroupHintNeeded(false, false));
     try std.testing.expect(!inputGroupHintNeeded(false, true));
 }
 
 test "install: inputGroupHintNeeded shown only when group exists and user not yet a member" {
-    // Falsifiability: remove the !in_group guard → second case fails.
     try std.testing.expect(inputGroupHintNeeded(true, false));
     try std.testing.expect(!inputGroupHintNeeded(true, true));
 }
 
 test "install: hostHasInputGroup returns bool (smoke — value is host-dependent)" {
-    // Falsifiability: if hostHasInputGroup always panics, this fails.
-    // We cannot assert the value — it's host-dependent — but we confirm the
-    // function is callable and consistent with groupGid("input").
     const has = hostHasInputGroup();
     const gid = plan_mod.groupGid("input");
     try std.testing.expectEqual(gid != null, has);
@@ -3649,8 +3638,6 @@ test "tomlEscape: round-trip via real TOML parser" {
 // probeAndRebindDrivers is the inverse of probeAndUnbindDrivers.
 // It must rebind a matching device's unbound interface, leave an already-bound
 // interface alone, and ignore non-matching devices.
-// Falsifiability: deleting the `f.writeAll(child.name)` line in
-// rebindInterfaces (udev.zig) makes the "1-1.4:1.0" bind assertion fail.
 test "uninstall: probeAndRebindDrivers binds unbound matching interface only" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -3954,8 +3941,6 @@ test "uninstall: removes /etc udev rules in normal mode" {
 
 // Uninstall must remove 61-padctl-driver-block.rules symmetrically with
 // 60-padctl.rules (uninstall hygiene). Guards the `files[]` entry in uninstall().
-// Falsifiability: deleting "/lib/udev/rules.d/61-padctl-driver-block.rules"
-// from the `files[]` array in phase.zig makes the RuleFileNotRemoved error fire.
 test "uninstall: removes 61-padctl-driver-block.rules" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -4074,10 +4059,6 @@ test "plan: isStaging() returns true iff scope == .package" {
     }
 }
 
-// Falsifiability: temp-remove the `if (scope != .package)` gate around the
-// runtime-touch block in phase.zig — this test fires systemctl calls and
-// touches the runtime root in package mode, so it would observe the probe
-// stop call recorded into ProbeRig and fail with calls.items.len == 1.
 test "uninstall: package scope skips ALL runtime ops" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -4175,4 +4156,146 @@ test "uninstall: user scope routes to user systemctl only" {
     // path only fires when probeSocketAlive returns true, and there's no socket
     // here, so stopDaemonScope is never called — calls list stays empty.
     try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);
+}
+
+// --- post-install daemon verification gate ---
+
+// Gate decision per InstallPlan branch, mirroring the case A-E matrix above.
+test "install: verify gate case A — non-root default install verifies daemon" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local" };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case B — sudo_hop install verifies daemon" {
+    const testing = std.testing;
+    const opts = InstallOptions{};
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case C — staged build (destdir) skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .destdir = "/tmp/staging" };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case D — --no-user-service skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = false };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = "alice", .sudo_uid = "1000" };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case E — root --user-service without SUDO_USER skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .user_service = true };
+    const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    // systemctl_plan.mode == .skip: no start was attempted, nothing to verify.
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case F — --no-start skips verification" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local", .no_start = true };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(!plan.shouldVerifyDaemon());
+}
+
+test "install: verify gate case G — --no-enable still starts, still verifies" {
+    const testing = std.testing;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local", .no_enable = true };
+    const env = EnvSnapshot{ .uid = 1000, .home = "/home/alice", .sudo_user = null, .sudo_uid = null };
+    const plan = try InstallPlan.compute(testing.allocator, opts, env);
+    defer plan.deinit(testing.allocator);
+    try testing.expect(plan.shouldVerifyDaemon());
+}
+
+fn verifyServerThread(listen_fd: std.posix.fd_t, reply: []const u8) void {
+    const cfd = std.posix.accept(listen_fd, null, null, 0) catch return;
+    defer std.posix.close(cfd);
+    var buf: [256]u8 = undefined;
+    _ = std.posix.read(cfd, &buf) catch return;
+    _ = std.posix.write(cfd, reply) catch {};
+}
+
+fn bindTestSocket(path: []const u8) !std.posix.fd_t {
+    const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+    errdefer std.posix.close(fd);
+    var addr: std.os.linux.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    if (path.len >= addr.path.len) return error.PathTooLong;
+    @memcpy(addr.path[0..path.len], path);
+    try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+    try std.posix.listen(fd, 1);
+    return fd;
+}
+
+test "install: waitDaemonResponding true when daemon answers STATUS" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/v.sock", .{root});
+    defer allocator.free(sock_path);
+
+    const listen_fd = bindTestSocket(sock_path) catch |err| {
+        if (err == error.AccessDenied) return error.SkipZigTest;
+        return err;
+    };
+    defer std.posix.close(listen_fd);
+    const t = try std.Thread.spawn(.{}, verifyServerThread, .{ listen_fd, "STATUS\n" });
+    defer t.join();
+
+    try testing.expect(phase_mod.waitDaemonResponding(sock_path, 3000, 50));
+}
+
+test "install: waitDaemonResponding false on unreachable socket" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/missing.sock", .{root});
+    defer allocator.free(sock_path);
+
+    try testing.expect(!phase_mod.waitDaemonResponding(sock_path, 300, 50));
+}
+
+test "install: waitDaemonResponding false when daemon answers garbage" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const sock_path = try std.fmt.allocPrint(allocator, "{s}/g.sock", .{root});
+    defer allocator.free(sock_path);
+
+    const listen_fd = bindTestSocket(sock_path) catch |err| {
+        if (err == error.AccessDenied) return error.SkipZigTest;
+        return err;
+    };
+    defer std.posix.close(listen_fd);
+    const t = try std.Thread.spawn(.{}, verifyServerThread, .{ listen_fd, "ERR not-padctl\n" });
+    defer t.join();
+
+    try testing.expect(!phase_mod.waitDaemonResponding(sock_path, 300, 50));
 }

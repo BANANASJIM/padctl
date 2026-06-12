@@ -342,6 +342,14 @@ pub const InstallPlan = struct {
         return self.scope == .package;
     }
 
+    /// True when this install actually starts the user service, so a
+    /// post-install daemon liveness check is meaningful. Mirrors
+    /// runSystemctlUnits: start only runs on live installs without
+    /// --no-start when a user bus is reachable.
+    pub fn shouldVerifyDaemon(self: *const InstallPlan) bool {
+        return self.do_enable_systemctl and !self.opts.no_start and self.systemctl_plan.mode != .skip;
+    }
+
     pub fn compute(allocator: std.mem.Allocator, opts: InstallOptions, env: EnvSnapshot) !InstallPlan {
         const is_root = env.uid == 0;
         const destdir = opts.destdir;
