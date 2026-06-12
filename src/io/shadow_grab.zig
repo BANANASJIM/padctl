@@ -45,6 +45,18 @@ pub const GrabList = struct {
         return false;
     }
 
+    /// Append this list's STATUS wire fields: ` shadow_grabs=<n>` plus a
+    /// comma-joined ` shadow_nodes=` list when any grab is held.
+    pub fn appendStatusFields(self: *const GrabList, w: anytype) !void {
+        try w.print(" shadow_grabs={d}", .{self.len});
+        if (self.len == 0) return;
+        try w.writeAll(" shadow_nodes=");
+        for (self.grabs[0..self.len], 0..) |*g, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.writeAll(g.name());
+        }
+    }
+
     /// Closing a grabbed fd implicitly releases its EVIOCGRAB.
     pub fn releaseAll(self: *GrabList) void {
         for (self.grabs[0..self.len]) |*g| posix.close(g.fd);

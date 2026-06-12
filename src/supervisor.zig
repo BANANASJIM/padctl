@@ -2101,6 +2101,8 @@ pub const Supervisor = struct {
             w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
                 inb_ago_ms, outb_ago_ms, inflight_ms,
             }) catch {};
+
+            m.shadow_grabs.appendStatusFields(w) catch {};
         }
         w.writeByte('\n') catch return;
         cs.sendResponse(fd, stream.getWritten());

@@ -144,12 +144,15 @@ pub const StatusDevice = struct {
     pid: u16,
     output_kind: []const u8,
     output_fd_alive: bool,
+    shadow_grabs: usize = 0,
+    shadow_nodes: []const u8 = "",
 
     pub fn deinit(self: StatusDevice, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.state);
         allocator.free(self.mapping);
         allocator.free(self.output_kind);
+        allocator.free(self.shadow_nodes);
     }
 };
 
@@ -186,9 +189,12 @@ pub fn parseStatusLine(line: []const u8, allocator: std.mem.Allocator) ![]Status
         errdefer allocator.free(mapping);
         const output_kind = try extractField(allocator, chunk, "output_kind=", null);
         errdefer allocator.free(output_kind);
+        const shadow_nodes = try extractField(allocator, chunk, "shadow_nodes=", null);
+        errdefer allocator.free(shadow_nodes);
         const vid = parseHexField(chunk, "vid=0x") orelse 0;
         const pid = parseHexField(chunk, "pid=0x") orelse 0;
         const output_fd_alive = std.mem.indexOf(u8, chunk, "output_fd_alive=true") != null;
+        const shadow_grabs = parseDecField(chunk, "shadow_grabs=") orelse 0;
 
         try devices.append(allocator, .{
             .name = name,
@@ -198,6 +204,8 @@ pub fn parseStatusLine(line: []const u8, allocator: std.mem.Allocator) ![]Status
             .pid = pid,
             .output_kind = output_kind,
             .output_fd_alive = output_fd_alive,
+            .shadow_grabs = shadow_grabs,
+            .shadow_nodes = shadow_nodes,
         });
     }
 
@@ -215,6 +223,15 @@ fn extractField(allocator: std.mem.Allocator, chunk: []const u8, key: []const u8
     var i = val_start;
     while (i < chunk.len and chunk[i] != ' ' and chunk[i] != '\n' and chunk[i] != '\r') i += 1;
     return allocator.dupe(u8, chunk[val_start..i]);
+}
+
+fn parseDecField(chunk: []const u8, key: []const u8) ?usize {
+    const pos = std.mem.indexOf(u8, chunk, key) orelse return null;
+    const val_start = pos + key.len;
+    var end = val_start;
+    while (end < chunk.len and std.ascii.isDigit(chunk[end])) end += 1;
+    if (end == val_start) return null;
+    return std.fmt.parseInt(usize, chunk[val_start..end], 10) catch null;
 }
 
 fn parseHexField(chunk: []const u8, key: []const u8) ?u16 {
