@@ -1751,8 +1751,6 @@ test "uinput: pollFf returns identical FfEvent regardless of dump_enabled" {
 // (always SUCCESS for a raw syscall that never literally returns -1), so a
 // failing ioctl was silently swallowed and the function returned void.
 // Driving the ioctl over fd=-1 yields EBADF, which must now surface as error.
-// Falsifiability: restoring `std.posix.errno(rc)` makes both tests fail —
-// the ioctl returns void instead of the expected error.
 test "uinput: ioctlInt surfaces ioctl errno as error (EBADF on bad fd)" {
     try std.testing.expectError(error.Unexpected, ioctlInt(-1, UI_SET_EVBIT, c.EV_KEY));
 }

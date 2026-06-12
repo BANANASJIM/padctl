@@ -25,8 +25,8 @@ const KEY_LEFTSHIFT: u16 = 42;
 const KEY_A: u16 = 30;
 
 // The test encodes v1ld's exact scenario (issue #330), adapted to use keyboard
-// keys for observability. Gamepad buttons (like the reporter's RB and X) do not
-// produce aux events, so order-based falsifiability requires key targets.
+// keys for observability (gamepad buttons produce no aux events, preventing
+// order-based assertions).
 //
 // Macro structure mirrors the reporter's:
 //   { down = "KEY_LEFTSHIFT" }   analogous to "down RB"
@@ -34,11 +34,6 @@ const KEY_A: u16 = 30;
 //   "pause_for_release"
 //   { up = "KEY_A" }             analogous to "up X"
 //   { up = "KEY_LEFTSHIFT" }     analogous to "up RB"
-//
-// Falsifiability: emitPendingReleases (no-drain path) walks steps in press
-// order and emits KEY_LEFTSHIFT up before KEY_A up. The drain path runs the
-// actual up= steps (step 3 = up KEY_A, step 4 = up KEY_LEFTSHIFT), so KEY_A up
-// comes first. The test asserts KEY_A up precedes KEY_LEFTSHIFT up.
 test "macro #330: drain pause_for_release on layer deactivation — up= steps run in unwind order" {
     const allocator = testing.allocator;
 

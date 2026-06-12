@@ -2816,9 +2816,8 @@ test "mapper: layer dpad override: active layer dpad config used" {
 }
 
 test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
-    // Regression: when a hold-layer activates via timer (PENDING→ACTIVE), self.prev.dpad_x/y
-    // retains the pressed value. Without the prev reset, processDpad sees curr==prev and
-    // emits no edge. Fix: reset prev.dpad_x/y on active_changed.
+    // When a hold-layer activates via timer (PENDING→ACTIVE), prev.dpad_x/y must be reset
+    // so processDpad sees a new edge.
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[[layer]]
@@ -3000,7 +2999,6 @@ test "mapper: checkGyroActivate: bare LT gates correctly" {
 }
 
 test "mapper: checkGyroActivate: bogus bare name returns false (not true)" {
-    // Regression: before fix this returned true, making gyro always-on.
     try testing.expect(!checkGyroActivate("BOGUS_NOT_A_BUTTON", 0xFFFFFFFF));
 }
 
@@ -3941,18 +3939,8 @@ test "mapper: dual-ready ppoll — apply uses caller now_ns, tap fires at press+
 
 test "mapper: timing boundary sweep — tap fires via .pending branch iff release_ns < hold_timeout_ns" {
     // 7 release_delta × 3 press bases = 21 cases.
-    //
-    // Falsifiability: the tap-fires cases (delta < 200) release the trigger
-    // while the hold timer is STILL PENDING — the timer is never manually
-    // expired, so onTriggerRelease takes the `.pending` branch.
-    // A `macro:hold_x` runs in parallel: a spurious active_changed reset on
-    // the PENDING-press frame calls emitPendingReleases +
-    // active_macros.clearRetainingCapacity, dropping the held X gamepad bit
-    // and the active macro. We assert both on the PENDING-press frame, so
-    // re-adding the mutation is visible.
-    //
-    // The held-past-hold_timeout cases (delta >= 200) DO expire the timer
-    // first → onTriggerRelease takes the legitimate `.active` branch → no tap.
+    // Tap-fires cases (delta < 200): release while hold timer is PENDING, takes `.pending` branch.
+    // Held-past-hold_timeout cases (delta >= 200): timer expires first → `.active` branch → no tap.
     const allocator = testing.allocator;
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));

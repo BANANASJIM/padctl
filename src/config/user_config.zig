@@ -682,10 +682,6 @@ test "writeAtomic leaves no .tmp sidecar after success" {
 // a fresh tmp file onto config.toml, because that rename fires inotify MOVED_TO
 // and drives a destructive daemon reload loop. We prove the no-op via the file's
 // inode: rename(2) replaces the inode, an in-place skip preserves it.
-//
-// Falsifiability: removing the skip-on-identical guard in writeAtomic makes the
-// second (identical-content) write perform the rename, changing the inode, so
-// the `inode_after_same == inode_before` assertion fails.
 test "writeAtomic skips rewrite when content is unchanged (#355)" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -812,14 +808,6 @@ test "user_config: missing [chord_switch] leaves field null" {
 
 // `padctl switch <name>` does a full-file rewrite via emitToml/writeAtomic.
 // This asserts the round-trip preserves [chord_switch].
-//
-// Falsifiability: this test FAILS if either production mutation is reverted:
-//   (1) remove the [chord_switch] emission block in emitToml() — re-parse
-//       finds chord_switch == null and the modifier/selectors/hold_ms
-//       assertions error out; or
-//   (2) drop `.chord_switch = ...` from the writeConfigToml/dump/install
-//       UserConfig literals (the `rewritten` struct below mirrors that
-//       call-site) — chord_switch becomes null and the test fails identically.
 test "user_config: switch-style full rewrite preserves [chord_switch]" {
     const allocator = std.testing.allocator;
     const original =

@@ -9,8 +9,6 @@ const FfbForwarder = @import("../io/ffb_forwarder.zig").FfbForwarder;
 const OutputReport = @import("../io/uhid.zig").OutputReport;
 
 // Test A: write enter sets write_in_flight_since_ns, exit clears it (success path).
-// Falsifiability: removing the `defer w.endWrite()` in hidraw.write makes the
-// post-call expectEqual fail with the begin timestamp instead of 0.
 test "wedge: hidraw write clears write_in_flight_since_ns on success" {
     const fds = try posix.pipe2(.{});
     defer posix.close(fds[0]);
@@ -38,8 +36,6 @@ test "wedge: hidraw write clears write_in_flight_since_ns on success" {
 }
 
 // Test B: error path still clears write_in_flight_since_ns.
-// Falsifiability: same as Test A — defer guarantees the clear runs regardless
-// of the write outcome. Without the defer, the error path leaves the field set.
 test "wedge: hidraw write clears write_in_flight_since_ns on error" {
     // Closed write-end → BrokenPipe → DeviceIO.WriteError.Disconnected.
     const fds = try posix.pipe2(.{});
@@ -107,10 +103,6 @@ test "wedge: hidraw read bumps last_inbound_ns" {
 
 // Test C + D: STATUS output contains the 3 new fields, and write_in_flight_ms
 // reports a sensible non-zero when the atomic is pre-armed.
-// Falsifiability for C: removing any of the three writes in handleStatus
-// causes the corresponding indexOf assertion to fail.
-// Falsifiability for D: dropping the `(now_ns - ifs) / ns_per_ms` formula
-// in favour of a constant breaks the ±tolerance assertion.
 test "wedge: STATUS surfaces last_inbound_ms_ago, last_outbound_ms_ago, write_in_flight_ms" {
     const Supervisor = @import("../supervisor.zig").Supervisor;
     const device_mod = @import("../config/device.zig");
@@ -227,16 +219,10 @@ test "wedge: default values are all zero" {
     try testing.expectEqual(@as(u64, 0), w.loadInFlight());
 }
 
-// Test E (BLOCKING fix follow-up): spawnInstance is the single wedge-wiring
-// chokepoint. Every production attach path (run() bootstrap, doReload, hotplug
-// retry, attachWithInstance) routes through spawnInstance, so wiring there
-// must wire the wedge pointer on a hidraw-backed DeviceIO without any
-// per-call-site attachWedges() invocation.
-//
-// Falsifiability: deleting `instance.attachWedges()` from spawnInstance makes
-// this test fail with `hidraw.wedge == null`. The reviewer's BLOCKING
-// observation (run() and doReload bypasses) is structurally prevented as long
-// as this test guards the chokepoint.
+// Test E: spawnInstance is the single wedge-wiring chokepoint. Every production
+// attach path (run() bootstrap, doReload, hotplug retry, attachWithInstance)
+// routes through spawnInstance, so wiring there covers all call sites without
+// per-call-site attachWedges() invocations.
 test "wedge: spawnInstance wires hidraw wedge pointer via single chokepoint" {
     const Supervisor = @import("../supervisor.zig").Supervisor;
     const device_mod = @import("../config/device.zig");

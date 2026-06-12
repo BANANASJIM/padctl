@@ -1,7 +1,5 @@
-// Regression: DeviceInstance.deinit must destroy(imu_dev) BEFORE free(imu_name_owned).
-// imu_dev.close() runs inside destroy and writes UHID_DESTROY to the fd while
-// UhidDevice.name still points at the imu_name backing buffer. If the free order
-// is reversed the name pointer dangled during the UHID_DESTROY write.
+// DeviceInstance.deinit must destroy(imu_dev) BEFORE free(imu_name_owned): the close
+// writes UHID_DESTROY while UhidDevice.name still points at imu_name_owned.
 
 const std = @import("std");
 const posix = std.posix;

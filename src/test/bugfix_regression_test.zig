@@ -40,9 +40,6 @@ test "stripInputSuffix: same base path deduplicates" {
     try testing.expectEqualStrings(a, b);
 }
 
-// Regression: previously only error.AccessDenied was retried; EPERM/ENODEV/ENOENT
-// caused a silent drop (bare `return`), losing the hotplug attach forever.
-
 test "isTransientOpenError: transient errors are retried" {
     try testing.expect(Supervisor.isTransientOpenError(error.AccessDenied));
     try testing.expect(Supervisor.isTransientOpenError(error.PermissionDenied));
@@ -60,9 +57,6 @@ test "isTransientOpenError: fatal errors are not retried" {
     try testing.expect(!Supervisor.isTransientOpenError(error.SystemResources));
     try testing.expect(!Supervisor.isTransientOpenError(error.Unexpected));
 }
-
-// Regression: previously EPERM/ENODEV/ENOENT were normalized to error.AccessDenied,
-// making it impossible for callers to distinguish the retry sentinel from a real EACCES.
 
 test "attachWithRoot: missing device returns HotplugTransient, not AccessDenied" {
     var sup = try Supervisor.initForTest(testing.allocator);
@@ -103,12 +97,6 @@ test "walker: finds toml files in subdirectories" {
     try testing.expectEqual(@as(usize, 3), toml_count);
 }
 
-// Regression: both MacroPlayer delay and layer hold-trigger used the same timerfd.
-// A layer-hold arm/disarm after apply() would silently overwrite the macro delay,
-// causing { delay = N } steps to never fire and subsequent macro steps to be skipped.
-// EventLoop.macro_timer_fd is a dedicated timerfd for TimerQueue; timer_fd is
-// layer-hold only. The two fds must never share a timerfd_settime call path.
-
 test "macro_timer_fd and timer_fd are independent — layer arm does not clobber macro delay" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
@@ -125,12 +113,6 @@ test "macro_timer_fd and timer_fd are independent — layer arm does not clobber
     const ready = try posix.poll(&pfd, 200);
     try testing.expectEqual(@as(usize, 1), ready);
 }
-
-// Regression: Mapper.onTimerExpired ran self.layer.onTimerExpired() unconditionally,
-// promoting any PENDING layer to ACTIVE regardless of which timerfd fired.
-// Separating the arm path alone is insufficient — expiry handlers must also be
-// split per slot, otherwise a macro `delay` shorter than hold_timeout collapses
-// the layer hold timing to the macro deadline.
 
 test "macro timer expiry must NOT promote PENDING layer" {
     const allocator = testing.allocator;

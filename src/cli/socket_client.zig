@@ -281,11 +281,6 @@ test "resolveSocketPathFor: PADCTL_SOCKET env override wins" {
     try testing.expectEqualStrings("/custom/path.sock", got);
 }
 
-// Falsifiability: drop the XDG advertised-read branch in resolveSocketPathFor
-// and this test must FAIL — the resolver will hit the backward-compat
-// fallback and return the XDG socket path instead of the advertised value.
-// Fixture writes at `$XDG_RUNTIME_DIR/socket.advertised` (no `padctl/`
-// segment) to match the daemon writer: dirname($XDG/padctl.sock) is $XDG.
 test "resolveSocketPathFor: XDG advertised file is honored" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
@@ -391,13 +386,6 @@ test "sendCommand: empty response returns EndOfStream" {
 // than a catch-all, so callers can distinguish a malformed socket path from a
 // genuinely-unreachable daemon. `connectToSocket` is called by every CLI client
 // (status/devices/switch/dump) before printing "cannot connect to padctl daemon".
-//
-// Falsifiability: the explicit validation branch
-//   `if (path.len == 0 or path[0] != '/' or indexOf(path, "..") != null)
-//        return error.InvalidPath;`
-// makes the error specific. Removing that guard lets invalid paths fall through
-// to posix.socket/posix.connect and fail with a generic errno — NOT
-// error.InvalidPath — so every `expectError(error.InvalidPath, ...)` below fails.
 test "socket_client: connectToSocket: malformed paths return specific InvalidPath" {
     // Empty path — must not be a generic socket/connect failure.
     try testing.expectError(error.InvalidPath, connectToSocket(""));
