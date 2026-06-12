@@ -4177,11 +4177,11 @@ test "uninstall: user scope routes to user systemctl only" {
     try testing.expectEqual(@as(usize, 0), ProbeRig.calls.items.len);
 }
 
-// --- finding C25: post-install daemon verification gate ---
+// --- post-install daemon verification gate ---
 
 // Gate decision per InstallPlan branch, mirroring the case A-E matrix above.
 // Falsifiability: replace shouldVerifyDaemon's body with `return false` (the
-// pre-C25 blind-success behavior) and cases A/B/G fail; `return true` and
+// blind-success behavior) and cases A/B/G fail; `return true` and
 // cases C/D/E/F fail.
 test "install: verify gate case A — non-root default install verifies daemon" {
     const testing = std.testing;
