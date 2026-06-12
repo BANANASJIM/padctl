@@ -71,11 +71,15 @@ pub fn parseHidrawUevent(content: []const u8) ?UeventInfo {
 fn accessDeniedEntry(allocator: std.mem.Allocator, config_dir: []const u8, path: []const u8) !?ScanEntry {
     var uevent_path_buf: [256]u8 = undefined;
     const uevent_path = std.fmt.bufPrint(&uevent_path_buf, "/sys/class/hidraw/{s}/device/uevent", .{std.fs.path.basename(path)}) catch return null;
-    var f = std.fs.openFileAbsolute(uevent_path, .{}) catch return null;
-    defer f.close();
-    var content: [1024]u8 = undefined;
-    const n = f.read(&content) catch return null;
-    const info = parseHidrawUevent(content[0..n]) orelse return null;
+    const content = std.fs.cwd().readFileAlloc(allocator, uevent_path, 8192) catch |err| {
+        std.log.warn("scan: cannot identify denied node {s}: {}", .{ path, err });
+        return null;
+    };
+    defer allocator.free(content);
+    const info = parseHidrawUevent(content) orelse {
+        std.log.warn("scan: cannot identify denied node {s}: no HID_ID in uevent", .{path});
+        return null;
+    };
 
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
@@ -166,20 +170,26 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         });
     }
 
-    // Suppress unmatched sibling interfaces of matched physical devices.
-    // If any hidraw node for a physical device matched a config, hide the
-    // unmatched siblings sharing the same physical path.
+    suppressUnmatchedSiblings(allocator, &entries);
+
+    return entries.toOwnedSlice(allocator);
+}
+
+/// Suppress unmatched sibling interfaces of matched physical devices: if any
+/// hidraw node for a physical device matched a config, hide the unmatched
+/// siblings sharing the same physical path. Access-denied siblings stay
+/// visible so denied-node counts remain accurate.
+fn suppressUnmatchedSiblings(allocator: std.mem.Allocator, entries: *std.ArrayList(ScanEntry)) void {
     for (entries.items) |e| {
         if (e.config_path != null and e.phys.len > 0) {
             for (entries.items) |*other| {
-                if (other.config_path == null and std.mem.eql(u8, other.phys, e.phys)) {
+                if (other.config_path == null and !other.access_denied and std.mem.eql(u8, other.phys, e.phys)) {
                     other.config_path = ""; // sentinel: suppress but don't show
                 }
             }
         }
     }
 
-    // Remove suppressed entries (sentinel config_path == "")
     var keep: usize = 0;
     for (entries.items) |e| {
         if (e.config_path) |cp| {
@@ -195,8 +205,6 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         keep += 1;
     }
     entries.shrinkRetainingCapacity(keep);
-
-    return entries.toOwnedSlice(allocator);
 }
 
 pub fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8) ![]const u8 {
@@ -265,6 +273,26 @@ fn tomlMatchesVidPid(allocator: std.mem.Allocator, path: []const u8, vid: u16, p
     return matchInterfaceId(content, iface_id);
 }
 
+/// First `id = <n>` value in one [[device.interface]] section body.
+fn sectionInterfaceId(after: []const u8) ?u8 {
+    var lines = std.mem.splitScalar(u8, after, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (trimmed.len == 0) continue;
+        if (trimmed[0] == '[') break; // next section
+        if (trimmed[0] == '#') continue;
+        if (!std.mem.startsWith(u8, trimmed, "id")) continue;
+        const rest = std.mem.trimLeft(u8, trimmed["id".len..], " \t");
+        if (rest.len == 0 or rest[0] != '=') continue;
+        const val_str = std.mem.trimLeft(u8, rest[1..], " \t");
+        var end: usize = 0;
+        while (end < val_str.len and std.ascii.isDigit(val_str[end])) end += 1;
+        if (end == 0) continue;
+        return std.fmt.parseInt(u8, val_str[0..end], 10) catch continue;
+    }
+    return null;
+}
+
 /// Check whether TOML content has a [[device.interface]] section whose id matches target.
 /// Returns null if no [[device.interface]] sections exist (no constraint),
 /// true if any section's id matches target, false otherwise.
@@ -274,28 +302,30 @@ fn configHasInterfaceId(content: []const u8, target: u8) ?bool {
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, content, pos, marker)) |idx| {
         found_any = true;
-        const after = content[idx + marker.len ..];
-        var lines = std.mem.splitScalar(u8, after, '\n');
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trimLeft(u8, line, " \t");
-            if (trimmed.len == 0) continue;
-            if (trimmed[0] == '[') break; // next section
-            if (trimmed[0] == '#') continue;
-            if (!std.mem.startsWith(u8, trimmed, "id")) continue;
-            const rest = std.mem.trimLeft(u8, trimmed["id".len..], " \t");
-            if (rest.len == 0 or rest[0] != '=') continue;
-            const val_str = std.mem.trimLeft(u8, rest[1..], " \t");
-            var end: usize = 0;
-            while (end < val_str.len and std.ascii.isDigit(val_str[end])) end += 1;
-            if (end == 0) continue;
-            const parsed = std.fmt.parseInt(u8, val_str[0..end], 10) catch continue;
-            if (parsed == target) return true;
-            break; // found id for this section, move to next
+        if (sectionInterfaceId(content[idx + marker.len ..])) |id| {
+            if (id == target) return true;
         }
         pos = idx + marker.len;
     }
     if (!found_any) return null;
     return false;
+}
+
+/// Bitmask of [[device.interface]] ids declared in TOML content (ids above 63
+/// share the top bit). Null when no interface sections exist (matches any).
+pub fn interfaceIdMask(content: []const u8) ?u64 {
+    const marker = "[[device.interface]]";
+    var mask: u64 = 0;
+    var found_any = false;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, content, pos, marker)) |idx| {
+        found_any = true;
+        if (sectionInterfaceId(content[idx + marker.len ..])) |id| {
+            mask |= @as(u64, 1) << @intCast(@min(id, 63));
+        }
+        pos = idx + marker.len;
+    }
+    return if (found_any) mask else null;
 }
 
 /// Match device interface id against config's [[device.interface]] sections.
@@ -614,6 +644,57 @@ test "scan: matchInterfaceId: with constraint and known iface" {
 test "scan: matchInterfaceId: with constraint and null iface returns false" {
     const toml = "[[device.interface]]\nid = 2\n";
     try std.testing.expectEqual(@as(?bool, false), matchInterfaceId(toml, null));
+}
+
+test "scan: interfaceIdMask: no sections is null, ids become bits" {
+    try std.testing.expectEqual(@as(?u64, null), interfaceIdMask("[device]\nvid = 0x1234\n"));
+    try std.testing.expectEqual(@as(?u64, 1 << 2), interfaceIdMask("[[device.interface]]\nid = 2\n"));
+    try std.testing.expectEqual(
+        @as(?u64, (1 << 0) | (1 << 2)),
+        interfaceIdMask("[[device.interface]]\nid = 0\n\n[[device.interface]]\nid = 2\n"),
+    );
+}
+
+test "scan: suppressUnmatchedSiblings keeps access-denied siblings visible" {
+    const allocator = std.testing.allocator;
+    var entries: std.ArrayList(ScanEntry) = .{};
+    defer {
+        for (entries.items) |e| freeEntry(allocator, e);
+        entries.deinit(allocator);
+    }
+    const phys = "usb-0000:10:00.0-3";
+    try entries.append(allocator, .{
+        .path = try allocator.dupe(u8, "/dev/hidraw0"),
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .name = try allocator.dupe(u8, "pad"),
+        .phys = try allocator.dupe(u8, phys),
+        .config_path = try allocator.dupe(u8, "devices/pad.toml"),
+    });
+    try entries.append(allocator, .{
+        .path = try allocator.dupe(u8, "/dev/hidraw1"),
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .name = try allocator.dupe(u8, "pad"),
+        .phys = try allocator.dupe(u8, phys),
+        .config_path = null,
+    });
+    try entries.append(allocator, .{
+        .path = try allocator.dupe(u8, "/dev/hidraw2"),
+        .vid = 0x37d7,
+        .pid = 0x2401,
+        .name = try allocator.dupe(u8, "pad"),
+        .phys = try allocator.dupe(u8, phys),
+        .config_path = null,
+        .access_denied = true,
+    });
+
+    suppressUnmatchedSiblings(allocator, &entries);
+
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqualStrings("/dev/hidraw0", entries.items[0].path);
+    try std.testing.expectEqualStrings("/dev/hidraw2", entries.items[1].path);
+    try std.testing.expect(entries.items[1].access_denied);
 }
 
 test "scan: freeEntries: empty slice is a no-op" {

@@ -353,6 +353,22 @@ pub fn resolveDoctorDeviceDirs(allocator: std.mem.Allocator, exec_start: ?[]cons
     return dirs.toOwnedSlice(allocator);
 }
 
+/// Directories in the order the daemon actually resolves device configs: the
+/// unit's --config-dir alone when set (the daemon ignores all other dirs),
+/// otherwise the default user-first search path the bare daemon walks.
+/// Caller owns the returned slice and each element.
+pub fn resolveDaemonConfigDirs(allocator: std.mem.Allocator, exec_start: ?[]const u8) ![][]const u8 {
+    if (exec_start) |es| {
+        if (configDirFromExecStart(es)) |cfg| {
+            const dirs = try allocator.alloc([]const u8, 1);
+            errdefer allocator.free(dirs);
+            dirs[0] = try allocator.dupe(u8, cfg);
+            return dirs;
+        }
+    }
+    return paths.resolveDeviceConfigDirs(allocator);
+}
+
 /// Query the live padctl.service ExecStart so doctor scans the same device dir
 /// the daemon was launched with. Best-effort: returns null on any failure.
 fn queryServiceExecStart(allocator: std.mem.Allocator) ?[]u8 {
@@ -376,12 +392,17 @@ fn firstExistingDir(dirs: []const []const u8) []const u8 {
     return dirs[0];
 }
 
+pub const ConfigMatch = struct {
+    path: []const u8,
+    iface_mask: ?u64,
+};
+
 /// Every device TOML matching vid:pid across `dirs`, in resolution order; the
-/// first element is the file that wins. Caller owns the slice and elements.
-pub fn collectConfigMatches(allocator: std.mem.Allocator, dirs: []const []const u8, vid: u16, pid: u16) ![][]u8 {
-    var matches: std.ArrayList([]u8) = .{};
+/// first element is the file that wins. Caller owns the slice and the paths.
+pub fn collectConfigMatches(allocator: std.mem.Allocator, dirs: []const []const u8, vid: u16, pid: u16) ![]ConfigMatch {
+    var matches: std.ArrayList(ConfigMatch) = .{};
     errdefer {
-        for (matches.items) |m| allocator.free(m);
+        for (matches.items) |m| allocator.free(m.path);
         matches.deinit(allocator);
     }
     for (dirs) |devices_dir| {
@@ -405,7 +426,7 @@ pub fn collectConfigMatches(allocator: std.mem.Allocator, dirs: []const []const 
             };
             toml_extract.freeDeviceInfo(allocator, dev);
             if (dev.vid == vid and dev.pid == pid) {
-                try matches.append(allocator, full);
+                try matches.append(allocator, .{ .path = full, .iface_mask = scan.interfaceIdMask(content) });
             } else {
                 allocator.free(full);
             }
@@ -414,21 +435,41 @@ pub fn collectConfigMatches(allocator: std.mem.Allocator, dirs: []const []const 
     return matches.toOwnedSlice(allocator);
 }
 
-pub fn freeConfigMatches(allocator: std.mem.Allocator, matches: [][]u8) void {
-    for (matches) |m| allocator.free(m);
+pub fn freeConfigMatches(allocator: std.mem.Allocator, matches: []ConfigMatch) void {
+    for (matches) |m| allocator.free(m.path);
     allocator.free(matches);
 }
 
-/// Print which device TOML wins, flagging files it shadows.
-pub fn printProvenance(writer: anytype, matches: []const []const u8) !void {
-    if (matches.len == 0) return;
-    try writer.print("  config: {s}", .{matches[0]});
-    if (matches.len > 1) {
-        try writer.writeAll(" (OVERRIDES");
-        for (matches[1..]) |m| try writer.print(" {s}", .{m});
-        try writer.writeByte(')');
+fn ifaceOverlap(a: ?u64, b: ?u64) bool {
+    const am = a orelse return true;
+    const bm = b orelse return true;
+    return (am & bm) != 0;
+}
+
+fn firstOverlapping(matches: []const ConfigMatch, idx: usize) ?usize {
+    for (matches[0..idx], 0..) |prev, k| {
+        if (ifaceOverlap(prev.iface_mask, matches[idx].iface_mask)) return k;
     }
-    try writer.writeByte('\n');
+    return null;
+}
+
+/// Print which device TOML wins, flagging files it shadows. Files constrained
+/// to disjoint interfaces are co-active and each get their own line.
+pub fn printProvenance(writer: anytype, matches: []const ConfigMatch) !void {
+    for (matches, 0..) |m, i| {
+        if (firstOverlapping(matches, i) != null) continue;
+        try writer.print("  config: {s}", .{m.path});
+        var open = false;
+        for (matches[i + 1 ..], i + 1..) |later, j| {
+            const winner = firstOverlapping(matches, j) orelse continue;
+            if (winner != i) continue;
+            try writer.writeAll(if (open) " " else " (OVERRIDES ");
+            try writer.print("{s}", .{later.path});
+            open = true;
+        }
+        if (open) try writer.writeByte(')');
+        try writer.writeByte('\n');
+    }
 }
 
 pub fn printHidrawDiagnosis(writer: anytype, path: ?[]const u8, access_denied: bool) !void {
@@ -493,6 +534,18 @@ pub fn decideVerdict(in: VerdictInput) Verdict {
     return .present_not_claimed;
 }
 
+/// Entry for vid:pid, preferring a readable node over an access-denied one
+/// when the device exposes several hidraw nodes with mixed permissions.
+pub fn pickScanEntry(entries: []const scan.ScanEntry, vid: u16, pid: u16) ?scan.ScanEntry {
+    var denied: ?scan.ScanEntry = null;
+    for (entries) |e| {
+        if (e.vid != vid or e.pid != pid) continue;
+        if (!e.access_denied) return e;
+        if (denied == null) denied = e;
+    }
+    return denied;
+}
+
 fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const StatusDevice, exec_start: ?[]const u8, writer: anytype) !void {
     try writer.writeAll("[supported devices]\n");
 
@@ -520,10 +573,16 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
     const scan_entries = scan.scan(allocator, scan_dir) catch null;
     defer if (scan_entries) |se| scan.freeEntries(allocator, se);
 
+    const daemon_dirs = resolveDaemonConfigDirs(allocator, exec_start) catch null;
+    defer if (daemon_dirs) |dd| paths.freeConfigDirs(allocator, dd);
+
     for (entries.items) |entry| {
         try writer.print("{s} (0x{x:0>4}:0x{x:0>4})\n", .{ entry.name, entry.vid, entry.pid });
 
-        const matches = collectConfigMatches(allocator, dirs, entry.vid, entry.pid) catch null;
+        const matches = if (daemon_dirs) |dd|
+            collectConfigMatches(allocator, dd, entry.vid, entry.pid) catch null
+        else
+            null;
         defer if (matches) |ms| freeConfigMatches(allocator, ms);
         if (matches) |ms| try printProvenance(writer, ms);
 
@@ -547,16 +606,10 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
             try writer.writeAll("  usb: (sysfs unavailable)\n");
         }
 
-        const hid_entry: ?scan.ScanEntry = blk: {
-            if (scan_entries) |se| {
-                for (se) |se_entry| {
-                    if (se_entry.vid == entry.vid and se_entry.pid == entry.pid) {
-                        break :blk se_entry;
-                    }
-                }
-            }
-            break :blk null;
-        };
+        const hid_entry: ?scan.ScanEntry = if (scan_entries) |se|
+            pickScanEntry(se, entry.vid, entry.pid)
+        else
+            null;
         const hidraw_state: HidrawState = if (hid_entry) |he|
             (if (he.access_denied) .denied else .ok)
         else

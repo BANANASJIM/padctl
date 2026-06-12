@@ -4,6 +4,7 @@ const scan = @import("../cli/scan.zig");
 const doctor = @import("../cli/doctor.zig");
 const socket_client = @import("../cli/socket_client.zig");
 const shadow_grab = @import("../io/shadow_grab.zig");
+const paths = @import("../config/paths.zig");
 
 // --- hidraw uevent parsing (permission-denied identity without open()) ---
 
@@ -166,7 +167,9 @@ test "doctor_accuracy: findFlaggedShadow flags xpad and block-listed drivers, ne
 test "doctor_accuracy: printProvenance single match has no OVERRIDES" {
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(testing.allocator);
-    try doctor.printProvenance(buf.writer(testing.allocator), &.{"/usr/share/padctl/devices/flydigi/vader5.toml"});
+    try doctor.printProvenance(buf.writer(testing.allocator), &.{
+        .{ .path = "/usr/share/padctl/devices/flydigi/vader5.toml", .iface_mask = null },
+    });
     try testing.expectEqualStrings("  config: /usr/share/padctl/devices/flydigi/vader5.toml\n", buf.items);
 }
 
@@ -174,11 +177,38 @@ test "doctor_accuracy: printProvenance shadowed files listed after OVERRIDES" {
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(testing.allocator);
     try doctor.printProvenance(buf.writer(testing.allocator), &.{
-        "/home/u/.config/padctl/devices/vader5.toml",
-        "/usr/share/padctl/devices/flydigi/vader5.toml",
+        .{ .path = "/home/u/.config/padctl/devices/vader5.toml", .iface_mask = null },
+        .{ .path = "/usr/share/padctl/devices/flydigi/vader5.toml", .iface_mask = null },
     });
     try testing.expectEqualStrings(
         "  config: /home/u/.config/padctl/devices/vader5.toml (OVERRIDES /usr/share/padctl/devices/flydigi/vader5.toml)\n",
+        buf.items,
+    );
+}
+
+test "doctor_accuracy: printProvenance disjoint interface constraints are co-active" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    try doctor.printProvenance(buf.writer(testing.allocator), &.{
+        .{ .path = "/etc/padctl/devices/pad-iface1.toml", .iface_mask = 1 << 1 },
+        .{ .path = "/etc/padctl/devices/pad-iface2.toml", .iface_mask = 1 << 2 },
+    });
+    try testing.expectEqualStrings(
+        "  config: /etc/padctl/devices/pad-iface1.toml\n" ++
+            "  config: /etc/padctl/devices/pad-iface2.toml\n",
+        buf.items,
+    );
+}
+
+test "doctor_accuracy: printProvenance unconstrained file overrides any constraint" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    try doctor.printProvenance(buf.writer(testing.allocator), &.{
+        .{ .path = "/home/u/.config/padctl/devices/pad.toml", .iface_mask = null },
+        .{ .path = "/usr/share/padctl/devices/pad-iface2.toml", .iface_mask = 1 << 2 },
+    });
+    try testing.expectEqualStrings(
+        "  config: /home/u/.config/padctl/devices/pad.toml (OVERRIDES /usr/share/padctl/devices/pad-iface2.toml)\n",
         buf.items,
     );
 }
@@ -199,10 +229,15 @@ test "doctor_accuracy: collectConfigMatches walks dirs in resolution order" {
 
     try tmp.dir.makePath("user/devices");
     try tmp.dir.makePath("system/devices/flydigi");
-    inline for (.{ "user/devices/vader5.toml", "system/devices/flydigi/vader5.toml" }) |rel| {
-        var f = try tmp.dir.createFile(rel, .{});
+    {
+        var f = try tmp.dir.createFile("user/devices/vader5.toml", .{});
         defer f.close();
         try f.writeAll("[device]\nname = \"vader5\"\nvid = 0x37d7\npid = 0x2401\n");
+    }
+    {
+        var f = try tmp.dir.createFile("system/devices/flydigi/vader5.toml", .{});
+        defer f.close();
+        try f.writeAll("[device]\nname = \"vader5\"\nvid = 0x37d7\npid = 0x2401\n\n[[device.interface]]\nid = 1\n");
     }
     {
         var f = try tmp.dir.createFile("system/devices/other.toml", .{});
@@ -218,12 +253,55 @@ test "doctor_accuracy: collectConfigMatches walks dirs in resolution order" {
     const matches = try doctor.collectConfigMatches(allocator, &.{ user_dir, sys_dir }, 0x37d7, 0x2401);
     defer doctor.freeConfigMatches(allocator, matches);
     try testing.expectEqual(@as(usize, 2), matches.len);
-    try testing.expect(std.mem.endsWith(u8, matches[0], "user/devices/vader5.toml"));
-    try testing.expect(std.mem.endsWith(u8, matches[1], "system/devices/flydigi/vader5.toml"));
+    try testing.expect(std.mem.endsWith(u8, matches[0].path, "user/devices/vader5.toml"));
+    try testing.expectEqual(@as(?u64, null), matches[0].iface_mask);
+    try testing.expect(std.mem.endsWith(u8, matches[1].path, "system/devices/flydigi/vader5.toml"));
+    try testing.expectEqual(@as(?u64, 1 << 1), matches[1].iface_mask);
 
     const none = try doctor.collectConfigMatches(allocator, &.{ user_dir, sys_dir }, 0xffff, 0xffff);
     defer doctor.freeConfigMatches(allocator, none);
     try testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "doctor_accuracy: resolveDaemonConfigDirs with --config-dir returns only that dir" {
+    const allocator = testing.allocator;
+    const dirs = try doctor.resolveDaemonConfigDirs(
+        allocator,
+        "/usr/local/bin/padctl --config-dir /usr/local/share/padctl/devices",
+    );
+    defer paths.freeConfigDirs(allocator, dirs);
+    try testing.expectEqual(@as(usize, 1), dirs.len);
+    try testing.expectEqualStrings("/usr/local/share/padctl/devices", dirs[0]);
+}
+
+test "doctor_accuracy: resolveDaemonConfigDirs default install uses daemon user-first order" {
+    const allocator = testing.allocator;
+    const got = try doctor.resolveDaemonConfigDirs(allocator, "/usr/bin/padctl");
+    defer paths.freeConfigDirs(allocator, got);
+    const want = try paths.resolveDeviceConfigDirs(allocator);
+    defer paths.freeConfigDirs(allocator, want);
+    try testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try testing.expectEqualStrings(w, g);
+    // Daemon resolution order differs from doctor's scan/listing order, which
+    // leads with the install prefixes.
+    const scan_dirs = try doctor.resolveDoctorDeviceDirs(allocator, null);
+    defer paths.freeConfigDirs(allocator, scan_dirs);
+    try testing.expectEqualStrings("/usr/local/share/padctl/devices", scan_dirs[0]);
+    try testing.expect(!std.mem.eql(u8, got[0], scan_dirs[0]));
+}
+
+test "doctor_accuracy: pickScanEntry prefers readable node over denied sibling" {
+    const entries = [_]scan.ScanEntry{
+        .{ .path = "/dev/hidraw0", .vid = 0x37d7, .pid = 0x2401, .name = "v", .phys = "usb-1", .config_path = null, .access_denied = true },
+        .{ .path = "/dev/hidraw1", .vid = 0x37d7, .pid = 0x2401, .name = "v", .phys = "usb-1", .config_path = null },
+    };
+    const picked = doctor.pickScanEntry(&entries, 0x37d7, 0x2401).?;
+    try testing.expectEqualStrings("/dev/hidraw1", picked.path);
+    try testing.expect(!picked.access_denied);
+
+    const denied_only = entries[0..1];
+    try testing.expect(doctor.pickScanEntry(denied_only, 0x37d7, 0x2401).?.access_denied);
+    try testing.expect(doctor.pickScanEntry(&entries, 0x1111, 0x2222) == null);
 }
 
 // --- STATUS wire: shadow_grabs fields, additive ---
