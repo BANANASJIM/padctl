@@ -61,6 +61,12 @@ Top-level button remapping (active when no layer overrides). Keys are ButtonId n
 
 `LT` / `RT` as targets emit the digital trigger press plus a full analog pull (ABS_Z / ABS_RZ = 255) while the source button is held. Tap/double gesture legs targeting `LT` / `RT` emit only the digital press; use a plain remap or a `hold` leg for an analog pull.
 
+```toml
+[remap]
+M1 = "RT"   # full analog pull (255) while M1 is held
+M2 = "LT"
+```
+
 > **Note:** `BTN_*` values (e.g. `"BTN_SOUTH"`) are routed to the virtual **mouse** device, not the gamepad. To target a gamepad button use a friendly `ButtonId` name (`"A"`, `"Select"`, etc.) instead.
 
 ```toml
