@@ -137,6 +137,14 @@ Available target types:
 | `"disabled"` | Suppress the button entirely |
 | `"macro:<name>"` | Run a named macro sequence |
 
+For example, to fire the triggers from back buttons:
+
+```toml
+[remap]
+M1 = "RT"   # full analog pull (255) while M1 is held
+M2 = "LT"
+```
+
 > **Note:** `BTN_*` values (e.g. `"BTN_SOUTH"`) are routed to the virtual **mouse** device, not the gamepad. To remap to a gamepad button use a friendly `ButtonId` name (`"A"`, `"Select"`, etc.) instead.
 
 Available button names: `A`, `B`, `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `Start`, `Select`, `Home`, `Capture`, `LS`, `RS`, `DPadUp`, `DPadDown`, `DPadLeft`, `DPadRight`, `M1`, `M2`, `M3`, `M4`, `Paddle1`, `Paddle2`, `Paddle3`, `Paddle4`, `TouchPad`, `Mic`, `C`, `Z`, `LM`, `RM`, `O`
