@@ -347,6 +347,13 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
         }
         warnLintFindings(findings.items);
     } else |_| {} // lint failure (OOM) must not break parsing
+    if (collectRemapFindings(allocator, &result.value)) |findings| {
+        defer {
+            var f = findings;
+            f.deinit(allocator);
+        }
+        warnRemapFindings(allocator, findings.items);
+    } else |_| {}
     return result;
 }
 
@@ -883,6 +890,139 @@ fn warnLintFindings(findings: []const LintFinding) void {
         } else {
             std.log.warn("config: unknown key '{s}' inside [{s}] (line {d}) — typo or misplaced field?", .{ f.unknown_key, f.table, f.line });
         }
+    }
+}
+
+// --- remap key/target pre-flight findings ---
+//
+// Runtime precomputeRemap warns and skips unknown remap keys/targets, so a
+// typo like `M11 = "KEY_F13"` silently does nothing. These findings name the
+// exact key/value before runtime; the runtime path is unchanged.
+
+pub const RemapFinding = struct {
+    table: []const u8, // "remap" or "layer.remap"
+    key: []const u8,
+    target: ?[]const u8, // null = unknown-key finding
+    suggestion: ?[]const u8,
+};
+
+fn editDistanceOne(a: []const u8, b: []const u8) bool {
+    if (a.len == b.len) {
+        var diff: usize = 0;
+        for (a, b) |x, y| {
+            if (x != y) diff += 1;
+            if (diff > 1) return false;
+        }
+        return diff == 1;
+    }
+    const long = if (a.len > b.len) a else b;
+    const short = if (a.len > b.len) b else a;
+    if (long.len - short.len != 1) return false;
+    var i: usize = 0;
+    var j: usize = 0;
+    var skipped = false;
+    while (j < short.len) {
+        if (long[i] != short[j]) {
+            if (skipped) return false;
+            skipped = true;
+            i += 1;
+        } else {
+            i += 1;
+            j += 1;
+        }
+    }
+    return true;
+}
+
+pub fn suggestButtonName(unknown: []const u8) ?[]const u8 {
+    for (std.meta.fieldNames(ButtonId)) |name| {
+        if (editDistanceOne(name, unknown)) return name;
+    }
+    return null;
+}
+
+pub fn suggestTargetName(unknown: []const u8) ?[]const u8 {
+    if (suggestButtonName(unknown)) |name| return name;
+    if (editDistanceOne("disabled", unknown)) return "disabled";
+    for (input_codes.key_table) |e| {
+        if (editDistanceOne(e.name, unknown)) return e.name;
+    }
+    for (input_codes.mouse_table) |e| {
+        if (editDistanceOne(e.name, unknown)) return e.name;
+    }
+    for (input_codes.btn_table) |e| {
+        if (editDistanceOne(e.name, unknown)) return e.name;
+    }
+    return null;
+}
+
+fn collectRemapMapFindings(
+    allocator: std.mem.Allocator,
+    findings: *std.ArrayList(RemapFinding),
+    map: *const RemapMap,
+    table: []const u8,
+) !void {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (std.meta.stringToEnum(ButtonId, key) == null) {
+            try findings.append(allocator, .{
+                .table = table,
+                .key = key,
+                .target = null,
+                .suggestion = suggestButtonName(key),
+            });
+        }
+        switch (entry.value_ptr.*) {
+            .string => |s| {
+                // macro: targets are checked by checkRemapMacros.
+                if (std.mem.startsWith(u8, s, "macro:")) continue;
+                _ = remap_mod.resolveTarget(s) catch {
+                    try findings.append(allocator, .{
+                        .table = table,
+                        .key = key,
+                        .target = s,
+                        .suggestion = suggestTargetName(s),
+                    });
+                };
+            },
+            // Checked by checkRemapChords / checkRemapGestures.
+            .chord_names, .gesture => {},
+        }
+    }
+}
+
+/// Caller owns the returned list; finding strings are borrowed from `cfg`.
+pub fn collectRemapFindings(allocator: std.mem.Allocator, cfg: *const MappingConfig) !std.ArrayList(RemapFinding) {
+    var findings: std.ArrayList(RemapFinding) = .empty;
+    errdefer findings.deinit(allocator);
+    if (cfg.remap) |*m| try collectRemapMapFindings(allocator, &findings, m, "remap");
+    if (cfg.layer) |layers| {
+        for (layers) |*layer| {
+            if (layer.remap) |*m| try collectRemapMapFindings(allocator, &findings, m, "layer.remap");
+        }
+    }
+    return findings;
+}
+
+pub fn remapFindingMessage(allocator: std.mem.Allocator, f: RemapFinding) ![]u8 {
+    if (f.target) |t| {
+        if (f.suggestion) |s| {
+            return std.fmt.allocPrint(allocator, "[{s}] target '{s}' for key '{s}' is not a valid target (did you mean '{s}'?)", .{ f.table, t, f.key, s });
+        }
+        return std.fmt.allocPrint(allocator, "[{s}] target '{s}' for key '{s}' is not a valid target", .{ f.table, t, f.key });
+    }
+    if (f.suggestion) |s| {
+        return std.fmt.allocPrint(allocator, "[{s}] key '{s}' is not a button name (did you mean '{s}'?)", .{ f.table, f.key, s });
+    }
+    return std.fmt.allocPrint(allocator, "[{s}] key '{s}' is not a button name", .{ f.table, f.key });
+}
+
+fn warnRemapFindings(allocator: std.mem.Allocator, findings: []const RemapFinding) void {
+    for (findings) |f| {
+        const msg = remapFindingMessage(allocator, f) catch continue;
+        defer allocator.free(msg);
+        std.log.warn("config: {s}", .{msg});
     }
 }
 
@@ -2522,6 +2662,106 @@ test "parseFile: per-layer gyro sensitivity overflow is clamped and loads" {
     try std.testing.expectEqual(@as(?f64, 1.0e6), layer.gyro.?.sensitivity_y);
 }
 
+// --- remap finding tests ---
+
+test "remap findings: unknown key flagged with distance-1 suggestion" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M11 = "KEY_F13"
+    );
+    defer result.deinit();
+    var findings = try collectRemapFindings(allocator, &result.value);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    const f = findings.items[0];
+    try std.testing.expectEqualStrings("remap", f.table);
+    try std.testing.expectEqualStrings("M11", f.key);
+    try std.testing.expect(f.target == null);
+    try std.testing.expectEqualStrings("M1", f.suggestion.?);
+    const msg = try remapFindingMessage(allocator, f);
+    defer allocator.free(msg);
+    try std.testing.expectEqualStrings("[remap] key 'M11' is not a button name (did you mean 'M1'?)", msg);
+}
+
+test "remap findings: unknown string target flagged with distance-1 suggestion" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M1 = "KEY_F13X"
+    );
+    defer result.deinit();
+    var findings = try collectRemapFindings(allocator, &result.value);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    const f = findings.items[0];
+    try std.testing.expectEqualStrings("M1", f.key);
+    try std.testing.expectEqualStrings("KEY_F13X", f.target.?);
+    try std.testing.expectEqualStrings("KEY_F13", f.suggestion.?);
+    const msg = try remapFindingMessage(allocator, f);
+    defer allocator.free(msg);
+    try std.testing.expectEqualStrings("[remap] target 'KEY_F13X' for key 'M1' is not a valid target (did you mean 'KEY_F13'?)", msg);
+}
+
+test "remap findings: no suggestion when nothing within distance 1" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\Bogus99 = "totally_unknown"
+    );
+    defer result.deinit();
+    var findings = try collectRemapFindings(allocator, &result.value);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), findings.items.len);
+    for (findings.items) |f| try std.testing.expect(f.suggestion == null);
+}
+
+test "remap findings: [layer.remap] table attributed" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\
+        \\[layer.remap]
+        \\M11 = "KEY_F1"
+    );
+    defer result.deinit();
+    var findings = try collectRemapFindings(allocator, &result.value);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    try std.testing.expectEqualStrings("layer.remap", findings.items[0].table);
+}
+
+test "remap findings: valid remap, macro target, chord, and gesture produce none" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[macro]]
+        \\name = "dodge"
+        \\steps = [{ tap = "B" }]
+        \\
+        \\[remap]
+        \\M1 = "macro:dodge"
+        \\M2 = "disabled"
+        \\A = "KEY_F13"
+        \\B = ["KEY_LEFTCTRL", "KEY_C"]
+        \\X = { tap = "KEY_X", hold = "KEY_Y" }
+        \\Y = "mouse_left"
+    );
+    defer result.deinit();
+    var findings = try collectRemapFindings(allocator, &result.value);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "suggestButtonName / suggestTargetName: vocabulary coverage" {
+    try std.testing.expectEqualStrings("Start", suggestButtonName("Stat").?);
+    try std.testing.expect(suggestButtonName("Bogus99") == null);
+    try std.testing.expectEqualStrings("disabled", suggestTargetName("disable").?);
+    try std.testing.expectEqualStrings("mouse_left", suggestTargetName("mouse_leftt").?);
+    try std.testing.expectEqualStrings("BTN_SIDE", suggestTargetName("BTN_SIDES").?);
+}
+
 test "shipped mappings parse, clamp, and validate" {
     const allocator = std.testing.allocator;
     const shipped = [_][]const u8{
@@ -2536,5 +2776,8 @@ test "shipped mappings parse, clamp, and validate" {
         defer result.deinit();
         clampNumericRanges(&result.value);
         try validate(&result.value);
+        var findings = try collectRemapFindings(allocator, &result.value);
+        defer findings.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 0), findings.items.len);
     }
 }
