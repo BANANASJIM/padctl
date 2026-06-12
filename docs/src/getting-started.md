@@ -249,7 +249,7 @@ padctl devices [--socket <path>]           # list connected devices
 padctl list-mappings [--config-dir <dir>]  # list available mapping profiles
 padctl reload [--pid <pid>]                # send SIGHUP to reload configs
 padctl config list                         # show XDG config search paths
-padctl config init [--device] [--preset <name>]  # interactive mapping creator; valid preset names: xbox-360, xbox-elite2, dualsense, switch-pro
+padctl config init [--device <name>]       # interactive mapping creator; templates: default, fps, racing, fighting
 padctl config edit [name]                  # open mapping in $VISUAL/$EDITOR
 padctl config test [--config] [--mapping]  # live input preview
 padctl dump enable|disable                 # toggle diagnostic logging (persists)

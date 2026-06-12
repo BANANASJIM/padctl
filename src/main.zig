@@ -255,7 +255,7 @@ const Cli = struct {
 
 const ConfigCmd = union(enum) {
     list,
-    init: struct { device: ?[]const u8, preset: ?[]const u8 },
+    init: struct { device: ?[]const u8 },
     edit: ?[]const u8,
     @"test": struct { config: ?[]const u8, mapping: ?[]const u8 },
 };
@@ -419,18 +419,15 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 parsed_cli.config_cmd = .list;
             } else if (std.mem.eql(u8, sub, "init")) {
                 var device: ?[]const u8 = null;
-                var preset: ?[]const u8 = null;
                 while (args.next()) |iarg| {
                     if (std.mem.eql(u8, iarg, "--device")) {
                         device = args.next() orelse return error.MissingArgValue;
-                    } else if (std.mem.eql(u8, iarg, "--preset")) {
-                        preset = args.next() orelse return error.MissingArgValue;
                     } else {
                         std.log.err("unknown config init argument: {s}", .{iarg});
                         return error.UnknownArgument;
                     }
                 }
-                parsed_cli.config_cmd = .{ .init = .{ .device = device, .preset = preset } };
+                parsed_cli.config_cmd = .{ .init = .{ .device = device } };
             } else if (std.mem.eql(u8, sub, "edit")) {
                 const mapping_name = args.next();
                 parsed_cli.config_cmd = .{ .edit = mapping_name };
@@ -623,7 +620,6 @@ fn printHelp() void {
         \\  config list           List XDG-layer device and mapping configs
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
         \\    --device <name>     Skip device selection prompt
-        \\    --preset <name>     Skip output preset prompt (xbox-360/xbox-elite2/dualsense/switch-pro)
         \\  config edit [name]    Open mapping in $VISUAL/$EDITOR; validate on exit
         \\  config test           Live input preview (Ctrl-C to exit)
         \\    --config <path>     Device config to identify input
@@ -1000,7 +996,7 @@ pub fn main() !void {
                 };
             },
             .init => |opts| {
-                cli.config.init.run(allocator, opts.device, opts.preset) catch |err| {
+                cli.config.init.run(allocator, opts.device) catch |err| {
                     std.log.err("config init failed: {}", .{err});
                     std.process.exit(1);
                 };
