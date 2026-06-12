@@ -136,7 +136,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
     return entries.toOwnedSlice(allocator);
 }
 
-fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8) ![]const u8 {
+pub fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8) ![]const u8 {
     var dir = if (std.fs.path.isAbsolute(config_dir))
         try std.fs.openDirAbsolute(config_dir, .{ .iterate = true })
     else

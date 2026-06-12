@@ -257,7 +257,7 @@ const ConfigCmd = union(enum) {
     list,
     init: struct { device: ?[]const u8, preset: ?[]const u8 },
     edit: ?[]const u8,
-    @"test": struct { config: ?[]const u8, mapping: ?[]const u8 },
+    @"test": struct { config: ?[]const u8, mapping: ?[]const u8, raw: bool },
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
@@ -437,17 +437,20 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             } else if (std.mem.eql(u8, sub, "test")) {
                 var test_config: ?[]const u8 = null;
                 var test_mapping: ?[]const u8 = null;
+                var test_raw = false;
                 while (args.next()) |targ| {
                     if (std.mem.eql(u8, targ, "--config")) {
                         test_config = args.next() orelse return error.MissingArgValue;
                     } else if (std.mem.eql(u8, targ, "--mapping")) {
                         test_mapping = args.next() orelse return error.MissingArgValue;
+                    } else if (std.mem.eql(u8, targ, "--raw")) {
+                        test_raw = true;
                     } else {
                         std.log.err("unknown config test argument: {s}", .{targ});
                         return error.UnknownArgument;
                     }
                 }
-                parsed_cli.config_cmd = .{ .@"test" = .{ .config = test_config, .mapping = test_mapping } };
+                parsed_cli.config_cmd = .{ .@"test" = .{ .config = test_config, .mapping = test_mapping, .raw = test_raw } };
             } else {
                 std.log.err("unknown config subcommand: {s}", .{sub});
                 return error.UnknownArgument;
@@ -625,9 +628,11 @@ fn printHelp() void {
         \\    --device <name>     Skip device selection prompt
         \\    --preset <name>     Skip output preset prompt (xbox-360/xbox-elite2/dualsense/switch-pro)
         \\  config edit [name]    Open mapping in $VISUAL/$EDITOR; validate on exit
-        \\  config test           Live input preview (Ctrl-C to exit)
-        \\    --config <path>     Device config to identify input
+        \\  config test           Live input preview decoded into named button/axis events (Ctrl-C to exit)
+        \\                        Decoding supports hidraw devices only; vendor-class (libusb) devices show raw bytes
+        \\    --config <path>     Device config to decode input (default: auto-detect from XDG device dirs)
         \\    --mapping <path>    Mapping to apply for display
+        \\    --raw               Show raw report bytes instead of decoded events
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
@@ -1012,7 +1017,7 @@ pub fn main() !void {
                 };
             },
             .@"test" => |opts| {
-                cli.config.@"test".run(allocator, opts.config, opts.mapping, stdout_writer) catch |err| {
+                cli.config.@"test".run(allocator, opts.config, opts.mapping, opts.raw, stdout_writer) catch |err| {
                     std.log.err("config test failed: {}", .{err});
                     std.process.exit(1);
                 };
