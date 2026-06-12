@@ -17,7 +17,7 @@ Use the interactive creator:
 
 ```sh
 mkdir -p ~/.config/padctl/mappings/
-padctl config init --preset xbox-360
+padctl config init
 ```
 
 Or, from a source checkout, copy the repository example and edit it:

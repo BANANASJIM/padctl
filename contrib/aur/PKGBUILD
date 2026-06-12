@@ -6,7 +6,7 @@ pkgdesc="HID gamepad daemon — declarative TOML device config, uinput output"
 arch=('x86_64' 'aarch64')
 url="https://github.com/BANANASJIM/padctl"
 license=('LGPL-2.1-or-later')
-depends=('systemd' 'gcc-libs' 'glibc')
+depends=('systemd')
 makedepends=('git')
 provides=('padctl')
 conflicts=('padctl' 'padctl-bin')
@@ -45,13 +45,13 @@ prepare() {
 build() {
     cd padctl
     export ZIG_GLOBAL_CACHE_DIR="${srcdir}/zig-cache"
-    local _zig_arch
+    local _zig_arch _musl_target
     case "${CARCH}" in
-        x86_64) _zig_arch="x86_64-linux" ;;
-        aarch64) _zig_arch="aarch64-linux" ;;
+        x86_64)  _zig_arch="x86_64-linux";  _musl_target="x86_64-linux-musl" ;;
+        aarch64) _zig_arch="aarch64-linux"; _musl_target="aarch64-linux-musl" ;;
         *) echo "unsupported architecture: ${CARCH}" >&2; return 1 ;;
     esac
-    "${srcdir}/zig-${_zig_arch}-${_zig_version}/zig" build -Doptimize=ReleaseSafe
+    "${srcdir}/zig-${_zig_arch}-${_zig_version}/zig" build -Doptimize=ReleaseSafe -Dtarget="${_musl_target}"
 }
 
 package() {
