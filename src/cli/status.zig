@@ -76,8 +76,6 @@ test "run: connection failure returns 1" {
     try testing.expectEqual(@as(u8, 1), rc);
 }
 
-// Regression: connect failure must print the actionable hints, not the old
-// bare one-liner that dead-ended users (no service check, no doctor pointer).
 test "run: connection failure prints socket path and doctor hint" {
     var err_buf: std.ArrayList(u8) = .{};
     defer err_buf.deinit(testing.allocator);

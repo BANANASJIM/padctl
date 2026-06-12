@@ -562,8 +562,6 @@ test "doctor: parseServiceShow: missing keys yield empty fields" {
     try testing.expectEqualStrings("", st.exec_main_status);
 }
 
-// Falsifiability: each branch below pins the exact tailored hint; collapsing
-// the diagnosis to a generic message fails all three.
 test "doctor: printServiceDiagnosis: not-found suggests install" {
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(testing.allocator);

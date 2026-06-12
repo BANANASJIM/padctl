@@ -469,8 +469,6 @@ test "socket_client: parseStatusLine: device and mapping names with spaces" {
     try testing.expectEqualStrings("active", devices[0].state);
 }
 
-// Falsifiability: dropping any of the four lines (or reverting callers to the
-// old bare "cannot connect" message) breaks the exact-output expectation.
 test "socket_client: reportConnectFailure: exact four-line output" {
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(testing.allocator);

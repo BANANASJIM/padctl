@@ -1219,7 +1219,7 @@ fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8, 
     const user_config_mod = @import("config/user_config.zig");
 
     const fd = socket_client.connectToSocket(socket_path) catch {
-        err_writer.writeAll("error: cannot connect to daemon (is padctl running?)\n") catch {};
+        socket_client.reportConnectFailure(err_writer, socket_path);
         std.process.exit(1);
     };
     defer std.posix.close(fd);
