@@ -32,7 +32,69 @@ pub const ScanEntry = struct {
     phys: []const u8,
     config_path: ?[]const u8,
     interface_id: ?u8 = null,
+    access_denied: bool = false,
 };
+
+pub const UeventInfo = struct {
+    vid: u16,
+    pid: u16,
+    name: []const u8,
+};
+
+/// Parse HID_ID/HID_NAME from a hidraw device uevent, so a node's identity is
+/// readable without opening it. `name` aliases `content`.
+pub fn parseHidrawUevent(content: []const u8) ?UeventInfo {
+    var info: UeventInfo = .{ .vid = 0, .pid = 0, .name = "" };
+    var have_id = false;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimRight(u8, raw, "\r");
+        if (std.mem.startsWith(u8, line, "HID_ID=")) {
+            var parts = std.mem.splitScalar(u8, line["HID_ID=".len..], ':');
+            _ = parts.next();
+            const vid_s = parts.next() orelse continue;
+            const pid_s = parts.next() orelse continue;
+            const vid = std.fmt.parseInt(u32, vid_s, 16) catch continue;
+            const pid = std.fmt.parseInt(u32, pid_s, 16) catch continue;
+            info.vid = @truncate(vid);
+            info.pid = @truncate(pid);
+            have_id = true;
+        } else if (std.mem.startsWith(u8, line, "HID_NAME=")) {
+            info.name = line["HID_NAME=".len..];
+        }
+    }
+    return if (have_id) info else null;
+}
+
+/// Build an entry for a node that exists but cannot be opened, using the
+/// world-readable sysfs uevent for identity.
+fn accessDeniedEntry(allocator: std.mem.Allocator, config_dir: []const u8, path: []const u8) !?ScanEntry {
+    var uevent_path_buf: [256]u8 = undefined;
+    const uevent_path = std.fmt.bufPrint(&uevent_path_buf, "/sys/class/hidraw/{s}/device/uevent", .{std.fs.path.basename(path)}) catch return null;
+    var f = std.fs.openFileAbsolute(uevent_path, .{}) catch return null;
+    defer f.close();
+    var content: [1024]u8 = undefined;
+    const n = f.read(&content) catch return null;
+    const info = parseHidrawUevent(content[0..n]) orelse return null;
+
+    const owned_path = try allocator.dupe(u8, path);
+    errdefer allocator.free(owned_path);
+    const name = try allocator.dupe(u8, info.name);
+    errdefer allocator.free(name);
+    const phys = readPhysicalPath(allocator, path) catch try allocator.dupe(u8, "");
+    errdefer allocator.free(phys);
+    const iface_id = readInterfaceId(path);
+    return .{
+        .path = owned_path,
+        .vid = info.vid,
+        .pid = info.pid,
+        .name = name,
+        .phys = phys,
+        .config_path = findConfig(allocator, config_dir, info.vid, info.pid, iface_id) catch null,
+        .interface_id = iface_id,
+        .access_denied = true,
+    };
+}
 
 /// Enumerate /dev/hidrawN, match against *.toml with interface filtering.
 /// Caller owns result; call freeEntries() when done.
@@ -43,7 +105,6 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         entries.deinit(allocator);
     }
 
-    var access_denied_hint_shown = false;
     var i: u8 = 0;
     while (i < MAX_HIDRAW) : (i += 1) {
         var path_buf: [32]u8 = undefined;
@@ -52,9 +113,11 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| switch (err) {
             error.FileNotFound => continue,
             error.AccessDenied => {
-                if (!access_denied_hint_shown) {
-                    std.log.warn("scan: permission denied on {s} — run with sudo or add yourself to the 'input' group", .{path});
-                    access_denied_hint_shown = true;
+                if (accessDeniedEntry(allocator, config_dir, path) catch null) |e| {
+                    entries.append(allocator, e) catch |aerr| {
+                        freeEntry(allocator, e);
+                        return aerr;
+                    };
                 }
                 continue;
             },
@@ -372,8 +435,10 @@ fn visibleInHidraw(d: StatusDevice, entries: []const ScanEntry) bool {
 
 /// Render scan results. Daemon-managed devices whose hidraw nodes are gone
 /// (the libusb claim detached the kernel driver) are merged in as
-/// "(claimed by padctl)" rows, deduplicated by vid:pid.
-fn render(writer: anytype, entries: []const ScanEntry, daemon_devices: []const StatusDevice) !void {
+/// "(claimed by padctl)" rows, deduplicated by vid:pid. A single permission
+/// warning covers all access-denied nodes regardless of how many config dirs
+/// were scanned.
+pub fn render(writer: anytype, entries: []const ScanEntry, daemon_devices: []const StatusDevice) !void {
     var claimed: usize = 0;
     for (daemon_devices) |d| {
         if (!visibleInHidraw(d, entries)) claimed += 1;
@@ -436,6 +501,15 @@ fn render(writer: anytype, entries: []const ScanEntry, daemon_devices: []const S
         entries.len - unmatched + claimed,
         unmatched,
     });
+
+    var denied: usize = 0;
+    for (entries) |e| {
+        if (e.access_denied) denied += 1;
+    }
+    if (denied > 0) {
+        try writer.print("\nwarning: permission denied opening {d} hidraw node(s)\n", .{denied});
+        try writer.writeAll("hint: sudo usermod -aG input $USER && re-login (or replug to apply udev rules)\n");
+    }
 
     if (unmatched > 0) {
         try writer.writeByte('\n');
