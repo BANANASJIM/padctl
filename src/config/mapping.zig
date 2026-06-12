@@ -893,11 +893,7 @@ fn warnLintFindings(findings: []const LintFinding) void {
     }
 }
 
-// --- remap key/target pre-flight findings ---
-//
-// Runtime precomputeRemap warns and skips unknown remap keys/targets, so a
-// typo like `M11 = "KEY_F13"` silently does nothing. These findings name the
-// exact key/value before runtime; the runtime path is unchanged.
+// --- remap key/target pre-flight findings (runtime path unchanged) ---
 
 pub const RemapFinding = struct {
     table: []const u8, // "remap" or "layer.remap"
