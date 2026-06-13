@@ -164,6 +164,45 @@ test "shadow_grab: a node already grabbed by another reader is counted (EBUSY)" 
     try testing.expectEqual(@as(usize, 0), observer.len);
 }
 
+test "shadow_grab: sweep re-grabs an unowned EBUSY node once the foreign holder releases it" {
+    const vid: u16 = 0xFAD7;
+    const pid: u16 = 0x24FA;
+    const ufd = try createPad(BUS_USB, vid, pid);
+    defer destroyPad(ufd);
+
+    var name_buf: [24]u8 = undefined;
+    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
+
+    var path_buf: [40]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/dev/input/{s}", .{node});
+
+    // A foreign reader holds the exclusive grab.
+    const foreign = try posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
+    var foreign_open = true;
+    defer if (foreign_open) posix.close(foreign);
+    try testing.expectEqual(linux.E.SUCCESS, linux.E.init(linux.ioctl(foreign, ioctl.EVIOCGRAB, 1)));
+
+    // padctl can only count it (EBUSY): an unowned, fd-less entry.
+    var list = shadow_grab.GrabList{};
+    defer list.releaseAll();
+    shadow_grab.sweepDir(&list, "/dev/input", params, {}, null);
+    try testing.expect(list.contains(node));
+
+    // The foreign reader releases the node with no REMOVE uevent.
+    posix.close(foreign);
+    foreign_open = false;
+
+    // The next sweep re-validates the unowned entry and re-grabs it: padctl now
+    // genuinely guards the node, observable as a second EVIOCGRAB hitting EBUSY.
+    shadow_grab.sweepDir(&list, "/dev/input", params, {}, null);
+    try testing.expect(list.contains(node));
+
+    const probe = try posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
+    defer posix.close(probe);
+    try testing.expectEqual(linux.E.BUSY, linux.E.init(linux.ioctl(probe, ioctl.EVIOCGRAB, 1)));
+}
+
 test "shadow_grab: sweep skips virtual-bus nodes (padctl's own uinput outputs)" {
     const vid: u16 = 0xFAD7;
     const pid: u16 = 0x24FD;

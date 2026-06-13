@@ -81,26 +81,82 @@ pub const GrabList = struct {
         return false;
     }
 
-    /// Evict entries whose device is gone (fd answers ENODEV). EBUSY-held
-    /// entries own no fd, so they are name-tracked and pruned only via evict().
+    /// Evict entries whose device is gone (owned fd answers ENODEV) and re-probe
+    /// entries held by a foreign reader (owned=false). A foreign EVIOCGRAB that
+    /// is later released leaves the node grabbable again with no REMOVE uevent,
+    /// so an unowned entry must be re-validated rather than trusted forever:
+    /// re-grab succeeds -> upgrade to an owned grab padctl now guards; still
+    /// EBUSY -> keep counting it; node gone -> drop it. `/dev/input` matches the
+    /// only production caller; revalidate is seam-injected for unit testing.
     pub fn pruneDead(self: *GrabList) void {
+        self.pruneDeadWith(reopenGrab, "/dev/input");
+    }
+
+    fn pruneDeadWith(
+        self: *GrabList,
+        comptime revalidate: fn ([]const u8, []const u8) Revalidation,
+        input_dir: []const u8,
+    ) void {
         var i: usize = 0;
         while (i < self.len) {
-            if (!self.grabs[i].owned) {
-                i += 1;
+            const g = &self.grabs[i];
+            if (g.owned) {
+                var id: ioctl.InputId = undefined;
+                if (linux.E.init(linux.ioctl(g.fd, ioctl.EVIOCGID, @intFromPtr(&id))) == .NODEV) {
+                    posix.close(g.fd);
+                    self.dropAt(i);
+                } else {
+                    i += 1;
+                }
                 continue;
             }
-            var id: ioctl.InputId = undefined;
-            if (linux.E.init(linux.ioctl(self.grabs[i].fd, ioctl.EVIOCGID, @intFromPtr(&id))) == .NODEV) {
-                posix.close(self.grabs[i].fd);
-                self.len -= 1;
-                self.grabs[i] = self.grabs[self.len];
-            } else {
-                i += 1;
+            switch (revalidate(input_dir, g.name())) {
+                .upgraded => |fd| {
+                    g.fd = fd;
+                    g.owned = true;
+                    i += 1;
+                },
+                .still_busy => i += 1,
+                .gone => self.dropAt(i),
             }
         }
     }
+
+    fn dropAt(self: *GrabList, i: usize) void {
+        self.len -= 1;
+        self.grabs[i] = self.grabs[self.len];
+    }
 };
+
+/// Outcome of re-probing an unowned (foreign-held) shadow entry.
+const Revalidation = union(enum) {
+    /// The foreign grab was released; padctl re-grabbed it and now owns this fd.
+    upgraded: posix.fd_t,
+    /// Another reader still holds the exclusive grab; keep the unowned entry.
+    still_busy,
+    /// The node is gone (open/ioctl failed); drop the entry.
+    gone,
+};
+
+/// Re-open `node` read-only and re-attempt EVIOCGRAB. On success padctl owns
+/// the returned fd; on EBUSY the node is still foreign-held; any open or other
+/// ioctl failure means the node disappeared.
+fn reopenGrab(input_dir: []const u8, node: []const u8) Revalidation {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ input_dir, node }) catch return .gone;
+    const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch return .gone;
+    switch (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGRAB, 1))) {
+        .SUCCESS => return .{ .upgraded = fd },
+        .BUSY => {
+            posix.close(fd);
+            return .still_busy;
+        },
+        else => {
+            posix.close(fd);
+            return .gone;
+        },
+    }
+}
 
 /// Pure decision seam: grab when the node carries the managed device's
 /// physical VID/PID and is not one of padctl's own outputs — virtual-bus
@@ -321,6 +377,21 @@ test "shadow_grab: classifyGrabErrno counts EBUSY as a handled shadow" {
     try testing.expectEqual(GrabResult.skipped, classifyGrabErrno(.INVAL));
 }
 
+fn revalidateStillBusy(_: []const u8, _: []const u8) Revalidation {
+    return .still_busy;
+}
+
+fn revalidateGone(_: []const u8, _: []const u8) Revalidation {
+    return .gone;
+}
+
+/// Upgrade fixture: opens /dev/null so the upgraded entry owns a real,
+/// closeable fd (a bare sentinel would let close() bugs go undetected).
+fn revalidateUpgrade(_: []const u8, _: []const u8) Revalidation {
+    const fd = posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch unreachable;
+    return .{ .upgraded = fd };
+}
+
 test "shadow_grab: an EBUSY-held shadow is counted but releaseAll skips its fd" {
     var list = GrabList{};
     // Simulate what tryGrabNode records on EBUSY: a counted, unowned entry
@@ -329,9 +400,10 @@ test "shadow_grab: an EBUSY-held shadow is counted but releaseAll skips its fd" 
     try testing.expectEqual(@as(usize, 1), list.len);
     try testing.expect(list.contains("event8"));
 
-    // pruneDead must not ioctl/close the unowned fd; the entry survives.
-    list.pruneDead();
+    // A still-foreign-held node stays counted and must not close the -1 fd.
+    list.pruneDeadWith(revalidateStillBusy, "/dev/input");
     try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(!list.grabs[0].owned);
 
     // releaseAll/evict must not posix.close(-1) on an unowned entry.
     try testing.expect(list.evict("event8"));
@@ -339,6 +411,31 @@ test "shadow_grab: an EBUSY-held shadow is counted but releaseAll skips its fd" 
 
     recordGrab(&list, "event8", -1, false);
     list.releaseAll();
+    try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "shadow_grab: pruneDead re-grabs an unowned shadow whose foreign holder released it" {
+    var list = GrabList{};
+    recordGrab(&list, "event8", -1, false);
+
+    // The foreign reader released its grab: re-validation re-grabs the node, so
+    // the phantom entry is upgraded to an owned grab padctl genuinely guards.
+    list.pruneDeadWith(revalidateUpgrade, "/dev/input");
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(list.grabs[0].owned);
+    try testing.expect(list.grabs[0].fd >= 0);
+
+    // The upgraded fd is owned, so releaseAll closes it (double-free would trap).
+    list.releaseAll();
+    try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "shadow_grab: pruneDead drops an unowned shadow whose node is gone" {
+    var list = GrabList{};
+    recordGrab(&list, "event8", -1, false);
+    recordGrab(&list, "event9", -1, false);
+
+    list.pruneDeadWith(revalidateGone, "/dev/input");
     try testing.expectEqual(@as(usize, 0), list.len);
 }
 
