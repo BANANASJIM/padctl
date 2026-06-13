@@ -85,17 +85,17 @@ test "shadow_grab: sweep grabs a USB-bus shadow node exclusively and releases it
     defer list.releaseAll();
 
     // Foreign physical VID/PID: the sweep must not touch the node.
-    shadow_grab.sweepDir(&list, "/dev/input", .{ .phys_vendor = 0xF0F0, .phys_product = 0x0F0F });
+    shadow_grab.sweepDir(&list, "/dev/input", .{ .phys_vendor = 0xF0F0, .phys_product = 0x0F0F }, {}, null);
     try testing.expect(!list.contains(node));
     list.releaseAll();
 
     const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
-    shadow_grab.sweepDir(&list, "/dev/input", params);
+    shadow_grab.sweepDir(&list, "/dev/input", params, {}, null);
     try testing.expect(list.contains(node));
 
     // Re-sweep is idempotent: already-grabbed nodes are skipped.
     const len_after = list.len;
-    shadow_grab.sweepDir(&list, "/dev/input", params);
+    shadow_grab.sweepDir(&list, "/dev/input", params, {}, null);
     try testing.expectEqual(len_after, list.len);
 
     // EVIOCGRAB exclusivity is observable: a second grab fails with EBUSY.
@@ -124,14 +124,44 @@ test "shadow_grab: sweep prunes a grab whose device is gone (ENODEV)" {
     var list = shadow_grab.GrabList{};
     defer list.releaseAll();
     const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
-    shadow_grab.sweepDir(&list, "/dev/input", params);
+    shadow_grab.sweepDir(&list, "/dev/input", params, {}, null);
     try testing.expect(list.contains(node));
 
     destroyPad(ufd);
     destroyed = true;
 
-    shadow_grab.sweepDir(&list, "/dev/input", params);
+    shadow_grab.sweepDir(&list, "/dev/input", params, {}, null);
     try testing.expect(!list.contains(node));
+}
+
+test "shadow_grab: a node already grabbed by another reader is counted (EBUSY)" {
+    const vid: u16 = 0xFAD7;
+    const pid: u16 = 0x24FB;
+    const ufd = try createPad(BUS_USB, vid, pid);
+    defer destroyPad(ufd);
+
+    var name_buf: [24]u8 = undefined;
+    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
+
+    // First reader takes the exclusive grab.
+    var holder = shadow_grab.GrabList{};
+    defer holder.releaseAll();
+    try testing.expectEqual(shadow_grab.GrabResult.grabbed, shadow_grab.tryGrabNode(&holder, "/dev/input", node, params));
+
+    // Second reader hits EBUSY: the node is hidden, so it must be counted as a
+    // handled shadow (shadow_grabs > 0) rather than silently dropped — otherwise
+    // doctor would falsely report 'managed_unguarded_shadow'.
+    var observer = shadow_grab.GrabList{};
+    defer observer.releaseAll();
+    try testing.expectEqual(shadow_grab.GrabResult.already_grabbed, shadow_grab.tryGrabNode(&observer, "/dev/input", node, params));
+    try testing.expectEqual(@as(usize, 1), observer.len);
+    try testing.expect(observer.contains(node));
+
+    // The EBUSY entry owns no fd; releaseAll/evict must not double-close, and
+    // the real holder still owns the kernel grab.
+    try testing.expect(observer.evict(node));
+    try testing.expectEqual(@as(usize, 0), observer.len);
 }
 
 test "shadow_grab: sweep skips virtual-bus nodes (padctl's own uinput outputs)" {
@@ -145,6 +175,6 @@ test "shadow_grab: sweep skips virtual-bus nodes (padctl's own uinput outputs)" 
 
     var list = shadow_grab.GrabList{};
     defer list.releaseAll();
-    shadow_grab.sweepDir(&list, "/dev/input", .{ .phys_vendor = vid, .phys_product = pid });
+    shadow_grab.sweepDir(&list, "/dev/input", .{ .phys_vendor = vid, .phys_product = pid }, {}, null);
     try testing.expect(!list.contains(node));
 }

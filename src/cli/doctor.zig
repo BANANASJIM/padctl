@@ -670,6 +670,34 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
 
 const testing = std.testing;
 
+test "doctor: decideVerdict: a held shadow grab clears the unguarded warning" {
+    const base: VerdictInput = .{
+        .usb_present = true,
+        .claimed = true,
+        .hidraw = .ok,
+        .kernel_driver = true,
+        .flagged_driver = true,
+        .shadow_grabs = 0,
+    };
+    // No grab counted (e.g. the old EBUSY-drops-to-skipped path): false warning.
+    try testing.expectEqual(Verdict.managed_unguarded_shadow, decideVerdict(base));
+    // Counting an EBUSY-held shadow (shadow_grabs > 0) is the healthy state.
+    var guarded = base;
+    guarded.shadow_grabs = 1;
+    try testing.expectEqual(Verdict.ok_managed, decideVerdict(guarded));
+}
+
+test "doctor: decideVerdict: normal device stays OK with no flagged driver" {
+    try testing.expectEqual(Verdict.ok_managed, decideVerdict(.{
+        .usb_present = true,
+        .claimed = true,
+        .hidraw = .ok,
+        .kernel_driver = false,
+        .flagged_driver = false,
+        .shadow_grabs = 0,
+    }));
+}
+
 test "doctor: probeUsbPresence: device present with driver" {
     const allocator = testing.allocator;
 
