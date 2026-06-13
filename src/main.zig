@@ -447,9 +447,15 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                         test_mapping = args.next() orelse return error.MissingArgValue;
                     } else if (std.mem.eql(u8, targ, "--raw")) {
                         test_raw = true;
-                    } else {
+                    } else if (targ.len > 0 and targ[0] == '-') {
                         std.log.err("unknown config test argument: {s}", .{targ});
                         return error.UnknownArgument;
+                    } else {
+                        if (test_mapping != null) {
+                            std.log.err("config test accepts at most one mapping name", .{});
+                            return error.UnknownArgument;
+                        }
+                        test_mapping = targ;
                     }
                 }
                 parsed_cli.config_cmd = .{ .@"test" = .{ .config = test_config, .mapping = test_mapping, .raw = test_raw } };
@@ -607,7 +613,7 @@ fn printHelp() void {
         \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
         \\  list-mappings         List discovered mapping profiles from XDG paths
         \\    --config-dir <dir>  Also show device-specific mappings from this directory
-        \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
+        \\  reload [--pid <pid>]  Reload device configs; verifies via the control socket (SIGHUP fallback)
         \\  switch [name]         Switch mapping (omit name to re-apply from user config)
         \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
         \\    --device <id>       Apply only to specific device
@@ -629,10 +635,11 @@ fn printHelp() void {
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
         \\    --device <name>     Skip device selection prompt
         \\  config edit [name]    Open mapping in $VISUAL/$EDITOR; validate on exit
-        \\  config test           Live input preview decoded into named button/axis events (Ctrl-C to exit)
+        \\  config test [mapping] Live input preview decoded into named button/axis events (Ctrl-C to exit)
+        \\                        [mapping] is a profile name (resolved like switch) or a path with '/'
         \\                        Decoding supports hidraw devices only; vendor-class (libusb) devices show raw bytes
         \\    --config <path>     Device config to decode input (default: auto-detect from XDG device dirs)
-        \\    --mapping <path>    Mapping to apply for display
+        \\    --mapping <name>    Mapping name or path to apply for display
         \\    --raw               Show raw report bytes instead of decoded events
         \\
         \\Options:
@@ -785,7 +792,7 @@ pub fn main() !void {
 
     // reload subcommand
     if (parsed.reload) {
-        cli.reload.run(allocator, parsed.reload_pid) catch |err| {
+        cli.reload.run(allocator, parsed.reload_pid, parsed.socket_path, stdout_writer, stderr_writer) catch |err| {
             std.log.err("reload failed: {}", .{err});
             std.process.exit(1);
         };

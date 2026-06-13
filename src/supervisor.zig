@@ -197,6 +197,13 @@ const PendingKind = enum { hidraw, input_grab };
 // 8 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
 pub const SUPERVISOR_MAX_FDS: usize = 8 + 1 + 4;
 
+/// Type-erased binding to the active dispatch's reload strategy. `ctx` points at
+/// the dispatch value living on `serveLoop`'s stack for the loop's duration.
+const ReloadHook = struct {
+    ctx: *const anyopaque,
+    call: *const fn (ctx: *const anyopaque, sup: *Supervisor) void,
+};
+
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     managed: std.ArrayList(ManagedInstance),
@@ -257,6 +264,10 @@ pub const Supervisor = struct {
     /// True when PADCTL_TRACE_LIFECYCLE=1 at startup. Cached once so hot paths
     /// pay only a bool branch, not a getenv call per event.
     trace_lifecycle: bool = false,
+    /// Reload trigger bound by `serveLoop` to the active dispatch strategy, so a
+    /// RELOAD control-socket command runs the same path as SIGHUP. null until the
+    /// loop installs it.
+    reload_hook: ?ReloadHook = null,
 
     /// Emit a [lifecycle] info line when trace_lifecycle is enabled.
     fn traceLifecycle(self: *const Supervisor, comptime fmt: []const u8, args: anytype) void {
@@ -1635,6 +1646,18 @@ pub const Supervisor = struct {
     ) !void {
         defer self.stopAll();
 
+        const Dispatch = @TypeOf(dispatch);
+        self.reload_hook = .{
+            .ctx = &dispatch,
+            .call = struct {
+                fn call(ctx: *const anyopaque, sup: *Supervisor) void {
+                    const d: *const Dispatch = @ptrCast(@alignCast(ctx));
+                    d.reload(sup);
+                }
+            }.call,
+        };
+        defer self.reload_hook = null;
+
         // 7 base fds + 1 listen + 4 clients = 12
         var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
         const set = SupervisorPollSet.init(self, &pollfds);
@@ -1767,11 +1790,24 @@ pub const Supervisor = struct {
             .status => self.handleStatus(fd),
             .list => self.handleList(fd),
             .devices => self.handleDevices(fd),
+            .reload => self.handleReload(fd),
             .dump_on => self.handleDump(fd, true),
             .dump_off => self.handleDump(fd, false),
             .dump_status => self.handleDumpStatus(fd),
             .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
         }
+    }
+
+    fn handleReload(self: *Supervisor, fd: posix.fd_t) void {
+        var cs = &self.ctrl_sock.?;
+        const hook = self.reload_hook orelse {
+            cs.sendResponse(fd, "ERR reload-unavailable\n");
+            return;
+        };
+        hook.call(hook.ctx, self);
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "OK reloaded {d} devices\n", .{self.managed.items.len}) catch "OK reloaded\n";
+        cs.sendResponse(fd, msg);
     }
 
     fn handleChordSwitch(self: *Supervisor, fd: posix.fd_t, chord_index: u8) void {
@@ -4787,6 +4823,76 @@ test "supervisor: Supervisor: status includes mapping name" {
         sup.ctrl_sock = null;
         sup.deinit();
     }
+}
+
+var test_reload_calls: usize = 0;
+
+fn testReloadHookCall(_: *const anyopaque, _: *Supervisor) void {
+    test_reload_calls += 1;
+}
+
+test "supervisor: handleReload runs the hook and reports the device count" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    var dummy: u8 = 0;
+    test_reload_calls = 0;
+    sup.reload_hook = .{ .ctx = &dummy, .call = testReloadHookCall };
+
+    sup.handleReload(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqual(@as(usize, 1), test_reload_calls);
+    try testing.expectEqualStrings("OK reloaded 1 devices\n", resp_buf[0..n]);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+}
+
+test "supervisor: handleReload without a hook reports ERR" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    defer sup.ctrl_sock = null;
+
+    sup.handleReload(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR reload-unavailable\n", resp_buf[0..n]);
 }
 
 test "supervisor: Supervisor: status shows (none) when no mapping loaded" {
