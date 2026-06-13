@@ -22,6 +22,7 @@ pub const tools = struct {
 };
 
 pub const cli = struct {
+    pub const errors = @import("cli/cli_errors.zig");
     pub const install = @import("cli/install.zig");
     pub const scan = @import("cli/scan.zig");
     pub const reload = @import("cli/reload.zig");
@@ -314,11 +315,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 } else if (std.mem.eql(u8, iarg, "--scope")) {
                     const v = args.next() orelse return error.MissingArgValue;
                     opts.scope = parseScope(v) orelse {
-                        std.log.err("invalid --scope value: {s} (expected system|user|package)", .{v});
+                        cli.errors.message(stderr_writer, "invalid --scope value (expected system|user|package)");
                         return error.UnknownArgument;
                     };
                 } else {
-                    std.log.err("unknown install argument: {s}", .{iarg});
+                    cli.errors.unknownArgument(stderr_writer, iarg);
                     return error.UnknownArgument;
                 }
             }
@@ -345,11 +346,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 } else if (std.mem.eql(u8, iarg, "--scope")) {
                     const v = args.next() orelse return error.MissingArgValue;
                     opts.scope = parseScope(v) orelse {
-                        std.log.err("invalid --scope value: {s} (expected system|user|package)", .{v});
+                        cli.errors.message(stderr_writer, "invalid --scope value (expected system|user|package)");
                         return error.UnknownArgument;
                     };
                 } else {
-                    std.log.err("unknown uninstall argument: {s}", .{iarg});
+                    cli.errors.unknownArgument(stderr_writer, iarg);
                     return error.UnknownArgument;
                 }
             }
@@ -366,7 +367,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 } else if (std.mem.eql(u8, sub_arg, "--config-dir")) {
                     parsed_cli.scan_config_dir = args.next() orelse return error.MissingArgValue;
                 } else {
-                    std.log.err("unknown scan argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 }
             }
@@ -379,7 +380,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 } else if (std.mem.eql(u8, sub_arg, "--config-dir")) {
                     parsed_cli.list_mappings_config_dir = args.next() orelse return error.MissingArgValue;
                 } else {
-                    std.log.err("unknown list-mappings argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 }
             }
@@ -408,53 +409,72 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 } else if (std.mem.eql(u8, sub_arg, "--pid")) {
                     parsed_cli.reload_pid = args.next() orelse return error.MissingArgValue;
                 } else {
-                    std.log.err("unknown reload argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 }
             }
         } else if (std.mem.eql(u8, arg, "config")) {
             const sub = args.next() orelse {
-                std.log.err("config: missing subcommand (list|init|edit|test)", .{});
-                return error.MissingArgValue;
+                cli.errors.message(stderr_writer, "config: missing subcommand (list|init|edit|test)");
+                return error.UnknownArgument;
             };
-            if (std.mem.eql(u8, sub, "list")) {
+            if (isHelpFlag(sub)) {
+                printConfigHelp(null);
+                std.process.exit(0);
+            } else if (std.mem.eql(u8, sub, "list")) {
                 parsed_cli.config_cmd = .list;
             } else if (std.mem.eql(u8, sub, "init")) {
                 var device: ?[]const u8 = null;
                 while (args.next()) |iarg| {
-                    if (std.mem.eql(u8, iarg, "--device")) {
+                    if (isHelpFlag(iarg)) {
+                        printConfigHelp("init");
+                        std.process.exit(0);
+                    } else if (std.mem.eql(u8, iarg, "--device")) {
                         device = args.next() orelse return error.MissingArgValue;
                     } else if (cli.config.init.isPresetArg(iarg)) {
-                        std.log.err("{s}", .{cli.config.init.preset_removed_message});
+                        cli.errors.message(stderr_writer, cli.config.init.preset_removed_message);
                         return error.UnknownArgument;
                     } else {
-                        std.log.err("unknown config init argument: {s}", .{iarg});
+                        cli.errors.unknownArgument(stderr_writer, iarg);
                         return error.UnknownArgument;
                     }
                 }
                 parsed_cli.config_cmd = .{ .init = .{ .device = device } };
             } else if (std.mem.eql(u8, sub, "edit")) {
-                const mapping_name = args.next();
-                parsed_cli.config_cmd = .{ .edit = mapping_name };
+                const next = args.next();
+                if (next) |n| {
+                    if (isHelpFlag(n)) {
+                        printConfigHelp("edit");
+                        std.process.exit(0);
+                    }
+                    if (n.len > 0 and n[0] == '-') {
+                        cli.errors.unknownArgument(stderr_writer, n);
+                        return error.UnknownArgument;
+                    }
+                }
+                parsed_cli.config_cmd = .{ .edit = next };
             } else if (std.mem.eql(u8, sub, "test")) {
                 var test_config: ?[]const u8 = null;
                 var test_mapping: ?[]const u8 = null;
                 var test_raw = false;
                 while (args.next()) |targ| {
-                    if (std.mem.eql(u8, targ, "--config")) {
+                    if (isHelpFlag(targ)) {
+                        printConfigHelp("test");
+                        std.process.exit(0);
+                    } else if (std.mem.eql(u8, targ, "--config")) {
                         test_config = args.next() orelse return error.MissingArgValue;
                     } else if (std.mem.eql(u8, targ, "--mapping")) {
                         test_mapping = args.next() orelse return error.MissingArgValue;
                     } else if (std.mem.eql(u8, targ, "--raw")) {
                         test_raw = true;
                     } else {
-                        std.log.err("unknown config test argument: {s}", .{targ});
+                        cli.errors.unknownArgument(stderr_writer, targ);
                         return error.UnknownArgument;
                     }
                 }
                 parsed_cli.config_cmd = .{ .@"test" = .{ .config = test_config, .mapping = test_mapping, .raw = test_raw } };
             } else {
-                std.log.err("unknown config subcommand: {s}", .{sub});
+                cli.errors.unknownSubcommand(stderr_writer, "config", sub);
                 return error.UnknownArgument;
             }
         } else if (std.mem.eql(u8, arg, "switch")) {
@@ -473,11 +493,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 } else if (std.mem.eql(u8, sub_arg, "--persist")) {
                     persist = true;
                 } else if (sub_arg[0] == '-') {
-                    std.log.err("unknown switch argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 } else {
                     if (name != null) {
-                        std.log.err("switch accepts at most one mapping name", .{});
+                        cli.errors.message(stderr_writer, "switch accepts at most one mapping name");
                         return error.UnknownArgument;
                     }
                     name = sub_arg;
@@ -494,7 +514,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
                     parsed_cli.socket_explicit = true;
                 } else {
-                    std.log.err("unknown status argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 }
             }
@@ -508,7 +528,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
                     parsed_cli.socket_explicit = true;
                 } else {
-                    std.log.err("unknown doctor argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 }
             }
@@ -522,7 +542,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
                     parsed_cli.socket_explicit = true;
                 } else {
-                    std.log.err("unknown devices argument: {s}", .{sub_arg});
+                    cli.errors.unknownArgument(stderr_writer, sub_arg);
                     return error.UnknownArgument;
                 }
             }
@@ -536,7 +556,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     std.process.exit(0);
                 }
                 if (dump_argc >= dump_args.len) {
-                    std.log.err("too many dump arguments", .{});
+                    cli.errors.message(stderr_writer, "too many dump arguments");
                     return error.UnknownArgument;
                 }
                 dump_args[dump_argc] = da;
@@ -544,15 +564,15 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             }
             const result = parseDumpFromSlice(dump_args[0..dump_argc]) catch |err| switch (err) {
                 error.MissingSubcommand => {
-                    std.log.err("dump requires a subcommand: enable, disable, status, export, clear", .{});
-                    return error.MissingArgValue;
+                    cli.errors.message(stderr_writer, "dump requires a subcommand: enable, disable, status, export, clear");
+                    return error.UnknownArgument;
                 },
                 error.MissingArgValue => {
-                    std.log.err("dump: missing value for option (expected an argument after --period, --socket, or -o)", .{});
-                    return error.MissingArgValue;
+                    cli.errors.message(stderr_writer, "dump: missing value for option (expected an argument after --period, --socket, or -o)");
+                    return error.UnknownArgument;
                 },
                 error.UnknownArgument => {
-                    std.log.err("unknown dump argument", .{});
+                    cli.errors.message(stderr_writer, "unknown dump argument");
                     return error.UnknownArgument;
                 },
             };
@@ -564,91 +584,143 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 parsed_cli.socket_explicit = true;
             }
         } else {
-            std.log.err("unknown argument: {s}", .{arg});
+            cli.errors.unknownArgument(stderr_writer, arg);
             return error.UnknownArgument;
         }
     }
     return parsed_cli;
 }
 
-fn printHelp() void {
-    const help =
-        \\Usage: padctl [options]
-        \\       padctl install [--prefix /usr] [--immutable] [--mapping <name>...]
-        \\       padctl uninstall [--prefix /usr] [--immutable] [--mapping <name>...]
-        \\       padctl scan [--config-dir <dir>]
-        \\       padctl list-mappings [--config-dir <dir>]
-        \\       padctl reload [--pid <pid>]
-        \\       padctl switch <name> [--device <id>] [--socket <path>]
-        \\       padctl status [--socket <path>]
-        \\       padctl devices [--socket <path>]
-        \\       padctl dump <enable|disable|status|export|clear>
-        \\
-        \\Subcommands:
-        \\  install               Install binary, service, udev rules, and device configs
-        \\    --prefix <dir>      Installation prefix (default: /usr)
-        \\    --destdir <dir>     Staging root for package builds (default: "")
-        \\    --immutable         Use immutable OS file placement (/etc/ for systemd+udev)
-        \\    --no-immutable      Force standard install even on detected immutable OS
-        \\    --mapping <name>    Install a mapping config to /etc/padctl/mappings/ (repeatable)
-        \\    --force-mapping     Overwrite existing mapping files
-        \\    --force-binding     Overwrite device bindings in /etc/padctl/config.toml
-        \\    --user-service      Force user-scope install (~/.config/systemd/user/)
-        \\    --no-user-service   Skip user-service enable/start (even under sudo)
-        \\    --no-enable         Skip systemctl enable
-        \\    --no-start          Skip systemctl start
-        \\  uninstall             Remove installed files, stop and disable service
-        \\    --prefix <dir>      Installation prefix (default: /usr)
-        \\    --destdir <dir>     Staging root for package builds (default: "")
-        \\    --no-immutable      Force standard uninstall even on detected immutable OS
-        \\    --immutable         Also remove immutable-specific files from /etc/
-        \\    --mapping <name>    Remove a specific mapping from /etc/padctl/mappings/ (repeatable)
-        \\  scan                  List connected HID devices and config match status
-        \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
-        \\  list-mappings         List discovered mapping profiles from XDG paths
-        \\    --config-dir <dir>  Also show device-specific mappings from this directory
-        \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
-        \\  switch [name]         Switch mapping (omit name to re-apply from user config)
-        \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
-        \\    --device <id>       Apply only to specific device
-        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
-        \\  status                Show daemon status (current mapping, devices)
-        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
-        \\  doctor                Print self-contained diagnostic (daemon/device/hidraw/scope)
-        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
-        \\  devices               List connected devices via daemon
-        \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
-        \\  dump enable           Turn on diagnostic logging (persists across reboots)
-        \\  dump disable          Turn off diagnostic logging (default)
-        \\  dump status           Show dump state, log path, size, and time span
-        \\  dump export           Export filtered logs to stdout or file
-        \\    --period <duration> Time window: Nm, Nh, or Nd (default: 1d)
-        \\    -o <path>           Write to file instead of stdout
-        \\  dump clear            Delete all log files (interactive confirmation)
-        \\  config list           List XDG-layer device and mapping configs
-        \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
-        \\    --device <name>     Skip device selection prompt
-        \\  config edit [name]    Open mapping in $VISUAL/$EDITOR; validate on exit
-        \\  config test           Live input preview decoded into named button/axis events (Ctrl-C to exit)
-        \\                        Decoding supports hidraw devices only; vendor-class (libusb) devices show raw bytes
-        \\    --config <path>     Device config to decode input (default: auto-detect from XDG device dirs)
-        \\    --mapping <path>    Mapping to apply for display
-        \\    --raw               Show raw report bytes instead of decoded events
-        \\
-        \\Options:
-        \\  --config <path>     Device config TOML file (required to run)
-        \\  --config-dir <dir>  Glob *.toml in dir; discover all matching devices
-        \\  --mapping <path>    Mapping config TOML file (optional)
-        \\  --validate <path>   Validate device or mapping config and exit (returns 0/1)
-        \\  --pid-file <path>   Write PID to file on start, remove on exit
-        \\  --doc-gen           Generate Markdown device reference from --config path(s)
-        \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
-        \\  --help, -h          Show this help
-        \\  --version, -V       Show version
-        \\
-    ;
-    _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
+fn isHelpFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h");
 }
+
+fn printConfigHelp(sub: ?[]const u8) void {
+    const text = if (sub) |s| blk: {
+        if (std.mem.eql(u8, s, "init"))
+            break :blk 
+            \\Usage: padctl config init [--device <name>]
+            \\
+            \\Interactively create a mapping in ~/.config/padctl/mappings/.
+            \\  --device <name>   Skip the device selection prompt
+            \\
+        ;
+        if (std.mem.eql(u8, s, "edit"))
+            break :blk 
+            \\Usage: padctl config edit [name]
+            \\
+            \\Open a mapping in $VISUAL/$EDITOR; validate on exit.
+            \\Omit the name to pick from discovered mappings.
+            \\
+        ;
+        if (std.mem.eql(u8, s, "test"))
+            break :blk 
+            \\Usage: padctl config test [--config <path>] [--mapping <path>] [--raw]
+            \\
+            \\Live input preview decoded into named button/axis events (Ctrl-C to exit).
+            \\  --config <path>    Device config to decode input (default: auto-detect)
+            \\  --mapping <path>   Mapping to apply for display
+            \\  --raw              Show raw report bytes instead of decoded events
+            \\
+        ;
+        break :blk config_group_help;
+    } else config_group_help;
+    _ = std.posix.write(std.posix.STDOUT_FILENO, text) catch 0;
+}
+
+const config_group_help =
+    \\Usage: padctl config <list|init|edit|test>
+    \\
+    \\  list           List XDG-layer device and mapping configs
+    \\  init           Interactively create a mapping
+    \\  edit [name]    Open a mapping in $VISUAL/$EDITOR
+    \\  test           Live input preview decoded into named events
+    \\
+    \\Run 'padctl config <subcommand> --help' for details.
+    \\
+;
+
+fn printHelp() void {
+    _ = std.posix.write(std.posix.STDOUT_FILENO, help_text) catch 0;
+}
+
+pub const help_text =
+    \\Usage: padctl [options]
+    \\       padctl install [--prefix /usr] [--immutable] [--mapping <name>...]
+    \\       padctl uninstall [--prefix /usr] [--immutable] [--mapping <name>...]
+    \\       padctl scan [--config-dir <dir>]
+    \\       padctl list-mappings [--config-dir <dir>]
+    \\       padctl reload [--pid <pid>]
+    \\       padctl switch <name> [--device <id>] [--socket <path>]
+    \\       padctl status [--socket <path>]
+    \\       padctl devices [--socket <path>]
+    \\       padctl doctor [--socket <path>]
+    \\       padctl dump <enable|disable|status|export|clear>
+    \\       padctl config <list|init|edit|test>
+    \\
+    \\Subcommands:
+    \\  install               Install binary, service, udev rules, and device configs
+    \\    --prefix <dir>      Installation prefix (default: /usr)
+    \\    --destdir <dir>     Staging root for package builds (default: "")
+    \\    --immutable         Use immutable OS file placement (/etc/ for systemd+udev)
+    \\    --no-immutable      Force standard install even on detected immutable OS
+    \\    --mapping <name>    Install a mapping config to /etc/padctl/mappings/ (repeatable)
+    \\    --force-mapping     Overwrite existing mapping files
+    \\    --force-binding     Overwrite device bindings in /etc/padctl/config.toml
+    \\    --user-service      Force user-scope install (~/.config/systemd/user/)
+    \\    --no-user-service   Skip user-service enable/start (even under sudo)
+    \\    --no-enable         Skip systemctl enable
+    \\    --no-start          Skip systemctl start
+    \\  uninstall             Remove installed files, stop and disable service
+    \\    --prefix <dir>      Installation prefix (default: /usr)
+    \\    --destdir <dir>     Staging root for package builds (default: "")
+    \\    --no-immutable      Force standard uninstall even on detected immutable OS
+    \\    --immutable         Also remove immutable-specific files from /etc/
+    \\    --mapping <name>    Remove a specific mapping from /etc/padctl/mappings/ (repeatable)
+    \\  scan                  List connected HID devices and config match status
+    \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
+    \\  list-mappings         List discovered mapping profiles from XDG paths
+    \\    --config-dir <dir>  Also show device-specific mappings from this directory
+    \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
+    \\  switch [name]         Switch mapping (omit name to re-apply from user config)
+    \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
+    \\    --device <id>       Apply only to specific device
+    \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+    \\  status                Show daemon status (current mapping, devices)
+    \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+    \\  doctor                Print self-contained diagnostic (daemon/device/hidraw/scope)
+    \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+    \\  devices               List connected devices via daemon
+    \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+    \\  dump enable           Turn on diagnostic logging (persists across reboots)
+    \\  dump disable          Turn off diagnostic logging (default)
+    \\  dump status           Show dump state, log path, size, and time span
+    \\  dump export           Export filtered logs to stdout or file
+    \\    --period <duration> Time window: Nm, Nh, or Nd (default: 1d)
+    \\    -o <path>           Write to file instead of stdout
+    \\  dump clear            Delete all log files (interactive confirmation)
+    \\  config list           List XDG-layer device and mapping configs
+    \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
+    \\    --device <name>     Skip device selection prompt
+    \\  config edit [name]    Open mapping in $VISUAL/$EDITOR; validate on exit
+    \\  config test           Live input preview decoded into named button/axis events (Ctrl-C to exit)
+    \\                        Decoding supports hidraw devices only; vendor-class (libusb) devices show raw bytes
+    \\    --config <path>     Device config to decode input (default: auto-detect from XDG device dirs)
+    \\    --mapping <path>    Mapping to apply for display
+    \\    --raw               Show raw report bytes instead of decoded events
+    \\
+    \\Options:
+    \\  --config <path>     Device config TOML file (required to run)
+    \\  --config-dir <dir>  Glob *.toml in dir; discover all matching devices
+    \\  --mapping <path>    Mapping config TOML file (optional)
+    \\  --validate <path>   Validate device or mapping config and exit (returns 0/1)
+    \\  --pid-file <path>   Write PID to file on start, remove on exit
+    \\  --doc-gen           Generate Markdown device reference from --config path(s)
+    \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
+    \\  --help, -h          Show this help
+    \\  --version, -V       Show version
+    \\
+;
 
 fn writePidFile(path: []const u8) void {
     var buf: [32]u8 = undefined;
@@ -717,8 +789,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var parsed = parseArgs(allocator) catch |err| {
-        std.log.err("argument error: {}", .{err});
-        printHelp();
+        // parseArgs already printed a plain message for named errors. The bare
+        // `orelse return MissingArgValue` sites carry no context, so print a
+        // generic hint here rather than dumping help via the log formatter.
+        if (err == error.MissingArgValue)
+            cli.errors.message(stderr_writer, "missing value for an option");
         std.process.exit(1);
     };
     defer parsed.deinit();
@@ -1068,6 +1143,22 @@ pub fn main() !void {
             std.log.err("doc-gen failed: {}", .{err});
             std.process.exit(1);
         };
+        std.process.exit(0);
+    }
+
+    // Bare invocation with no subcommand on an interactive terminal: show a
+    // guide instead of silently forking a daemon. systemd starts the daemon
+    // with stderr on the journal (not a TTY), so the unit keeps its behavior;
+    // any explicit daemon flag (--config-dir/--config/--pid-file) does too.
+    if (parsed.config_path == null and parsed.config_dir == null and
+        parsed.pid_file == null and parsed.mapping_path == null and
+        std.posix.isatty(std.posix.STDERR_FILENO))
+    {
+        const running = if (cli.socket_client.connectToSocket(parsed.socket_path)) |fd| blk: {
+            std.posix.close(fd);
+            break :blk true;
+        } else |_| false;
+        cli.errors.guide(stderr_writer, running);
         std.process.exit(0);
     }
 
