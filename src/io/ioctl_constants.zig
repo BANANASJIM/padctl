@@ -33,6 +33,13 @@ pub const EVIOCGID = IOCTL.IOR('E', 0x02, c.input_id);
 pub const InputId = c.input_id;
 
 /// Dynamic-size evdev ioctl: kernel copies up to `len` bytes of the device's
+/// physical-location string (the USB topology path) into the user buffer.
+pub fn EVIOCGPHYS(len: u14) u32 {
+    const req = IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x07, .size = len };
+    return @bitCast(req);
+}
+
+/// Dynamic-size evdev ioctl: kernel copies up to `len` bytes of the device's
 /// uniq attribute (NUL-terminated) into the user buffer. SDL reads this to
 /// pair main-pad and IMU nodes.
 pub fn EVIOCGUNIQ(len: u14) u32 {

@@ -11,15 +11,22 @@ const posix = std.posix;
 const linux = std.os.linux;
 const ioctl = @import("ioctl_constants.zig");
 const uniq_mod = @import("uniq.zig");
+const hidraw = @import("hidraw.zig");
 
 pub const MAX_GRABS = @import("hidraw.zig").MAX_EVDEV_GRABS;
 
 const BUS_VIRTUAL: u16 = 0x06;
 const NAME_CAP = 24;
+const PHYS_CAP = 96;
 
 pub const Params = struct {
     phys_vendor: u16,
     phys_product: u16,
+    // Stripped USB topology path of the managed device (e.g. "usb-...-3"). When
+    // set, only nodes whose own phys path shares this prefix are grabbed, so two
+    // identical controllers do not steal each other's shadows. Empty disables
+    // the check (single-controller systems and nodes lacking a phys string).
+    phys_path: []const u8 = "",
 };
 
 pub const GrabResult = enum { grabbed, already_grabbed, skipped, access_denied };
@@ -31,11 +38,38 @@ const Grab = struct {
     // false when another reader holds the exclusive EVIOCGRAB (EBUSY): the node
     // is hidden so it counts as a handled shadow, but we own no fd to release.
     owned: bool = true,
+    // Identity read from EVIOCGID at record time, re-checked before a reopen
+    // re-grabs so a recycled eventN name backing an unrelated device is dropped.
+    id: ioctl.InputId = undefined,
 
     fn name(self: *const Grab) []const u8 {
         return self.name_buf[0..self.name_len];
     }
 };
+
+fn sameDevice(a: ioctl.InputId, b: ioctl.InputId) bool {
+    return a.bustype == b.bustype and a.vendor == b.vendor and a.product == b.product;
+}
+
+/// Read the node's physical-location string and strip the trailing "/inputN"
+/// component so it can be prefix-matched against a managed device's phys key.
+fn readNodePhys(fd: posix.fd_t, buf: *[PHYS_CAP]u8) []const u8 {
+    @memset(buf, 0);
+    if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGPHYS(buf.len), @intFromPtr(buf))) != .SUCCESS) return "";
+    const raw = std.mem.sliceTo(buf, 0);
+    return hidraw.stripInputSuffix(raw);
+}
+
+/// True when `node_phys` belongs to the device at `phys_path`: equal, or a
+/// path component boundary follows the shared prefix (so "...-3" never matches
+/// "...-30"). An empty `phys_path` or `node_phys` disables the check.
+fn physMatches(node_phys: []const u8, phys_path: []const u8) bool {
+    if (phys_path.len == 0 or node_phys.len == 0) return true;
+    if (!std.mem.startsWith(u8, node_phys, phys_path)) return false;
+    if (node_phys.len == phys_path.len) return true;
+    const next = node_phys[phys_path.len];
+    return next == '/' or next == ':' or next == '.' or next == '-';
+}
 
 pub const GrabList = struct {
     grabs: [MAX_GRABS]Grab = undefined,
@@ -94,7 +128,7 @@ pub const GrabList = struct {
 
     fn pruneDeadWith(
         self: *GrabList,
-        comptime revalidate: fn ([]const u8, []const u8) Revalidation,
+        comptime revalidate: fn ([]const u8, []const u8, ioctl.InputId) Revalidation,
         input_dir: []const u8,
     ) void {
         var i: usize = 0;
@@ -110,7 +144,7 @@ pub const GrabList = struct {
                 }
                 continue;
             }
-            switch (revalidate(input_dir, g.name())) {
+            switch (revalidate(input_dir, g.name(), g.id)) {
                 .upgraded => |fd| {
                     g.fd = fd;
                     g.owned = true;
@@ -138,13 +172,21 @@ const Revalidation = union(enum) {
     gone,
 };
 
-/// Re-open `node` read-only and re-attempt EVIOCGRAB. On success padctl owns
-/// the returned fd; on EBUSY the node is still foreign-held; any open or other
-/// ioctl failure means the node disappeared.
-fn reopenGrab(input_dir: []const u8, node: []const u8) Revalidation {
+/// Re-open `node` read-only and re-attempt EVIOCGRAB. Before grabbing, re-read
+/// EVIOCGID: the kernel recycles eventN names, so a node bearing this name may
+/// now back an unrelated device (the original vanished without a REMOVE uevent).
+/// An identity mismatch is treated as gone so the stale entry is dropped, never
+/// grabbed. On success padctl owns the returned fd; on EBUSY the node is still
+/// foreign-held; any open or other ioctl failure means the node disappeared.
+fn reopenGrab(input_dir: []const u8, node: []const u8, want: ioctl.InputId) Revalidation {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ input_dir, node }) catch return .gone;
     const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch return .gone;
+    var id: ioctl.InputId = undefined;
+    if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGID, @intFromPtr(&id))) != .SUCCESS or !sameDevice(id, want)) {
+        posix.close(fd);
+        return .gone;
+    }
     switch (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGRAB, 1))) {
         .SUCCESS => return .{ .upgraded = fd },
         .BUSY => {
@@ -159,14 +201,16 @@ fn reopenGrab(input_dir: []const u8, node: []const u8) Revalidation {
 }
 
 /// Pure decision seam: grab when the node carries the managed device's
-/// physical VID/PID and is not one of padctl's own outputs — virtual-bus
+/// physical VID/PID, sits on the same physical device (`node_phys` shares the
+/// managed phys path), and is not one of padctl's own outputs — virtual-bus
 /// uinput or "padctl/"-uniq UHID. The [output] identity is deliberately not
 /// excluded: configs often clone the physical VID/PID, and padctl's outputs
 /// are already covered by the bus/uniq checks.
-pub fn shouldGrab(id: ioctl.InputId, uniq: []const u8, p: Params) bool {
+pub fn shouldGrab(id: ioctl.InputId, uniq: []const u8, node_phys: []const u8, p: Params) bool {
     if (id.bustype == BUS_VIRTUAL) return false;
     if (std.mem.startsWith(u8, uniq, uniq_mod.PREFIX)) return false;
-    return id.vendor == p.phys_vendor and id.product == p.phys_product;
+    if (id.vendor != p.phys_vendor or id.product != p.phys_product) return false;
+    return physMatches(node_phys, p.phys_path);
 }
 
 fn readUniq(fd: posix.fd_t, buf: *[uniq_mod.MAX_UNIQ_LEN]u8) []const u8 {
@@ -203,8 +247,8 @@ fn classifyGrabErrno(e: linux.E) GrabResult {
     };
 }
 
-fn recordGrab(list: *GrabList, node: []const u8, fd: posix.fd_t, owned: bool) void {
-    list.grabs[list.len] = .{ .fd = fd, .name_buf = undefined, .name_len = @intCast(node.len), .owned = owned };
+fn recordGrab(list: *GrabList, node: []const u8, fd: posix.fd_t, owned: bool, id: ioctl.InputId) void {
+    list.grabs[list.len] = .{ .fd = fd, .name_buf = undefined, .name_len = @intCast(node.len), .owned = owned, .id = id };
     @memcpy(list.grabs[list.len].name_buf[0..node.len], node);
     list.len += 1;
 }
@@ -226,7 +270,9 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
     }
     var uniq_buf: [uniq_mod.MAX_UNIQ_LEN]u8 = undefined;
     const uniq = readUniq(fd, &uniq_buf);
-    if (!shouldGrab(id, uniq, p)) {
+    var phys_buf: [PHYS_CAP]u8 = undefined;
+    const node_phys = readNodePhys(fd, &phys_buf);
+    if (!shouldGrab(id, uniq, node_phys, p)) {
         posix.close(fd);
         return .skipped;
     }
@@ -234,7 +280,7 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
     const result = classifyGrabErrno(linux.E.init(linux.ioctl(fd, ioctl.EVIOCGRAB, 1)));
     switch (result) {
         .grabbed => {
-            recordGrab(list, node, fd, true);
+            recordGrab(list, node, fd, true, id);
             var drv_buf: [128]u8 = undefined;
             if (driverName(node, &drv_buf)) |drv| {
                 std.log.warn("shadow input node {s} ({x:0>4}:{x:0>4}) grabbed; kernel driver {s} bound to a managed device", .{ path, id.vendor, id.product, drv });
@@ -246,7 +292,7 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
             // Hidden by another reader's grab; count it but own no fd to hold.
             std.log.debug("shadow grab: {s} already grabbed by another reader", .{path});
             posix.close(fd);
-            recordGrab(list, node, -1, false);
+            recordGrab(list, node, -1, false, id);
         },
         else => {
             std.log.warn("shadow grab: EVIOCGRAB {s} failed", .{path});
@@ -310,31 +356,51 @@ const vader5: Params = .{
 };
 
 test "shadow_grab: shouldGrab takes xpad shadow node (BUS_USB, physical VID/PID)" {
-    try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", vader5));
+    try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", "", vader5));
 }
 
 test "shadow_grab: shouldGrab skips padctl uinput outputs (BUS_VIRTUAL)" {
-    try testing.expect(!shouldGrab(nodeId(0x06, 0x045e, 0x0b00), "", vader5));
+    try testing.expect(!shouldGrab(nodeId(0x06, 0x045e, 0x0b00), "", "", vader5));
     // Even a virtual-bus node cloning the physical VID/PID is ours, not a shadow.
-    try testing.expect(!shouldGrab(nodeId(0x06, 0x37d7, 0x2401), "", vader5));
+    try testing.expect(!shouldGrab(nodeId(0x06, 0x37d7, 0x2401), "", "", vader5));
 }
 
 test "shadow_grab: shouldGrab skips padctl UHID outputs by uniq prefix" {
     // clone_vid_pid UHID FFB device: BUS_USB + physical VID/PID, only the
     // uniq distinguishes it from a real xpad shadow.
-    try testing.expect(!shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "padctl/vader-5-pro-1a2b", vader5));
+    try testing.expect(!shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "padctl/vader-5-pro-1a2b", "", vader5));
 }
 
 test "shadow_grab: shouldGrab takes shadows when [output] clones the physical identity" {
     // xbox-elite-style config: [output] vid/pid equals the physical vid/pid,
     // so a genuine xpad shadow carries the output identity too.
     const p: Params = .{ .phys_vendor = 0x045e, .phys_product = 0x0b00 };
-    try testing.expect(shouldGrab(nodeId(0x03, 0x045e, 0x0b00), "", p));
+    try testing.expect(shouldGrab(nodeId(0x03, 0x045e, 0x0b00), "", "", p));
 }
 
 test "shadow_grab: shouldGrab skips unrelated devices" {
-    try testing.expect(!shouldGrab(nodeId(0x03, 0x046d, 0xc52b), "", vader5));
-    try testing.expect(!shouldGrab(nodeId(0x05, 0x37d7, 0x2402), "", vader5));
+    try testing.expect(!shouldGrab(nodeId(0x03, 0x046d, 0xc52b), "", "", vader5));
+    try testing.expect(!shouldGrab(nodeId(0x05, 0x37d7, 0x2402), "", "", vader5));
+}
+
+test "shadow_grab: shouldGrab grabs only the matching physical device when two are identical" {
+    const a: Params = .{ .phys_vendor = 0x37d7, .phys_product = 0x2401, .phys_path = "usb-0000:10:00.0-3" };
+    const b: Params = .{ .phys_vendor = 0x37d7, .phys_product = 0x2401, .phys_path = "usb-0000:10:00.0-4" };
+    const node = nodeId(0x03, 0x37d7, 0x2401);
+    // The shadow lives on device A's bus path: only instance A may grab it.
+    try testing.expect(shouldGrab(node, "", "usb-0000:10:00.0-3", a));
+    try testing.expect(!shouldGrab(node, "", "usb-0000:10:00.0-3", b));
+    // A shared prefix must not match across distinct ports ("-3" vs "-30").
+    try testing.expect(!shouldGrab(node, "", "usb-0000:10:00.0-30", a));
+}
+
+test "shadow_grab: shouldGrab falls back to VID/PID when phys is unknown" {
+    // No managed phys path (single controller) or node lacks a phys string:
+    // the topology check is disabled and VID/PID alone decides.
+    const p: Params = .{ .phys_vendor = 0x37d7, .phys_product = 0x2401, .phys_path = "" };
+    try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", "usb-x-9", p));
+    const with_path: Params = .{ .phys_vendor = 0x37d7, .phys_product = 0x2401, .phys_path = "usb-x-3" };
+    try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", "", with_path));
 }
 
 test "shadow_grab: GrabList contains/releaseAll bookkeeping" {
@@ -377,17 +443,17 @@ test "shadow_grab: classifyGrabErrno counts EBUSY as a handled shadow" {
     try testing.expectEqual(GrabResult.skipped, classifyGrabErrno(.INVAL));
 }
 
-fn revalidateStillBusy(_: []const u8, _: []const u8) Revalidation {
+fn revalidateStillBusy(_: []const u8, _: []const u8, _: ioctl.InputId) Revalidation {
     return .still_busy;
 }
 
-fn revalidateGone(_: []const u8, _: []const u8) Revalidation {
+fn revalidateGone(_: []const u8, _: []const u8, _: ioctl.InputId) Revalidation {
     return .gone;
 }
 
 /// Upgrade fixture: opens /dev/null so the upgraded entry owns a real,
 /// closeable fd (a bare sentinel would let close() bugs go undetected).
-fn revalidateUpgrade(_: []const u8, _: []const u8) Revalidation {
+fn revalidateUpgrade(_: []const u8, _: []const u8, _: ioctl.InputId) Revalidation {
     const fd = posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch unreachable;
     return .{ .upgraded = fd };
 }
@@ -396,7 +462,7 @@ test "shadow_grab: an EBUSY-held shadow is counted but releaseAll skips its fd" 
     var list = GrabList{};
     // Simulate what tryGrabNode records on EBUSY: a counted, unowned entry
     // whose fd was already closed (-1 would crash close() if treated as owned).
-    recordGrab(&list, "event8", -1, false);
+    recordGrab(&list, "event8", -1, false, nodeId(0x03, 0x37d7, 0x2401));
     try testing.expectEqual(@as(usize, 1), list.len);
     try testing.expect(list.contains("event8"));
 
@@ -409,14 +475,14 @@ test "shadow_grab: an EBUSY-held shadow is counted but releaseAll skips its fd" 
     try testing.expect(list.evict("event8"));
     try testing.expectEqual(@as(usize, 0), list.len);
 
-    recordGrab(&list, "event8", -1, false);
+    recordGrab(&list, "event8", -1, false, nodeId(0x03, 0x37d7, 0x2401));
     list.releaseAll();
     try testing.expectEqual(@as(usize, 0), list.len);
 }
 
 test "shadow_grab: pruneDead re-grabs an unowned shadow whose foreign holder released it" {
     var list = GrabList{};
-    recordGrab(&list, "event8", -1, false);
+    recordGrab(&list, "event8", -1, false, nodeId(0x03, 0x37d7, 0x2401));
 
     // The foreign reader released its grab: re-validation re-grabs the node, so
     // the phantom entry is upgraded to an owned grab padctl genuinely guards.
@@ -432,11 +498,57 @@ test "shadow_grab: pruneDead re-grabs an unowned shadow whose foreign holder rel
 
 test "shadow_grab: pruneDead drops an unowned shadow whose node is gone" {
     var list = GrabList{};
-    recordGrab(&list, "event8", -1, false);
-    recordGrab(&list, "event9", -1, false);
+    recordGrab(&list, "event8", -1, false, nodeId(0x03, 0x37d7, 0x2401));
+    recordGrab(&list, "event9", -1, false, nodeId(0x03, 0x37d7, 0x2401));
 
     list.pruneDeadWith(revalidateGone, "/dev/input");
     try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+/// Reopen fixture mirroring reopenGrab's identity gate: the eventN name now
+/// backs a different device, so the recorded `want` id no longer matches and
+/// the entry is reported gone instead of being re-grabbed.
+fn revalidateIdentityMismatch(_: []const u8, _: []const u8, want: ioctl.InputId) Revalidation {
+    const recycled = nodeId(0x03, 0x046d, 0xc52b);
+    if (!sameDevice(want, recycled)) return .gone;
+    const fd = posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch unreachable;
+    return .{ .upgraded = fd };
+}
+
+/// Reopen fixture where the recycled node's identity still matches the recorded
+/// id, so the re-grab proceeds and the entry is upgraded to an owned grab.
+fn revalidateIdentityMatch(_: []const u8, _: []const u8, want: ioctl.InputId) Revalidation {
+    const same = nodeId(0x03, 0x37d7, 0x2401);
+    if (!sameDevice(want, same)) return .gone;
+    const fd = posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0) catch unreachable;
+    return .{ .upgraded = fd };
+}
+
+test "shadow_grab: reopen drops a recycled node whose identity no longer matches" {
+    var list = GrabList{};
+    recordGrab(&list, "event8", -1, false, nodeId(0x03, 0x37d7, 0x2401));
+
+    // The original node vanished without a REMOVE uevent and event8 now backs an
+    // unrelated mouse: the identity gate must drop the entry, never re-grab it.
+    list.pruneDeadWith(revalidateIdentityMismatch, "/dev/input");
+    try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "shadow_grab: reopen re-grabs when the recycled node identity still matches" {
+    var list = GrabList{};
+    recordGrab(&list, "event8", -1, false, nodeId(0x03, 0x37d7, 0x2401));
+
+    list.pruneDeadWith(revalidateIdentityMatch, "/dev/input");
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(list.grabs[0].owned);
+    list.releaseAll();
+}
+
+test "shadow_grab: reopenGrab reports gone when EVIOCGID cannot confirm identity" {
+    // "null" under /dev opens but answers ENOTTY to EVIOCGID, standing in for a
+    // recycled node whose identity cannot be confirmed: it must never be grabbed.
+    const r = reopenGrab("/dev", "null", nodeId(0x03, 0x37d7, 0x2401));
+    try testing.expectEqual(Revalidation.gone, r);
 }
 
 test "shadow_grab: evict closes the named grab and frees the name for reuse" {

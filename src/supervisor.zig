@@ -1369,9 +1369,14 @@ pub const Supervisor = struct {
 
     fn shadowParams(m: *const ManagedInstance) shadow_grab.Params {
         const cfg = m.instance.device_cfg;
+        // readPhysicalPath falls back to the raw "/dev/..." node when sysfs has
+        // no HID_PHYS; that is not an evdev topology path, so it must not gate
+        // grabs. A real phys key ("usb-...") never starts with '/'.
+        const phys_path: []const u8 = if (std.mem.startsWith(u8, m.phys_key, "/")) "" else m.phys_key;
         return .{
             .phys_vendor = @intCast(cfg.device.vid),
             .phys_product = @intCast(cfg.device.pid),
+            .phys_path = phys_path,
         };
     }
 
