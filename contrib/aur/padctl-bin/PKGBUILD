@@ -48,6 +48,11 @@ package() {
         "${pkgdir}/usr/lib/udev/rules.d/60-padctl.rules"
     [[ -f install/61-padctl-driver-block.rules ]] && install -Dm644 install/61-padctl-driver-block.rules \
         "${pkgdir}/usr/lib/udev/rules.d/61-padctl-driver-block.rules"
+    install -Dm644 install/90-padctl.rules \
+        "${pkgdir}/usr/lib/udev/rules.d/90-padctl.rules"
+
+    install -Dm644 install/padctl.conf \
+        "${pkgdir}/usr/lib/modules-load.d/padctl.conf"
 
     while IFS= read -r -d '' toml; do
         install -Dm644 "${toml}" "${pkgdir}/usr/share/padctl/${toml}"
