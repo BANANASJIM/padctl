@@ -4330,11 +4330,9 @@ test "install: should-verify true but start never attempted => verify" {
     );
 }
 
-// Composed gate flow: a start ran on a reachable user bus (=> .verify), but the
-// daemon crash-loops and never answers STATUS, so the gate must surface a
-// non-zero error (error.DaemonNotResponding) — not silently exit 0. This pins
-// the end-to-end path the install-flow.yml Scenario-D exit-0 rewrite stopped
-// covering. The socket is bound (connect succeeds) but never accepted/answered.
+// Asserts the verify gate returns error.DaemonNotResponding (non-zero), not a
+// silent exit 0 when the daemon crash-loops and never answers STATUS.
+// The socket is bound (connect succeeds) but never accepted/answered.
 test "install: verify gate on reachable bus + dead daemon returns DaemonNotResponding" {
     const testing = std.testing;
     const allocator = testing.allocator;
