@@ -174,6 +174,7 @@ pub const CommandTag = enum {
     status,
     list,
     devices,
+    reload,
     dump_on,
     dump_off,
     dump_status,
@@ -220,6 +221,8 @@ pub fn parseCommand(raw: []const u8) Command {
         return .{ .tag = .list };
     } else if (std.ascii.eqlIgnoreCase(verb, "DEVICES")) {
         return .{ .tag = .devices };
+    } else if (std.ascii.eqlIgnoreCase(verb, "RELOAD")) {
+        return .{ .tag = .reload };
     } else if (std.ascii.eqlIgnoreCase(verb, "DUMP")) {
         const mode = it.next() orelse return .{ .tag = .unknown };
         if (std.ascii.eqlIgnoreCase(mode, "ON")) return .{ .tag = .dump_on };
@@ -287,6 +290,11 @@ test "control_socket: parseCommand: LIST" {
 test "control_socket: parseCommand: DEVICES" {
     const cmd = parseCommand("DEVICES\n");
     try testing.expectEqual(CommandTag.devices, cmd.tag);
+}
+
+test "control_socket: parseCommand: RELOAD" {
+    try testing.expectEqual(CommandTag.reload, parseCommand("RELOAD\n").tag);
+    try testing.expectEqual(CommandTag.reload, parseCommand("reload\n").tag);
 }
 
 test "control_socket: parseCommand: CHORD_SWITCH valid index" {
