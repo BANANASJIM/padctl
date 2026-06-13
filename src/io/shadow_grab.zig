@@ -22,12 +22,15 @@ pub const Params = struct {
     phys_product: u16,
 };
 
-pub const GrabResult = enum { grabbed, skipped, access_denied };
+pub const GrabResult = enum { grabbed, already_grabbed, skipped, access_denied };
 
 const Grab = struct {
     fd: posix.fd_t,
     name_buf: [NAME_CAP]u8,
     name_len: u8,
+    // false when another reader holds the exclusive EVIOCGRAB (EBUSY): the node
+    // is hidden so it counts as a handled shadow, but we own no fd to release.
+    owned: bool = true,
 
     fn name(self: *const Grab) []const u8 {
         return self.name_buf[0..self.name_len];
@@ -59,7 +62,9 @@ pub const GrabList = struct {
 
     /// Closing a grabbed fd implicitly releases its EVIOCGRAB.
     pub fn releaseAll(self: *GrabList) void {
-        for (self.grabs[0..self.len]) |*g| posix.close(g.fd);
+        for (self.grabs[0..self.len]) |*g| {
+            if (g.owned) posix.close(g.fd);
+        }
         self.len = 0;
     }
 
@@ -68,7 +73,7 @@ pub const GrabList = struct {
     pub fn evict(self: *GrabList, node: []const u8) bool {
         for (self.grabs[0..self.len], 0..) |*g, i| {
             if (!std.mem.eql(u8, g.name(), node)) continue;
-            posix.close(g.fd);
+            if (g.owned) posix.close(g.fd);
             self.len -= 1;
             self.grabs[i] = self.grabs[self.len];
             return true;
@@ -76,10 +81,15 @@ pub const GrabList = struct {
         return false;
     }
 
-    /// Evict entries whose device is gone (fd answers ENODEV).
+    /// Evict entries whose device is gone (fd answers ENODEV). EBUSY-held
+    /// entries own no fd, so they are name-tracked and pruned only via evict().
     pub fn pruneDead(self: *GrabList) void {
         var i: usize = 0;
         while (i < self.len) {
+            if (!self.grabs[i].owned) {
+                i += 1;
+                continue;
+            }
             var id: ioctl.InputId = undefined;
             if (linux.E.init(linux.ioctl(self.grabs[i].fd, ioctl.EVIOCGID, @intFromPtr(&id))) == .NODEV) {
                 posix.close(self.grabs[i].fd);
@@ -126,6 +136,23 @@ fn classifyOpenError(err: posix.OpenError) GrabResult {
     };
 }
 
+/// EBUSY means another reader already holds the exclusive grab, so the shadow
+/// is hidden either way and counts as handled; any other ioctl failure leaves
+/// the node ungrabbed and uncounted.
+fn classifyGrabErrno(e: linux.E) GrabResult {
+    return switch (e) {
+        .SUCCESS => .grabbed,
+        .BUSY => .already_grabbed,
+        else => .skipped,
+    };
+}
+
+fn recordGrab(list: *GrabList, node: []const u8, fd: posix.fd_t, owned: bool) void {
+    list.grabs[list.len] = .{ .fd = fd, .name_buf = undefined, .name_len = @intCast(node.len), .owned = owned };
+    @memcpy(list.grabs[list.len].name_buf[0..node.len], node);
+    list.len += 1;
+}
+
 /// Probe one event node and grab it when it shadows the managed device.
 pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: Params) GrabResult {
     if (node.len == 0 or node.len > NAME_CAP) return .skipped;
@@ -148,43 +175,68 @@ pub fn tryGrabNode(list: *GrabList, input_dir: []const u8, node: []const u8, p: 
         return .skipped;
     }
 
-    const grab_errno = linux.E.init(linux.ioctl(fd, ioctl.EVIOCGRAB, 1));
-    if (grab_errno != .SUCCESS) {
-        // EBUSY: someone already holds the exclusive grab (typically padctl's
-        // own hidraw-associated grab), so the node is hidden anyway.
-        if (grab_errno == .BUSY) {
-            std.log.debug("shadow grab: {s} already grabbed", .{path});
-        } else {
-            std.log.warn("shadow grab: EVIOCGRAB {s} failed: {s}", .{ path, @tagName(grab_errno) });
-        }
-        posix.close(fd);
-        return .skipped;
+    const result = classifyGrabErrno(linux.E.init(linux.ioctl(fd, ioctl.EVIOCGRAB, 1)));
+    switch (result) {
+        .grabbed => {
+            recordGrab(list, node, fd, true);
+            var drv_buf: [128]u8 = undefined;
+            if (driverName(node, &drv_buf)) |drv| {
+                std.log.warn("shadow input node {s} ({x:0>4}:{x:0>4}) grabbed; kernel driver {s} bound to a managed device", .{ path, id.vendor, id.product, drv });
+            } else {
+                std.log.warn("shadow input node {s} ({x:0>4}:{x:0>4}) grabbed; kernel driver bound to a managed device", .{ path, id.vendor, id.product });
+            }
+        },
+        .already_grabbed => {
+            // Hidden by another reader's grab; count it but own no fd to hold.
+            std.log.debug("shadow grab: {s} already grabbed by another reader", .{path});
+            posix.close(fd);
+            recordGrab(list, node, -1, false);
+        },
+        else => {
+            std.log.warn("shadow grab: EVIOCGRAB {s} failed", .{path});
+            posix.close(fd);
+        },
     }
-
-    list.grabs[list.len] = .{ .fd = fd, .name_buf = undefined, .name_len = @intCast(node.len) };
-    @memcpy(list.grabs[list.len].name_buf[0..node.len], node);
-    list.len += 1;
-
-    var drv_buf: [128]u8 = undefined;
-    if (driverName(node, &drv_buf)) |drv| {
-        std.log.warn("shadow input node {s} ({x:0>4}:{x:0>4}) grabbed; kernel driver {s} bound to a managed device", .{ path, id.vendor, id.product, drv });
-    } else {
-        std.log.warn("shadow input node {s} ({x:0>4}:{x:0>4}) grabbed; kernel driver bound to a managed device", .{ path, id.vendor, id.product });
-    }
-    return .grabbed;
+    return result;
 }
 
 /// Enumerate `input_dir` and grab every shadow node of the managed device.
 /// Catches shadows that predate the daemon (the netlink watch only sees new
 /// nodes). Dead grabs are pruned first so reused eventN names stay grabbable.
-pub fn sweepDir(list: *GrabList, input_dir: []const u8, p: Params) void {
+/// `on_denied` (when non-null) is invoked with the node name for every node
+/// that returns `.access_denied`, mirroring the netlink ADD retry path so a
+/// pre-existing shadow whose udev ACL has not landed yet is not lost.
+pub fn sweepDir(
+    list: *GrabList,
+    input_dir: []const u8,
+    p: Params,
+    ctx: anytype,
+    comptime on_denied: ?fn (@TypeOf(ctx), []const u8) void,
+) void {
+    sweepDirWith(tryGrabNode, list, input_dir, p, ctx, on_denied);
+}
+
+/// `sweepDir` with the per-node grab function injectable so the denied-node
+/// callback dispatch is testable without a real access-denied open (root, the
+/// CI uid, bypasses file permissions).
+fn sweepDirWith(
+    comptime grab_fn: fn (*GrabList, []const u8, []const u8, Params) GrabResult,
+    list: *GrabList,
+    input_dir: []const u8,
+    p: Params,
+    ctx: anytype,
+    comptime on_denied: ?fn (@TypeOf(ctx), []const u8) void,
+) void {
     list.pruneDead();
     var dir = std.fs.openDirAbsolute(input_dir, .{ .iterate = true }) catch return;
     defer dir.close();
     var it = dir.iterate();
     while (it.next() catch return) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "event")) continue;
-        _ = tryGrabNode(list, input_dir, entry.name, p);
+        const r = grab_fn(list, input_dir, entry.name, p);
+        if (r == .access_denied) {
+            if (on_denied) |cb| cb(ctx, entry.name);
+        }
     }
 }
 
@@ -261,6 +313,35 @@ test "shadow_grab: classifyOpenError marks only AccessDenied retryable" {
     try testing.expectEqual(GrabResult.skipped, classifyOpenError(error.DeviceBusy));
 }
 
+test "shadow_grab: classifyGrabErrno counts EBUSY as a handled shadow" {
+    try testing.expectEqual(GrabResult.grabbed, classifyGrabErrno(.SUCCESS));
+    try testing.expectEqual(GrabResult.already_grabbed, classifyGrabErrno(.BUSY));
+    // Any other ioctl failure leaves the node ungrabbed and uncounted.
+    try testing.expectEqual(GrabResult.skipped, classifyGrabErrno(.NODEV));
+    try testing.expectEqual(GrabResult.skipped, classifyGrabErrno(.INVAL));
+}
+
+test "shadow_grab: an EBUSY-held shadow is counted but releaseAll skips its fd" {
+    var list = GrabList{};
+    // Simulate what tryGrabNode records on EBUSY: a counted, unowned entry
+    // whose fd was already closed (-1 would crash close() if treated as owned).
+    recordGrab(&list, "event8", -1, false);
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(list.contains("event8"));
+
+    // pruneDead must not ioctl/close the unowned fd; the entry survives.
+    list.pruneDead();
+    try testing.expectEqual(@as(usize, 1), list.len);
+
+    // releaseAll/evict must not posix.close(-1) on an unowned entry.
+    try testing.expect(list.evict("event8"));
+    try testing.expectEqual(@as(usize, 0), list.len);
+
+    recordGrab(&list, "event8", -1, false);
+    list.releaseAll();
+    try testing.expectEqual(@as(usize, 0), list.len);
+}
+
 test "shadow_grab: evict closes the named grab and frees the name for reuse" {
     var list = GrabList{};
     inline for (.{ "event3", "event4" }, 0..) |n, i| {
@@ -294,6 +375,55 @@ test "shadow_grab: pruneDead keeps live fds" {
 
 test "shadow_grab: sweepDir on nonexistent dir is a no-op" {
     var list = GrabList{};
-    sweepDir(&list, "/nonexistent_input_dir_xyz", vader5);
+    sweepDir(&list, "/nonexistent_input_dir_xyz", vader5, {}, null);
     try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+const DeniedSink = struct {
+    nodes: std.ArrayList([]const u8) = .{},
+    allocator: std.mem.Allocator,
+
+    fn cb(self: *DeniedSink, node: []const u8) void {
+        const owned = self.allocator.dupe(u8, node) catch return;
+        self.nodes.append(self.allocator, owned) catch {};
+    }
+    fn deinit(self: *DeniedSink) void {
+        for (self.nodes.items) |n| self.allocator.free(n);
+        self.nodes.deinit(self.allocator);
+    }
+};
+
+fn stubAlwaysDenied(_: *GrabList, _: []const u8, node: []const u8, _: Params) GrabResult {
+    return if (std.mem.eql(u8, node, "event9")) .access_denied else .skipped;
+}
+
+test "shadow_grab: sweepDir reports access_denied nodes to the retry callback" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    // The grab function is stubbed to report event9 as access_denied — the exact
+    // race the netlink ADD path retries; the sweep must surface it to the
+    // callback so a pre-existing shadow is not lost (uid-independent: root
+    // bypasses real file permissions, so a 0000-mode file would not suffice).
+    {
+        var f = try tmp.dir.createFile("event9", .{});
+        f.close();
+    }
+    {
+        var f = try tmp.dir.createFile("event8", .{});
+        f.close();
+    }
+    try tmp.dir.makePath("not-an-event"); // ignored: wrong prefix
+
+    var sink = DeniedSink{ .allocator = allocator };
+    defer sink.deinit();
+    var list = GrabList{};
+    sweepDirWith(stubAlwaysDenied, &list, tmp_path, vader5, &sink, DeniedSink.cb);
+
+    try testing.expectEqual(@as(usize, 0), list.len);
+    try testing.expectEqual(@as(usize, 1), sink.nodes.items.len);
+    try testing.expectEqualStrings("event9", sink.nodes.items[0]);
 }
