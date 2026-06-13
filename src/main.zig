@@ -980,7 +980,7 @@ pub fn main() !void {
 
     // status subcommand
     if (parsed.status_cmd) {
-        const rc = cli.status.run(parsed.socket_path, stdout_writer, stderr_writer);
+        const rc = cli.status.run(allocator, parsed.socket_path, stdout_writer, stderr_writer);
         std.process.exit(rc);
     }
 
