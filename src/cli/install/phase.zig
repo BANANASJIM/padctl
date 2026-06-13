@@ -187,10 +187,10 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             var sock_buf: [256]u8 = undefined;
             const sock_path = verifySocketPath(&plan, &sock_buf);
             _ = std.posix.write(std.posix.STDOUT_FILENO, "\nWaiting for the daemon to respond...\n") catch {};
-            if (!waitDaemonResponding(sock_path, 5000, 250)) {
+            runVerifyPoll(sock_path, 5000, 250, waitDaemonResponding) catch |err| {
                 printVerifyFailure(allocator, &plan);
-                return error.DaemonNotResponding;
-            }
+                return err;
+            };
         },
         .deferred_start => printDeferredStartHint(),
     }
@@ -216,6 +216,15 @@ pub fn waitDaemonResponding(path: []const u8, timeout_ms: i64, poll_interval_ms:
         if (std.time.milliTimestamp() >= deadline) return false;
         std.Thread.sleep(poll_interval_ms * std.time.ns_per_ms);
     }
+}
+
+pub const PollFn = *const fn (path: []const u8, timeout_ms: i64, poll_interval_ms: u64) bool;
+
+/// The verify branch's failure decision: poll the daemon socket and turn a
+/// no-answer into a non-zero error. `poll` is injectable so the reachable-bus
+/// crash-loop path (a never-answering socket) can be exercised end-to-end.
+pub fn runVerifyPoll(path: []const u8, timeout_ms: i64, poll_interval_ms: u64, poll: PollFn) error{DaemonNotResponding}!void {
+    if (!poll(path, timeout_ms, poll_interval_ms)) return error.DaemonNotResponding;
 }
 
 /// Resolve the socket the just-started user service will bind. Under
