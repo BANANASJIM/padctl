@@ -2,18 +2,18 @@ const std = @import("std");
 const posix = std.posix;
 const socket_client = @import("socket_client.zig");
 
-pub fn run(socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
+pub fn run(allocator: std.mem.Allocator, socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
     const fd = socket_client.connectToSocket(socket_path) catch {
         socket_client.reportConnectFailure(err_writer, socket_path);
         return 1;
     };
     defer posix.close(fd);
 
-    var buf: [4096]u8 = undefined;
-    const resp = socket_client.sendCommand(fd, "STATUS\n", &buf) catch {
+    const resp = socket_client.sendCommandAlloc(allocator, fd, "STATUS\n", 3000) catch {
         err_writer.writeAll("error: no response from daemon\n") catch {};
         return 1;
     };
+    defer allocator.free(resp);
 
     writer.writeAll(resp) catch {};
     if (resp.len == 0 or resp[resp.len - 1] != '\n') {
@@ -67,12 +67,12 @@ test "run: ERR response returns 1" {
 
     std.Thread.sleep(10 * std.time.ns_per_ms);
 
-    const rc = run(sock_path, std.io.null_writer, std.io.null_writer);
+    const rc = run(allocator, sock_path, std.io.null_writer, std.io.null_writer);
     try testing.expectEqual(@as(u8, 1), rc);
 }
 
 test "run: connection failure returns 1" {
-    const rc = run("/tmp/padctl-nonexistent-test.sock", std.io.null_writer, std.io.null_writer);
+    const rc = run(testing.allocator, "/tmp/padctl-nonexistent-test.sock", std.io.null_writer, std.io.null_writer);
     try testing.expectEqual(@as(u8, 1), rc);
 }
 
@@ -80,7 +80,7 @@ test "run: connection failure prints socket path and doctor hint" {
     var err_buf: std.ArrayList(u8) = .{};
     defer err_buf.deinit(testing.allocator);
 
-    const rc = run("/tmp/padctl-nonexistent-test.sock", std.io.null_writer, err_buf.writer(testing.allocator));
+    const rc = run(testing.allocator, "/tmp/padctl-nonexistent-test.sock", std.io.null_writer, err_buf.writer(testing.allocator));
     try testing.expectEqual(@as(u8, 1), rc);
     try testing.expectEqualStrings(
         "error: cannot connect to padctl daemon at /tmp/padctl-nonexistent-test.sock\n" ++

@@ -2049,12 +2049,26 @@ pub const Supervisor = struct {
 
     pub fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
-        var buf: [4096]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        const w = stream.writer();
+        var line: std.ArrayList(u8) = .{};
+        defer line.deinit(self.allocator);
+        self.buildStatusLine(&line) catch {
+            cs.sendResponse(fd, "STATUS\n");
+            return;
+        };
+        cs.sendResponse(fd, line.items);
+    }
+
+    // STATUS is a single newline-terminated line whose length grows with the
+    // managed-device count and with device/mapping name lengths. A fixed buffer
+    // truncated the tail fields (shadow_grabs/shadow_nodes appended last) once
+    // enough long-named devices were attached, so the line is built into a
+    // heap buffer that grows to fit the full reply.
+    fn buildStatusLine(self: *Supervisor, line: *std.ArrayList(u8)) !void {
+        const a = self.allocator;
+        const w = line.writer(a);
         const now_ns = self.nowNs();
 
-        w.writeAll("STATUS") catch return;
+        try w.writeAll("STATUS");
         for (self.managed.items) |*m| {
             const name = m.instance.device_cfg.device.name;
             const state_str: []const u8 = if (m.suspended) "suspended" else "active";
@@ -2069,7 +2083,7 @@ pub const Supervisor = struct {
                 }
                 break :blk "(none)";
             };
-            w.print(" device={s} state={s} mapping={s}", .{ name, state_str, mapping_name }) catch break;
+            try w.print(" device={s} state={s} mapping={s}", .{ name, state_str, mapping_name });
 
             // Diagnostic fields (issue #236).
             const vid: u16 = @intCast(m.instance.device_cfg.device.vid);
@@ -2080,20 +2094,20 @@ pub const Supervisor = struct {
                 .uhid => "uhid",
             };
             const output_fd_alive: bool = m.instance.owner != .none;
-            w.print(" phys_key={s} vid=0x{x:0>4} pid=0x{x:0>4} output_kind={s} output_fd_alive={}", .{
+            try w.print(" phys_key={s} vid=0x{x:0>4} pid=0x{x:0>4} output_kind={s} output_fd_alive={}", .{
                 m.phys_key, vid, pid, output_kind, output_fd_alive,
-            }) catch break;
+            });
 
             if (m.grace_deadline_ns) |dl| {
                 const remaining_ms: u64 = if (dl > now_ns) (dl - now_ns) / std.time.ns_per_ms else 0;
-                w.print(" grace_deadline_remaining_ms={d}", .{remaining_ms}) catch {};
+                try w.print(" grace_deadline_remaining_ms={d}", .{remaining_ms});
             }
 
             var evdev_buf: [256]u8 = undefined;
             const evdev_node = resolveEvdevNode(vid, pid, &evdev_buf) orelse "<unresolved>";
-            w.print(" evdev_node={s}", .{evdev_node}) catch {};
+            try w.print(" evdev_node={s}", .{evdev_node});
 
-            w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len}) catch {};
+            try w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len});
 
             // write_in_flight_ms=0 when no write is currently blocked; a sustained
             // non-zero value (hundreds of ms) is the smoking gun for a kernel-side
@@ -2104,14 +2118,13 @@ pub const Supervisor = struct {
             const inb_ago_ms: u64 = if (inb == 0 or now_ns < inb) 0 else (now_ns - inb) / std.time.ns_per_ms;
             const outb_ago_ms: u64 = if (outb == 0 or now_ns < outb) 0 else (now_ns - outb) / std.time.ns_per_ms;
             const inflight_ms: u64 = if (ifs == 0 or now_ns < ifs) 0 else (now_ns - ifs) / std.time.ns_per_ms;
-            w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
+            try w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
                 inb_ago_ms, outb_ago_ms, inflight_ms,
-            }) catch {};
+            });
 
-            m.shadow_grabs.appendStatusFields(w) catch {};
+            try m.shadow_grabs.appendStatusFields(w);
         }
-        w.writeByte('\n') catch return;
-        cs.sendResponse(fd, stream.getWritten());
+        try w.writeByte('\n');
     }
 
     fn handleList(self: *Supervisor, fd: posix.fd_t) void {
@@ -5548,6 +5561,115 @@ test "supervisor: handleStatus includes diagnostic fields (issue #236)" {
         sup.stopAll();
         sup.ctrl_sock = null;
         sup.deinit();
+    }
+}
+
+// Many managed devices with long names overflow the old fixed 4096 STATUS
+// buffer; the tail fields (shadow_grabs/shadow_nodes, appended last) were
+// dropped first and the trailing newline lost. The reply must stay complete.
+test "supervisor: handleStatus does not truncate tail fields under many devices" {
+    const allocator = testing.allocator;
+
+    const long_name_toml =
+        \\[device]
+        \\name = "MegaController With A Deliberately Long Product Name 0123456789"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 3
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\left_x = { offset = 1, type = "i16le" }
+    ;
+
+    const parsed_dev = try device_mod.parseString(allocator, long_name_toml);
+    defer parsed_dev.deinit();
+
+    const N = 24;
+    var mocks: [N]*MockDeviceIO = undefined;
+    var mock_count: usize = 0;
+
+    var sup = try Supervisor.initForTest(allocator);
+
+    var i: usize = 0;
+    while (i < N) : (i += 1) {
+        const mock = try allocator.create(MockDeviceIO);
+        mock.* = try MockDeviceIO.init(allocator, &.{});
+        mocks[mock_count] = mock;
+        mock_count += 1;
+
+        const inst = try makeTestInstance(allocator, mock, &parsed_dev.value);
+        var devname_buf: [32]u8 = undefined;
+        var phys_buf: [48]u8 = undefined;
+        const devname = try std.fmt.bufPrint(&devname_buf, "hidraw{d}", .{i});
+        const phys = try std.fmt.bufPrint(&phys_buf, "usb-0000:00:14.0-{d}.{d}/input0", .{ i, i });
+        try sup.attachWithInstance(devname, phys, inst, null);
+
+        var node_buf: [24]u8 = undefined;
+        const node = try std.fmt.bufPrint(&node_buf, "event{d}-shadow", .{i});
+        sup.managed.items[i].shadow_grabs.pushUnownedForTest(node);
+    }
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    sup.handleStatus(resp_fds[0]);
+
+    var resp: std.ArrayList(u8) = .{};
+    defer resp.deinit(allocator);
+    var chunk: [65536]u8 = undefined;
+    while (true) {
+        const n = try posix.read(resp_fds[1], &chunk);
+        if (n == 0) break;
+        try resp.appendSlice(allocator, chunk[0..n]);
+        if (std.mem.indexOfScalar(u8, resp.items, '\n') != null) break;
+        if (n < chunk.len) break;
+    }
+    const line = resp.items;
+
+    try testing.expect(line.len > 4096);
+    try testing.expect(std.mem.endsWith(u8, line, "\n"));
+
+    var devices: usize = 0;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, line, search, "device=")) |pos| {
+        devices += 1;
+        search = pos + "device=".len;
+    }
+    try testing.expectEqual(@as(usize, N), devices);
+
+    try testing.expect(std.mem.indexOf(u8, line, "event23-shadow") != null);
+
+    const parsed = try socket_client.parseStatusLine(line, allocator);
+    defer socket_client.freeStatusDevices(allocator, parsed);
+    try testing.expectEqual(@as(usize, N), parsed.len);
+    try testing.expectEqual(@as(usize, 1), parsed[N - 1].shadow_grabs);
+    try testing.expect(std.mem.indexOf(u8, parsed[N - 1].shadow_nodes, "event23-shadow") != null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+        var k: usize = 0;
+        while (k < mock_count) : (k += 1) {
+            mocks[k].deinit();
+            allocator.destroy(mocks[k]);
+        }
     }
 }
 
