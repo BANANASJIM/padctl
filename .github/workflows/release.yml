@@ -159,6 +159,7 @@ jobs:
           done
           cp staging/usr/lib/systemd/user/*.service "${STAGING}/install/"
           cp staging/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
+          cp staging/usr/lib/modules-load.d/padctl.conf "${STAGING}/install/padctl.conf"
           [ -f staging/usr/bin/padctl-reconnect ] && cp staging/usr/bin/padctl-reconnect "${STAGING}/install/"
           cp -r devices "${STAGING}/"
           cp LICENSE README.md "${STAGING}/"
@@ -220,8 +221,8 @@ jobs:
           sed -i "s/^Architecture:.*/Architecture: ${DEB_ARCH}/" "${DEST}/DEBIAN/control"
 
           mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/user" \
-                   "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/share/padctl" \
-                   "${DEST}/usr/share/doc/padctl"
+                   "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/lib/modules-load.d" \
+                   "${DEST}/usr/share/padctl" "${DEST}/usr/share/doc/padctl"
 
           for bin in padctl padctl-capture padctl-debug padctl-reconnect; do
             [ -f "${SRC}/bin/${bin}" ] && install -Dm755 "${SRC}/bin/${bin}" "${DEST}/usr/bin/${bin}"
@@ -230,6 +231,7 @@ jobs:
 
           cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
           cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
+          install -Dm644 "${SRC}/install/padctl.conf" "${DEST}/usr/lib/modules-load.d/padctl.conf"
 
           cp -r "${SRC}/devices" "${DEST}/usr/share/padctl/"
           install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
@@ -280,6 +282,10 @@ jobs:
             padctl list-mappings
             padctl --validate /usr/share/padctl/devices/sony/dualsense.toml
             test -d /usr/share/padctl/devices/
+            test -f /usr/lib/udev/rules.d/90-padctl.rules
+            test -f /usr/lib/modules-load.d/padctl.conf
+            grep -qx uhid /usr/lib/modules-load.d/padctl.conf
+            grep -qx uinput /usr/lib/modules-load.d/padctl.conf
           "
 
   checksums:

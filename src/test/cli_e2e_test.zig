@@ -3,6 +3,7 @@
 const std = @import("std");
 const testing = std.testing;
 
+const main_mod = @import("../main.zig");
 const paths_mod = @import("../config/paths.zig");
 const scan_mod = @import("../cli/scan.zig");
 const device_mod = @import("../config/device.zig");
@@ -10,6 +11,16 @@ const config_edit = @import("../cli/config/edit.zig");
 const config_test_mod = @import("../cli/config/test.zig");
 const helpers = @import("helpers.zig");
 const collectTomlPaths = helpers.collectTomlPaths;
+
+// --- 0. Help/usage block coverage ---
+
+test "help: usage block lists doctor, config, and dump" {
+    const usage_end = std.mem.indexOf(u8, main_mod.help_text, "Subcommands:").?;
+    const usage = main_mod.help_text[0..usage_end];
+    try testing.expect(std.mem.indexOf(u8, usage, "padctl doctor") != null);
+    try testing.expect(std.mem.indexOf(u8, usage, "padctl config") != null);
+    try testing.expect(std.mem.indexOf(u8, usage, "padctl dump") != null);
+}
 
 // --- 1. Install: directory structure paths ---
 

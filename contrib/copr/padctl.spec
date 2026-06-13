@@ -47,6 +47,8 @@ systemd socket activation and udev integration.
 %{_unitdir}/padctl.service
 %{_udevrulesdir}/60-padctl.rules
 %{_udevrulesdir}/61-padctl-driver-block.rules
+%{_udevrulesdir}/90-padctl.rules
+%{_modulesloaddir}/padctl.conf
 %{_datadir}/padctl/
 
 %post

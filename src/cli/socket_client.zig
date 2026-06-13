@@ -127,6 +127,42 @@ pub fn sendCommandTimeout(fd: posix.fd_t, cmd: []const u8, buf: []u8, timeout_ms
     return buf[0..total];
 }
 
+/// Like sendCommandTimeout but reads the full newline-terminated reply into a
+/// heap buffer that grows as needed. STATUS replies scale with the managed
+/// device count and name lengths, so a fixed read buffer can truncate the tail
+/// fields. Caller owns the returned slice.
+pub fn sendCommandAlloc(
+    allocator: std.mem.Allocator,
+    fd: posix.fd_t,
+    cmd: []const u8,
+    timeout_ms: i32,
+) ![]u8 {
+    _ = try posix.write(fd, cmd);
+
+    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+
+    while (true) {
+        const ready = posix.poll(&fds, timeout_ms) catch return error.Io;
+        if (ready == 0) {
+            if (out.items.len == 0) return error.Timeout;
+            break;
+        }
+        const n = posix.read(fd, &chunk) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        try out.appendSlice(allocator, chunk[0..n]);
+        if (std.mem.indexOfScalar(u8, out.items, '\n') != null) break;
+    }
+    if (out.items.len == 0) return error.EndOfStream;
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn formatSwitch(buf: []u8, name: []const u8, device_id: ?[]const u8) []const u8 {
     if (device_id) |dev| {
         const len = (std.fmt.bufPrint(buf, "SWITCH {s} --device {s}\n", .{ name, dev }) catch return buf[0..0]).len;
@@ -257,11 +293,11 @@ pub fn queryStatusDevices(allocator: std.mem.Allocator, socket_path: []const u8,
         return null;
     };
     defer posix.close(fd);
-    var buf: [4096]u8 = undefined;
-    const resp = sendCommandTimeout(fd, "STATUS\n", &buf, timeout_ms) catch |err| {
+    const resp = sendCommandAlloc(allocator, fd, "STATUS\n", timeout_ms) catch |err| {
         std.log.debug("daemon status query: no response: {}", .{err});
         return null;
     };
+    defer allocator.free(resp);
     return parseStatusLine(resp, allocator) catch null;
 }
 
