@@ -4296,7 +4296,7 @@ test "install: waitDaemonResponding false when daemon answers garbage" {
     try testing.expect(!phase_mod.waitDaemonResponding(sock_path, 300, 50));
 }
 
-// --- verify gate decision: reachable-bus crash-loop vs deferred headless start (#418) ---
+// --- verify gate decision: reachable-bus crash-loop vs deferred headless start ---
 
 test "install: verify gate skips when no start was requested" {
     const testing = std.testing;

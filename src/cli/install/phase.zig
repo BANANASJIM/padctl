@@ -237,7 +237,7 @@ pub const VerifyGateAction = enum {
     verify,
     /// A start was requested but the user bus was not live (headless / SSH /
     /// boot-before-login / linger not enabled). The unit is enabled and starts
-    /// at next login — print a hint, do not fail the install (issue #418).
+    /// at next login — print a hint, do not fail the install.
     deferred_start,
 };
 

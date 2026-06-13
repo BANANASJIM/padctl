@@ -241,7 +241,7 @@ jobs:
                 exit 1
               fi
 
-              # ---- Scenario D: headless verify gate (issue #418) — a started
+              # ---- Scenario D: headless verify gate — a started
               # install whose user session bus is NOT live (no systemd in this
               # sandbox, exactly the headless/SSH/boot-before-login case) must
               # NOT hard-fail. The service is enabled and starts at next login;
