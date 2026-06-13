@@ -373,6 +373,7 @@ jobs:
           sudo ./zig-out/bin/padctl install --destdir "$PWD/_install_stage" --prefix /usr --no-enable --no-start
           cp _install_stage/usr/lib/systemd/user/*.service "${STAGING}/install/"
           cp _install_stage/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
+          cp _install_stage/usr/lib/modules-load.d/padctl.conf "${STAGING}/install/padctl.conf"
           [ -f _install_stage/usr/bin/padctl-reconnect ] && cp _install_stage/usr/bin/padctl-reconnect "${STAGING}/install/"
           cp -r devices "${STAGING}/"
           cp LICENSE README.md "${STAGING}/"
@@ -400,8 +401,8 @@ jobs:
           sed -i "s/^Architecture:.*/Architecture: ${DEB_ARCH}/" "${DEST}/DEBIAN/control"
 
           mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/user" \
-                   "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/share/padctl" \
-                   "${DEST}/usr/share/doc/padctl"
+                   "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/lib/modules-load.d" \
+                   "${DEST}/usr/share/padctl" "${DEST}/usr/share/doc/padctl"
 
           for bin in padctl padctl-capture padctl-debug padctl-reconnect; do
             [ -f "${SRC}/bin/${bin}" ] && install -Dm755 "${SRC}/bin/${bin}" "${DEST}/usr/bin/${bin}"
@@ -410,6 +411,7 @@ jobs:
 
           cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
           cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
+          install -Dm644 "${SRC}/install/padctl.conf" "${DEST}/usr/lib/modules-load.d/padctl.conf"
 
           cp -r "${SRC}/devices" "${DEST}/usr/share/padctl/"
           install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
@@ -426,6 +428,10 @@ jobs:
             || { echo "FAIL: padctl.service missing"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/lib/udev/rules\.d/60-padctl\.rules$' \
             || { echo "FAIL: 60-padctl.rules missing"; echo "${OUT}"; exit 1; }
+          echo "${OUT}" | grep -q ' \./usr/lib/udev/rules\.d/90-padctl\.rules$' \
+            || { echo "FAIL: 90-padctl.rules (IMU tag) missing from .deb"; echo "${OUT}"; exit 1; }
+          echo "${OUT}" | grep -q ' \./usr/lib/modules-load\.d/padctl\.conf$' \
+            || { echo "FAIL: modules-load.d/padctl.conf (uhid/uinput autoload) missing from .deb"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/share/padctl/devices/flydigi/vader5\.toml$' \
             || { echo "FAIL: vader5.toml not under /usr/share/padctl/devices/"; echo "${OUT}"; exit 1; }
           DEVICES=$(echo "${OUT}" | grep -c '^.* \./usr/share/padctl/devices/.\+/.\+\.toml$' || true)
@@ -457,6 +463,10 @@ jobs:
             test -x /usr/bin/padctl || { echo FAIL padctl bin not executable; exit 1; }
             test -f /usr/lib/systemd/user/padctl.service || { echo FAIL service unit missing; exit 1; }
             test -f /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL udev rules missing; exit 1; }
+            test -f /usr/lib/udev/rules.d/90-padctl.rules || { echo FAIL 90-padctl.rules IMU tag missing; exit 1; }
+            test -f /usr/lib/modules-load.d/padctl.conf || { echo FAIL modules-load.d/padctl.conf missing; exit 1; }
+            grep -qx uhid /usr/lib/modules-load.d/padctl.conf || { echo FAIL uhid not autoloaded; exit 1; }
+            grep -qx uinput /usr/lib/modules-load.d/padctl.conf || { echo FAIL uinput not autoloaded; exit 1; }
             echo "::endgroup::"
 
             echo "::group::version sync (zon=${ZON_VER})"
@@ -508,6 +518,8 @@ jobs:
             test ! -f /usr/bin/padctl || { echo FAIL bin still present; exit 1; }
             test ! -f /usr/lib/systemd/user/padctl.service || { echo FAIL service still present; exit 1; }
             test ! -f /usr/lib/udev/rules.d/60-padctl.rules || { echo FAIL udev still present; exit 1; }
+            test ! -f /usr/lib/udev/rules.d/90-padctl.rules || { echo FAIL 90-padctl.rules still present; exit 1; }
+            test ! -f /usr/lib/modules-load.d/padctl.conf || { echo FAIL modules-load.d/padctl.conf still present; exit 1; }
             echo "::endgroup::"
 
             echo "::group::purge cleans residual share dir"
