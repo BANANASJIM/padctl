@@ -6,7 +6,6 @@ const hidraw = @import("../../io/hidraw.zig");
 const device_mod = @import("../../config/device.zig");
 const mapping_mod = @import("../../config/mapping.zig");
 const paths = @import("../../config/paths.zig");
-const mapping_discovery = @import("../../config/mapping_discovery.zig");
 const scan_mod = @import("../scan.zig");
 const interpreter_mod = @import("../../core/interpreter.zig");
 const state_mod = @import("../../core/state.zig");
@@ -152,7 +151,17 @@ fn formatEvents(w: anytype, prev: state_mod.GamepadState, curr: state_mod.Gamepa
 fn resolveMappingPath(allocator: std.mem.Allocator, mapping_arg: []const u8) !?[]const u8 {
     if (std.mem.indexOfScalar(u8, mapping_arg, '/') != null)
         return try allocator.dupe(u8, mapping_arg);
-    return mapping_discovery.findMapping(allocator, mapping_arg);
+    const dirs = try paths.resolveMappingConfigDirs(allocator);
+    defer paths.freeConfigDirs(allocator, dirs);
+    return resolveMappingNameInDirs(allocator, mapping_arg, dirs);
+}
+
+/// Resolve a bare profile name to `<dir>/<name>.toml` across `dirs` in priority
+/// order, the same lookup `padctl switch` uses. Caller frees when non-null.
+fn resolveMappingNameInDirs(allocator: std.mem.Allocator, name: []const u8, dirs: []const []const u8) !?[]const u8 {
+    const filename = try std.fmt.allocPrint(allocator, "{s}.toml", .{name});
+    defer allocator.free(filename);
+    return paths.findConfig(allocator, filename, dirs);
 }
 
 pub fn run(
@@ -320,6 +329,36 @@ test "resolveMappingPath: slash arg is used as a literal path" {
 test "resolveMappingPath: bare name resolves through mapping dirs" {
     const allocator = testing.allocator;
     const got = try resolveMappingPath(allocator, "nonexistent_profile_xyz_12345");
+    defer if (got) |p| allocator.free(p);
+    try testing.expectEqual(@as(?[]const u8, null), got);
+}
+
+test "resolveMappingNameInDirs: bare name resolves to the on-disk profile" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "fps.toml", .data = "name = \"fps\"\n" });
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const dirs = [_][]const u8{dir};
+    const got = try resolveMappingNameInDirs(allocator, "fps", &dirs);
+    defer if (got) |p| allocator.free(p);
+    try testing.expect(got != null);
+    try testing.expect(std.mem.endsWith(u8, got.?, "/fps.toml"));
+}
+
+test "resolveMappingNameInDirs: missing name returns null" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const dirs = [_][]const u8{dir};
+    const got = try resolveMappingNameInDirs(allocator, "absent", &dirs);
     defer if (got) |p| allocator.free(p);
     try testing.expectEqual(@as(?[]const u8, null), got);
 }

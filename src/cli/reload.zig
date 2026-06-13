@@ -43,25 +43,28 @@ fn isAlive(pid: std.posix.pid_t) bool {
     return true;
 }
 
-/// Ask the daemon to reload via the control socket. Returns true when it
-/// answered with a verified result (which is forwarded to `writer`/`err_writer`),
-/// false when the socket was unreachable so the caller can fall back to SIGHUP.
-fn reloadViaSocket(socket_path: []const u8, writer: anytype, err_writer: anytype) bool {
-    const fd = socket_client.connectToSocket(socket_path) catch return false;
+const SocketReload = enum { ok, failed, unreachable_socket };
+
+/// Ask the daemon to reload via the control socket. Forwards the reply to
+/// `writer`/`err_writer` and reports whether it confirmed success (`ok`),
+/// reported a failure (`failed`), or the socket was unreachable so the caller
+/// can fall back to SIGHUP (`unreachable_socket`).
+fn reloadViaSocket(socket_path: []const u8, writer: anytype, err_writer: anytype) SocketReload {
+    const fd = socket_client.connectToSocket(socket_path) catch return .unreachable_socket;
     defer std.posix.close(fd);
 
     var resp_buf: [256]u8 = undefined;
-    const resp = socket_client.sendCommand(fd, "RELOAD\n", &resp_buf) catch return false;
-    printReply(resp, writer, err_writer);
-    return true;
+    const resp = socket_client.sendCommand(fd, "RELOAD\n", &resp_buf) catch return .unreachable_socket;
+    return printReply(resp, writer, err_writer);
 }
 
-fn printReply(resp: []const u8, writer: anytype, err_writer: anytype) void {
+fn printReply(resp: []const u8, writer: anytype, err_writer: anytype) SocketReload {
     if (std.mem.startsWith(u8, resp, "OK")) {
         writeLine(writer, resp);
-    } else {
-        writeLine(err_writer, resp);
+        return .ok;
     }
+    writeLine(err_writer, resp);
+    return .failed;
 }
 
 fn writeLine(out: anytype, resp: []const u8) void {
@@ -72,7 +75,11 @@ fn writeLine(out: anytype, resp: []const u8) void {
 pub fn run(allocator: std.mem.Allocator, pid_arg: ?[]const u8, socket_path: []const u8, writer: anytype, err_writer: anytype) !void {
     // The socket reply confirms the reload actually happened; SIGHUP only
     // assumes it. Use the socket when reachable, fall back to the signal.
-    if (pid_arg == null and reloadViaSocket(socket_path, writer, err_writer)) return;
+    if (pid_arg == null) switch (reloadViaSocket(socket_path, writer, err_writer)) {
+        .ok => return,
+        .failed => std.process.exit(1),
+        .unreachable_socket => {},
+    };
 
     const pid = resolvePid(allocator, pid_arg) catch {
         std.log.err("padctl daemon not running", .{});
@@ -145,12 +152,14 @@ test "printReply: OK goes to writer, ERR goes to err_writer" {
     var err: std.ArrayList(u8) = .{};
     defer err.deinit(testing.allocator);
 
-    printReply("OK reloaded 2 devices\n", out.writer(testing.allocator), err.writer(testing.allocator));
+    const ok = printReply("OK reloaded 2 devices\n", out.writer(testing.allocator), err.writer(testing.allocator));
+    try testing.expectEqual(SocketReload.ok, ok);
     try testing.expectEqualStrings("OK reloaded 2 devices\n", out.items);
     try testing.expectEqualStrings("", err.items);
 
     out.clearRetainingCapacity();
-    printReply("ERR /etc/x.toml: bad", out.writer(testing.allocator), err.writer(testing.allocator));
+    const failed = printReply("ERR /etc/x.toml: bad", out.writer(testing.allocator), err.writer(testing.allocator));
+    try testing.expectEqual(SocketReload.failed, failed);
     try testing.expectEqualStrings("", out.items);
     try testing.expectEqualStrings("ERR /etc/x.toml: bad\n", err.items);
 }
