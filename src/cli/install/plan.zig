@@ -139,7 +139,8 @@ pub fn runCmd(argv: []const []const u8) void {
 }
 
 /// Like runCmd but warns on non-zero exit. Used for critical steps (enable/start).
-pub fn runCmdWarn(argv: []const []const u8) void {
+/// Returns true when the command exited 0, false on spawn failure or non-zero exit.
+pub fn runCmdWarn(argv: []const []const u8) bool {
     var child = std.process.Child.init(argv, std.heap.page_allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Inherit;
@@ -148,7 +149,7 @@ pub fn runCmdWarn(argv: []const []const u8) void {
         _ = std.posix.write(std.posix.STDERR_FILENO, "warning: failed to spawn: ") catch {};
         _ = std.posix.write(std.posix.STDERR_FILENO, argv[0]) catch {};
         _ = std.posix.write(std.posix.STDERR_FILENO, "\n") catch {};
-        return;
+        return false;
     };
     const failed = switch (term) {
         .Exited => |code| code != 0,
@@ -163,6 +164,7 @@ pub fn runCmdWarn(argv: []const []const u8) void {
         }
         _ = std.posix.write(std.posix.STDERR_FILENO, "\n") catch {};
     }
+    return !failed;
 }
 
 /// Ask a y/n question on stderr and read the answer from stdin.
@@ -342,10 +344,12 @@ pub const InstallPlan = struct {
         return self.scope == .package;
     }
 
-    /// True when this install actually starts the user service, so a
+    /// True when this install attempts to start the user service, so a
     /// post-install daemon liveness check is meaningful. Mirrors
-    /// runSystemctlUnits: start only runs on live installs without
-    /// --no-start when a user bus is reachable.
+    /// runSystemctlUnits: start is requested on live installs without
+    /// --no-start when a user bus plan is not .skip. Whether the bus was
+    /// actually reachable is only known after the start runs — see
+    /// `verifyGateAction`.
     pub fn shouldVerifyDaemon(self: *const InstallPlan) bool {
         return self.do_enable_systemctl and !self.opts.no_start and self.systemctl_plan.mode != .skip;
     }

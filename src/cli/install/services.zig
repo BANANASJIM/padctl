@@ -332,24 +332,27 @@ pub fn runSystemctlUser(verbs: []const []const u8) void {
 }
 
 /// Same as runSystemctlUser but warns on non-zero exit (mirrors runCmdWarn).
-pub fn runSystemctlUserWarn(verbs: []const []const u8) void {
+/// Returns true when systemctl ran and exited 0 (the user bus was reachable and
+/// the verb succeeded), false when it was skipped, could not be built, or the
+/// user manager rejected the command (bus not live — headless/boot-before-login).
+pub fn runSystemctlUserWarn(verbs: []const []const u8) bool {
     const plan = currentPlanFromEnv();
     if (plan.mode == .skip) {
         printSkipSystemctlNote();
-        return;
+        return false;
     }
     const allocator = std.heap.page_allocator;
     const argv = buildSystemctlUserArgv(allocator, plan, verbs) catch |err| {
         var errbuf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&errbuf, "warning: could not build systemctl argv: {}\n", .{err}) catch "warning: systemctl argv build failed\n";
         writeAll(std.posix.STDERR_FILENO, msg);
-        return;
+        return false;
     } orelse {
         printSkipSystemctlNote();
-        return;
+        return false;
     };
     defer freeArgv(allocator, argv);
-    runCmdWarn(argv);
+    return runCmdWarn(argv);
 }
 
 /// System-scope counterpart to runSystemctlUser. Used by the legacy-unit
@@ -488,10 +491,23 @@ pub fn installReconnectScript(allocator: std.mem.Allocator, plan: *const Install
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
 }
 
+/// Outcome of the start phase, fed back to the post-install verify gate so it
+/// can tell a genuine crash-loop (start ran on a live bus, daemon never
+/// answered) from a headless/boot-before-login install (the user bus is not
+/// live yet, the service is enabled and will start at next login).
+pub const StartOutcome = struct {
+    /// True when a `systemctl --user start` was requested (not --no-start and
+    /// the bus plan was not .skip).
+    start_attempted: bool = false,
+    /// True only when `systemctl --user start` actually ran and exited 0,
+    /// i.e. the user bus was reachable and the unit was launched.
+    start_ran: bool = false,
+};
+
 // Manage the systemd units. The caller reloads the udev ruleset and applies
 // driver state first, so the service starts against a device already in its
 // final driver state.
-pub fn runSystemctlUnits(plan: *const InstallPlan) void {
+pub fn runSystemctlUnits(plan: *const InstallPlan) StartOutcome {
     if (plan.systemctl_plan.mode == .skip) {
         var groups: [3][]const []const u8 = undefined;
         var n: usize = 0;
@@ -506,13 +522,13 @@ pub fn runSystemctlUnits(plan: *const InstallPlan) void {
             n += 1;
         }
         printSkipSystemctlNoteFor(groups[0..n]);
-        return;
+        return .{};
     }
     runSystemctlUser(&.{"daemon-reload"});
     if (!plan.opts.no_enable) {
-        runSystemctlUserWarn(&.{ "enable", "padctl.service" });
+        _ = runSystemctlUserWarn(&.{ "enable", "padctl.service" });
     }
-    if (!plan.opts.no_start) {
-        runSystemctlUserWarn(&.{ "start", "padctl.service" });
-    }
+    if (plan.opts.no_start) return .{};
+    const ran = runSystemctlUserWarn(&.{ "start", "padctl.service" });
+    return .{ .start_attempted = true, .start_ran = ran };
 }

@@ -171,8 +171,9 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         runCmd(&.{ "udevadm", "trigger" });
         udev.applyDriverState(allocator, &plan, device_entries.items);
     }
+    var start_outcome = services.StartOutcome{};
     if (plan.do_enable_systemctl) {
-        services.runSystemctlUnits(&plan);
+        start_outcome = services.runSystemctlUnits(&plan);
     }
 
     if (mapping_failed) {
@@ -180,14 +181,18 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         return error.MappingInstallFailed;
     }
 
-    if (plan.shouldVerifyDaemon()) {
-        var sock_buf: [256]u8 = undefined;
-        const sock_path = verifySocketPath(&plan, &sock_buf);
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\nWaiting for the daemon to respond...\n") catch {};
-        if (!waitDaemonResponding(sock_path, 5000, 250)) {
-            printVerifyFailure(allocator, &plan);
-            return error.DaemonNotResponding;
-        }
+    switch (verifyGateAction(plan.shouldVerifyDaemon(), start_outcome)) {
+        .skip => {},
+        .verify => {
+            var sock_buf: [256]u8 = undefined;
+            const sock_path = verifySocketPath(&plan, &sock_buf);
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "\nWaiting for the daemon to respond...\n") catch {};
+            if (!waitDaemonResponding(sock_path, 5000, 250)) {
+                printVerifyFailure(allocator, &plan);
+                return error.DaemonNotResponding;
+            }
+        },
+        .deferred_start => printDeferredStartHint(),
     }
 
     printCompletionHint(&plan);
@@ -223,6 +228,41 @@ fn verifySocketPath(plan: *const InstallPlan, buf: []u8) []const u8 {
         return socket_client.resolveSocketPathFor(buf, null, xrd, socket_client.SYSTEM_RUNTIME_DIR, false);
     }
     return socket_client.resolveSocketPath(buf);
+}
+
+pub const VerifyGateAction = enum {
+    /// No start was requested for this install (staging, --no-start, etc.).
+    skip,
+    /// A start ran on a reachable user bus — poll the socket; non-zero on no answer.
+    verify,
+    /// A start was requested but the user bus was not live (headless / SSH /
+    /// boot-before-login / linger not enabled). The unit is enabled and starts
+    /// at next login — print a hint, do not fail the install (issue #418).
+    deferred_start,
+};
+
+/// Decide what the post-install gate should do, given whether a start was
+/// requested for this install (`should_verify`) and the runtime outcome of the
+/// `systemctl --user start` (`outcome`). Pure for testability.
+pub fn verifyGateAction(should_verify: bool, outcome: services.StartOutcome) VerifyGateAction {
+    if (!should_verify) return .skip;
+    if (outcome.start_attempted and !outcome.start_ran) return .deferred_start;
+    return .verify;
+}
+
+fn printDeferredStartHint() void {
+    _ = std.posix.write(std.posix.STDOUT_FILENO,
+        \\
+        \\Note: the user service is enabled but could not be started now — your
+        \\user session bus is not active (headless/SSH/boot-before-login). It will
+        \\start automatically at your next graphical login. No action is required.
+        \\
+        \\To start it now without logging in, or to run it on a headless/server
+        \\box with no login session:
+        \\  sudo loginctl enable-linger $USER
+        \\  systemctl --user start padctl.service
+        \\
+    ) catch {};
 }
 
 fn printVerifyFailure(allocator: std.mem.Allocator, plan: *const InstallPlan) void {

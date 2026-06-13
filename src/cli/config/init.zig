@@ -6,6 +6,16 @@ const mapping = @import("../../config/mapping.zig");
 
 const templates = [_][]const u8{ "default", "fps", "racing", "fighting" };
 
+pub const preset_removed_message =
+    "--preset was removed in v0.1.16; choose a template with --device <name> " ++
+    "(templates: default/fps/racing/fighting)";
+
+/// True when `arg` is the removed `--preset` flag, either bare (`--preset`,
+/// value follows as the next arg) or inline (`--preset=<x>`).
+pub fn isPresetArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--preset") or std.mem.startsWith(u8, arg, "--preset=");
+}
+
 fn ensureMappingsDir(abs_path: []const u8) !void {
     try std.fs.cwd().makePath(abs_path);
 }
@@ -264,6 +274,21 @@ test "init: formatGuidance contains expected substrings" {
     try std.testing.expect(std.mem.indexOf(u8, guidance, "padctl switch vader-5-pro") != null);
     try std.testing.expect(std.mem.indexOf(u8, guidance, "name = \"Vader 5 Pro\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, guidance, "default_mapping = \"vader-5-pro\"") != null);
+}
+
+test "init: isPresetArg recognizes bare and inline --preset" {
+    try std.testing.expect(isPresetArg("--preset"));
+    try std.testing.expect(isPresetArg("--preset=fps"));
+    try std.testing.expect(!isPresetArg("--device"));
+    try std.testing.expect(!isPresetArg("--presets"));
+    try std.testing.expect(!isPresetArg("preset"));
+}
+
+test "init: preset-removed message names the removal version and the replacement" {
+    const m = preset_removed_message;
+    try std.testing.expect(std.mem.indexOf(u8, m, "--preset was removed in v0.1.16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, m, "--device") != null);
+    try std.testing.expect(std.mem.indexOf(u8, m, "default/fps/racing/fighting") != null);
 }
 
 // Validate generated TOML content in memory; returns error if invalid.

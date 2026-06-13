@@ -424,6 +424,9 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 while (args.next()) |iarg| {
                     if (std.mem.eql(u8, iarg, "--device")) {
                         device = args.next() orelse return error.MissingArgValue;
+                    } else if (cli.config.init.isPresetArg(iarg)) {
+                        std.log.err("{s}", .{cli.config.init.preset_removed_message});
+                        return error.UnknownArgument;
                     } else {
                         std.log.err("unknown config init argument: {s}", .{iarg});
                         return error.UnknownArgument;

@@ -4295,3 +4295,37 @@ test "install: waitDaemonResponding false when daemon answers garbage" {
 
     try testing.expect(!phase_mod.waitDaemonResponding(sock_path, 300, 50));
 }
+
+// --- verify gate decision: reachable-bus crash-loop vs deferred headless start (#418) ---
+
+test "install: verify gate skips when no start was requested" {
+    const testing = std.testing;
+    try testing.expectEqual(
+        phase_mod.VerifyGateAction.skip,
+        phase_mod.verifyGateAction(false, .{ .start_attempted = false, .start_ran = false }),
+    );
+}
+
+test "install: reachable bus + start ran => verify (genuine crash-loop is non-zero)" {
+    const testing = std.testing;
+    try testing.expectEqual(
+        phase_mod.VerifyGateAction.verify,
+        phase_mod.verifyGateAction(true, .{ .start_attempted = true, .start_ran = true }),
+    );
+}
+
+test "install: start attempted but bus not reachable => deferred start (exit 0 + linger hint)" {
+    const testing = std.testing;
+    try testing.expectEqual(
+        phase_mod.VerifyGateAction.deferred_start,
+        phase_mod.verifyGateAction(true, .{ .start_attempted = true, .start_ran = false }),
+    );
+}
+
+test "install: should-verify true but start never attempted => verify" {
+    const testing = std.testing;
+    try testing.expectEqual(
+        phase_mod.VerifyGateAction.verify,
+        phase_mod.verifyGateAction(true, .{ .start_attempted = false, .start_ran = false }),
+    );
+}
