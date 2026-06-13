@@ -810,7 +810,7 @@ pub const Supervisor = struct {
             .switch_mapping = null,
             .default_mapping_pr = default_pr,
         });
-        sweepShadowNodes(&self.managed.items[self.managed.items.len - 1]);
+        self.sweepShadowNodes(&self.managed.items[self.managed.items.len - 1]);
     }
 
     fn pruneStaleSuspendedForId(self: *Supervisor, vid: u16, pid: u16, keep_phys: []const u8) void {
@@ -913,7 +913,7 @@ pub const Supervisor = struct {
         m.suspended = false;
         m.grace_deadline_ns = null;
         self.armGraceTimer();
-        sweepShadowNodes(m);
+        self.sweepShadowNodes(m);
     }
 
     fn clearSwitchMapping(self: *Supervisor, m: *ManagedInstance) void {
@@ -1383,6 +1383,7 @@ pub const Supervisor = struct {
             if (m.suspended) continue;
             switch (shadow_grab.tryGrabNode(&m.shadow_grabs, "/dev/input", node, shadowParams(m))) {
                 .grabbed => return .grabbed,
+                .already_grabbed => return .already_grabbed,
                 .access_denied => denied = true,
                 .skipped => {},
             }
@@ -1410,9 +1411,14 @@ pub const Supervisor = struct {
 
     /// Grab pre-existing shadow nodes when an instance becomes active (spawn
     /// and resume) — a shadow that predates the daemon never produces a
-    /// netlink ADD.
-    fn sweepShadowNodes(m: *ManagedInstance) void {
-        shadow_grab.sweepDir(&m.shadow_grabs, "/dev/input", shadowParams(m));
+    /// netlink ADD. Nodes that race udev permission setup are queued for retry,
+    /// mirroring the netlink ADD path so a pre-existing shadow is never lost.
+    fn sweepShadowNodes(self: *Supervisor, m: *ManagedInstance) void {
+        shadow_grab.sweepDir(&m.shadow_grabs, "/dev/input", shadowParams(m), self, enqueueShadowRetry);
+    }
+
+    fn enqueueShadowRetry(self: *Supervisor, node: []const u8) void {
+        self.enqueueRetry(.input_grab, node);
     }
 
     fn drainNetlink(self: *Supervisor) void {
@@ -3006,6 +3012,23 @@ test "supervisor: input grab retry dedups per kind and drains non-denied nodes" 
     // Node gone (or readable but not a shadow): the retry entry is dropped.
     sup.drainHotplugRetry();
     try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
+}
+
+test "supervisor: sweep denied callback enqueues an input_grab retry" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    // The sweep wires this callback for every node it found but could not yet
+    // open (access_denied), mirroring the netlink ADD retry path.
+    sup.enqueueShadowRetry("event9");
+    sup.enqueueShadowRetry("event9");
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+    try testing.expectEqual(PendingKind.input_grab, sup.hotplug_pending.items[0].kind);
+    const item = sup.hotplug_pending.items[0];
+    try testing.expectEqualStrings("event9", item.devname[0..item.len]);
 }
 
 test "supervisor: cold-scan retry is inert when retry timer is unavailable" {
