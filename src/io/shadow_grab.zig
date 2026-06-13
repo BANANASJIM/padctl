@@ -17,7 +17,7 @@ pub const MAX_GRABS = @import("hidraw.zig").MAX_EVDEV_GRABS;
 
 const BUS_VIRTUAL: u16 = 0x06;
 const NAME_CAP = 24;
-const PHYS_CAP = 96;
+const PHYS_CAP = 256;
 
 pub const Params = struct {
     phys_vendor: u16,
@@ -401,6 +401,23 @@ test "shadow_grab: shouldGrab falls back to VID/PID when phys is unknown" {
     try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", "usb-x-9", p));
     const with_path: Params = .{ .phys_vendor = 0x37d7, .phys_product = 0x2401, .phys_path = "usb-x-3" };
     try testing.expect(shouldGrab(nodeId(0x03, 0x37d7, 0x2401), "", "", with_path));
+}
+
+test "shadow_grab: a long phys path survives the read buffer and matches itself" {
+    // A phys string near the evdev limit must fit readNodePhys's buffer intact,
+    // or it truncates and stops prefix-matching its own managed phys_path,
+    // silently dropping a real shadow.
+    const long_phys = "usb-0000:10:00.0-3.4.2.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1";
+    try testing.expect(long_phys.len > 96);
+    try testing.expect(long_phys.len <= PHYS_CAP);
+
+    var buf: [PHYS_CAP]u8 = undefined;
+    @memset(&buf, 0);
+    @memcpy(buf[0..long_phys.len], long_phys);
+    const stored = std.mem.sliceTo(&buf, 0);
+
+    try testing.expectEqualStrings(long_phys, stored);
+    try testing.expect(physMatches(stored, long_phys));
 }
 
 test "shadow_grab: GrabList contains/releaseAll bookkeeping" {
