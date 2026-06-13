@@ -94,6 +94,16 @@ pub const GrabList = struct {
         }
     }
 
+    /// Record a foreign-held (EBUSY) node with no owned fd. Used by tests to
+    /// populate a list without touching /dev/input.
+    pub fn pushUnownedForTest(self: *GrabList, node: []const u8) void {
+        if (self.len >= MAX_GRABS or node.len > NAME_CAP) return;
+        var g = Grab{ .fd = -1, .name_buf = undefined, .name_len = @intCast(node.len), .owned = false };
+        @memcpy(g.name_buf[0..node.len], node);
+        self.grabs[self.len] = g;
+        self.len += 1;
+    }
+
     /// Closing a grabbed fd implicitly releases its EVIOCGRAB.
     pub fn releaseAll(self: *GrabList) void {
         for (self.grabs[0..self.len]) |*g| {

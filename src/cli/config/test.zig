@@ -145,13 +145,40 @@ fn formatEvents(w: anytype, prev: state_mod.GamepadState, curr: state_mod.Gamepa
     }
 }
 
+/// `mapping_arg` is a bare profile name (resolved through the XDG mapping dirs,
+/// matching `padctl switch`) unless it contains a '/', in which case it is used
+/// as a literal path. Caller frees the result when non-null.
+fn resolveMappingPath(allocator: std.mem.Allocator, mapping_arg: []const u8) !?[]const u8 {
+    if (std.mem.indexOfScalar(u8, mapping_arg, '/') != null)
+        return try allocator.dupe(u8, mapping_arg);
+    const dirs = try paths.resolveMappingConfigDirs(allocator);
+    defer paths.freeConfigDirs(allocator, dirs);
+    return resolveMappingNameInDirs(allocator, mapping_arg, dirs);
+}
+
+/// Resolve a bare profile name to `<dir>/<name>.toml` across `dirs` in priority
+/// order, the same lookup `padctl switch` uses. Caller frees when non-null.
+fn resolveMappingNameInDirs(allocator: std.mem.Allocator, name: []const u8, dirs: []const []const u8) !?[]const u8 {
+    const filename = try std.fmt.allocPrint(allocator, "{s}.toml", .{name});
+    defer allocator.free(filename);
+    return paths.findConfig(allocator, filename, dirs);
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     config_path: ?[]const u8,
-    mapping_path: ?[]const u8,
+    mapping_arg: ?[]const u8,
     raw_mode: bool,
     writer: anytype,
 ) !void {
+    const mapping_path: ?[]const u8 = if (mapping_arg) |ma|
+        resolveMappingPath(allocator, ma) catch null
+    else
+        null;
+    defer if (mapping_path) |p| allocator.free(p);
+    if (mapping_arg != null and mapping_path == null)
+        std.log.warn("mapping '{s}' not found", .{mapping_arg.?});
+
     const mapping: ?mapping_mod.ParseResult = blk: {
         const mpath = if (mapping_path) |mp| mp else {
             break :blk null;
@@ -290,6 +317,51 @@ fn formatReport(w: anytype, report: []const u8, remap: ?mapping_mod.RemapMap) !v
 // --- tests ---
 
 const testing = std.testing;
+
+test "resolveMappingPath: slash arg is used as a literal path" {
+    const allocator = testing.allocator;
+    const got = try resolveMappingPath(allocator, "/etc/padctl/mappings/fps.toml");
+    defer if (got) |p| allocator.free(p);
+    try testing.expect(got != null);
+    try testing.expectEqualStrings("/etc/padctl/mappings/fps.toml", got.?);
+}
+
+test "resolveMappingPath: bare name resolves through mapping dirs" {
+    const allocator = testing.allocator;
+    const got = try resolveMappingPath(allocator, "nonexistent_profile_xyz_12345");
+    defer if (got) |p| allocator.free(p);
+    try testing.expectEqual(@as(?[]const u8, null), got);
+}
+
+test "resolveMappingNameInDirs: bare name resolves to the on-disk profile" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "fps.toml", .data = "name = \"fps\"\n" });
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const dirs = [_][]const u8{dir};
+    const got = try resolveMappingNameInDirs(allocator, "fps", &dirs);
+    defer if (got) |p| allocator.free(p);
+    try testing.expect(got != null);
+    try testing.expect(std.mem.endsWith(u8, got.?, "/fps.toml"));
+}
+
+test "resolveMappingNameInDirs: missing name returns null" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const dirs = [_][]const u8{dir};
+    const got = try resolveMappingNameInDirs(allocator, "absent", &dirs);
+    defer if (got) |p| allocator.free(p);
+    try testing.expectEqual(@as(?[]const u8, null), got);
+}
 
 test "formatReport: hex dump without mapping" {
     var out: std.ArrayList(u8) = .{};

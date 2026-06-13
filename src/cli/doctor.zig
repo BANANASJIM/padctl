@@ -157,14 +157,14 @@ fn runInner(allocator: std.mem.Allocator, socket_path: []const u8, writer: anyty
     };
     defer posix.close(connect_fd);
 
-    var resp_buf: [4096]u8 = undefined;
-    const resp = socket_client.sendCommand(connect_fd, "STATUS\n", &resp_buf) catch {
+    const resp = socket_client.sendCommandAlloc(allocator, connect_fd, "STATUS\n", 3000) catch {
         try writer.writeAll("daemon: UP (no status response)\n");
         try printDriverBlock(writer);
         try writer.writeByte('\n');
         try printSupportedDevices(allocator, status_devices, exec_start, writer);
         return;
     };
+    defer allocator.free(resp);
 
     status_devices = parseStatusLine(resp, allocator) catch &.{};
     try writer.print("daemon: up, {d} managed device(s)\n", .{status_devices.len});

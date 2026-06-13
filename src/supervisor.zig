@@ -197,6 +197,13 @@ const PendingKind = enum { hidraw, input_grab };
 // 8 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
 pub const SUPERVISOR_MAX_FDS: usize = 8 + 1 + 4;
 
+/// Type-erased binding to the active dispatch's reload strategy. `ctx` points at
+/// the dispatch value living on `serveLoop`'s stack for the loop's duration.
+const ReloadHook = struct {
+    ctx: *const anyopaque,
+    call: *const fn (ctx: *const anyopaque, sup: *Supervisor) void,
+};
+
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     managed: std.ArrayList(ManagedInstance),
@@ -257,6 +264,46 @@ pub const Supervisor = struct {
     /// True when PADCTL_TRACE_LIFECYCLE=1 at startup. Cached once so hot paths
     /// pay only a bool branch, not a getenv call per event.
     trace_lifecycle: bool = false,
+    /// Reload trigger bound by `serveLoop` to the active dispatch strategy, so a
+    /// RELOAD control-socket command runs the same path as SIGHUP. null until the
+    /// loop installs it.
+    reload_hook: ?ReloadHook = null,
+    /// First config that failed to parse during the in-flight reload. The reload
+    /// path swallows per-file errors (a bad file just drops its device), so this
+    /// records the first failure for `handleReload` to surface as `ERR <file>:
+    /// <reason>` instead of a misleading `OK`. Cleared before each reload.
+    reload_failure: ?ReloadFailure = null,
+
+    /// First failing config of a reload, kept in inline buffers so the socket
+    /// reply path needs no allocation. `recordReloadFailure` fills it once.
+    pub const ReloadFailure = struct {
+        file_buf: [160]u8 = undefined,
+        file_len: usize = 0,
+        reason_buf: [80]u8 = undefined,
+        reason_len: usize = 0,
+
+        fn file(self: *const ReloadFailure) []const u8 {
+            return self.file_buf[0..self.file_len];
+        }
+        fn reason(self: *const ReloadFailure) []const u8 {
+            return self.reason_buf[0..self.reason_len];
+        }
+    };
+
+    /// Record the first config that failed to parse during a reload. Later
+    /// failures are ignored so the reply names the first broken file.
+    fn recordReloadFailure(self: *Supervisor, file_path: []const u8, err: anyerror) void {
+        if (self.reload_failure != null) return;
+        var f: ReloadFailure = .{};
+        const fc = @min(file_path.len, f.file_buf.len);
+        @memcpy(f.file_buf[0..fc], file_path[0..fc]);
+        f.file_len = fc;
+        const name = @errorName(err);
+        const rc = @min(name.len, f.reason_buf.len);
+        @memcpy(f.reason_buf[0..rc], name[0..rc]);
+        f.reason_len = rc;
+        self.reload_failure = f;
+    }
 
     /// Emit a [lifecycle] info line when trace_lifecycle is enabled.
     fn traceLifecycle(self: *const Supervisor, comptime fmt: []const u8, args: anytype) void {
@@ -1640,6 +1687,18 @@ pub const Supervisor = struct {
     ) !void {
         defer self.stopAll();
 
+        const Dispatch = @TypeOf(dispatch);
+        self.reload_hook = .{
+            .ctx = &dispatch,
+            .call = struct {
+                fn call(ctx: *const anyopaque, sup: *Supervisor) void {
+                    const d: *const Dispatch = @ptrCast(@alignCast(ctx));
+                    d.reload(sup);
+                }
+            }.call,
+        };
+        defer self.reload_hook = null;
+
         // 7 base fds + 1 listen + 4 clients = 12
         var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
         const set = SupervisorPollSet.init(self, &pollfds);
@@ -1772,11 +1831,30 @@ pub const Supervisor = struct {
             .status => self.handleStatus(fd),
             .list => self.handleList(fd),
             .devices => self.handleDevices(fd),
+            .reload => self.handleReload(fd),
             .dump_on => self.handleDump(fd, true),
             .dump_off => self.handleDump(fd, false),
             .dump_status => self.handleDumpStatus(fd),
             .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
         }
+    }
+
+    fn handleReload(self: *Supervisor, fd: posix.fd_t) void {
+        var cs = &self.ctrl_sock.?;
+        const hook = self.reload_hook orelse {
+            cs.sendResponse(fd, "ERR reload-unavailable\n");
+            return;
+        };
+        self.reload_failure = null;
+        hook.call(hook.ctx, self);
+        var buf: [control_socket.BUF_SIZE]u8 = undefined;
+        if (self.reload_failure) |*f| {
+            const msg = std.fmt.bufPrint(&buf, "ERR {s}: {s}\n", .{ f.file(), f.reason() }) catch "ERR reload-failed\n";
+            cs.sendResponse(fd, msg);
+            return;
+        }
+        const msg = std.fmt.bufPrint(&buf, "OK reloaded {d} devices\n", .{self.managed.items.len}) catch "OK reloaded\n";
+        cs.sendResponse(fd, msg);
     }
 
     fn handleChordSwitch(self: *Supervisor, fd: posix.fd_t, chord_index: u8) void {
@@ -2054,12 +2132,26 @@ pub const Supervisor = struct {
 
     pub fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
-        var buf: [4096]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        const w = stream.writer();
+        var line: std.ArrayList(u8) = .{};
+        defer line.deinit(self.allocator);
+        self.buildStatusLine(&line) catch {
+            cs.sendResponse(fd, "STATUS\n");
+            return;
+        };
+        cs.sendResponse(fd, line.items);
+    }
+
+    // STATUS is a single newline-terminated line whose length grows with the
+    // managed-device count and with device/mapping name lengths. A fixed buffer
+    // truncated the tail fields (shadow_grabs/shadow_nodes appended last) once
+    // enough long-named devices were attached, so the line is built into a
+    // heap buffer that grows to fit the full reply.
+    fn buildStatusLine(self: *Supervisor, line: *std.ArrayList(u8)) !void {
+        const a = self.allocator;
+        const w = line.writer(a);
         const now_ns = self.nowNs();
 
-        w.writeAll("STATUS") catch return;
+        try w.writeAll("STATUS");
         for (self.managed.items) |*m| {
             const name = m.instance.device_cfg.device.name;
             const state_str: []const u8 = if (m.suspended) "suspended" else "active";
@@ -2074,7 +2166,7 @@ pub const Supervisor = struct {
                 }
                 break :blk "(none)";
             };
-            w.print(" device={s} state={s} mapping={s}", .{ name, state_str, mapping_name }) catch break;
+            try w.print(" device={s} state={s} mapping={s}", .{ name, state_str, mapping_name });
 
             // Diagnostic fields (issue #236).
             const vid: u16 = @intCast(m.instance.device_cfg.device.vid);
@@ -2085,20 +2177,20 @@ pub const Supervisor = struct {
                 .uhid => "uhid",
             };
             const output_fd_alive: bool = m.instance.owner != .none;
-            w.print(" phys_key={s} vid=0x{x:0>4} pid=0x{x:0>4} output_kind={s} output_fd_alive={}", .{
+            try w.print(" phys_key={s} vid=0x{x:0>4} pid=0x{x:0>4} output_kind={s} output_fd_alive={}", .{
                 m.phys_key, vid, pid, output_kind, output_fd_alive,
-            }) catch break;
+            });
 
             if (m.grace_deadline_ns) |dl| {
                 const remaining_ms: u64 = if (dl > now_ns) (dl - now_ns) / std.time.ns_per_ms else 0;
-                w.print(" grace_deadline_remaining_ms={d}", .{remaining_ms}) catch {};
+                try w.print(" grace_deadline_remaining_ms={d}", .{remaining_ms});
             }
 
             var evdev_buf: [256]u8 = undefined;
             const evdev_node = resolveEvdevNode(vid, pid, &evdev_buf) orelse "<unresolved>";
-            w.print(" evdev_node={s}", .{evdev_node}) catch {};
+            try w.print(" evdev_node={s}", .{evdev_node});
 
-            w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len}) catch {};
+            try w.print(" hotplug_pending={d}", .{self.hotplug_pending.items.len});
 
             // write_in_flight_ms=0 when no write is currently blocked; a sustained
             // non-zero value (hundreds of ms) is the smoking gun for a kernel-side
@@ -2109,14 +2201,13 @@ pub const Supervisor = struct {
             const inb_ago_ms: u64 = if (inb == 0 or now_ns < inb) 0 else (now_ns - inb) / std.time.ns_per_ms;
             const outb_ago_ms: u64 = if (outb == 0 or now_ns < outb) 0 else (now_ns - outb) / std.time.ns_per_ms;
             const inflight_ms: u64 = if (ifs == 0 or now_ns < ifs) 0 else (now_ns - ifs) / std.time.ns_per_ms;
-            w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
+            try w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
                 inb_ago_ms, outb_ago_ms, inflight_ms,
-            }) catch {};
+            });
 
-            m.shadow_grabs.appendStatusFields(w) catch {};
+            try m.shadow_grabs.appendStatusFields(w);
         }
-        w.writeByte('\n') catch return;
-        cs.sendResponse(fd, stream.getWritten());
+        try w.writeByte('\n');
     }
 
     fn handleList(self: *Supervisor, fd: posix.fd_t) void {
@@ -2193,7 +2284,7 @@ pub const Supervisor = struct {
     /// Caller owns the returned ParseResult (call deinit on it). Returns null if none configured.
     const DefaultMapping = struct { result: mapping_cfg.ParseResult, stem: []u8 };
 
-    fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?DefaultMapping {
+    fn loadUserDefaultMapping(self: *Supervisor, device_name: []const u8) ?DefaultMapping {
         const ucfg = &(self.user_cfg orelse return null);
         const mapping_name = user_config_mod.findDefaultMapping(ucfg, device_name) orelse return null;
         const path = blk: {
@@ -2210,6 +2301,7 @@ pub const Supervisor = struct {
         defer self.allocator.free(path);
         const result = mapping_cfg.parseFile(self.allocator, path) catch |err| {
             std.log.warn("skipping default mapping {s}: {}", .{ path, err });
+            self.recordReloadFailure(path, err);
             return null;
         };
         const stem = self.allocator.dupe(u8, std.fs.path.stem(path)) catch {
@@ -2228,7 +2320,7 @@ pub const Supervisor = struct {
     /// the mapping file omits a `name =` field). Returns null
     /// when no default mapping is configured or it fails to load/allocate;
     /// on null nothing is leaked. Ownership transfers to the caller.
-    fn buildDefaultMapping(self: *const Supervisor, device_name: []const u8) ?DefaultMappingPtr {
+    fn buildDefaultMapping(self: *Supervisor, device_name: []const u8) ?DefaultMappingPtr {
         const dm = self.loadUserDefaultMapping(device_name) orelse return null;
         const p = self.allocator.create(mapping_cfg.ParseResult) catch {
             var r = dm.result;
@@ -2268,6 +2360,7 @@ pub const Supervisor = struct {
 
             const parsed = config_device.parseFile(self.allocator, toml_path) catch |err| {
                 std.log.warn("skipping device config {s}: {}", .{ toml_path, err });
+                self.recordReloadFailure(toml_path, err);
                 continue;
             };
             const cfg_ptr = try self.allocator.create(config_device.ParseResult);
@@ -4794,6 +4887,167 @@ test "supervisor: Supervisor: status includes mapping name" {
     }
 }
 
+var test_reload_calls: usize = 0;
+
+fn testReloadHookCall(_: *const anyopaque, _: *Supervisor) void {
+    test_reload_calls += 1;
+}
+
+test "supervisor: handleReload runs the hook and reports the device count" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+    var sup = try Supervisor.initForTest(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    var dummy: u8 = 0;
+    test_reload_calls = 0;
+    sup.reload_hook = .{ .ctx = &dummy, .call = testReloadHookCall };
+
+    sup.handleReload(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqual(@as(usize, 1), test_reload_calls);
+    try testing.expectEqualStrings("OK reloaded 1 devices\n", resp_buf[0..n]);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+    }
+}
+
+test "supervisor: handleReload without a hook reports ERR" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    defer sup.ctrl_sock = null;
+
+    sup.handleReload(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("ERR reload-unavailable\n", resp_buf[0..n]);
+}
+
+// Hook that drives the production dir-reload path, mirroring serve()'s dispatch
+// so handleReload sees the same swallowed-parse failures a real reload would.
+const DirReloadDispatch = struct {
+    dir_path: []const u8,
+    fn reload(d: @This(), sup: *Supervisor) void {
+        sup.doReloadFromDir(d.dir_path);
+    }
+};
+
+fn installDirReloadHook(sup: *Supervisor, dispatch: *const DirReloadDispatch) void {
+    sup.reload_hook = .{
+        .ctx = dispatch,
+        .call = struct {
+            fn call(ctx: *const anyopaque, s: *Supervisor) void {
+                const d: *const DirReloadDispatch = @ptrCast(@alignCast(ctx));
+                d.reload(s);
+            }
+        }.call,
+    };
+}
+
+test "supervisor: handleReload reports ERR when a config no longer parses" {
+    const allocator = testing.allocator;
+
+    var cfg_dir = testing.tmpDir(.{});
+    defer cfg_dir.cleanup();
+    try cfg_dir.dir.writeFile(.{ .sub_path = "broken.toml", .data = "this is = not [valid toml" });
+    const cfg_dir_path = try cfg_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(cfg_dir_path);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    defer sup.ctrl_sock = null;
+
+    const dispatch = DirReloadDispatch{ .dir_path = cfg_dir_path };
+    installDirReloadHook(&sup, &dispatch);
+    defer sup.reload_hook = null;
+
+    sup.handleReload(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expect(std.mem.startsWith(u8, resp_buf[0..n], "ERR "));
+    try testing.expect(std.mem.indexOf(u8, resp_buf[0..n], "broken.toml") != null);
+}
+
+test "supervisor: handleReload reports OK when every config parses" {
+    const allocator = testing.allocator;
+
+    var cfg_dir = testing.tmpDir(.{});
+    defer cfg_dir.cleanup();
+    try cfg_dir.dir.writeFile(.{ .sub_path = "device.toml", .data = minimal_device_toml });
+    const cfg_dir_path = try cfg_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(cfg_dir_path);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+    defer sup.ctrl_sock = null;
+
+    const dispatch = DirReloadDispatch{ .dir_path = cfg_dir_path };
+    installDirReloadHook(&sup, &dispatch);
+    defer sup.reload_hook = null;
+
+    sup.handleReload(resp_fds[0]);
+    var resp_buf: [256]u8 = undefined;
+    const n = try posix.read(resp_fds[1], &resp_buf);
+    try testing.expectEqualStrings("OK reloaded 0 devices\n", resp_buf[0..n]);
+}
+
 test "supervisor: Supervisor: status shows (none) when no mapping loaded" {
     const allocator = testing.allocator;
 
@@ -5553,6 +5807,115 @@ test "supervisor: handleStatus includes diagnostic fields (issue #236)" {
         sup.stopAll();
         sup.ctrl_sock = null;
         sup.deinit();
+    }
+}
+
+// Many managed devices with long names overflow the old fixed 4096 STATUS
+// buffer; the tail fields (shadow_grabs/shadow_nodes, appended last) were
+// dropped first and the trailing newline lost. The reply must stay complete.
+test "supervisor: handleStatus does not truncate tail fields under many devices" {
+    const allocator = testing.allocator;
+
+    const long_name_toml =
+        \\[device]
+        \\name = "MegaController With A Deliberately Long Product Name 0123456789"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 3
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\left_x = { offset = 1, type = "i16le" }
+    ;
+
+    const parsed_dev = try device_mod.parseString(allocator, long_name_toml);
+    defer parsed_dev.deinit();
+
+    const N = 24;
+    var mocks: [N]*MockDeviceIO = undefined;
+    var mock_count: usize = 0;
+
+    var sup = try Supervisor.initForTest(allocator);
+
+    var i: usize = 0;
+    while (i < N) : (i += 1) {
+        const mock = try allocator.create(MockDeviceIO);
+        mock.* = try MockDeviceIO.init(allocator, &.{});
+        mocks[mock_count] = mock;
+        mock_count += 1;
+
+        const inst = try makeTestInstance(allocator, mock, &parsed_dev.value);
+        var devname_buf: [32]u8 = undefined;
+        var phys_buf: [48]u8 = undefined;
+        const devname = try std.fmt.bufPrint(&devname_buf, "hidraw{d}", .{i});
+        const phys = try std.fmt.bufPrint(&phys_buf, "usb-0000:00:14.0-{d}.{d}/input0", .{ i, i });
+        try sup.attachWithInstance(devname, phys, inst, null);
+
+        var node_buf: [24]u8 = undefined;
+        const node = try std.fmt.bufPrint(&node_buf, "event{d}-shadow", .{i});
+        sup.managed.items[i].shadow_grabs.pushUnownedForTest(node);
+    }
+
+    const resp_fds = try testSocketpair();
+    defer posix.close(resp_fds[0]);
+    defer posix.close(resp_fds[1]);
+    sup.ctrl_sock = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, -1, -1, -1 },
+        .client_count = 0,
+        .path = "",
+        .allocator = allocator,
+    };
+
+    sup.handleStatus(resp_fds[0]);
+
+    var resp: std.ArrayList(u8) = .{};
+    defer resp.deinit(allocator);
+    var chunk: [65536]u8 = undefined;
+    while (true) {
+        const n = try posix.read(resp_fds[1], &chunk);
+        if (n == 0) break;
+        try resp.appendSlice(allocator, chunk[0..n]);
+        if (std.mem.indexOfScalar(u8, resp.items, '\n') != null) break;
+        if (n < chunk.len) break;
+    }
+    const line = resp.items;
+
+    try testing.expect(line.len > 4096);
+    try testing.expect(std.mem.endsWith(u8, line, "\n"));
+
+    var devices: usize = 0;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, line, search, "device=")) |pos| {
+        devices += 1;
+        search = pos + "device=".len;
+    }
+    try testing.expectEqual(@as(usize, N), devices);
+
+    try testing.expect(std.mem.indexOf(u8, line, "event23-shadow") != null);
+
+    const parsed = try socket_client.parseStatusLine(line, allocator);
+    defer socket_client.freeStatusDevices(allocator, parsed);
+    try testing.expectEqual(@as(usize, N), parsed.len);
+    try testing.expectEqual(@as(usize, 1), parsed[N - 1].shadow_grabs);
+    try testing.expect(std.mem.indexOf(u8, parsed[N - 1].shadow_nodes, "event23-shadow") != null);
+
+    defer {
+        sup.stopAll();
+        sup.ctrl_sock = null;
+        sup.deinit();
+        var k: usize = 0;
+        while (k < mock_count) : (k += 1) {
+            mocks[k].deinit();
+            allocator.destroy(mocks[k]);
+        }
     }
 }
 
