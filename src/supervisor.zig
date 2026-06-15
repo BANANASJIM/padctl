@@ -1515,11 +1515,7 @@ pub const Supervisor = struct {
         entry.retries = 0;
         entry.kind = kind;
         self.hotplug_pending.append(self.allocator, entry) catch return;
-        const spec = linux.itimerspec{
-            .it_value = .{ .sec = 0, .nsec = 300_000_000 },
-            .it_interval = .{ .sec = 0, .nsec = 0 },
-        };
-        _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+        self.armHotplugRetry();
     }
 
     fn enqueueHotplugRetryForPath(self: *Supervisor, path: []const u8) void {
@@ -1578,11 +1574,11 @@ pub const Supervisor = struct {
                     continue;
                 }
                 p.retries += 1;
-                if (p.retries >= 3) {
+                if (p.retries >= HOTPLUG_RETRY_BACKOFF_MS.len) {
                     if (self.last_attach_node_gone) {
                         std.log.debug("hotplug: {s} removed before attach (claimed or unplugged), giving up", .{name});
                     } else {
-                        std.log.warn("hotplug: giving up on {s} after 3 retries", .{name});
+                        std.log.warn("hotplug: giving up on {s} after {d} retries", .{ name, p.retries });
                     }
                     _ = self.hotplug_pending.swapRemove(i);
                 } else {
@@ -1593,12 +1589,30 @@ pub const Supervisor = struct {
             _ = self.hotplug_pending.swapRemove(i);
         }
         if (self.hotplug_pending.items.len > 0) {
-            const spec = linux.itimerspec{
-                .it_value = .{ .sec = 0, .nsec = 300_000_000 },
-                .it_interval = .{ .sec = 0, .nsec = 0 },
-            };
-            _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+            self.armHotplugRetry();
         }
+    }
+
+    fn hotplugRetryDelayMs(p: *const HotplugPending) u32 {
+        return switch (p.kind) {
+            .input_grab => 300,
+            .hidraw => HOTPLUG_RETRY_BACKOFF_MS[@min(p.retries, HOTPLUG_RETRY_BACKOFF_MS.len - 1)],
+        };
+    }
+
+    fn armHotplugRetry(self: *Supervisor) void {
+        if (self.hotplug_retry_fd < 0) return;
+        var min_ms: u32 = std.math.maxInt(u32);
+        for (self.hotplug_pending.items) |*p| {
+            const ms = hotplugRetryDelayMs(p);
+            if (ms < min_ms) min_ms = ms;
+        }
+        if (min_ms == std.math.maxInt(u32)) return;
+        const spec = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = @as(i64, min_ms) * std.time.ns_per_ms },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+        _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
     }
 
     fn drainInotify(self: *Supervisor) void {
@@ -2641,11 +2655,7 @@ pub const Supervisor = struct {
                     else => false,
                 };
                 self.last_attach_node_gone = node_gone;
-                if (node_gone) {
-                    std.log.debug("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
-                } else {
-                    std.log.warn("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
-                }
+                std.log.debug("hotplug: {s} not ready ({s}), will retry", .{ path, @errorName(err) });
                 return error.HotplugTransient;
             }
             return err;
@@ -3241,6 +3251,8 @@ test "supervisor: hotplug rawinfo failure is transient" {
     try testing.expectError(error.HotplugTransient, sup.attachWithRoot("hidraw7", dev_root));
 }
 
+const HOTPLUG_RETRY_GIVEUP_GUARD: usize = 100;
+
 // Drives the real event-driven retry path once per call: arms the timerfd so
 // the NONBLOCK read inside drainHotplugRetry succeeds, then drains.
 fn pumpHotplugRetry(sup: *Supervisor) void {
@@ -3293,8 +3305,6 @@ test "supervisor: hotplug retry rides out a multi-second transient (issue #431/#
     try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
     try testing.expectEqual(HOTPLUG_RETRY_BACKOFF_MS.len, giveup_pumps);
 }
-
-const HOTPLUG_RETRY_GIVEUP_GUARD: usize = 100;
 
 test "supervisor: attachWithInstanceResult reports duplicate devname without taking instance" {
     const allocator = testing.allocator;
