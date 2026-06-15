@@ -194,6 +194,12 @@ const HotplugPending = struct {
 
 const PendingKind = enum { hidraw, input_grab };
 
+// Per-attempt delay (ms) for the event-driven hotplug attach retry. The array
+// length is the give-up cap; the cumulative window (~7.6s) covers a cold-boot /
+// upgrade transient where udev permissions, kernel driver bind, or firmware are
+// not yet settled and a single ADD uevent must not be dropped permanently.
+const HOTPLUG_RETRY_BACKOFF_MS = [_]u32{ 300, 300, 500, 800, 1200, 1500, 1500, 1500 };
+
 // 8 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
 pub const SUPERVISOR_MAX_FDS: usize = 8 + 1 + 4;
 
@@ -253,6 +259,12 @@ pub const Supervisor = struct {
     /// "restart failed after bookkeeping" branch without racing real
     /// thread creation.
     test_fail_rebind_restart: bool = false,
+    /// Test-only seam: when non-null, `attachWithRoot()` returns
+    /// `error.HotplugTransient` and decrements this counter on each call until
+    /// it reaches zero, then attaches normally. Lets retry-budget tests drive a
+    /// device that is transient for a controllable number of consecutive
+    /// retries without touching real device nodes.
+    test_attach_transient_remaining: ?usize = null,
     /// Daemon-wide fallback counter for UHID uniq strings when `phys_key` is
     /// null (virtual / Bluetooth devices without sysfs phys). Passed by pointer
     /// into every `DeviceInstance.init` call site; see `src/io/uniq.zig`.
@@ -2609,6 +2621,16 @@ pub const Supervisor = struct {
 
     pub fn attachWithRoot(self: *Supervisor, devname: []const u8, dev_root: []const u8) !void {
         self.last_attach_node_gone = false;
+        if (builtin.is_test) {
+            if (self.test_attach_transient_remaining) |remaining| {
+                if (remaining > 0) {
+                    self.test_attach_transient_remaining = remaining - 1;
+                    return error.HotplugTransient;
+                }
+                self.test_attach_transient_remaining = null;
+                return;
+            }
+        }
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
 
@@ -3218,6 +3240,61 @@ test "supervisor: hotplug rawinfo failure is transient" {
 
     try testing.expectError(error.HotplugTransient, sup.attachWithRoot("hidraw7", dev_root));
 }
+
+// Drives the real event-driven retry path once per call: arms the timerfd so
+// the NONBLOCK read inside drainHotplugRetry succeeds, then drains.
+fn pumpHotplugRetry(sup: *Supervisor) void {
+    const spec = linux.itimerspec{
+        .it_value = .{ .sec = 0, .nsec = 1 },
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+    };
+    _ = linux.timerfd_settime(sup.hotplug_retry_fd, .{}, &spec, null);
+    var ev: [8]u8 = undefined;
+    while (true) {
+        const n = posix.read(sup.hotplug_retry_fd, &ev) catch break;
+        if (n == 0) break;
+    }
+    sup.drainHotplugRetry();
+}
+
+test "supervisor: hotplug retry rides out a multi-second transient (issue #431/#402 budget)" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    // (a) A device transient for 5 consecutive retries — past the old 3-retry
+    // give-up cap — must survive and attach once the transient clears.
+    sup.test_attach_transient_remaining = 5;
+    sup.enqueueHotplugRetry("hidraw9");
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+
+    var pumps: usize = 0;
+    while (sup.hotplug_pending.items.len > 0 and pumps < HOTPLUG_RETRY_BACKOFF_MS.len + 2) : (pumps += 1) {
+        pumpHotplugRetry(&sup);
+    }
+    // Cleared after exactly 5 transient retries + 1 successful attach; the entry
+    // is gone because it attached, not because the budget was exhausted.
+    try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
+    try testing.expectEqual(@as(?usize, null), sup.test_attach_transient_remaining);
+    try testing.expectEqual(@as(usize, 6), pumps);
+
+    // (b) A permanently-transient device must still be given up within a bounded
+    // number of retries (== the backoff array length), never looping forever.
+    sup.test_attach_transient_remaining = std.math.maxInt(usize);
+    sup.enqueueHotplugRetry("hidraw10");
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+
+    var giveup_pumps: usize = 0;
+    while (sup.hotplug_pending.items.len > 0 and giveup_pumps < HOTPLUG_RETRY_GIVEUP_GUARD) : (giveup_pumps += 1) {
+        pumpHotplugRetry(&sup);
+    }
+    try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
+    try testing.expectEqual(HOTPLUG_RETRY_BACKOFF_MS.len, giveup_pumps);
+}
+
+const HOTPLUG_RETRY_GIVEUP_GUARD: usize = 100;
 
 test "supervisor: attachWithInstanceResult reports duplicate devname without taking instance" {
     const allocator = testing.allocator;
