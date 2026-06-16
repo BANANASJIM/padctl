@@ -4,6 +4,7 @@ const socket_client = @import("socket_client.zig");
 const udev = @import("install/udev.zig");
 const scan = @import("scan.zig");
 const toml_extract = @import("toml_extract.zig");
+const perm_hint = @import("perm_hint.zig");
 const paths = @import("../config/paths.zig");
 
 pub const StatusDevice = socket_client.StatusDevice;
@@ -479,7 +480,8 @@ pub fn printHidrawDiagnosis(writer: anytype, path: ?[]const u8, access_denied: b
     };
     if (access_denied) {
         try writer.print("  hidraw: {s} exists but permission denied (mode/owner; you are not in the input group)\n", .{p});
-        try writer.writeAll("  hint: sudo usermod -aG input $USER && re-login (or replug to apply udev rules)\n");
+        try writer.writeAll("  ");
+        perm_hint.writeInputGroupHint(writer);
     } else {
         try writer.print("  hidraw: {s}\n", .{p});
     }

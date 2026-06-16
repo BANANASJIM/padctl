@@ -6,6 +6,7 @@ const hidraw = @import("../io/hidraw.zig");
 const readPhysicalPath = hidraw.readPhysicalPath;
 const readInterfaceId = hidraw.readInterfaceId;
 const toml_extract = @import("toml_extract.zig");
+const perm_hint = @import("perm_hint.zig");
 const socket_client = @import("socket_client.zig");
 const StatusDevice = socket_client.StatusDevice;
 
@@ -538,17 +539,18 @@ pub fn render(writer: anytype, entries: []const ScanEntry, daemon_devices: []con
     }
     if (denied > 0) {
         try writer.print("\nwarning: permission denied opening {d} hidraw node(s)\n", .{denied});
-        try writer.writeAll("hint: sudo usermod -aG input $USER && re-login (or replug to apply udev rules)\n");
+        perm_hint.writeInputGroupHint(writer);
     }
 
     if (unmatched > 0) {
         try writer.writeByte('\n');
-        try writer.writeAll("To capture an unmatched device:\n");
+        try writer.writeAll("To capture an unmatched device (records HID reports and writes a starter devices/*.toml):\n");
         for (entries) |e| {
             if (e.config_path == null) {
-                try writer.print("  padctl-capture --vid 0x{x:0>4} --pid 0x{x:0>4}\n", .{ e.vid, e.pid });
+                try writer.print("  padctl-capture --vid 0x{x:0>4} --pid 0x{x:0>4} --output <name>.toml\n", .{ e.vid, e.pid });
             }
         }
+        try writer.writeAll("See docs/src/getting-started.md (\"Adding a new device\") for the full workflow.\n");
     }
 }
 

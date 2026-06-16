@@ -216,6 +216,24 @@ Exit 0 = valid. Exit 1 = validation errors printed to stderr. Exit 2 = file not 
 
 The flag is repeatable: `padctl --validate a.toml --validate b.toml` validates both files and exits with the worst code seen.
 
+## Adding a new device
+
+padctl 的目标是「新设备 = 一个 `.toml`，零代码」。当 `padctl scan` 显示某个设备
+unmatched（没有匹配的 device config）时，用 `padctl-capture` 录制它的 HID 报文并
+生成一个起始 TOML 骨架：
+
+```sh
+padctl-capture --vid 0xVVVV --pid 0xPPPP --output mypad.toml
+```
+
+`padctl-capture` 会提示后续步骤。完整流程：
+
+1. **Capture** — 运行上面的命令录制报文，得到 `mypad.toml` 骨架。
+2. **Refine** — 检查并调整 `[report]` 字段的 offset / type，使按键和摇杆映射正确。
+3. **Install** — 放到用户配置目录：`mkdir -p ~/.config/padctl/devices && cp mypad.toml ~/.config/padctl/devices/`
+4. **Validate** — `padctl --validate ~/.config/padctl/devices/mypad.toml`
+5. **Test decode** — `padctl config test` 实时预览解码出的具名按键/摇杆事件，确认字段正确。
+
 ## Generate Device Docs
 
 ```sh

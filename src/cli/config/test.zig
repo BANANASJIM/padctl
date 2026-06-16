@@ -7,6 +7,7 @@ const device_mod = @import("../../config/device.zig");
 const mapping_mod = @import("../../config/mapping.zig");
 const paths = @import("../../config/paths.zig");
 const scan_mod = @import("../scan.zig");
+const perm_hint = @import("../perm_hint.zig");
 const interpreter_mod = @import("../../core/interpreter.zig");
 const state_mod = @import("../../core/state.zig");
 
@@ -29,12 +30,15 @@ const OpenedDevice = struct {
     iface: ?u8,
 };
 
-fn openHidrawByVidPid(vid: u16, pid: u16) !OpenedDevice {
+fn openHidrawByVidPid(vid: u16, pid: u16, denied: *bool) !OpenedDevice {
     var i: u8 = 0;
     while (i < MAX_HIDRAW) : (i += 1) {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
-        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| {
+            if (err == error.AccessDenied) denied.* = true;
+            continue;
+        };
 
         var info: ioctl.HidrawDevinfo = undefined;
         if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) {
@@ -55,13 +59,17 @@ fn openAutoResolved(
     allocator: std.mem.Allocator,
     dirs: []const []const u8,
     out_config: *?[]const u8,
+    denied: *bool,
 ) !OpenedDevice {
     var fallback: ?OpenedDevice = null;
     var i: u8 = 0;
     while (i < MAX_HIDRAW) : (i += 1) {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
-        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch |err| {
+            if (err == error.AccessDenied) denied.* = true;
+            continue;
+        };
 
         var info: ioctl.HidrawDevinfo = undefined;
         if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) {
@@ -164,6 +172,19 @@ fn resolveMappingNameInDirs(allocator: std.mem.Allocator, name: []const u8, dirs
     return paths.findConfig(allocator, filename, dirs);
 }
 
+/// Report why no hidraw node could be opened. When every candidate node was
+/// permission-denied, the user is not missing a device — they lack `input`
+/// group access, so route to the shared remedy instead of "no device found".
+fn reportNoDevice(writer: anytype, denied: bool) void {
+    if (denied) {
+        writer.writeAll("error: a hidraw node was permission-denied.\n") catch {};
+        perm_hint.writeInputGroupHint(writer);
+    } else {
+        writer.writeAll("error: no hidraw device found.\n") catch {};
+        writer.writeAll("hint: connect a supported controller, then run `padctl scan`.\n") catch {};
+    }
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     config_path: ?[]const u8,
@@ -205,8 +226,10 @@ pub fn run(
         parsed_device = parsed;
         const vid = std.math.cast(u16, parsed.value.device.vid) orelse return error.MalformedConfig;
         const pid = std.math.cast(u16, parsed.value.device.pid) orelse return error.MalformedConfig;
-        opened = openHidrawByVidPid(vid, pid) catch |e| {
-            std.log.err("no hidraw device matching {x:0>4}:{x:0>4}: {}", .{ vid, pid, e });
+        var denied = false;
+        opened = openHidrawByVidPid(vid, pid, &denied) catch |e| {
+            writer.print("error: no hidraw device matching {x:0>4}:{x:0>4}.\n", .{ vid, pid }) catch {};
+            if (denied) perm_hint.writeInputGroupHint(writer);
             return e;
         };
     } else {
@@ -219,8 +242,9 @@ pub fn run(
         } else |e| {
             std.log.warn("failed to resolve device config dirs: {}", .{e});
         }
-        opened = openAutoResolved(allocator, dirs, &auto_path) catch |e| {
-            std.log.warn("no hidraw device available: {}", .{e});
+        var denied = false;
+        opened = openAutoResolved(allocator, dirs, &auto_path, &denied) catch |e| {
+            reportNoDevice(writer, denied);
             return e;
         };
         if (auto_path) |p| {
@@ -317,6 +341,24 @@ fn formatReport(w: anytype, report: []const u8, remap: ?mapping_mod.RemapMap) !v
 // --- tests ---
 
 const testing = std.testing;
+
+test "reportNoDevice: all-denied routes to the input-group hint" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    reportNoDevice(buf.writer(testing.allocator), true);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "permission-denied") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "usermod -aG input $USER") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "no hidraw device found") == null);
+}
+
+test "reportNoDevice: genuinely absent device does not show the group hint" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    reportNoDevice(buf.writer(testing.allocator), false);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "no hidraw device found") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "padctl scan") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "usermod") == null);
+}
 
 test "resolveMappingPath: slash arg is used as a literal path" {
     const allocator = testing.allocator;

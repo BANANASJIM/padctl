@@ -22,6 +22,10 @@ test "help: usage block lists doctor, config, and dump" {
     try testing.expect(std.mem.indexOf(u8, usage, "padctl dump") != null);
 }
 
+test "help: mentions the padctl-capture companion tool" {
+    try testing.expect(std.mem.indexOf(u8, main_mod.help_text, "padctl-capture") != null);
+}
+
 // --- 1. Install: directory structure paths ---
 
 test "install paths: bin under prefix" {
