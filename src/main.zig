@@ -28,6 +28,7 @@ pub const cli = struct {
     pub const reload = @import("cli/reload.zig");
     pub const list_mappings = @import("cli/list_mappings.zig");
     pub const socket_client = @import("cli/socket_client.zig");
+    pub const error_hint = @import("cli/error_hint.zig");
     pub const switch_mapping = @import("cli/switch_mapping.zig");
     pub const status = @import("cli/status.zig");
     pub const doctor = @import("cli/doctor.zig");
