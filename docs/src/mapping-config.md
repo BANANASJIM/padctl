@@ -148,6 +148,7 @@ invert_y = true
 | `invert_x` | bool | — | Invert X axis |
 | `invert_y` | bool | — | Invert Y axis |
 | `blend_stick` | bool | `false` | When `true`, gyro joystick output is **added** to the physical stick value (`clamp(physical + gyro, -32767..32767)`) instead of replacing it. Only applies when `mode = "joystick"`. Ignored for `mode = "mouse"`. |
+| `minimum_output` | float | `0.0` | Minimum stick deflection magnitude while gyro is active, as a fraction of full scale (clamped to `0.0`–`1.0`, where `1.0` ≈ `20000` stick units). When the computed output magnitude is non-zero but below this floor, it is scaled up to exactly `minimum_output` while preserving direction. `0.0` disables the floor (default, no-op). A still controller stays at zero, and `deadzone` always wins (input absorbed by the deadzone produces zero output, never resurrected by the floor). Only applies when `mode = "joystick"`; ignored for `mode = "mouse"`. Useful for escaping an in-game stick deadzone so small gyro motion still registers. |
 
 ## `[stick.left]` / `[stick.right]`
 

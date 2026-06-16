@@ -252,6 +252,25 @@ This lets the physical stick handle coarse movement while the gyro provides fine
 
 > **Note:** when the physical stick is already at full deflection (±32767), the gyro contribution is clamped out entirely. `blend_stick` has no effect when `mode = "mouse"`.
 
+#### Escaping an in-game deadzone (`minimum_output`)
+
+Some games apply their own deadzone to the right stick, so a small gyro deflection produces no in-game camera movement at all — slow, precise aiming simply does nothing until you move past the game's threshold. `minimum_output` raises the gyro output to a floor whenever gyro is active, so even a slight motion clears that deadzone:
+
+```toml
+[gyro]
+mode           = "joystick"
+target         = "right_stick"
+activate       = "LS"
+sensitivity    = 100
+deadzone       = 200
+smoothing      = 0.3
+minimum_output = 0.15      # floor stick output at 15% of full scale while gyro moves
+```
+
+`minimum_output` is a fraction of full scale clamped to the `0.0`–`1.0` range (where `1.0` corresponds to roughly `20000` stick units). When the computed output magnitude is non-zero but below this floor, padctl scales it up to exactly `minimum_output` while preserving the aim direction — so a 5% deflection becomes a 15% deflection pointing the same way. The floor only kicks in for motion that already cleared the gyro `deadzone`: a perfectly still controller stays at zero, and any input absorbed by `deadzone` is never resurrected by `minimum_output`. Tune the value so the smallest deliberate motion just clears the game's own stick deadzone — start around `0.10`–`0.20` and raise it if slow aiming still produces no movement.
+
+> **Note:** `minimum_output` only applies in `mode = "joystick"`. Mouse mode integrates motion frame by frame, so it has no deadzone to escape and ignores this field. The default `minimum_output = 0.0` disables the floor entirely.
+
 ### Sticks (`[stick.left]` / `[stick.right]`)
 
 Three modes:
