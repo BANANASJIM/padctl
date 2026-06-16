@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const socket_client = @import("socket_client.zig");
+const error_hint = @import("error_hint.zig");
 
 pub fn run(allocator: std.mem.Allocator, socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
     const fd = socket_client.connectToSocket(socket_path) catch {
@@ -15,12 +16,16 @@ pub fn run(allocator: std.mem.Allocator, socket_path: []const u8, writer: anytyp
     };
     defer allocator.free(resp);
 
+    if (std.mem.startsWith(u8, resp, "ERR")) {
+        error_hint.report(err_writer, resp, "");
+        return 1;
+    }
+
     writer.writeAll(resp) catch {};
     if (resp.len == 0 or resp[resp.len - 1] != '\n') {
         writer.writeAll("\n") catch {};
     }
-
-    return if (std.mem.startsWith(u8, resp, "ERR")) 1 else 0;
+    return 0;
 }
 
 // --- tests ---

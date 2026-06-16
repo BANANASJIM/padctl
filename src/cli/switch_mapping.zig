@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const socket_client = @import("socket_client.zig");
+const error_hint = @import("error_hint.zig");
 const mapping_discovery = @import("../config/mapping_discovery.zig");
 
 pub fn run(allocator: std.mem.Allocator, name: []const u8, device_id: ?[]const u8, socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
@@ -30,12 +31,14 @@ pub fn run(allocator: std.mem.Allocator, name: []const u8, device_id: ?[]const u
         return 1;
     };
 
-    writer.writeAll(resp) catch {};
-    if (resp.len == 0 or resp[resp.len - 1] != '\n') {
-        writer.writeAll("\n") catch {};
+    if (std.mem.startsWith(u8, resp, "OK")) {
+        writer.writeAll(resp) catch {};
+        if (resp.len == 0 or resp[resp.len - 1] != '\n') writer.writeAll("\n") catch {};
+        return 0;
     }
 
-    return if (std.mem.startsWith(u8, resp, "OK")) 0 else 1;
+    error_hint.report(err_writer, resp, name);
+    return 1;
 }
 
 // --- tests ---

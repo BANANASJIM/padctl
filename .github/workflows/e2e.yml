@@ -55,14 +55,25 @@ jobs:
             echo "uhid_ok=false" >> "$GITHUB_OUTPUT"
             echo "::warning::UHID gate DISABLED — /dev/uhid not accessible on this runner. Layer 2/3 tests will skip."
           fi
+      - name: Probe /dev/uinput accessibility
+        id: uinput_probe
+        run: |
+          if [ -r /dev/uinput ] && [ -w /dev/uinput ]; then
+            echo "uinput_ok=true" >> "$GITHUB_OUTPUT"
+            echo "uinput gate ENABLED — /dev/uinput is accessible, enforcing PADCTL_TEST_REQUIRE_UINPUT=1"
+          else
+            echo "uinput_ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::uinput gate DISABLED — /dev/uinput not accessible on this runner. shadow-grab integration test will skip."
+          fi
       - name: Run e2e tests
         env:
           PADCTL_TEST_REQUIRE_UHID: ${{ steps.uhid_probe.outputs.uhid_ok == 'true' && '1' || '0' }}
         run: zig build test-e2e
-      - name: Run integration tests (UHID)
-        if: steps.uhid_probe.outputs.uhid_ok == 'true'
+      - name: Run integration tests (UHID + uinput)
+        if: steps.uhid_probe.outputs.uhid_ok == 'true' || steps.uinput_probe.outputs.uinput_ok == 'true'
         env:
-          PADCTL_TEST_REQUIRE_UHID: "1"
+          PADCTL_TEST_REQUIRE_UHID: ${{ steps.uhid_probe.outputs.uhid_ok == 'true' && '1' || '0' }}
+          PADCTL_TEST_REQUIRE_UINPUT: ${{ steps.uinput_probe.outputs.uinput_ok == 'true' && '1' || '0' }}
         run: zig build test-integration
       - name: Run UHID kernel-touching unit tests (test-uhid)
         if: steps.uhid_probe.outputs.uhid_ok == 'true'
