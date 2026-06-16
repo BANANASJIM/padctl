@@ -1,0 +1,33 @@
+name: nix-flake
+on:
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - build.zig.zon
+      - build.zig.zon2json-lock
+      - .github/workflows/nix-flake.yml
+  pull_request:
+    paths:
+      - flake.nix
+      - flake.lock
+      - build.zig.zon
+      - build.zig.zon2json-lock
+      - .github/workflows/nix-flake.yml
+
+concurrency:
+  group: nix-flake-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: nix build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - name: nix build .#default
+        run: nix build .#default --print-build-logs
+      - name: padctl --version
+        run: ./result/bin/padctl --version
