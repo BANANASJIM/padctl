@@ -74,6 +74,23 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
     return cli;
 }
 
+/// The skeleton is a starting point, not a finished config. Print the steps
+/// that close the device-authoring loop: where to install it, how to validate
+/// the TOML, and how to watch decoded input.
+fn printNextSteps(path: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf,
+        \\
+        \\Next steps:
+        \\  1. Review the skeleton and refine the [report] field offsets/types.
+        \\  2. Install it:   mkdir -p ~/.config/padctl/devices && cp {s} ~/.config/padctl/devices/
+        \\  3. Validate it:  padctl --validate ~/.config/padctl/devices/{s}
+        \\  4. Watch input:  padctl config test   (decodes live reports into named events)
+        \\
+    , .{ path, std.fs.path.basename(path) }) catch return;
+    _ = posix.write(posix.STDERR_FILENO, msg) catch 0;
+}
+
 fn printHelp() void {
     const help =
         \\Usage: padctl-capture [options]
@@ -351,6 +368,7 @@ pub fn main() !void {
         try toml_gen.emitToml(result, dev_info, allocator, &bw.interface);
         try bw.interface.flush();
         std.log.info("Written to {s}", .{out_path});
+        printNextSteps(out_path);
     } else {
         const stdout = std.fs.File.stdout();
         var bw = stdout.writer(&out_buf);

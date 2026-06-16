@@ -29,6 +29,7 @@ pub const cli = struct {
     pub const list_mappings = @import("cli/list_mappings.zig");
     pub const socket_client = @import("cli/socket_client.zig");
     pub const error_hint = @import("cli/error_hint.zig");
+    pub const perm_hint = @import("cli/perm_hint.zig");
     pub const switch_mapping = @import("cli/switch_mapping.zig");
     pub const status = @import("cli/status.zig");
     pub const doctor = @import("cli/doctor.zig");
@@ -729,6 +730,10 @@ pub const help_text =
     \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
     \\  --help, -h          Show this help
     \\  --version, -V       Show version
+    \\
+    \\Companion tools:
+    \\  padctl-capture        Record a device's HID reports and emit a starter devices/*.toml
+    \\                        (run `padctl-capture --help`; see "Adding a new device" in the docs)
     \\
 ;
 
