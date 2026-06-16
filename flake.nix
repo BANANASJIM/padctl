@@ -13,7 +13,7 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
 
       env = system: zig2nix.outputs.zig-env.${system} {
-        zig = zig2nix.outputs.packages.${system}.zig."0.15.2".bin;
+        zig = zig2nix.outputs.packages.${system}.zig-0_15_2;
       };
     in
     {
@@ -23,8 +23,9 @@
           zigTarget = builtins.replaceStrings [ "-linux" ] [ "-linux-musl" ] system;
         in
         {
-          default = e.packageForTarget zigTarget {
+          default = e.package {
             src = ./.;
+            inherit zigTarget;
             zigBuildFlags = [ "-Doptimize=ReleaseSafe" ];
             meta = {
               description = "HID gamepad remapper — declarative TOML config, uinput output";
@@ -40,11 +41,10 @@
       devShells = forAllSystems (system:
         let
           e = env system;
-          pkgs = nixpkgs.legacyPackages.${system};
         in
         {
           default = e.mkShell {
-            packages = [ pkgs.namcap ];
+            packages = [ ];
           };
         }
       );

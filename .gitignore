@@ -35,6 +35,6 @@ formal/*.jar
 formal/*_TTrace_*
 formal/*.cfg
 
-# trap-sanitizer test coredumps
-core
-core.*
+# trap-sanitizer test coredumps (root-anchored so src/core/ is not excluded)
+/core
+/core.*
