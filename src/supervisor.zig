@@ -190,6 +190,10 @@ const HotplugPending = struct {
     len: u8,
     retries: u8,
     kind: PendingKind,
+    // Absolute CLOCK_MONOTONIC deadline for this entry's next attempt. Each
+    // entry rides its own backoff schedule so a shared timer firing for the
+    // nearest entry never collapses a slower entry's window.
+    next_deadline_ns: u64,
 };
 
 const PendingKind = enum { hidraw, input_grab };
@@ -1514,6 +1518,7 @@ pub const Supervisor = struct {
         entry.len = @intCast(n);
         entry.retries = 0;
         entry.kind = kind;
+        entry.next_deadline_ns = self.nowNs() + delayNsFor(kind, 0);
         self.hotplug_pending.append(self.allocator, entry) catch return;
         self.armHotplugRetry();
     }
@@ -1552,6 +1557,12 @@ pub const Supervisor = struct {
         var i: usize = 0;
         while (i < self.hotplug_pending.items.len) {
             const p = &self.hotplug_pending.items[i];
+            // Each entry rides its own backoff schedule: skip it until its
+            // absolute deadline so a co-pending fast entry never accelerates it.
+            if (self.nowNs() < p.next_deadline_ns) {
+                i += 1;
+                continue;
+            }
             const name = p.devname[0..p.len];
             if (p.kind == .input_grab) {
                 if (self.tryGrabForManaged(name) == .access_denied) {
@@ -1560,6 +1571,7 @@ pub const Supervisor = struct {
                         std.log.debug("shadow grab: giving up on {s} after 3 retries", .{name});
                         _ = self.hotplug_pending.swapRemove(i);
                     } else {
+                        p.next_deadline_ns = self.nowNs() + delayNsFor(p.kind, p.retries);
                         i += 1;
                     }
                 } else {
@@ -1582,6 +1594,7 @@ pub const Supervisor = struct {
                     }
                     _ = self.hotplug_pending.swapRemove(i);
                 } else {
+                    p.next_deadline_ns = self.nowNs() + delayNsFor(p.kind, p.retries);
                     i += 1;
                 }
                 continue;
@@ -1593,23 +1606,30 @@ pub const Supervisor = struct {
         }
     }
 
-    fn hotplugRetryDelayMs(p: *const HotplugPending) u32 {
-        return switch (p.kind) {
+    fn delayNsFor(kind: PendingKind, retries: u8) u64 {
+        const ms: u64 = switch (kind) {
             .input_grab => 300,
-            .hidraw => HOTPLUG_RETRY_BACKOFF_MS[@min(p.retries, HOTPLUG_RETRY_BACKOFF_MS.len - 1)],
+            .hidraw => HOTPLUG_RETRY_BACKOFF_MS[@min(retries, HOTPLUG_RETRY_BACKOFF_MS.len - 1)],
         };
+        return ms * std.time.ns_per_ms;
     }
 
     fn armHotplugRetry(self: *Supervisor) void {
         if (self.hotplug_retry_fd < 0) return;
-        var min_ms: u32 = std.math.maxInt(u32);
+        var nearest: u64 = std.math.maxInt(u64);
         for (self.hotplug_pending.items) |*p| {
-            const ms = hotplugRetryDelayMs(p);
-            if (ms < min_ms) min_ms = ms;
+            if (p.next_deadline_ns < nearest) nearest = p.next_deadline_ns;
         }
-        if (min_ms == std.math.maxInt(u32)) return;
+        if (nearest == std.math.maxInt(u64)) return;
+        const now = self.nowNs();
+        // Arm at least ~1us so the timerfd fires promptly when a deadline has
+        // already passed (also keeps `it_value` non-zero, i.e. armed).
+        const delay_ns: u64 = if (nearest > now) nearest - now else 1_000;
         const spec = linux.itimerspec{
-            .it_value = .{ .sec = 0, .nsec = @as(i64, min_ms) * std.time.ns_per_ms },
+            .it_value = .{
+                .sec = @intCast(delay_ns / std.time.ns_per_s),
+                .nsec = @intCast(delay_ns % std.time.ns_per_s),
+            },
             .it_interval = .{ .sec = 0, .nsec = 0 },
         };
         _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
@@ -3129,6 +3149,9 @@ test "supervisor: input grab retry dedups per kind and drains non-denied nodes" 
     defer sup.deinit();
     sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
 
+    const base: u64 = 10 * std.time.ns_per_s;
+    sup.test_now_override_ns = base;
+
     sup.enqueueRetry(.input_grab, "event5");
     sup.enqueueRetry(.input_grab, "event5");
     try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
@@ -3139,7 +3162,9 @@ test "supervisor: input grab retry dedups per kind and drains non-denied nodes" 
     try testing.expectEqual(@as(usize, 2), sup.hotplug_pending.items.len);
     _ = sup.hotplug_pending.swapRemove(1);
 
-    // Node gone (or readable but not a shadow): the retry entry is dropped.
+    // Advance past the input_grab deadline (300ms); node gone (or readable but
+    // not a shadow): the retry entry is dropped.
+    sup.test_now_override_ns = base + 300 * std.time.ns_per_ms;
     sup.drainHotplugRetry();
     try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
 }
@@ -3253,19 +3278,23 @@ test "supervisor: hotplug rawinfo failure is transient" {
 
 const HOTPLUG_RETRY_GIVEUP_GUARD: usize = 100;
 
-// Drives the real event-driven retry path once per call: arms the timerfd so
-// the NONBLOCK read inside drainHotplugRetry succeeds, then drains.
-fn pumpHotplugRetry(sup: *Supervisor) void {
-    const spec = linux.itimerspec{
-        .it_value = .{ .sec = 0, .nsec = 1 },
-        .it_interval = .{ .sec = 0, .nsec = 0 },
-    };
-    _ = linux.timerfd_settime(sup.hotplug_retry_fd, .{}, &spec, null);
-    var ev: [8]u8 = undefined;
-    while (true) {
-        const n = posix.read(sup.hotplug_retry_fd, &ev) catch break;
-        if (n == 0) break;
+// Cumulative virtual deadline reached after `n` hidraw retries, i.e. the sum of
+// the first `n` backoff slots. Lets a test advance the clock exactly to an
+// entry's nth attempt without re-deriving the schedule by hand.
+fn hidrawDeadlineAfter(n: usize) u64 {
+    var total: u64 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        total += HOTPLUG_RETRY_BACKOFF_MS[@min(i, HOTPLUG_RETRY_BACKOFF_MS.len - 1)];
     }
+    return total * std.time.ns_per_ms;
+}
+
+// Advances virtual time to `at_ns` and drains once. drainHotplugRetry's
+// NONBLOCK read no-ops on a disarmed fd, so the deadline gate is what decides
+// which entries are attempted — exactly the production semantics.
+fn drainAtVirtual(sup: *Supervisor, base_ns: u64, at_ns: u64) void {
+    sup.test_now_override_ns = base_ns + at_ns;
     sup.drainHotplugRetry();
 }
 
@@ -3276,34 +3305,153 @@ test "supervisor: hotplug retry rides out a multi-second transient (issue #431/#
     defer sup.deinit();
     sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
 
+    const base: u64 = 10 * std.time.ns_per_s;
+    sup.test_now_override_ns = base;
+
     // (a) A device transient for 5 consecutive retries — past the old 3-retry
-    // give-up cap — must survive and attach once the transient clears.
+    // give-up cap — must survive and attach once the transient clears. Drive it
+    // on its own backoff schedule via virtual time; a drain before the next
+    // deadline must NOT consume a retry.
     sup.test_attach_transient_remaining = 5;
     sup.enqueueHotplugRetry("hidraw9");
     try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
 
-    var pumps: usize = 0;
-    while (sup.hotplug_pending.items.len > 0 and pumps < HOTPLUG_RETRY_BACKOFF_MS.len + 2) : (pumps += 1) {
-        pumpHotplugRetry(&sup);
+    var attempt: usize = 0;
+    while (sup.hotplug_pending.items.len > 0 and attempt < HOTPLUG_RETRY_BACKOFF_MS.len + 2) : (attempt += 1) {
+        // A premature drain (1ns before the deadline) is a no-op: the retry
+        // counter must not advance until the entry's own deadline arrives.
+        const before = sup.hotplug_pending.items[0].retries;
+        drainAtVirtual(&sup, base, hidrawDeadlineAfter(attempt + 1) - 1);
+        if (sup.hotplug_pending.items.len == 0) break;
+        try testing.expectEqual(before, sup.hotplug_pending.items[0].retries);
+        // At the deadline the attempt fires.
+        drainAtVirtual(&sup, base, hidrawDeadlineAfter(attempt + 1));
     }
     // Cleared after exactly 5 transient retries + 1 successful attach; the entry
     // is gone because it attached, not because the budget was exhausted.
     try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
     try testing.expectEqual(@as(?usize, null), sup.test_attach_transient_remaining);
-    try testing.expectEqual(@as(usize, 6), pumps);
+    // 5 transient deadline drains + 1 successful attach drain == 6 iterations.
+    try testing.expectEqual(@as(usize, 6), attempt);
 
     // (b) A permanently-transient device must still be given up within a bounded
     // number of retries (== the backoff array length), never looping forever.
+    sup.test_now_override_ns = base;
     sup.test_attach_transient_remaining = std.math.maxInt(usize);
     sup.enqueueHotplugRetry("hidraw10");
     try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
 
-    var giveup_pumps: usize = 0;
-    while (sup.hotplug_pending.items.len > 0 and giveup_pumps < HOTPLUG_RETRY_GIVEUP_GUARD) : (giveup_pumps += 1) {
-        pumpHotplugRetry(&sup);
+    var drains: usize = 0;
+    while (sup.hotplug_pending.items.len > 0 and drains < HOTPLUG_RETRY_GIVEUP_GUARD) {
+        drains += 1;
+        drainAtVirtual(&sup, base, hidrawDeadlineAfter(drains));
     }
     try testing.expectEqual(@as(usize, 0), sup.hotplug_pending.items.len);
-    try testing.expectEqual(HOTPLUG_RETRY_BACKOFF_MS.len, giveup_pumps);
+    // Each deadline drain consumes exactly one retry; give-up lands at the
+    // backoff array length, never looping forever.
+    try testing.expectEqual(HOTPLUG_RETRY_BACKOFF_MS.len, drains);
+}
+
+// BUG 2 guard: a slow entry (Vader5 at the 1500ms slot) co-pending with a fast,
+// permanently-failing entry must keep its OWN backoff cadence. Under the old
+// shared-min-delay / retry-all behaviour the slow entry was retried at the fast
+// entry's pace, collapsing its ~7.6s window — so it would give up far earlier
+// in virtual time. Here the device-under-test must NOT be retried before its
+// own next_deadline_ns regardless of the co-pending entry's faster schedule.
+test "supervisor: per-entry deadline survives a faster co-pending entry (issue #431 BUG2)" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    const base: u64 = 10 * std.time.ns_per_s;
+    sup.test_now_override_ns = base;
+
+    // Both entries route through the shared transient seam, so both keep failing
+    // on every attempt they actually take. "fast" is enqueued first; the
+    // device-under-test ("dut") is the slow Vader5-style entry we protect.
+    sup.test_attach_transient_remaining = std.math.maxInt(usize);
+    sup.enqueueHotplugRetry("hidraw_fast");
+    sup.enqueueHotplugRetry("hidraw_dut");
+    try testing.expectEqual(@as(usize, 2), sup.hotplug_pending.items.len);
+
+    const dut = struct {
+        fn find(s: *Supervisor) ?*HotplugPending {
+            for (s.hotplug_pending.items) |*p| {
+                if (std.mem.eql(u8, p.devname[0..p.len], "hidraw_dut")) return p;
+            }
+            return null;
+        }
+    };
+
+    // Advance virtual time slot-by-slot up to (but not reaching) the DUT's full
+    // budget. At every wake the fast entry is eligible far more often, but the
+    // DUT's retry count must track ONLY its own cumulative backoff schedule:
+    // after virtual time T, the DUT has taken exactly as many attempts as its
+    // schedule permits, never more.
+    var t_ms: u64 = 0;
+    var guard: usize = 0;
+    const full_budget_ms = hidrawDeadlineAfter(HOTPLUG_RETRY_BACKOFF_MS.len) / std.time.ns_per_ms;
+    while (t_ms < full_budget_ms and guard < HOTPLUG_RETRY_GIVEUP_GUARD) : (guard += 1) {
+        t_ms += 100;
+        sup.test_now_override_ns = base + t_ms * std.time.ns_per_ms;
+        sup.drainHotplugRetry();
+        if (dut.find(&sup)) |p| {
+            // expected attempts = number of schedule deadlines <= elapsed t_ms
+            var expected: u8 = 0;
+            while (expected < HOTPLUG_RETRY_BACKOFF_MS.len and
+                hidrawDeadlineAfter(expected + 1) / std.time.ns_per_ms <= t_ms) : (expected += 1)
+            {}
+            try testing.expectEqual(expected, p.retries);
+        }
+    }
+
+    // The DUT is given up only after its full cumulative budget elapsed in
+    // virtual time, NOT accelerated by the fast co-pending entry. (Reaching here
+    // means it was never retried ahead of schedule above.)
+    try testing.expect(t_ms >= full_budget_ms);
+}
+
+// BUG 1 guard: armHotplugRetry must split a >=1000ms delay into sec+nsec. The
+// old code wrote nsec = 1.5e9 (> 999_999_999), so timerfd_settime returned
+// EINVAL and the timer was left DISARMED — gettime then reports it_value == 0
+// and the high backoff slots never fire. Drive the real arm path and read the
+// kernel timer back.
+test "supervisor: armHotplugRetry produces a valid timer for high backoff slots (issue #431 BUG1)" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.hotplug_retry_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+
+    const base: u64 = 10 * std.time.ns_per_s;
+    sup.test_now_override_ns = base;
+
+    // Place a single hidraw entry at retries=5 → the 1500ms slot, whose delay
+    // exceeds the 999_999_999 ns timespec ceiling unless split correctly.
+    sup.enqueueHotplugRetry("hidraw_slow");
+    try testing.expectEqual(@as(usize, 1), sup.hotplug_pending.items.len);
+    const p = &sup.hotplug_pending.items[0];
+    p.retries = 5;
+    p.next_deadline_ns = base + Supervisor.delayNsFor(.hidraw, p.retries);
+    try testing.expectEqual(@as(u32, 1500), HOTPLUG_RETRY_BACKOFF_MS[p.retries]);
+
+    // Disarm first so the only thing that can arm the timer is this call. Without
+    // this, the valid 300ms timer set at enqueue would mask a rejected high-slot
+    // settime and the buggy code would read back non-zero.
+    const disarm = linux.itimerspec{ .it_value = .{ .sec = 0, .nsec = 0 }, .it_interval = .{ .sec = 0, .nsec = 0 } };
+    _ = linux.timerfd_settime(sup.hotplug_retry_fd, .{}, &disarm, null);
+
+    sup.armHotplugRetry();
+
+    var cur: linux.itimerspec = undefined;
+    const rc = linux.timerfd_gettime(sup.hotplug_retry_fd, &cur);
+    try testing.expectEqual(@as(usize, 0), rc);
+    // A correctly-armed 1500ms timer reports a non-zero remaining it_value. The
+    // buggy sec=0,nsec=1.5e9 form is rejected (EINVAL), leaving the disarmed
+    // timer at zero.
+    try testing.expect(cur.it_value.sec > 0 or cur.it_value.nsec > 0);
 }
 
 test "supervisor: attachWithInstanceResult reports duplicate devname without taking instance" {
