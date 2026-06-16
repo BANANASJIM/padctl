@@ -157,7 +157,9 @@ pub const testing_support = struct {
     pub const supervisor_suspend_output_continuity_test = @import("test/supervisor_suspend_output_continuity_test.zig");
     pub const wedge_instrumentation_test = @import("test/wedge_instrumentation_test.zig");
     pub const libusb_capability_test = @import("test/libusb_capability_test.zig");
-    pub const shadow_grab_integration_test = @import("test/shadow_grab_integration_test.zig");
+    // shadow_grab_integration_test runs as its own `test-integration` artifact
+    // (it needs /dev/uinput); the unprivileged `zig build test` run could only
+    // ever SkipZigTest it, so it is intentionally NOT registered here.
     // Permanent canary — proves test discovery walks into testing_support.
     // If the discovery mechanism breaks again, this test stops running and
     // we can prove the regression with a deliberate failure.

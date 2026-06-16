@@ -290,6 +290,23 @@ pub fn build(b: *std.Build) void {
     grace_int_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(grace_int_tests).step);
 
+    // shadow_grab_integration: watchdog real-kernel validation.
+    // Creates a uinput shadow node, sweeps, and asserts EVIOCGRAB exclusivity.
+    // Own test artifact so its test{} blocks execute under test-integration; the
+    // check-matrix container has no /dev/uinput so it skips gracefully unless
+    // PADCTL_TEST_REQUIRE_UINPUT=1 (set by the privileged e2e job).
+    const shadow_int_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/shadow_grab_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    shadow_int_mod.addImport("src", src_mod);
+    const shadow_int_tests = b.addTest(.{ .root_module = shadow_int_mod, .filters = test_filters });
+    applyLibusb(b, shadow_int_tests, use_libusb, vendored);
+    shadow_int_tests.linkLibC();
+    integration_step.dependOn(&b.addRunArtifact(shadow_int_tests).step);
+
     // Phase 13 Wave 3 T5f: Layer 1 routing tests — pure pipe2 fixture, no
     // /dev/uhid, no privilege required. Hooks to the main test step so the
     // CI green bar covers the UHID routing switch.

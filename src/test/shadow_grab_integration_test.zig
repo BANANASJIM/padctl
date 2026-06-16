@@ -1,18 +1,52 @@
-//! Integration test for the shadow input-node watchdog (issue #406).
+//! Integration test for the shadow input-node watchdog (issue #406 / #411).
 //!
 //! Creates a uinput device that mimics a kernel-driver shadow node (BUS_USB
 //! plus the managed pad's physical VID/PID, no uniq), runs the sweep, and
 //! asserts the node is exclusively grabbed — a second EVIOCGRAB fails with
-//! EBUSY — and released again by releaseAll(). Skips when /dev/uinput or the
-//! created node is unavailable, same gating as the other uinput tests.
+//! EBUSY — and released again by releaseAll().
+//!
+//! ## Runtime behaviour (mirrors uhid_uniq_pairing_test.zig)
+//!
+//! - On a host without `/dev/uinput` access (unprivileged containers, the
+//!   plain `check-matrix` CI job): logs an explicit warning so the absence is
+//!   visible, then behaves one of two ways:
+//!     * Default: returns `error.SkipZigTest` — the suite stays green while
+//!       making the gap audible.
+//!     * When `PADCTL_TEST_REQUIRE_UINPUT=1` is set: returns
+//!       `error.UinputAccessRequired` — a hard failure, so an environment
+//!       meant to have /dev/uinput access but lacking it surfaces the breakage
+//!       immediately. The privileged `e2e` job sets it when /dev/uinput is
+//!       accessible, which is the only place this flagship #406/#411 watchdog
+//!       test runs for real and a regression turns it RED.
 
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const testing = std.testing;
 
-const shadow_grab = @import("../io/shadow_grab.zig");
-const ioctl = @import("../io/ioctl_constants.zig");
+// Imported via the `src` barrel (same as the other Layer 2 integration tests)
+// so this file is built as its own `test-integration` artifact rather than
+// pulled into the unprivileged `zig build test` run, where /dev/uinput is
+// never available and the watchdog assertions can only ever SkipZigTest.
+const src = @import("src");
+const shadow_grab = src.io.shadow_grab;
+const ioctl = src.io.ioctl_constants;
+
+fn requireUinput() bool {
+    const v = std.posix.getenv("PADCTL_TEST_REQUIRE_UINPUT") orelse return false;
+    return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+}
+
+fn reportMissingUinput(reason: []const u8) error{ SkipZigTest, UinputAccessRequired } {
+    std.log.warn(
+        "shadow_grab_integration_test: /dev/uinput unavailable ({s}) — shadow-grab watchdog CI signal is SILENT. " ++
+            "Run in a privileged environment with /dev/uinput, " ++
+            "or set PADCTL_TEST_REQUIRE_UINPUT=1 to turn this into a hard failure.",
+        .{reason},
+    );
+    if (requireUinput()) return error.UinputAccessRequired;
+    return error.SkipZigTest;
+}
 
 const BUS_USB: u16 = 0x03;
 const BUS_VIRTUAL: u16 = 0x06;
@@ -31,7 +65,7 @@ fn expectIoctlOk(rc: usize) !void {
 
 fn createPad(bustype: u16, vid: u16, pid: u16) !posix.fd_t {
     const fd = posix.open("/dev/uinput", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.AccessDenied, error.FileNotFound => return reportMissingUinput("/dev/uinput open failed"),
         else => return err,
     };
     errdefer posix.close(fd);
@@ -79,7 +113,7 @@ test "shadow_grab: sweep grabs a USB-bus shadow node exclusively and releases it
     defer destroyPad(ufd);
 
     var name_buf: [24]u8 = undefined;
-    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const node = findEventNode(vid, pid, &name_buf) orelse return reportMissingUinput("created uinput node did not appear under /dev/input");
 
     var list = shadow_grab.GrabList{};
     defer list.releaseAll();
@@ -119,7 +153,7 @@ test "shadow_grab: sweep prunes a grab whose device is gone (ENODEV)" {
     defer if (!destroyed) destroyPad(ufd);
 
     var name_buf: [24]u8 = undefined;
-    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const node = findEventNode(vid, pid, &name_buf) orelse return reportMissingUinput("created uinput node did not appear under /dev/input");
 
     var list = shadow_grab.GrabList{};
     defer list.releaseAll();
@@ -141,7 +175,7 @@ test "shadow_grab: a node already grabbed by another reader is counted (EBUSY)" 
     defer destroyPad(ufd);
 
     var name_buf: [24]u8 = undefined;
-    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const node = findEventNode(vid, pid, &name_buf) orelse return reportMissingUinput("created uinput node did not appear under /dev/input");
     const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
 
     // First reader takes the exclusive grab.
@@ -171,7 +205,7 @@ test "shadow_grab: sweep re-grabs an unowned EBUSY node once the foreign holder 
     defer destroyPad(ufd);
 
     var name_buf: [24]u8 = undefined;
-    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const node = findEventNode(vid, pid, &name_buf) orelse return reportMissingUinput("created uinput node did not appear under /dev/input");
     const params: shadow_grab.Params = .{ .phys_vendor = vid, .phys_product = pid };
 
     var path_buf: [40]u8 = undefined;
@@ -210,7 +244,7 @@ test "shadow_grab: sweep skips virtual-bus nodes (padctl's own uinput outputs)" 
     defer destroyPad(ufd);
 
     var name_buf: [24]u8 = undefined;
-    const node = findEventNode(vid, pid, &name_buf) orelse return error.SkipZigTest;
+    const node = findEventNode(vid, pid, &name_buf) orelse return reportMissingUinput("created uinput node did not appear under /dev/input");
 
     var list = shadow_grab.GrabList{};
     defer list.releaseAll();
