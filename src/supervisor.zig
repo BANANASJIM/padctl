@@ -3352,12 +3352,11 @@ test "supervisor: hotplug retry rides out a multi-second transient (issue #431/#
     try testing.expectEqual(HOTPLUG_RETRY_BACKOFF_MS.len, drains);
 }
 
-// BUG 2 guard: a slow entry (Vader5 at the 1500ms slot) co-pending with a fast,
-// permanently-failing entry must keep its OWN backoff cadence. Under the old
-// shared-min-delay / retry-all behaviour the slow entry was retried at the fast
-// entry's pace, collapsing its ~7.6s window — so it would give up far earlier
-// in virtual time. Here the device-under-test must NOT be retried before its
-// own next_deadline_ns regardless of the co-pending entry's faster schedule.
+// BUG 2 guard: a slow hidraw entry (seeded deep into the backoff at the 1500ms
+// slot) co-pending with a genuinely faster entry (fresh, 300ms slot) must keep
+// its OWN deadline. Under the old shared-min-delay / retry-all behaviour the slow
+// entry was retried on every wake the fast entry triggered, collapsing its
+// window. The per-entry deadline gate must hold it until its own deadline.
 test "supervisor: per-entry deadline survives a faster co-pending entry (issue #431 BUG2)" {
     const allocator = testing.allocator;
 
@@ -3368,49 +3367,44 @@ test "supervisor: per-entry deadline survives a faster co-pending entry (issue #
     const base: u64 = 10 * std.time.ns_per_s;
     sup.test_now_override_ns = base;
 
-    // Both entries route through the shared transient seam, so both keep failing
-    // on every attempt they actually take. "fast" is enqueued first; the
-    // device-under-test ("dut") is the slow Vader5-style entry we protect.
-    sup.test_attach_transient_remaining = std.math.maxInt(usize);
-    sup.enqueueHotplugRetry("hidraw_fast");
-    sup.enqueueHotplugRetry("hidraw_dut");
-    try testing.expectEqual(@as(usize, 2), sup.hotplug_pending.items.len);
-
-    const dut = struct {
-        fn find(s: *Supervisor) ?*HotplugPending {
-            for (s.hotplug_pending.items) |*p| {
-                if (std.mem.eql(u8, p.devname[0..p.len], "hidraw_dut")) return p;
+    const find = struct {
+        fn p(s: *Supervisor, name: []const u8) ?*HotplugPending {
+            for (s.hotplug_pending.items) |*it| {
+                if (std.mem.eql(u8, it.devname[0..it.len], name)) return it;
             }
             return null;
         }
-    };
+    }.p;
 
-    // Advance virtual time slot-by-slot up to (but not reaching) the DUT's full
-    // budget. At every wake the fast entry is eligible far more often, but the
-    // DUT's retry count must track ONLY its own cumulative backoff schedule:
-    // after virtual time T, the DUT has taken exactly as many attempts as its
-    // schedule permits, never more.
-    var t_ms: u64 = 0;
-    var guard: usize = 0;
-    const full_budget_ms = hidrawDeadlineAfter(HOTPLUG_RETRY_BACKOFF_MS.len) / std.time.ns_per_ms;
-    while (t_ms < full_budget_ms and guard < HOTPLUG_RETRY_GIVEUP_GUARD) : (guard += 1) {
-        t_ms += 100;
+    // Both route through the shared transient seam so neither ever attaches.
+    sup.test_attach_transient_remaining = std.math.maxInt(usize);
+    sup.enqueueHotplugRetry("hidraw_fast"); // fresh -> 300ms deadline
+    sup.enqueueHotplugRetry("hidraw_dut");
+
+    // Seed the device-under-test deep into the backoff so it is genuinely slower
+    // than the co-pending fast entry.
+    const seed_slot: u8 = 5; // 1500ms
+    {
+        const d = find(&sup, "hidraw_dut").?;
+        d.retries = seed_slot;
+        d.next_deadline_ns = base + Supervisor.delayNsFor(.hidraw, seed_slot);
+    }
+    const dut_due_ms = HOTPLUG_RETRY_BACKOFF_MS[seed_slot]; // 1500
+
+    // The fast entry is eligible every 300ms and is retried repeatedly, but the
+    // DUT must hold its seeded retry count until its own 1500ms deadline.
+    var t_ms: u64 = 100;
+    while (t_ms < dut_due_ms) : (t_ms += 100) {
         sup.test_now_override_ns = base + t_ms * std.time.ns_per_ms;
         sup.drainHotplugRetry();
-        if (dut.find(&sup)) |p| {
-            // expected attempts = number of schedule deadlines <= elapsed t_ms
-            var expected: u8 = 0;
-            while (expected < HOTPLUG_RETRY_BACKOFF_MS.len and
-                hidrawDeadlineAfter(expected + 1) / std.time.ns_per_ms <= t_ms) : (expected += 1)
-            {}
-            try testing.expectEqual(expected, p.retries);
-        }
+        try testing.expectEqual(seed_slot, find(&sup, "hidraw_dut").?.retries);
     }
 
-    // The DUT is given up only after its full cumulative budget elapsed in
-    // virtual time, NOT accelerated by the fast co-pending entry. (Reaching here
-    // means it was never retried ahead of schedule above.)
-    try testing.expect(t_ms >= full_budget_ms);
+    // At its own deadline the DUT advances by exactly one attempt — proof it was
+    // never dragged forward by the faster co-pending entry.
+    sup.test_now_override_ns = base + dut_due_ms * std.time.ns_per_ms;
+    sup.drainHotplugRetry();
+    try testing.expectEqual(@as(u8, seed_slot + 1), find(&sup, "hidraw_dut").?.retries);
 }
 
 // BUG 1 guard: armHotplugRetry must split a >=1000ms delay into sec+nsec. The
