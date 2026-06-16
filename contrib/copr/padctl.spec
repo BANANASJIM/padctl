@@ -1,6 +1,6 @@
 # Version: update this field when cutting a new COPR release (not overwritten by release.yml).
 Name:           padctl
-Version:        0.1.0
+Version:        0.1.16
 Release:        1%{?dist}
 Summary:        HID gamepad remapper with declarative TOML config
 
@@ -44,7 +44,7 @@ systemd socket activation and udev integration.
 %{_bindir}/padctl-capture
 %{_bindir}/padctl-debug
 %{_bindir}/padctl-reconnect
-%{_unitdir}/padctl.service
+%{_userunitdir}/padctl.service
 %{_udevrulesdir}/60-padctl.rules
 %{_udevrulesdir}/61-padctl-driver-block.rules
 %{_udevrulesdir}/90-padctl.rules
@@ -52,15 +52,23 @@ systemd socket activation and udev integration.
 %{_datadir}/padctl/
 
 %post
-%systemd_post padctl.service
+%systemd_user_post padctl.service
+# modules-load.d only loads at next boot; load now so the daemon works first run.
+modprobe uhid uinput || true
 
 %preun
-%systemd_preun padctl.service
+%systemd_user_preun padctl.service
 
 %postun
-%systemd_postun_with_restart padctl.service
+%systemd_user_postun_with_restart padctl.service
 
 %changelog
+* Mon Jun 16 2026 padctl maintainers <maintainers@padctl.dev> - 0.1.16-1
+- Bump to 0.1.16
+- Fix %%files: padctl install writes the user unit to %%{_userunitdir}, not %%{_unitdir}
+- Use systemd user-scope scriptlet macros to match the user unit
+- modprobe uhid uinput in %%post so the daemon works before the next boot
+
 * Fri Apr 04 2026 padctl maintainers <maintainers@padctl.dev> - 0.1.0-1
 - Fix ExclusiveArch (was incorrectly BuildArch)
 - Update udev rules: 99-padctl.rules -> 60-padctl.rules + 61-padctl-driver-block.rules
