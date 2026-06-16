@@ -60,6 +60,16 @@ fn validateExtended(
     errors: *std.ArrayList(ValidationError),
     allocator: std.mem.Allocator,
 ) !void {
+    const libusb = device.usesLibusb(cfg);
+    for (cfg.report) |report| {
+        // report.size must fit a read buffer or every report is silently dropped.
+        if (report.size < 0 or report.size > device.MAX_REPORT_SIZE) {
+            try addError(errors, allocator, file, "report '{s}': size {d} exceeds max readable report size {d} bytes — reports this large are never delivered", .{ report.name, report.size, device.MAX_REPORT_SIZE });
+        } else if (libusb and report.size > device.LIBUSB_SLOT_SIZE) {
+            try addError(errors, allocator, file, "report '{s}': size {d} exceeds the {d}-byte libusb read slot — vendor/suppress transports truncate reads to {d} bytes", .{ report.name, report.size, device.LIBUSB_SLOT_SIZE, device.LIBUSB_SLOT_SIZE });
+        }
+    }
+
     for (cfg.report) |report| {
         // Pass 5: button_group bit_index < 8 * group_size
         if (report.button_group) |bg| {
@@ -125,6 +135,25 @@ fn validateExtended(
     }
 }
 
+// Pass 9: unknown keys in known device tables — typo'd keys parse cleanly but
+// are silently dropped, so surface them as diagnostics.
+fn lintDeviceFields(
+    content: []const u8,
+    file: []const u8,
+    errors: *std.ArrayList(ValidationError),
+    allocator: std.mem.Allocator,
+) !void {
+    var findings = device.lintUnknownFields(allocator, content) catch return;
+    defer findings.deinit(allocator);
+    for (findings.items) |f| {
+        if (f.table.len == 0) {
+            try addError(errors, allocator, file, "unknown key '{s}' at top-level (line {d}) — typo or misplaced field?", .{ f.unknown_key, f.line });
+        } else {
+            try addError(errors, allocator, file, "unknown key '{s}' inside [{s}] (line {d}) — typo or misplaced field?", .{ f.unknown_key, f.table, f.line });
+        }
+    }
+}
+
 /// Validate a single TOML file. Auto-detects device vs mapping schema by
 /// scanning for a `[device]` header. Returns a slice of errors (caller owns,
 /// call freeErrors). Exit semantics: 0 errors = valid, >0 = invalid.
@@ -160,6 +189,7 @@ pub fn validateFile(
             };
             defer parsed.deinit();
             try validateExtended(&parsed.value, path, &errors, allocator);
+            try lintDeviceFields(content, path, &errors, allocator);
             if (errors.items.len == 0) {
                 device.validate(&parsed.value) catch |err| {
                     const msg = try std.fmt.allocPrint(allocator, "schema error: {}", .{err});
@@ -445,6 +475,88 @@ test "validate: undeclared interface in report: error reported" {
     var found = false;
     for (errors) |e| {
         if (std.mem.indexOf(u8, e.message, "interface 99") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "validate: report.size over 512-byte cap: actionable error reported" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 600
+        \\[output]
+        \\name = "T"
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expect(errors.len > 0);
+    var found = false;
+    for (errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "exceeds max readable report size 512") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "validate: report.size over libusb 64-byte slot on vendor transport: note reported" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 128
+        \\[output]
+        \\name = "T"
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    var found = false;
+    for (errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "libusb read slot") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "validate: device config with unknown key reports actionable error" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\siz = 8
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[output]
+        \\name = "T"
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expect(errors.len > 0);
+    var found = false;
+    for (errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "unknown key 'siz'") != null and
+            std.mem.indexOf(u8, e.message, "[device]") != null) found = true;
     }
     try testing.expect(found);
 }

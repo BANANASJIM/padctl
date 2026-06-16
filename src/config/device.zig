@@ -1,10 +1,20 @@
 const std = @import("std");
 const toml = @import("toml");
+const toml_lint = @import("toml_lint.zig");
 const state = @import("../core/state.zig");
 const presets = @import("presets.zig");
 const input_codes = @import("input_codes.zig");
 
 pub const ButtonId = state.ButtonId;
+
+// Largest report a read path can deliver. The hidraw read buffer
+// (src/event_loop.zig — `var buf: [512]u8`) caps HID reports at 512 bytes; the
+// libusb ring slot (src/io/usbraw.zig — SLOT_SIZE = 64) truncates vendor reads
+// to 64. A report.size above MAX_REPORT_SIZE can never be filled, so the
+// interpreter (src/core/interpreter.zig — `raw.len < cr.src.size` guard) drops
+// every report with no diagnostic. Reject at validate time instead.
+pub const MAX_REPORT_SIZE: i64 = 512;
+pub const LIBUSB_SLOT_SIZE: i64 = 64;
 
 pub const InterfaceConfig = struct {
     id: i64,
@@ -342,6 +352,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     }
 
     for (cfg.report) |report| {
+        if (report.size < 0 or report.size > MAX_REPORT_SIZE) return error.ReportSizeTooLarge;
+
         if (report.fields) |fields| {
             var seen_buf: [64][]const u8 = undefined;
             var seen_len: usize = 0;
@@ -490,6 +502,61 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     }
 }
 
+// --- schema lint: detect unknown keys in device config tables ---
+//
+// sam701/zig-toml silently drops unknown fields, so a typo'd device key (e.g.
+// `ofset` for `offset`) parses cleanly and is never applied. devices/*.toml is
+// the primary contribution surface, so flag stray keys the same way mapping
+// configs do. Free-form HashMap sections (report.fields, output.axes/buttons/
+// mapping, button_group.map, command/aux button maps) accept arbitrary keys
+// and are skipped.
+pub const LintFinding = toml_lint.LintFinding;
+
+fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
+    const sf = toml_lint.structFieldNames;
+    if (header.len == 0) return null; // device config has no top-level keys
+
+    if (std.mem.eql(u8, header, "device")) return sf(DeviceInfo);
+    if (std.mem.eql(u8, header, "device.init")) return sf(InitConfig);
+    if (std.mem.eql(u8, header, "device.interface")) return sf(InterfaceConfig);
+
+    if (std.mem.eql(u8, header, "report")) return sf(ReportConfig);
+    if (std.mem.eql(u8, header, "report.match")) return sf(MatchConfig);
+    if (std.mem.eql(u8, header, "report.button_group")) return sf(ButtonGroupConfig);
+    if (std.mem.eql(u8, header, "report.fields")) return null; // free-form
+    if (std.mem.eql(u8, header, "report.checksum")) return sf(ChecksumConfig);
+
+    if (std.mem.eql(u8, header, "output")) return sf(OutputConfig);
+    if (std.mem.eql(u8, header, "output.dpad")) return sf(DpadOutputConfig);
+    if (std.mem.eql(u8, header, "output.force_feedback")) return sf(ForceFeedbackConfig);
+    if (std.mem.eql(u8, header, "output.aux")) return sf(AuxConfig);
+    if (std.mem.eql(u8, header, "output.touchpad")) return sf(TouchpadConfig);
+    if (std.mem.eql(u8, header, "output.imu")) return sf(ImuConfig);
+    if (std.mem.eql(u8, header, "output.axes") or
+        std.mem.eql(u8, header, "output.buttons") or
+        std.mem.eql(u8, header, "output.mapping") or
+        std.mem.eql(u8, header, "output.aux.buttons")) return null; // free-form
+
+    if (std.mem.eql(u8, header, "wasm")) return sf(WasmConfig);
+    if (std.mem.eql(u8, header, "wasm.overrides")) return sf(WasmOverridesConfig);
+
+    // commands.<name> -> CommandConfig; commands.<name>.checksum -> CommandChecksumConfig.
+    if (std.mem.startsWith(u8, header, "commands.")) {
+        if (std.mem.endsWith(u8, header, ".checksum")) return sf(CommandChecksumConfig);
+        return sf(CommandConfig);
+    }
+
+    return null; // unrecognised header — skip (forward-compat)
+}
+
+pub fn lintUnknownFields(allocator: std.mem.Allocator, raw_toml: []const u8) !std.ArrayList(LintFinding) {
+    return toml_lint.lint(allocator, raw_toml, lintAllowlistFor);
+}
+
+fn warnLintFindings(findings: []const LintFinding) void {
+    toml_lint.warnFindings(findings);
+}
+
 pub const ParseResult = toml.Parsed(DeviceConfig);
 
 // Parse + apply presets without running validate(). The CLI lint tool needs the
@@ -508,6 +575,13 @@ pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseR
             };
         }
     }
+    if (lintUnknownFields(allocator, content)) |findings| {
+        defer {
+            var f = findings;
+            f.deinit(allocator);
+        }
+        warnLintFindings(findings.items);
+    } else |_| {} // lint failure (OOM) must not break parsing
     return result;
 }
 
@@ -1974,4 +2048,141 @@ test "device: init referencing nonexistent interface id is rejected" {
         \\commands = ["5aa5"]
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_init_toml));
+}
+
+// --- report.size bound tests ---
+
+fn reportSizeToml(comptime size: []const u8) []const u8 {
+    return "[device]\n" ++
+        "name = \"T\"\n" ++
+        "vid = 1\n" ++
+        "pid = 2\n" ++
+        "[[device.interface]]\n" ++
+        "id = 0\n" ++
+        "class = \"hid\"\n" ++
+        "[[report]]\n" ++
+        "name = \"r\"\n" ++
+        "interface = 0\n" ++
+        "size = " ++ size ++ "\n";
+}
+
+test "device: report.size at the 512-byte cap validates" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, reportSizeToml("512"));
+    defer result.deinit();
+    try std.testing.expectEqual(@as(i64, 512), result.value.report[0].size);
+}
+
+test "device: report.size above the 512-byte cap is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.ReportSizeTooLarge, parseString(allocator, reportSizeToml("513")));
+}
+
+test "device: report.size far above the cap is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.ReportSizeTooLarge, parseString(allocator, reportSizeToml("4096")));
+}
+
+// --- unknown-field linter tests ---
+
+test "device: lintUnknownFields flags an unknown key in [device]" {
+    const allocator = std.testing.allocator;
+    const typo =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\nam = "typo"
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+    ;
+    var findings = try lintUnknownFields(allocator, typo);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    try std.testing.expectEqualStrings("nam", findings.items[0].unknown_key);
+    try std.testing.expectEqualStrings("device", findings.items[0].table);
+}
+
+test "device: lintUnknownFields flags a typo'd [[report]] key" {
+    const allocator = std.testing.allocator;
+    const typo =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\siz = 8
+    ;
+    var findings = try lintUnknownFields(allocator, typo);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    try std.testing.expectEqualStrings("siz", findings.items[0].unknown_key);
+    try std.testing.expectEqualStrings("report", findings.items[0].table);
+}
+
+test "device: lintUnknownFields leaves a clean config unflagged" {
+    const allocator = std.testing.allocator;
+    var findings = try lintUnknownFields(allocator, test_toml);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "device: lintUnknownFields does not flag free-form HashMap sections" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\any_user_field = { offset = 0, type = "u8" }
+        \\[output]
+        \\name = "T"
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\Whatever = "BTN_NORTH"
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "device: all shipped devices/*.toml lint clean" {
+    const allocator = std.testing.allocator;
+    var dir = try std.fs.cwd().openDir("devices", .{ .iterate = true });
+    defer dir.close();
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var checked: usize = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".toml")) continue;
+        const content = try dir.readFileAlloc(allocator, entry.path, 1024 * 1024);
+        defer allocator.free(content);
+        var findings = try lintUnknownFields(allocator, content);
+        defer findings.deinit(allocator);
+        if (findings.items.len > 0) {
+            for (findings.items) |f|
+                std.debug.print("  {s}: unknown key '{s}' in [{s}] (line {d})\n", .{ entry.path, f.unknown_key, f.table, f.line });
+        }
+        try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
 }

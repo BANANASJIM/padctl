@@ -103,7 +103,6 @@ expect = { offset = 74, type = "u32le" }
 # --- WASM plugin: IMU calibration via Feature Report 0x05 ---
 [wasm]
 plugin = "plugins/sony_imu_calibration.wasm"
-calibration_reports = [0x05]
 
 [wasm.overrides]
 process_report = true
