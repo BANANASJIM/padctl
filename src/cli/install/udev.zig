@@ -241,6 +241,24 @@ pub fn installUdevRules(allocator: std.mem.Allocator, plan: *const InstallPlan, 
     };
 }
 
+/// Modules are loaded only on a live root install — never in staging/package
+/// mode (no live kernel to act on) and never unprivileged (modprobe would
+/// fail). Pure predicate so tests can table-drive it. Same gate as
+/// applyDriverState.
+pub fn shouldLoadModules(plan: *const InstallPlan) bool {
+    return !plan.staging_mode and plan.is_root;
+}
+
+/// Best-effort load of the kernel modules padctl needs at runtime (uhid,
+/// uinput). modules-load.d only fires at the next boot, so a first live
+/// `padctl install` on a host where these are not yet resident would otherwise
+/// crash-loop the daemon until reboot. modprobe failure (absent binary,
+/// builtin module) is ignored by runCmd — it must never fail the install.
+pub fn loadModules(plan: *const InstallPlan) void {
+    if (!shouldLoadModules(plan)) return;
+    runCmd(&.{ "modprobe", "uhid", "uinput" });
+}
+
 /// Mutate live kernel driver state to match the freshly written udev rules.
 /// MUST be called AFTER `udevadm control --reload-rules`: re-probe generates
 /// bind uevents that udevd evaluates against its currently loaded ruleset, so a

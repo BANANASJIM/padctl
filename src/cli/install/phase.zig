@@ -170,6 +170,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         runCmd(&.{ "udevadm", "control", "--reload-rules" });
         runCmd(&.{ "udevadm", "trigger" });
         udev.applyDriverState(allocator, &plan, device_entries.items);
+        udev.loadModules(&plan);
     }
     var start_outcome = services.StartOutcome{};
     if (plan.do_enable_systemctl) {

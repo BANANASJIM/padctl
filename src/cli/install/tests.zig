@@ -63,6 +63,7 @@ const generateDriverBlockRules = _udev.generateDriverBlockRules;
 const generateDriverBlockRulesFromEntries = _udev.generateDriverBlockRulesFromEntries;
 const daemon_socket_guard = udev_mod.daemon_socket_guard;
 const shouldProactiveUnbind = udev_mod.shouldProactiveUnbind;
+const shouldLoadModules = udev_mod.shouldLoadModules;
 
 // migration.zig
 const ensureUserXdgDirs = migration_mod.ensureUserXdgDirs;
@@ -2060,6 +2061,42 @@ test "install: #137 shouldProactiveUnbind truth table" {
         const plan = try InstallPlan.compute(testing.allocator, c.opts, c.env);
         defer plan.deinit(testing.allocator);
         try testing.expectEqual(c.want, shouldProactiveUnbind(&plan));
+    }
+}
+
+// FAILS if loadModules is not gated to live-root installs. Staging mode and
+// non-root installs must never modprobe (no live kernel / would fail).
+test "install: shouldLoadModules only on live root install" {
+    const testing = std.testing;
+    const Case = struct {
+        opts: InstallOptions,
+        env: EnvSnapshot,
+        want: bool,
+    };
+    const cases = [_]Case{
+        // live root install → true
+        .{
+            .opts = .{ .prefix = "/usr" },
+            .env = .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+            .want = true,
+        },
+        // staged package build (destdir set) → false even as root
+        .{
+            .opts = .{ .destdir = "/tmp/stage-modprobe" },
+            .env = .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+        // unprivileged user install → false
+        .{
+            .opts = .{ .prefix = "/home/a/.local" },
+            .env = .{ .uid = 1000, .home = "/home/a", .sudo_user = null, .sudo_uid = null },
+            .want = false,
+        },
+    };
+    for (cases) |c| {
+        const plan = try InstallPlan.compute(testing.allocator, c.opts, c.env);
+        defer plan.deinit(testing.allocator);
+        try testing.expectEqual(c.want, shouldLoadModules(&plan));
     }
 }
 

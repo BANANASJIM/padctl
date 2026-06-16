@@ -2,9 +2,14 @@
 set -e
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     if [ -d /run/systemd/system ]; then
-        # padctl-resume.service was removed in issue #131 Problem B fix;
-        # still attempt stop/disable to clean up upgrades from v0.1.2.
-        systemctl stop padctl.service padctl-resume.service 2>/dev/null || true
-        systemctl disable padctl.service padctl-resume.service 2>/dev/null || true
+        # padctl ships a user unit to /usr/lib/systemd/user, so a system-scope
+        # `systemctl stop/disable` is a no-op. --global disable clears any
+        # system-global enablement without needing a session bus; a per-user
+        # `systemctl --user enable` symlink in $HOME is untouched (the user
+        # should disable/stop their own instance, see below).
+        systemctl --global disable padctl.service padctl-resume.service 2>/dev/null || true
+        # A user instance running right now lives on a per-user session bus a
+        # maintainer script cannot reliably reach. Stop it yourself if it is
+        # still running:  systemctl --user stop padctl.service
     fi
 fi

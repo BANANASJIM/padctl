@@ -5,3 +5,5 @@ if [ -d /run/systemd/system ]; then
 fi
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
+# modules-load.d only loads at next boot; load now so the daemon works first run.
+modprobe uhid uinput 2>/dev/null || true
