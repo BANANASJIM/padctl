@@ -377,10 +377,7 @@ pub const UinputDevice = struct {
         return self.fd;
     }
 
-    /// Stop FfEvent that an UI_FF_ERASE of `effect_id` must surface to the
-    /// event loop, so its onStop/anyPlaying logic clears the scheduler slot
-    /// and emits a zero rumble frame when no effect remains playing. Out of
-    /// range ids surface nothing.
+    /// Zero-magnitude FF stop event for an erased effect; null for out-of-range ids.
     pub fn eraseStopEvent(effect_id: u8) ?FfEvent {
         if (effect_id >= 16) return null;
         return .{

@@ -30,6 +30,8 @@ pub fn HIDIOCSFEATURE(len: u14) u32 {
 // evdev
 pub const EVIOCGRAB = IOCTL.IOW('E', 0x90, c_int);
 pub const EVIOCGID = IOCTL.IOR('E', 0x02, c.input_id);
+pub const EVIOCSFF = IOCTL.IOW('E', 0x80, c.ff_effect);
+pub const EVIOCRMFF = IOCTL.IOW('E', 0x81, c_int);
 pub const InputId = c.input_id;
 
 /// Dynamic-size evdev ioctl: kernel copies up to `len` bytes of the device's

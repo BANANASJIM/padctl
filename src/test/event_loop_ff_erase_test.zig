@@ -76,6 +76,7 @@ test "uinput: eraseStopEvent surfaces a zero rumble FfEvent for the erased slot"
     const ev = uinput.UinputDevice.eraseStopEvent(3) orelse
         return error.EraseProducedNoStop;
     try testing.expectEqual(@as(u8, 3), ev.effect_id);
+    try testing.expectEqual(@as(u16, 0x50), ev.effect_type); // FF_RUMBLE
     try testing.expectEqual(@as(u16, 0), ev.strong);
     try testing.expectEqual(@as(u16, 0), ev.weak);
     try testing.expectEqual(@as(u16, 0), ev.duration_ms);
@@ -112,7 +113,10 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
     //    slot leaks and the motor never stops.
     // 3) A different effect plays then is explicitly stopped. The leaked slot
     //    must not suppress this final stop frame.
-    const erase_stop = uinput.UinputDevice.eraseStopEvent(0);
+    // Hand-written stop event for the erased slot — encoded independently of
+    // eraseStopEvent so this integration test pins the expected wire shape
+    // rather than echoing the helper it indirectly exercises. 0x50 = FF_RUMBLE.
+    const erase_stop: ?uinput.FfEvent = .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 };
     const seq = [_]?uinput.FfEvent{
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 0 },
         erase_stop,

@@ -307,6 +307,24 @@ pub fn build(b: *std.Build) void {
     shadow_int_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(shadow_int_tests).step);
 
+    // uinput_ff_erase_integration: real UI_FF_ERASE wiring validation (#65).
+    // Creates an FF_RUMBLE uinput device, EVIOCSFF-uploads then EVIOCRMFF-erases
+    // an effect (no EV_FF=0), and asserts pollFf surfaces a zero-magnitude stop.
+    // Own test artifact like shadow_grab; skips gracefully without /dev/uinput
+    // unless PADCTL_TEST_REQUIRE_UINPUT=1 (set by the privileged e2e job).
+    const ff_erase_int_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/uinput_ff_erase_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    ff_erase_int_mod.addImport("toml", toml_mod);
+    ff_erase_int_mod.addImport("src", src_mod);
+    const ff_erase_int_tests = b.addTest(.{ .root_module = ff_erase_int_mod, .filters = test_filters });
+    applyLibusb(b, ff_erase_int_tests, use_libusb, vendored);
+    ff_erase_int_tests.linkLibC();
+    integration_step.dependOn(&b.addRunArtifact(ff_erase_int_tests).step);
+
     // Phase 13 Wave 3 T5f: Layer 1 routing tests — pure pipe2 fixture, no
     // /dev/uhid, no privilege required. Hooks to the main test step so the
     // CI green bar covers the UHID routing switch.
