@@ -122,6 +122,7 @@ pub const testing_support = struct {
     pub const bugfix_regression_test = @import("test/bugfix_regression_test.zig");
     pub const doctor_accuracy_test = @import("test/doctor_accuracy_test.zig");
     pub const event_loop_rumble_test = @import("test/event_loop_rumble_test.zig");
+    pub const event_loop_ff_erase_test = @import("test/event_loop_ff_erase_test.zig");
     pub const uhid_output_dispatch_test = @import("test/uhid_output_dispatch_test.zig");
     pub const pidff_e2e_test = @import("test/pidff_e2e_test.zig");
     pub const chord_output_e2e_test = @import("test/chord_output_e2e_test.zig");
