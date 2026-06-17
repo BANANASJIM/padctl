@@ -382,8 +382,14 @@ pub const UinputDevice = struct {
     /// and emits a zero rumble frame when no effect remains playing. Out of
     /// range ids surface nothing.
     pub fn eraseStopEvent(effect_id: u8) ?FfEvent {
-        _ = effect_id;
-        return null;
+        if (effect_id >= 16) return null;
+        return .{
+            .effect_type = c.FF_RUMBLE,
+            .effect_id = effect_id,
+            .strong = 0,
+            .weak = 0,
+            .duration_ms = 0,
+        };
     }
 
     pub fn pollFf(self: *UinputDevice) !?FfEvent {
@@ -441,12 +447,17 @@ pub const UinputDevice = struct {
                         rumble_log.debug("[{s}] pollFf: UI_BEGIN_FF_ERASE FAILED rc={d}", .{ self.log_tag, begin_rc });
                         continue;
                     }
+                    erase.retval = 0;
+                    _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
                     if (erase.effect_id < 16) {
                         self.ff_effects[@intCast(erase.effect_id)] = .{};
                         rumble_log.debug("[{s}] pollFf: ERASE id={d}", .{ self.log_tag, erase.effect_id });
+                        // uinput does not use ff-memless, so erasing a playing
+                        // effect leaves the motor on. Mirror EV_FF=0 so the
+                        // event loop clears the scheduler slot and stops it.
+                        result = eraseStopEvent(@intCast(erase.effect_id));
+                        break;
                     }
-                    erase.retval = 0;
-                    _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
                 }
             } else if (ev.type == c.EV_FF) {
                 const id: usize = @intCast(ev.code);

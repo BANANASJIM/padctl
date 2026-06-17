@@ -36,11 +36,16 @@ const ff_toml =
     \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
 ;
 
-const MockFfOutputSeq = struct {
+// Drain-aware FF mock: each mockPollFf reads one byte from the test pipe
+// before returning the next event, so the test's wall-clock sleeps gate the
+// 10ms play-frame throttle window (matching MockFfOutputDrain in
+// event_loop_rumble_test.zig).
+const MockFfOutputDrain = struct {
     events: []const ?uinput.FfEvent,
     call_count: usize = 0,
+    pipe_read: posix.fd_t,
 
-    fn outputDevice(self: *MockFfOutputSeq) uinput.OutputDevice {
+    fn outputDevice(self: *MockFfOutputDrain) uinput.OutputDevice {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
@@ -53,7 +58,9 @@ const MockFfOutputSeq = struct {
     fn mockEmit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
 
     fn mockPollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
-        const self: *MockFfOutputSeq = @ptrCast(@alignCast(ptr));
+        const self: *MockFfOutputDrain = @ptrCast(@alignCast(ptr));
+        var buf: [1]u8 = undefined;
+        _ = posix.read(self.pipe_read, &buf) catch return null;
         if (self.call_count < self.events.len) {
             const ev = self.events[self.call_count];
             self.call_count += 1;
@@ -100,11 +107,11 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
     const interp = Interpreter.init(&parsed.value);
 
     // 1) Play an infinite-duration effect (duration_ms=0 → never auto-stops).
-    // 2) The host erases it (no EV_FF=0). This is the event a fixed pollFf
-    //    surfaces for UI_FF_ERASE; current code surfaces null, so the slot
-    //    leaks and the motor never stops.
-    // 3) Later, a different effect plays then is explicitly stopped. The leaked
-    //    slot must not suppress this stop frame.
+    // 2) The host erases it (no EV_FF=0). erase_stop is the event a fixed
+    //    pollFf surfaces for UI_FF_ERASE; current code surfaces null, so the
+    //    slot leaks and the motor never stops.
+    // 3) A different effect plays then is explicitly stopped. The leaked slot
+    //    must not suppress this final stop frame.
     const erase_stop = uinput.UinputDevice.eraseStopEvent(0);
     const seq = [_]?uinput.FfEvent{
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 0 },
@@ -113,13 +120,13 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
         .{ .effect_type = 0x50, .effect_id = 1, .strong = 0, .weak = 0, .duration_ms = 0 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -135,15 +142,21 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 200 });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // Drain all four events across a few wakeups; the FF slot is
-    // level-triggered so each iteration consumes one queued event.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(40 * std.time.ns_per_ms);
+    // One pipe write per event; the 15ms gaps clear the 10ms play-frame
+    // throttle so each play frame actually reaches the device.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1}); // play 0
+    std.Thread.sleep(15 * std.time.ns_per_ms);
+    _ = try posix.write(ff_pipe[1], &[_]u8{1}); // erase 0 → stop
+    std.Thread.sleep(15 * std.time.ns_per_ms);
+    _ = try posix.write(ff_pipe[1], &[_]u8{1}); // play 1
+    std.Thread.sleep(15 * std.time.ns_per_ms);
+    _ = try posix.write(ff_pipe[1], &[_]u8{1}); // explicit stop 1
+    std.Thread.sleep(15 * std.time.ns_per_ms);
     loop.stop();
     thread.join();
 
