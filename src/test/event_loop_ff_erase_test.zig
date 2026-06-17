@@ -37,13 +37,14 @@ const ff_toml =
 ;
 
 // Drain-aware FF mock: each mockPollFf reads one byte from the test pipe
-// before returning the next event, so the test's wall-clock sleeps gate the
-// 10ms play-frame throttle window (matching MockFfOutputDrain in
-// event_loop_rumble_test.zig).
+// before returning the next event. After consuming a real event it writes one
+// byte to ack_write so the test body can wait for each event to be processed
+// before sending the next, providing deterministic ordering without sleeps.
 const MockFfOutputDrain = struct {
     events: []const ?uinput.FfEvent,
     call_count: usize = 0,
     pipe_read: posix.fd_t,
+    ack_write: posix.fd_t,
 
     fn outputDevice(self: *MockFfOutputDrain) uinput.OutputDevice {
         return .{ .ptr = self, .vtable = &vtable };
@@ -64,6 +65,10 @@ const MockFfOutputDrain = struct {
         if (self.call_count < self.events.len) {
             const ev = self.events[self.call_count];
             self.call_count += 1;
+            if (ev != null) {
+                // Signal the test body: this real event has been consumed.
+                _ = posix.write(self.ack_write, &[_]u8{1}) catch {};
+            }
             return ev;
         }
         return null;
@@ -103,6 +108,11 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
 
+    // Ack pipe: blocking read side; event loop writes one byte per consumed event.
+    const ack_pipe = try posix.pipe2(.{});
+    defer posix.close(ack_pipe[0]);
+    defer posix.close(ack_pipe[1]);
+
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
@@ -124,7 +134,7 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
         .{ .effect_type = 0x50, .effect_id = 1, .strong = 0, .weak = 0, .duration_ms = 0 },
         null,
     };
-    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0] };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = ack_pipe[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
@@ -151,16 +161,31 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // One pipe write per event; the 15ms gaps clear the 10ms play-frame
-    // throttle so each play frame actually reaches the device.
+    // Ack-based sync: write one byte to ff_pipe[1], then block until the event
+    // loop confirms it consumed the event by reading one ack byte. This removes
+    // the race where loop.stop() fires before the 4th event is processed.
+    // A 15ms gap before each play write still clears the 10ms throttle window.
+    const waitAck = struct {
+        fn call(ack_read: posix.fd_t) error{AckTimeout}!void {
+            var pfd = [1]posix.pollfd{.{ .fd = ack_read, .events = posix.POLL.IN, .revents = 0 }};
+            const n = posix.poll(&pfd, 2000) catch return error.AckTimeout;
+            if (n == 0) return error.AckTimeout;
+            var buf: [1]u8 = undefined;
+            _ = posix.read(ack_read, &buf) catch {};
+        }
+    }.call;
+
+    std.Thread.sleep(15 * std.time.ns_per_ms);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // play 0
+    try waitAck(ack_pipe[0]);
     std.Thread.sleep(15 * std.time.ns_per_ms);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // erase 0 → stop
+    try waitAck(ack_pipe[0]);
     std.Thread.sleep(15 * std.time.ns_per_ms);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // play 1
-    std.Thread.sleep(15 * std.time.ns_per_ms);
+    try waitAck(ack_pipe[0]);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // explicit stop 1
-    std.Thread.sleep(15 * std.time.ns_per_ms);
+    try waitAck(ack_pipe[0]);
     loop.stop();
     thread.join();
 

@@ -307,7 +307,7 @@ pub fn build(b: *std.Build) void {
     shadow_int_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(shadow_int_tests).step);
 
-    // uinput_ff_erase_integration: real UI_FF_ERASE wiring validation (#65).
+    // uinput_ff_erase_integration: real UI_FF_ERASE wiring validation.
     // Creates an FF_RUMBLE uinput device, EVIOCSFF-uploads then EVIOCRMFF-erases
     // an effect (no EV_FF=0), and asserts pollFf surfaces a zero-magnitude stop.
     // Own test artifact like shadow_grab; skips gracefully without /dev/uinput

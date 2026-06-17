@@ -1,4 +1,4 @@
-//! Real-uinput integration test for the pollFf UI_FF_ERASE wiring (issue #65).
+//! Real-uinput integration test for the pollFf UI_FF_ERASE wiring.
 //!
 //! The production stop-on-erase plumbing lives in `UinputDevice.pollFf`'s
 //! UI_FF_ERASE branch (`result = eraseStopEvent(...); break;`). That branch only
