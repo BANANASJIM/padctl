@@ -289,6 +289,8 @@ IMU (accelerometer + gyroscope) output via a separate UHID node. When declared, 
 
 See ADR-015 for the design rationale. This section enables SDL3-visible sensor pairing on Steam games.
 
+> **Force feedback limitation:** enabling `[output.imu] backend="uhid"` places the primary gamepad on the UHID backend. On current kernels, evdev force feedback is unavailable for UHID devices unless the kernel's `hid-universal-pidff` module recognises the device VID/PID — generic UHID nodes get `capabilities/ff=0`. Wine/Lutris evdev rumble will not work in this mode. Rumble via SDL or Steam (HIDAPI path) is unaffected.
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `backend` | string | no | `"uhid"` | Must be `"uhid"`; only legal value (validator rejects `"uinput"`) |

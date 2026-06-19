@@ -156,6 +156,7 @@ pub const testing_support = struct {
     pub const uhid_simulator = @import("test/harness/uhid_simulator.zig");
     pub const uhid_test_cleanup = @import("test/uhid_test_cleanup.zig");
     pub const device_instance_imu_ownership_test = @import("test/device_instance_imu_ownership_test.zig");
+    pub const ffb_uhid_guardrail_test = @import("test/ffb_uhid_guardrail_test.zig");
     pub const supervisor_suspended_attach_takeover_test = @import("test/supervisor_suspended_attach_takeover_test.zig");
     pub const supervisor_suspend_output_continuity_test = @import("test/supervisor_suspend_output_continuity_test.zig");
     pub const wedge_instrumentation_test = @import("test/wedge_instrumentation_test.zig");

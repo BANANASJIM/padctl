@@ -422,6 +422,9 @@ pub const DeviceInstance = struct {
                         }
                     }
                 }
+                if (ffbUnavailableOverUhid(true, out_cfg.force_feedback)) {
+                    std.log.warn("force_feedback is configured but evdev force feedback is unavailable over the UHID backend (active when imu.backend=uhid): the kernel binds force feedback only for allowlisted device IDs. Wine/Lutris evdev rumble will not work; rumble via SDL/Steam HIDAPI is unaffected.", .{});
+                }
             } else {
                 const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
                 errdefer {
@@ -1687,4 +1690,18 @@ test "openDeviceWithRetry returns promptly on a failing open (no in-thread sleep
     try testing.expectError(error.NotFound, result);
     // Old code: >= 7s. New code: a bare /dev scan, well under 3s.
     try testing.expect(elapsed_ns < 3 * std.time.ns_per_s);
+}
+
+/// Returns true when force feedback is configured but evdev FF is unavailable
+/// because the device runs on the UHID backend with a non-PID rumble config.
+/// The kernel's hid-universal-pidff binds FF only for allowlisted device IDs;
+/// a generic UHID device gets capabilities/ff=0, so evdev rumble never works.
+/// False when use_uhid=false, ffb=null, or when backend=uhid + kind=pid
+/// (PID passthrough handles its own FF channel).
+pub fn ffbUnavailableOverUhid(use_uhid: bool, ffb: ?device_cfg.ForceFeedbackConfig) bool {
+    if (!use_uhid) return false;
+    const f = ffb orelse return false;
+    const is_pid_passthrough = std.mem.eql(u8, f.backend, "uhid") and
+        std.mem.eql(u8, f.kind, "pid");
+    return !is_pid_passthrough;
 }
