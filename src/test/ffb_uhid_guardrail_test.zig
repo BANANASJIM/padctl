@@ -21,3 +21,8 @@ test "ffbUnavailableOverUhid: use_uhid=false + rumble => false" {
 test "ffbUnavailableOverUhid: use_uhid=true + ffb=null => false" {
     try testing.expect(!ffbUnavailableOverUhid(true, null));
 }
+
+test "ffbUnavailableOverUhid: use_uhid=true + backend=uhid kind=rumble => true" {
+    const ffb = device_cfg.ForceFeedbackConfig{ .backend = "uhid", .kind = "rumble" };
+    try testing.expect(ffbUnavailableOverUhid(true, ffb));
+}
