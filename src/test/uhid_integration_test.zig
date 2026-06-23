@@ -174,3 +174,115 @@ test "uhid: full pipeline hidraw read through interpreter" {
     try testing.expectEqual(@as(?i16, 50), delta.rx);
     try testing.expectEqual(@as(?i16, 150), delta.ry);
 }
+
+// --- Test 3: UHID rumble gamepad exposes no evdev FF capability (#444) ---
+//
+// padctl's buildFromOutput emits a Vendor-Defined (0xFF00) rumble output report
+// with no PID Usage Page (0x0F), so the kernel binds hid-generic (no FF init)
+// and the evdev node reports capabilities/ff = 0 — Wine/Lutris evdev force
+// feedback then silently no-ops. Full analysis: decisions/025-uhid-rumble-ff-kernel-wall.md.
+
+const FF_TEST_VID: u16 = 0xFADE; // padctl's virtual device identity (ADR-025: FADE:C001),
+const FF_TEST_PID: u16 = 0xC001; // not in the hid-universal-pidff allowlist.
+
+const ff_wall_toml =
+    \\[device]
+    \\name = "UHID FF Wall Test Pad"
+    \\vid = 0xFADE
+    \\pid = 0xC001
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "main"
+    \\interface = 0
+    \\size = 4
+    \\[report.fields]
+    \\left_x = { offset = 0, type = "u8" }
+    \\left_y = { offset = 1, type = "u8" }
+    \\[output]
+    \\name = "UHID FF Wall Test Pad"
+    \\vid = 0xFADE
+    \\pid = 0xC001
+    \\[output.axes]
+    \\left_x = { code = "ABS_X", min = 0, max = 255 }
+    \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+    \\[output.buttons]
+    \\A = "BTN_SOUTH"
+    \\B = "BTN_EAST"
+    \\[output.force_feedback]
+    \\type = "rumble"
+    \\max_effects = 16
+;
+
+// EVIOCGBIT(EV_FF, len): read the device's force-feedback effect bitmap — the
+// same data the kernel exports as /sys/class/input/eventN/device/capabilities/ff.
+fn eviocgbitFf(len: u14) u32 {
+    const req = linux.IOCTL.Request{ .dir = 2, .io_type = 'E', .nr = 0x20 + 0x15, .size = len };
+    return @bitCast(req);
+}
+
+fn findEvdevByVidPid(vid: u16, pid: u16) !?[64]u8 {
+    const ioctl_mod = src.io.ioctl_constants;
+    var i: u8 = 0;
+    while (i < 64) : (i += 1) {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/dev/input/event{d}", .{i}) catch continue;
+        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+        defer posix.close(fd);
+        var id: ioctl_mod.InputId = undefined;
+        const rc = linux.ioctl(fd, ioctl_mod.EVIOCGID, @intFromPtr(&id));
+        if (rc != 0) continue;
+        if (id.vendor == vid and id.product == pid) {
+            var result: [64]u8 = undefined;
+            @memcpy(result[0..path.len], path);
+            result[path.len] = 0;
+            return result;
+        }
+    }
+    return null;
+}
+
+test "uhid: rumble gamepad exposes capabilities/ff=0 — #444 kernel FF wall (ADR-025)" {
+    const allocator = testing.allocator;
+
+    // Build the descriptor through padctl's real imu=uhid rumble path.
+    const parsed = try device_mod.parseString(allocator, ff_wall_toml);
+    defer parsed.deinit();
+    const out_cfg = parsed.value.output orelse return error.SkipZigTest;
+    const descriptor = try src.io.uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg);
+    defer allocator.free(descriptor);
+
+    cleanup.ensureSignalHandlersInstalled();
+    const uhid_fd = try openUhid();
+    cleanup.registerUhidFd(uhid_fd);
+    defer {
+        cleanup.unregisterUhidFd(uhid_fd);
+        uhidDestroy(uhid_fd);
+        posix.close(uhid_fd);
+    }
+
+    try uhidCreate(uhid_fd, FF_TEST_VID, FF_TEST_PID, descriptor);
+
+    // Let the kernel bind hid-generic and create the evdev node.
+    std.Thread.sleep(300 * std.time.ns_per_ms);
+
+    const found = (try findEvdevByVidPid(FF_TEST_VID, FF_TEST_PID)) orelse return error.SkipZigTest;
+    const path_end = std.mem.indexOfScalar(u8, &found, 0) orelse found.len;
+    const ev_path = found[0..path_end];
+
+    const ev_fd = try posix.open(ev_path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
+    defer posix.close(ev_fd);
+
+    // EVIOCGBIT(EV_FF) copies the device's FF effect bitmap (all-zero when the
+    // kernel registered no EV_FF handler) and returns the byte count. Guard the
+    // return so an ioctl failure surfaces as a test error instead of passing
+    // against the pre-zeroed buffer. A non-zero byte means evdev FF is exposed —
+    // the #444 regression.
+    var ff_bits: [16]u8 = [_]u8{0} ** 16;
+    const rc = linux.ioctl(ev_fd, eviocgbitFf(ff_bits.len), @intFromPtr(&ff_bits));
+    if (linux.E.init(rc) != .SUCCESS) return error.EvdevFfBitIoctlFailed;
+    for (ff_bits) |b| {
+        try testing.expectEqual(@as(u8, 0), b);
+    }
+}
