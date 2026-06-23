@@ -337,8 +337,8 @@ pub const UhidDevice = struct {
         const uniq_copy = @min(cfg.uniq.len, ev.payload.uniq.len - 1);
         if (uniq_copy != 0) @memcpy(ev.payload.uniq[0..uniq_copy], cfg.uniq[0..uniq_copy]);
 
-        ev.payload.rd_size = std.math.cast(u16, cfg.descriptor.len) orelse
-            return error.DescriptorTooLarge;
+        if (cfg.descriptor.len > HID_MAX_DESCRIPTOR_SIZE) return error.DescriptorTooLarge;
+        ev.payload.rd_size = @intCast(cfg.descriptor.len);
         ev.payload.bus = cfg.bus;
         ev.payload.vendor = cfg.vid;
         ev.payload.product = cfg.pid;
@@ -621,6 +621,16 @@ test "uhid: init rejects descriptor too large" {
         .descriptor = too_big,
     };
     try testing.expectError(error.DescriptorTooLarge, UhidDevice.init(alloc, cfg));
+}
+
+test "uhid: sendCreate self-guards an oversized descriptor (bypassing init)" {
+    const alloc = testing.allocator;
+    const too_big = try alloc.alloc(u8, HID_MAX_DESCRIPTOR_SIZE + 1);
+    defer alloc.free(too_big);
+    @memset(too_big, 0);
+    const cfg = Config{ .vid = 0xFADE, .pid = 0xCAFE, .name = "x", .descriptor = too_big };
+    // Guard returns before any fd write, so fd = -1 is never touched.
+    try testing.expectError(error.DescriptorTooLarge, UhidDevice.sendCreate(-1, cfg));
 }
 
 test "uhid_device_vtable_match: emit + close frame UHID_INPUT2 / UHID_DESTROY" {
