@@ -25,9 +25,9 @@ fn parseHexOrDec(comptime T: type, s: []const u8) !T {
     return std.fmt.parseInt(T, t, 10);
 }
 
-// Strip a TOML inline comment; safe here because vid/pid/driver-name values
-// never contain a literal '#'.
-fn beforeHash(s: []const u8) []const u8 {
+// Strip a TOML inline comment from a bare scalar value (vid/pid/bool/identifier,
+// which never contain a literal '#'). NOT quote-aware — not for free-form strings.
+pub fn beforeHash(s: []const u8) []const u8 {
     return if (std.mem.indexOfScalar(u8, s, '#')) |h| s[0..h] else s;
 }
 

@@ -908,8 +908,7 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
         } else if (in_ffb_section) {
             if (isFieldKey(trimmed, "clone_vid_pid")) {
                 if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
-                    clone_vid_pid = std.mem.eql(u8, val, "true");
+                    clone_vid_pid = clonesVidPid(trimmed[eq + 1 ..]);
                 }
             }
         } else if (in_interface_section) {
@@ -972,4 +971,15 @@ pub fn setupTestUdev() void {
         f.writeAll(rule) catch {};
     } else |_| {}
     runCmd(&.{ "udevadm", "control", "--reload-rules" });
+}
+
+fn clonesVidPid(raw: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trim(u8, toml_extract.beforeHash(raw), " \t"), "true");
+}
+
+test "udev: clonesVidPid tolerates inline comments" {
+    try std.testing.expect(clonesVidPid(" true"));
+    try std.testing.expect(clonesVidPid(" true  # masquerade as wheel"));
+    try std.testing.expect(!clonesVidPid(" false  # x"));
+    try std.testing.expect(!clonesVidPid(" yes"));
 }
