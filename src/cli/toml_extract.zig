@@ -25,6 +25,12 @@ fn parseHexOrDec(comptime T: type, s: []const u8) !T {
     return std.fmt.parseInt(T, t, 10);
 }
 
+// Strip a TOML inline comment; safe here because vid/pid/driver-name values
+// never contain a literal '#'.
+fn beforeHash(s: []const u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, s, '#')) |h| s[0..h] else s;
+}
+
 fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return &.{};
@@ -79,19 +85,19 @@ pub fn extractDeviceVidPid(allocator: std.mem.Allocator, content: []const u8) !?
 
         if (isFieldKey(trimmed, "vid")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
+                const val = std.mem.trim(u8, beforeHash(trimmed[eq + 1 ..]), " \t");
                 vid = parseHexOrDec(u16, val) catch continue;
             }
         } else if (isFieldKey(trimmed, "pid")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
+                const val = std.mem.trim(u8, beforeHash(trimmed[eq + 1 ..]), " \t");
                 pid = parseHexOrDec(u16, val) catch continue;
             }
         } else if (isFieldKey(trimmed, "block_kernel_drivers")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
                 // First occurrence wins — ignore duplicates to avoid leak
                 if (block_drivers.len == 0) {
-                    block_drivers = parseStringArray(allocator, trimmed[eq + 1 ..]) catch &.{};
+                    block_drivers = parseStringArray(allocator, beforeHash(trimmed[eq + 1 ..])) catch &.{};
                 }
             }
         }
@@ -178,4 +184,19 @@ test "extractDeviceVidPid: missing pid returns null" {
         "vid = 0x1234\n";
     const result = try extractDeviceVidPid(std.testing.allocator, toml);
     try std.testing.expect(result == null);
+}
+
+test "extractDeviceVidPid: tolerates inline comments" {
+    const toml =
+        "[device]\n" ++
+        "vid = 0x1234  # vendor\n" ++
+        "pid = 0x5678  # product\n" ++
+        "block_kernel_drivers = [\"xpad\"]  # block xbox\n";
+    const result = try extractDeviceVidPid(std.testing.allocator, toml);
+    defer if (result) |r| freeDeviceInfo(std.testing.allocator, r);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u16, 0x1234), result.?.vid);
+    try std.testing.expectEqual(@as(u16, 0x5678), result.?.pid);
+    try std.testing.expectEqual(@as(usize, 1), result.?.block_kernel_drivers.len);
+    try std.testing.expectEqualStrings("xpad", result.?.block_kernel_drivers[0]);
 }
