@@ -402,7 +402,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
 
         if (report.button_group) |bg| {
-            if (bg.source.offset + bg.source.size > report.size) return error.OffsetOutOfBounds;
+            if (bg.source.offset < 0 or bg.source.offset + bg.source.size > report.size) return error.OffsetOutOfBounds;
             const bg_source_size = bg.source.size;
             const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
             var it = bg.map.map.iterator();
@@ -939,6 +939,30 @@ test "device: validate rejects an all-suppress config with no readable interface
         .report = &.{},
     };
     try std.testing.expectError(error.InvalidConfig, validate(&cfg));
+}
+
+test "device: validate rejects negative button_group source.offset" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Bad ButtonGroup Offset"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 8
+        \\
+        \\[report.button_group]
+        \\source = { offset = -1, size = 1 }
+        \\map = { A = 0 }
+    ;
+    try std.testing.expectError(error.OffsetOutOfBounds, parseString(allocator, bad));
 }
 
 test "device: force_feedback.auto_stop defaults to true when unspecified" {
