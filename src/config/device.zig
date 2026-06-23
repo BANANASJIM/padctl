@@ -464,13 +464,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     // [output.imu] is declared; unknown strings fail closed.
     if (cfg.output) |out| {
         if (out.imu) |imu| {
-            if (std.mem.eql(u8, imu.backend, "uhid")) {
-                // legal
-            } else if (std.mem.eql(u8, imu.backend, "uinput")) {
-                return error.InvalidConfig;
-            } else {
-                return error.InvalidConfig;
-            }
+            if (!std.mem.eql(u8, imu.backend, "uhid")) return error.InvalidConfig;
         }
     }
 
@@ -490,8 +484,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
 
             // uhid+pid requires [output.imu] as the UHID routing gate.
             if (is_uhid and is_pid) {
-                const imu_present = if (out.imu) |_| true else false;
-                if (!imu_present) return error.InvalidConfig;
+                if (out.imu == null) return error.InvalidConfig;
             }
 
             // clone_vid_pid=true is meaningless without a real VID/PID to clone.

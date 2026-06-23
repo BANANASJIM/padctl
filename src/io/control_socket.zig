@@ -58,7 +58,7 @@ pub const ControlSocket = struct {
         var addr: linux.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
         @memset(&addr.path, 0);
         if (path_z.len > addr.path.len - 1) return error.PathTooLong;
-        @memcpy(addr.path[0..path_z.len], path_z[0..path_z.len]);
+        @memcpy(addr.path[0..path_z.len], path_z);
 
         try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
         errdefer std.fs.deleteFileAbsolute(path) catch {};
