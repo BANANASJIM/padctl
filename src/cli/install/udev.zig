@@ -842,34 +842,6 @@ pub fn isValidIdentifier(s: []const u8) bool {
     return true;
 }
 
-/// Parse a TOML inline array of strings, e.g. `["xpad", "hid_generic"]`.
-fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
-    const trimmed = std.mem.trim(u8, value, " \t");
-    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return &.{};
-    const inner = trimmed[1 .. trimmed.len - 1];
-    if (std.mem.trim(u8, inner, " \t").len == 0) return &.{};
-
-    var count: usize = 0;
-    var it = std.mem.splitScalar(u8, inner, ',');
-    while (it.next()) |_| count += 1;
-
-    const result = try allocator.alloc([]const u8, count);
-    var idx: usize = 0;
-    it = std.mem.splitScalar(u8, inner, ',');
-    while (it.next()) |elem| {
-        const clean = std.mem.trim(u8, elem, " \t\"'");
-        // ! Reject unsafe identifiers — these are interpolated into udev shell commands.
-        if (!isValidIdentifier(clean)) {
-            for (result[0..idx]) |prev| allocator.free(prev);
-            allocator.free(result);
-            return &.{};
-        }
-        result[idx] = try allocator.dupe(u8, clean);
-        idx += 1;
-    }
-    return result;
-}
-
 fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.ArrayList(UdevEntry)) !void {
     var f = try std.fs.openFileAbsolute(path, .{});
     defer f.close();
@@ -947,7 +919,6 @@ fn parseHexOrDec(comptime T: type, s: []const u8) !T {
 /// + generateUdevRulesFromEntries instead of reaching through this namespace.
 pub const _internals_for_tests = struct {
     pub const isFieldKey = @import("udev.zig").isFieldKey;
-    pub const parseStringArray = @import("udev.zig").parseStringArray;
     pub const extractVidPid = @import("udev.zig").extractVidPid;
     pub const parseHexOrDec = @import("udev.zig").parseHexOrDec;
     pub const collectDeviceEntries = @import("udev.zig").collectDeviceEntries;

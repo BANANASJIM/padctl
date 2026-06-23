@@ -31,7 +31,7 @@ pub fn beforeHash(s: []const u8) []const u8 {
     return if (std.mem.indexOfScalar(u8, s, '#')) |h| s[0..h] else s;
 }
 
-fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
+pub fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return &.{};
     const inner = trimmed[1 .. trimmed.len - 1];
@@ -39,13 +39,16 @@ fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []
 
     var count: usize = 0;
     var it = std.mem.splitScalar(u8, inner, ',');
-    while (it.next()) |_| count += 1;
+    while (it.next()) |elem| {
+        if (std.mem.trim(u8, elem, " \t\"'").len > 0) count += 1;
+    }
 
     const result = try allocator.alloc([]const u8, count);
     var idx: usize = 0;
     it = std.mem.splitScalar(u8, inner, ',');
     while (it.next()) |elem| {
         const clean = std.mem.trim(u8, elem, " \t\"'");
+        if (clean.len == 0) continue; // tolerate a trailing/extra comma
         if (!isValidIdentifier(clean)) {
             for (result[0..idx]) |prev| allocator.free(prev);
             allocator.free(result);
