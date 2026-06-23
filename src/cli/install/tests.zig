@@ -56,7 +56,7 @@ const modules_load_content = udev_mod.modules_load_content;
 const _udev = udev_mod._internals_for_tests;
 const extractVidPid = _udev.extractVidPid;
 const isFieldKey = _udev.isFieldKey;
-const parseStringArray = _udev.parseStringArray;
+const parseStringArray = @import("../toml_extract.zig").parseStringArray;
 const parseHexOrDec = _udev.parseHexOrDec;
 const generateUdevRules = _udev.generateUdevRules;
 const generateDriverBlockRules = _udev.generateDriverBlockRules;
@@ -1563,6 +1563,18 @@ test "install: parseStringArray rejects command injection" {
     // Shell metacharacters must be rejected
     const result = try parseStringArray(allocator, "[\"x'; rm -rf / #\"]");
     try testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "install: parseStringArray tolerates a trailing comma" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const result = try parseStringArray(allocator, "[\"xpad\", ]");
+    defer {
+        for (result) |s| allocator.free(s);
+        allocator.free(result);
+    }
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings("xpad", result[0]);
 }
 
 test "install: isValidIdentifier accepts safe names" {
