@@ -46,10 +46,7 @@ fn trimWhitespace(s: []const u8) []const u8 {
 fn isValidBareKey(key: []const u8) bool {
     if (key.len == 0) return false;
     for (key) |c| {
-        const ok = (c >= 'A' and c <= 'Z') or
-            (c >= 'a' and c <= 'z') or
-            (c >= '0' and c <= '9') or
-            c == '_' or c == '-';
+        const ok = std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
         if (!ok) return false;
     }
     return true;

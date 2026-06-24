@@ -46,10 +46,7 @@ pub fn buildUniq(
         break :blk std.fmt.bufPrint(&inst_buf, "ctr{x:0>4}", .{counter}) catch unreachable;
     };
 
-    const body = try std.fmt.allocPrint(allocator, PREFIX ++ "{s}-{s}", .{ device_id, instance });
-    defer allocator.free(body);
-    const out = try allocator.allocSentinel(u8, body.len, 0);
-    @memcpy(out, body);
+    const out = try std.fmt.allocPrintSentinel(allocator, PREFIX ++ "{s}-{s}", .{ device_id, instance }, 0);
     // Sanity: total (incl NUL terminator) must fit the 64-byte UHID field.
     std.debug.assert(out.len + 1 <= MAX_UNIQ_LEN);
     return out;
@@ -77,11 +74,8 @@ pub fn normalizeDeviceId(buf: *[32]u8, name: []const u8) []u8 {
     var last_dash: bool = true; // treat start as dash so we drop leading runs
     for (name) |b| {
         if (w >= buf.len) break;
-        const c: u8 = blk: {
-            if (b >= 'A' and b <= 'Z') break :blk b + ('a' - 'A');
-            if ((b >= 'a' and b <= 'z') or (b >= '0' and b <= '9')) break :blk b;
-            break :blk '-';
-        };
+        const lc = std.ascii.toLower(b);
+        const c: u8 = if (std.ascii.isAlphanumeric(lc)) lc else '-';
         if (c == '-') {
             if (last_dash) continue;
             buf[w] = '-';

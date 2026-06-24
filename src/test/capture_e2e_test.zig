@@ -253,6 +253,24 @@ test "capture: emitToml — multi-byte button group spans bytes with group-globa
     try testing.expect(std.mem.indexOf(u8, out, "btn_5_2 = 2") != null);
 }
 
+test "capture: emitToml — device name with quote/backslash/newline is TOML-escaped" {
+    const allocator = testing.allocator;
+    const result = AnalysisResult{
+        .report_size = 2,
+        .magic = &[_]analyse_mod.MagicByte{},
+        .buttons = &[_]analyse_mod.ButtonCandidate{},
+        .axes = &[_]analyse_mod.AxisCandidate{},
+    };
+    const info = DeviceInfo{ .name = "Pad \"Evil\"\nback\\slash", .vid = 0x1234, .pid = 0x5678, .interface_id = 0 };
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
+
+    const expected_name_line = "name = \"Pad \\\"Evil\\\"\\nback\\\\slash\"";
+    try testing.expect(std.mem.indexOf(u8, buf.items, expected_name_line) != null);
+}
+
 // --- debug render ---
 
 test "capture: renderFrame — ANSI sequences present" {
