@@ -173,6 +173,86 @@ test "capture: emitToml — contains [device], [[report]], [report.fields]" {
     try testing.expect(std.mem.indexOf(u8, out, "\"u8\"") != null);
 }
 
+test "capture: emitToml — non-contiguous magic emits only the contiguous run (F2)" {
+    const allocator = testing.allocator;
+    // Invariant bytes at offsets 0 and 4, with a varying gap at 1..3.
+    // MatchConfig is a single offset + contiguous expect run, so the byte at
+    // offset 4 cannot be expressed and must be dropped — never packed at offset 1.
+    var magic = [_]analyse_mod.MagicByte{
+        .{ .offset = 0, .value = 0x5a },
+        .{ .offset = 4, .value = 0xc3 },
+    };
+    const result = AnalysisResult{
+        .report_size = 16,
+        .magic = &magic,
+        .buttons = &[_]analyse_mod.ButtonCandidate{},
+        .axes = &[_]analyse_mod.AxisCandidate{},
+    };
+    const info = DeviceInfo{ .name = "Pad", .vid = 0x1111, .pid = 0x2222, .interface_id = 0 };
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
+    const out = buf.items;
+
+    try testing.expect(std.mem.indexOf(u8, out, "expect = [0x5a]") != null);
+    // 0xc3 lives at the non-contiguous offset 4 and must NOT be packed in.
+    try testing.expect(std.mem.indexOf(u8, out, "0xc3") == null);
+}
+
+test "capture: emitToml — contiguous magic run is kept intact (F2)" {
+    const allocator = testing.allocator;
+    // Adjacent invariant bytes 0 and 1 form one contiguous run: both must be emitted.
+    var magic = [_]analyse_mod.MagicByte{
+        .{ .offset = 0, .value = 0x5a },
+        .{ .offset = 1, .value = 0xa5 },
+    };
+    const result = AnalysisResult{
+        .report_size = 16,
+        .magic = &magic,
+        .buttons = &[_]analyse_mod.ButtonCandidate{},
+        .axes = &[_]analyse_mod.AxisCandidate{},
+    };
+    const info = DeviceInfo{ .name = "Pad", .vid = 0x1111, .pid = 0x2222, .interface_id = 0 };
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "expect = [0x5a, 0xa5]") != null);
+}
+
+test "capture: emitToml — multi-byte button group spans bytes with group-global bits (F3)" {
+    const allocator = testing.allocator;
+    // Buttons in two different bytes: byte 5 bit 2, byte 6 bit 1. The interpreter
+    // reads `size` bytes from `offset` and treats each map bit index as
+    // group-global, so size must cover the span and bit indices must be re-based:
+    // byte 6 bit 1 → (6-5)*8 + 1 = 9.
+    var buttons = [_]analyse_mod.ButtonCandidate{
+        .{ .byte_offset = 5, .bit = 2, .toggle_count = 8, .high_confidence = true },
+        .{ .byte_offset = 6, .bit = 1, .toggle_count = 8, .high_confidence = true },
+    };
+    const result = AnalysisResult{
+        .report_size = 16,
+        .magic = &[_]analyse_mod.MagicByte{},
+        .buttons = &buttons,
+        .axes = &[_]analyse_mod.AxisCandidate{},
+    };
+    const info = DeviceInfo{ .name = "Pad", .vid = 0x1111, .pid = 0x2222, .interface_id = 0 };
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    try toml_gen_mod.emitToml(result, info, allocator, buf.writer(allocator));
+    const out = buf.items;
+
+    try testing.expect(std.mem.indexOf(u8, out, "size = 2 }") != null);
+    // the old single-byte hardcode must be gone
+    try testing.expect(std.mem.indexOf(u8, out, "size = 1 }") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "btn_6_1 = 9") != null);
+    // the first-byte button keeps its group-global index 2
+    try testing.expect(std.mem.indexOf(u8, out, "btn_5_2 = 2") != null);
+}
+
 // --- debug render ---
 
 test "capture: renderFrame — ANSI sequences present" {

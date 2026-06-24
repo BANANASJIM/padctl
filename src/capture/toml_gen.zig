@@ -43,12 +43,18 @@ pub fn emitToml(result: analyse.AnalysisResult, info: DeviceInfo, allocator: std
         .{ info.vid, info.pid, info.interface_id, info.interface_id, result.report_size },
     );
 
-    // match section if we have magic bytes
+    // MatchConfig expresses only a single offset + contiguous expect run, so emit
+    // the contiguous run from the first invariant byte; drop non-contiguous bytes.
     if (result.magic.len > 0) {
+        const start: usize = result.magic[0].offset;
+        var run_len: usize = 1;
+        while (run_len < result.magic.len and
+            @as(usize, result.magic[run_len].offset) == start + run_len) : (run_len += 1)
+        {}
         try writer.writeAll("[report.match]\n");
         try writer.print("offset = {d}\n", .{result.magic[0].offset});
         try writer.writeAll("expect = [");
-        for (result.magic, 0..) |m, i| {
+        for (result.magic[0..run_len], 0..) |m, i| {
             if (i > 0) try writer.writeAll(", ");
             try writer.print("0x{x:0>2}", .{m.value});
         }
@@ -73,21 +79,33 @@ pub fn emitToml(result: analyse.AnalysisResult, info: DeviceInfo, allocator: std
         try writer.writeAll("\n");
     }
 
-    // button_group section
-    if (result.buttons.len > 0) {
-        // group consecutive high-confidence bits by byte
-        const first = result.buttons[0];
-        try writer.writeAll("[report.button_group]\n");
-        try writer.print("source = {{ offset = {d}, size = 1 }}\n", .{first.byte_offset});
-        try writer.writeAll("map = {");
-        var first_entry = true;
+    // button_group section — the interpreter reads `size` bytes from `offset` and
+    // treats each map bit index as group-global, so encode the full byte span and
+    // re-base each button's bit to (byte - min_byte)*8 + bit.
+    {
+        var min_byte: u16 = std.math.maxInt(u16);
+        var max_byte: u16 = 0;
+        var any = false;
         for (result.buttons) |btn| {
             if (!btn.high_confidence) continue;
-            if (!first_entry) try writer.writeAll(", ");
-            try writer.print(" btn_{d}_{d} = {d}", .{ btn.byte_offset, btn.bit, btn.bit });
-            first_entry = false;
+            any = true;
+            min_byte = @min(min_byte, btn.byte_offset);
+            max_byte = @max(max_byte, btn.byte_offset);
         }
-        try writer.writeAll(" }\n\n");
+        if (any) {
+            try writer.writeAll("[report.button_group]\n");
+            try writer.print("source = {{ offset = {d}, size = {d} }}\n", .{ min_byte, max_byte - min_byte + 1 });
+            try writer.writeAll("map = {");
+            var first_entry = true;
+            for (result.buttons) |btn| {
+                if (!btn.high_confidence) continue;
+                if (!first_entry) try writer.writeAll(", ");
+                const global_bit = (@as(u16, btn.byte_offset) - min_byte) * 8 + btn.bit;
+                try writer.print(" btn_{d}_{d} = {d}", .{ btn.byte_offset, btn.bit, global_bit });
+                first_entry = false;
+            }
+            try writer.writeAll(" }\n\n");
+        }
     }
 
     // unknown bytes comment
