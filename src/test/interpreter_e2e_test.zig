@@ -190,6 +190,40 @@ test "EventLoop pipeline: A press then release" {
     try testing.expect(d1_btns & a_mask == 0);
 }
 
+// --- Regression: DualShock 4 USB report offsets (L2/R2 + IMU) ---
+// Guards the off-by-one where lt/rt and gyro/accel were each shifted +1 byte.
+// Layout per hid-playstation dualshock4_input_report_common (report-id inclusive):
+//   [0] id 0x01, [1..4] sticks, [5..7] buttons, [8] L2, [9] R2,
+//   [10..11] timestamp, [12] temp, [13..18] gyro, [19..24] accel.
+test "interpreter_e2e: DualShock4 USB — L2/R2 + IMU land at correct offsets" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/sony/dualshock4.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    raw[8] = 11; // L2
+    raw[9] = 22; // R2
+    std.mem.writeInt(i16, raw[13..15], 1000, .little); // gyro_x
+    std.mem.writeInt(i16, raw[15..17], 2000, .little); // gyro_y
+    std.mem.writeInt(i16, raw[17..19], 3000, .little); // gyro_z
+    std.mem.writeInt(i16, raw[19..21], -1000, .little); // accel_x
+    std.mem.writeInt(i16, raw[21..23], -2000, .little); // accel_y
+    std.mem.writeInt(i16, raw[23..25], -3000, .little); // accel_z
+
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+
+    try testing.expectEqual(@as(?u8, 11), delta.lt);
+    try testing.expectEqual(@as(?u8, 22), delta.rt);
+    try testing.expectEqual(@as(?i16, 1000), delta.gyro_x);
+    try testing.expectEqual(@as(?i16, 2000), delta.gyro_y);
+    try testing.expectEqual(@as(?i16, 3000), delta.gyro_z);
+    try testing.expectEqual(@as(?i16, -1000), delta.accel_x);
+    try testing.expectEqual(@as(?i16, -2000), delta.accel_y);
+    try testing.expectEqual(@as(?i16, -3000), delta.accel_z);
+}
+
 // --- Layer 2 (manual) ---
 // 1. zig build -Doptimize=Debug
 // 2. sudo ./zig-out/bin/padctl --config devices/flydigi/vader5.toml
