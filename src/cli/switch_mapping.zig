@@ -4,10 +4,20 @@ const socket_client = @import("socket_client.zig");
 const error_hint = @import("error_hint.zig");
 const mapping_discovery = @import("../config/mapping_discovery.zig");
 
-pub fn run(allocator: std.mem.Allocator, name: []const u8, device_id: ?[]const u8, socket_path: []const u8, writer: anytype, err_writer: anytype) u8 {
+pub const Outcome = enum { ok, no_devices, failed };
+
+pub fn classify(resp: []const u8) Outcome {
+    if (std.mem.startsWith(u8, resp, "OK")) return .ok;
+    if (error_hint.errorCode(resp)) |code| {
+        if (std.mem.eql(u8, code, "no-devices")) return .no_devices;
+    }
+    return .failed;
+}
+
+pub fn run(allocator: std.mem.Allocator, name: []const u8, device_id: ?[]const u8, socket_path: []const u8, writer: anytype, err_writer: anytype) Outcome {
     const fd = socket_client.connectToSocket(socket_path) catch {
         socket_client.reportConnectFailure(err_writer, socket_path);
-        return 1;
+        return .failed;
     };
     defer posix.close(fd);
 
@@ -22,30 +32,39 @@ pub fn run(allocator: std.mem.Allocator, name: []const u8, device_id: ?[]const u
     const cmd = socket_client.formatSwitch(&cmd_buf, switch_name, device_id);
     if (cmd.len == 0) {
         err_writer.writeAll("error: command too long\n") catch {};
-        return 1;
+        return .failed;
     }
 
     var resp_buf: [1024]u8 = undefined;
     const resp = socket_client.sendCommand(fd, cmd, &resp_buf) catch {
         err_writer.writeAll("error: no response from daemon\n") catch {};
-        return 1;
+        return .failed;
     };
 
-    if (std.mem.startsWith(u8, resp, "OK")) {
-        writer.writeAll(resp) catch {};
-        if (resp.len == 0 or resp[resp.len - 1] != '\n') writer.writeAll("\n") catch {};
-        return 0;
+    const outcome = classify(resp);
+    switch (outcome) {
+        .ok => {
+            writer.writeAll(resp) catch {};
+            if (resp.len == 0 or resp[resp.len - 1] != '\n') writer.writeAll("\n") catch {};
+        },
+        .no_devices => {},
+        .failed => error_hint.report(err_writer, resp, name),
     }
-
-    error_hint.report(err_writer, resp, name);
-    return 1;
+    return outcome;
 }
 
 // --- tests ---
 
 const testing = std.testing;
 
-test "run: connection failure returns 1" {
+test "run: connection failure returns failed" {
     const rc = run(testing.allocator, "fps", null, "/tmp/padctl-nonexistent-test.sock", std.io.null_writer, std.io.null_writer);
-    try testing.expectEqual(@as(u8, 1), rc);
+    try testing.expectEqual(Outcome.failed, rc);
+}
+
+test "classify: ok, no_devices, failed" {
+    try testing.expectEqual(Outcome.ok, classify("OK fps\n"));
+    try testing.expectEqual(Outcome.ok, classify("OK\n"));
+    try testing.expectEqual(Outcome.no_devices, classify("ERR no-devices\n"));
+    try testing.expectEqual(Outcome.failed, classify("ERR mapping-not-found\n"));
 }
