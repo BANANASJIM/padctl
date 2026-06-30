@@ -20,6 +20,14 @@ pub const FfbForwarder = struct {
         return .{ .physical_fd = physical_fd };
     }
 
+    /// Re-point the forwarder at a fresh physical hidraw fd after a device
+    /// rebind (sleep/wake). The old fd was closed by the supervisor, so re-arm
+    /// in case the forwarder had disabled itself on the now-stale fd.
+    pub fn setPhysicalFd(self: *FfbForwarder, fd: posix.fd_t) void {
+        self.physical_fd = fd;
+        self.state = .active;
+    }
+
     pub fn attachWedge(self: *FfbForwarder, wedge: *WedgeAtomics) void {
         self.wedge = wedge;
     }
