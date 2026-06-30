@@ -1046,28 +1046,43 @@ pub fn main() !void {
             break :blk resolveDefaultMapping(allocator, parsed.socket_path, stderr_writer);
         };
 
-        const rc = cli.switch_mapping.run(allocator, mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
-        if (rc == 0) {
-            // Auto-save to user config so `padctl switch` (no args) can
-            // restore the choice. Skipped when --device targets a specific
-            // controller because we can't reliably map a hidraw id to a
-            // device name without a device-keyed daemon API.
-            if (sw.device_id == null) {
-                saveToUserConfig(allocator, mapping_name, parsed.socket_path, stderr_writer);
-            }
-
-            if (sw.persist) {
-                if (sw.device_id != null) {
-                    stderr_writer.writeAll("error: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
-                    std.process.exit(1);
-                } else {
-                    if (!persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer)) {
+        const outcome = cli.switch_mapping.run(allocator, mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
+        switch (outcome) {
+            .ok => {
+                // Auto-save to user config so `padctl switch` (no args) can
+                // restore the choice. Skipped when --device targets a specific
+                // controller because we can't reliably map a hidraw id to a
+                // device name without a device-keyed daemon API.
+                if (sw.device_id == null) {
+                    saveToUserConfig(allocator, mapping_name, parsed.socket_path, stderr_writer);
+                }
+                if (sw.persist) {
+                    if (sw.device_id != null) {
+                        stderr_writer.writeAll("error: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
                         std.process.exit(1);
+                    } else {
+                        if (!persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer)) {
+                            std.process.exit(1);
+                        }
                     }
                 }
-            }
+                std.process.exit(0);
+            },
+            .no_devices => {
+                // Named switch with no --device: persist offline for all recorded devices.
+                if (sw.name != null and sw.device_id == null) {
+                    const rc = persistDefaultOffline(allocator, mapping_name, stdout_writer, stderr_writer);
+                    if (rc != 0) std.process.exit(rc);
+                    if (sw.persist and !persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer)) {
+                        std.process.exit(1);
+                    }
+                    std.process.exit(0);
+                }
+                _ = cli.error_hint.hintFor(stderr_writer, "no-devices", "");
+                std.process.exit(1);
+            },
+            .failed => std.process.exit(1),
         }
-        std.process.exit(rc);
     }
 
     // status subcommand
@@ -1621,6 +1636,94 @@ fn writeConfigToml(
     try user_config_mod.writeAtomic(allocator, config_path, &cfg);
 }
 
+/// #460: with no controller connected, record `mapping_name` as the default
+/// for every device already in the user config so it applies on next connect.
+/// Returns a process exit code.
+fn persistDefaultOffline(allocator: std.mem.Allocator, mapping_name: []const u8, out_writer: anytype, err_writer: anytype) u8 {
+    const mapping_discovery = @import("config/mapping_discovery.zig");
+    const paths = @import("config/paths.zig");
+    const error_hint_mod = @import("cli/error_hint.zig");
+
+    const resolved = mapping_discovery.findMapping(allocator, mapping_name) catch null;
+    defer if (resolved) |p| allocator.free(p);
+    if (resolved == null) {
+        _ = error_hint_mod.hintFor(err_writer, "mapping-not-found", mapping_name);
+        return 1;
+    }
+
+    const user_dir = paths.userConfigDir(allocator) catch {
+        err_writer.writeAll("error: could not write ~/.config/padctl/config.toml\n") catch {};
+        return 1;
+    };
+    defer allocator.free(user_dir);
+
+    std.fs.makeDirAbsolute(user_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => {
+            err_writer.writeAll("error: could not write ~/.config/padctl/config.toml\n") catch {};
+            return 1;
+        },
+    };
+
+    const count = writeDefaultForAllDevices(allocator, user_dir, mapping_name) catch |err| switch (err) {
+        error.MalformedConfig => {
+            err_writer.writeAll("error: user config.toml is malformed — fix or remove it first\n") catch {};
+            return 1;
+        },
+        else => {
+            err_writer.writeAll("error: could not write ~/.config/padctl/config.toml\n") catch {};
+            return 1;
+        },
+    };
+
+    if (count == 0) {
+        err_writer.writeAll("warning: no controller connected and no devices recorded yet.\n") catch {};
+        err_writer.writeAll("hint: connect your controller once so padctl records it, then run `padctl switch <name>` again.\n") catch {};
+        return 1;
+    }
+
+    out_writer.print("set default mapping to \"{s}\" for {d} recorded device(s)\n", .{ mapping_name, count }) catch {};
+    err_writer.writeAll("warning: no controller connected; it will apply when the controller is next connected.\n") catch {};
+    return 0;
+}
+
+/// Set default_mapping = mapping_name for ALL recorded [[device]] entries in
+/// {dir}/config.toml, preserving every other section. Returns the count of
+/// entries updated (0 when none recorded). Pure w.r.t. XDG — unit-testable.
+fn writeDefaultForAllDevices(allocator: std.mem.Allocator, dir: []const u8, mapping_name: []const u8) !usize {
+    const user_config_mod = @import("config/user_config.zig");
+
+    var existing = user_config_mod.loadFromDir(allocator, dir) catch |err| switch (err) {
+        error.MalformedConfig => return error.MalformedConfig,
+    };
+    defer if (existing) |*e| e.deinit();
+
+    const old_devices = if (existing) |e| e.value.device else null;
+    if (old_devices == null or old_devices.?.len == 0) return 0;
+
+    const devs = old_devices.?;
+    const new_devices = try allocator.alloc(user_config_mod.DeviceEntry, devs.len);
+    defer allocator.free(new_devices);
+
+    for (devs, 0..) |d, i| {
+        new_devices[i] = .{ .name = d.name, .default_mapping = mapping_name };
+    }
+
+    const cfg = user_config_mod.UserConfig{
+        .version = if (existing) |e| e.value.version else null,
+        .device = new_devices,
+        .diagnostics = if (existing) |e| e.value.diagnostics else .{},
+        .supervisor = if (existing) |e| e.value.supervisor else .{},
+        .chord_switch = if (existing) |e| e.value.chord_switch else null,
+    };
+
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
+    defer allocator.free(config_path);
+    try user_config_mod.writeAtomic(allocator, config_path, &cfg);
+
+    return devs.len;
+}
+
 fn parseDeviceFromStatus(resp: []const u8) ?[]const u8 {
     // Format: "STATUS device=NAME state=active\n"
     const prefix = "STATUS device=";
@@ -2019,4 +2122,88 @@ test "runFromDirs: startFromDirs scans all dirs, not just first" {
     const dirs = [_][]const u8{ dir1, dir2 };
     sup.startFromDirs(&dirs); // must not stop after dir1
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "writeDefaultForAllDevices: updates all devices, preserves other sections" {
+    const allocator = testing.allocator;
+    const user_config_mod = @import("config/user_config.zig");
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+
+    const seed =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = true
+        \\
+        \\[supervisor]
+        \\suspend_grace_sec = 30
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\default_mapping = "fps"
+        \\
+        \\[[device]]
+        \\name = "Sony DualSense"
+        \\default_mapping = "default"
+    ;
+    {
+        const f = try tmp.dir.createFile("config.toml", .{});
+        defer f.close();
+        try f.writeAll(seed);
+    }
+
+    const count = try writeDefaultForAllDevices(allocator, dir_path, "nioh");
+    try testing.expectEqual(@as(usize, 2), count);
+
+    var result = (try user_config_mod.loadFromDir(allocator, dir_path)).?;
+    defer result.deinit();
+
+    const devs = result.value.device orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), devs.len);
+    for (devs) |d| {
+        try testing.expectEqualStrings("nioh", d.default_mapping.?);
+    }
+    // Other sections must survive.
+    try testing.expectEqual(true, result.value.diagnostics.dump);
+    try testing.expectEqual(@as(i64, 30), result.value.supervisor.suspend_grace_sec);
+}
+
+test "writeDefaultForAllDevices: zero [[device]] entries returns 0" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+
+    const seed =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = true
+    ;
+    {
+        const f = try tmp.dir.createFile("config.toml", .{});
+        defer f.close();
+        try f.writeAll(seed);
+    }
+
+    const count = try writeDefaultForAllDevices(allocator, dir_path, "nioh");
+    try testing.expectEqual(@as(usize, 0), count);
+}
+
+test "writeDefaultForAllDevices: no config.toml returns 0" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+
+    const count = try writeDefaultForAllDevices(allocator, dir_path, "nioh");
+    try testing.expectEqual(@as(usize, 0), count);
 }
