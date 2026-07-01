@@ -794,6 +794,14 @@ pub const Mapper = struct {
         self.gesture_engine.reset();
         self.gesture_timer_tap_pending = 0;
         self.gesture_held_gamepad = 0;
+        // The engine reset above forgets any in-flight gesture hold; release the
+        // key/mouse it was holding so it isn't stranded down with no release edge.
+        for (&self.gesture_aux_down_targets) |*target| {
+            if (target.*) |down| {
+                emitAuxDownRelease(down, aux);
+                target.* = null;
+            }
+        }
         self.updateLayerHold(aux);
     }
 
@@ -1496,6 +1504,51 @@ test "mapper: releaseHeldAux releases old trigger-threshold aux down" {
     try testing.expectEqual(@as(usize, 1), release.len);
     try testing.expectEqual(@as(u16, 183), release.get(0).key.code);
     try testing.expect(!release.get(0).key.pressed);
+}
+
+test "mapper: gesture hold key released on layer activation (no stranded key)" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "Select"
+        \\activation = "toggle"
+        \\
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y", hold_ms = 300 }
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_mask = buttonBit("A");
+    const sel_mask = buttonBit("Select");
+    const a_idx = @intFromEnum(ButtonId.A);
+    const key_y: u16 = 21; // KEY_Y
+
+    // Fire the gesture hold leg while A is held: KEY_Y goes down and is recorded
+    // as a held gesture target.
+    _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
+    _ = m.onMacroTimerExpired(300 * std.time.ns_per_ms + 1);
+    try testing.expect(m.gesture_aux_down_targets[a_idx] != null);
+
+    // Toggle a layer on while A's hold key is still down: Select press then
+    // release. Toggle activation fires on the release edge, so the second apply
+    // is the frame that runs the layer transition — it must release the key the
+    // gesture was holding, otherwise KEY_Y stays stranded down.
+    _ = try m.apply(.{ .buttons = a_mask | sel_mask }, 16, 310 * std.time.ns_per_ms);
+    const ev = try m.apply(.{ .buttons = a_mask }, 16, 320 * std.time.ns_per_ms);
+
+    try testing.expect(m.gesture_aux_down_targets[a_idx] == null);
+    var saw_release = false;
+    for (ev.aux.slice()) |e| switch (e) {
+        .key => |k| {
+            if (k.code == key_y and !k.pressed) saw_release = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_release);
 }
 
 test "mapper: base remap gamepad_button: A -> B" {
