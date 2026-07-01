@@ -727,6 +727,11 @@ pub const DeviceInstance = struct {
         if (new_devices.len != self.devices.len) return error.DeviceCountMismatch;
         try self.loop.rebindDevices(new_devices);
         @memcpy(self.devices, new_devices);
+        // The FFB forwarder borrows devices[0]'s fd; closeDeviceIO just closed
+        // the old one, so re-point it at the fresh fd (mirrors init).
+        if (self.ffb_forwarder) |*fwd| {
+            if (self.devices.len > 0) fwd.setPhysicalFd(self.devices[0].pollfd().fd);
+        }
     }
 
     /// Re-run the device init sequence (e.g. handshake packets) using the
@@ -1669,6 +1674,35 @@ test "DeviceInstance: rebindDeviceIO rejects device count mismatch" {
 
     var empty = [_]DeviceIO{};
     try testing.expectError(error.DeviceCountMismatch, inst.rebindDeviceIO(&empty));
+}
+
+test "DeviceInstance: rebindDeviceIO re-points FfbForwarder at the fresh fd" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    defer mock_a.deinit();
+
+    var inst = try testInstance(allocator, &mock_a, &parsed.value);
+    defer {
+        inst.loop.deinit();
+        allocator.free(inst.devices);
+    }
+
+    // A force-feedback wheel borrows devices[0]'s fd through the forwarder.
+    inst.ffb_forwarder = FfbForwarder.init(inst.devices[0].pollfd().fd);
+
+    inst.closeDeviceIO();
+
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    var new_devs = [_]DeviceIO{mock_b.deviceIO()};
+    try inst.rebindDeviceIO(&new_devs);
+
+    // Without the re-point the forwarder keeps writing to the closed old fd.
+    try testing.expectEqual(mock_b.deviceIO().pollfd().fd, inst.ffb_forwarder.?.physical_fd);
 }
 
 // issue #397: openDeviceWithRetry must NOT sleep/retry on the supervisor
