@@ -1,6 +1,7 @@
 const std = @import("std");
 const toml = @import("toml");
 const paths = @import("paths.zig");
+const toml_lint = @import("toml_lint.zig");
 
 /// Current schema version written by the installer's binding writer.
 /// Bumping this requires adding migration logic in the loader.
@@ -49,6 +50,20 @@ pub const UserConfig = struct {
 };
 
 pub const ParseResult = toml.Parsed(UserConfig);
+
+fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
+    const sf = toml_lint.structFieldNames;
+    if (header.len == 0) return sf(UserConfig);
+    if (std.mem.eql(u8, header, "diagnostics")) return sf(DiagnosticsConfig);
+    if (std.mem.eql(u8, header, "supervisor")) return sf(SupervisorConfig);
+    if (std.mem.eql(u8, header, "chord_switch")) return sf(ChordSwitchConfig);
+    if (std.mem.eql(u8, header, "device")) return sf(DeviceEntry);
+    return null;
+}
+
+pub fn lintUnknownFields(allocator: std.mem.Allocator, raw_toml: []const u8) !std.ArrayList(toml_lint.LintFinding) {
+    return toml_lint.lint(allocator, raw_toml, lintAllowlistFor);
+}
 
 /// Load user config with system fallback.
 ///
@@ -133,6 +148,14 @@ pub fn loadFromDir(allocator: std.mem.Allocator, dir_path: []const u8) LoadDirEr
             std.log.warn("user config: {s} has version {d}, expected <= {d} — some fields may not be understood", .{ config_path, v, CURRENT_VERSION });
         }
     }
+
+    if (lintUnknownFields(allocator, content)) |findings| {
+        defer {
+            var f = findings;
+            f.deinit(allocator);
+        }
+        toml_lint.warnFindings(findings.items);
+    } else |_| {} // lint failure (OOM) must not break parsing
 
     return result;
 }
@@ -765,6 +788,61 @@ test "escapeTomlString escapes backslash and double-quote" {
     defer buf.deinit(a);
     try escapeTomlString(buf.writer(a), "a\\b\"c");
     try std.testing.expectEqualStrings("a\\\\b\\\"c", buf.items);
+}
+
+test "lintUnknownFields: typo'd [[device]] key is flagged" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\version = 1
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\defualt_mapping = "fps"
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    try std.testing.expectEqualStrings("defualt_mapping", findings.items[0].unknown_key);
+    try std.testing.expectEqualStrings("device", findings.items[0].table);
+}
+
+test "lintUnknownFields: clean user config returns no findings" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = false
+        \\max_log_size_mb = 100
+        \\
+        \\[supervisor]
+        \\suspend_grace_sec = 15
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\default_mapping = "fps"
+    ;
+    var findings = try lintUnknownFields(allocator, toml_str);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+// loadFromDir must propagate error.MalformedConfig (not null) so a broken user
+// config is distinguishable from an absent one.
+test "loadFromDir: malformed config propagates MalformedConfig not null" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    {
+        const f = try tmp.dir.createFile("config.toml", .{});
+        defer f.close();
+        try f.writeAll("[[[broken = not valid toml");
+    }
+    // Must be error.MalformedConfig, not null. resolveDefaultMapping branches on
+    // this error to emit "config.toml is malformed" instead of "no config.toml found".
+    try std.testing.expectError(error.MalformedConfig, loadFromDir(allocator, dir_path));
 }
 
 test "user_config: [chord_switch] section parses modifier + selectors + hold_ms" {

@@ -269,6 +269,14 @@ const ConfigCmd = union(enum) {
     @"test": struct { config: ?[]const u8, mapping: ?[]const u8, raw: bool },
 };
 
+fn validateDestdir(destdir: []const u8) error{RelativeDestdir}!void {
+    if (destdir.len > 0 and !std.fs.path.isAbsolute(destdir)) return error.RelativeDestdir;
+}
+
+fn validateSwitchArgs(persist: bool, device_id: ?[]const u8) error{PersistWithDevice}!void {
+    if (persist and device_id != null) return error.PersistWithDevice;
+}
+
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
@@ -300,6 +308,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     opts.prefix = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, iarg, "--destdir")) {
                     opts.destdir = args.next() orelse return error.MissingArgValue;
+                    validateDestdir(opts.destdir) catch {
+                        cli.errors.message(stderr_writer, "--destdir must be an absolute path");
+                        return error.UnknownArgument;
+                    };
                 } else if (std.mem.eql(u8, iarg, "--immutable")) {
                     opts.immutable = true;
                 } else if (std.mem.eql(u8, iarg, "--no-immutable")) {
@@ -343,6 +355,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     opts.prefix = args.next() orelse return error.MissingArgValue;
                 } else if (std.mem.eql(u8, iarg, "--destdir")) {
                     opts.destdir = args.next() orelse return error.MissingArgValue;
+                    validateDestdir(opts.destdir) catch {
+                        cli.errors.message(stderr_writer, "--destdir must be an absolute path");
+                        return error.UnknownArgument;
+                    };
                 } else if (std.mem.eql(u8, iarg, "--immutable")) {
                     opts.immutable = true;
                 } else if (std.mem.eql(u8, iarg, "--no-immutable")) {
@@ -1046,6 +1062,11 @@ pub fn main() !void {
             break :blk resolveDefaultMapping(allocator, parsed.socket_path, stderr_writer);
         };
 
+        validateSwitchArgs(sw.persist, sw.device_id) catch {
+            stderr_writer.writeAll("error: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
+            std.process.exit(1);
+        };
+
         const outcome = cli.switch_mapping.run(allocator, mapping_name, sw.device_id, parsed.socket_path, stdout_writer, stderr_writer);
         switch (outcome) {
             .ok => {
@@ -1057,13 +1078,8 @@ pub fn main() !void {
                     saveToUserConfig(allocator, mapping_name, parsed.socket_path, stderr_writer);
                 }
                 if (sw.persist) {
-                    if (sw.device_id != null) {
-                        stderr_writer.writeAll("error: --persist with --device is not yet supported (multi-device ambiguity)\n") catch {};
+                    if (!persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer)) {
                         std.process.exit(1);
-                    } else {
-                        if (!persistToSystemConfig(allocator, mapping_name, parsed.socket_path, stderr_writer)) {
-                            std.process.exit(1);
-                        }
                     }
                 }
                 std.process.exit(0);
@@ -1340,12 +1356,40 @@ test {
     _ = @import("test/gen/transition_id.zig");
 }
 
+test "validateDestdir: relative path is rejected" {
+    try std.testing.expectError(error.RelativeDestdir, validateDestdir("relative/path"));
+    try std.testing.expectError(error.RelativeDestdir, validateDestdir("subdir"));
+    try std.testing.expectError(error.RelativeDestdir, validateDestdir("./subdir"));
+}
+
+test "validateDestdir: absolute path is accepted" {
+    try validateDestdir("/tmp/staging");
+    try validateDestdir("/");
+}
+
+test "validateDestdir: empty string is accepted (no --destdir given)" {
+    try validateDestdir("");
+}
+
+test "validateSwitchArgs: persist with device_id is rejected" {
+    try std.testing.expectError(error.PersistWithDevice, validateSwitchArgs(true, "hidraw0"));
+}
+
+test "validateSwitchArgs: persist without device is accepted" {
+    try validateSwitchArgs(true, null);
+}
+
+test "validateSwitchArgs: device without persist is accepted" {
+    try validateSwitchArgs(false, "hidraw0");
+}
+
 /// Resolve the default mapping name from the user's config.toml for the
 /// currently connected device (queried from daemon STATUS). Used by bare
 /// `padctl switch` (no mapping name given).
 fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8, err_writer: anytype) []const u8 {
     const socket_client = @import("cli/socket_client.zig");
     const user_config_mod = @import("config/user_config.zig");
+    const paths_mod = @import("config/paths.zig");
 
     const fd = socket_client.connectToSocket(socket_path) catch {
         socket_client.reportConnectFailure(err_writer, socket_path);
@@ -1362,10 +1406,26 @@ fn resolveDefaultMapping(allocator: std.mem.Allocator, socket_path: []const u8, 
         std.process.exit(1);
     };
 
-    var result = user_config_mod.load(allocator) orelse {
-        err_writer.writeAll("error: no config.toml found; provide a mapping name explicitly\n") catch {};
-        err_writer.writeAll("  usage: padctl switch <name>\n") catch {};
-        std.process.exit(1);
+    // Try user config first, distinguishing malformed from absent.
+    var result: user_config_mod.ParseResult = blk: {
+        if (paths_mod.userConfigDir(allocator) catch null) |ud| {
+            defer allocator.free(ud);
+            const from_user = user_config_mod.loadFromDir(allocator, ud) catch {
+                // MalformedConfig: distinct message, not "no config found".
+                err_writer.writeAll("error: config.toml is malformed — fix it or pass a mapping name explicitly\n") catch {};
+                err_writer.writeAll("  usage: padctl switch <name>\n") catch {};
+                std.process.exit(1);
+            };
+            if (from_user) |r| break :blk r;
+        }
+        // User file absent or HOME not set; try system fallback.
+        const sys_dir = paths_mod.systemConfigDir();
+        const from_sys = user_config_mod.loadFromDir(allocator, sys_dir) catch null;
+        break :blk from_sys orelse {
+            err_writer.writeAll("error: no config.toml found; provide a mapping name explicitly\n") catch {};
+            err_writer.writeAll("  usage: padctl switch <name>\n") catch {};
+            std.process.exit(1);
+        };
     };
     return user_config_mod.findDefaultMapping(&result, device_name) orelse {
         err_writer.print("error: no default_mapping in config.toml for device \"{s}\"\n", .{device_name}) catch {};
