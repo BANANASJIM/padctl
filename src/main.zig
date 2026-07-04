@@ -1690,6 +1690,7 @@ fn persistDefaultOffline(allocator: std.mem.Allocator, mapping_name: []const u8,
         _ = error_hint_mod.hintFor(err_writer, "mapping-not-found", mapping_name);
         return 1;
     }
+    if (!validateMappingFileForOfflineSwitch(allocator, resolved.?, mapping_name, err_writer)) return 1;
 
     const user_dir = paths.userConfigDir(allocator) catch {
         err_writer.writeAll("error: could not write ~/.config/padctl/config.toml\n") catch {};
@@ -1705,9 +1706,9 @@ fn persistDefaultOffline(allocator: std.mem.Allocator, mapping_name: []const u8,
         },
     };
 
-    const count = writeDefaultForAllDevices(allocator, user_dir, mapping_name) catch |err| switch (err) {
+    const result = writeDefaultForOfflineConfig(allocator, user_dir, paths.systemConfigDir(), mapping_name) catch |err| switch (err) {
         error.MalformedConfig => {
-            err_writer.writeAll("error: user config.toml is malformed — fix or remove it first\n") catch {};
+            err_writer.writeAll("error: config.toml is malformed — fix or remove it first\n") catch {};
             return 1;
         },
         else => {
@@ -1716,15 +1717,75 @@ fn persistDefaultOffline(allocator: std.mem.Allocator, mapping_name: []const u8,
         },
     };
 
-    if (count == 0) {
+    if (result.count == 0) {
         err_writer.writeAll("warning: no controller connected and no devices recorded yet.\n") catch {};
         err_writer.writeAll("hint: connect your controller once so padctl records it, then run `padctl switch <name>` again.\n") catch {};
         return 1;
     }
 
-    out_writer.print("set default mapping to \"{s}\" for {d} recorded device(s)\n", .{ mapping_name, count }) catch {};
+    out_writer.print("set default mapping to \"{s}\" for {d} recorded device(s)\n", .{ mapping_name, result.count }) catch {};
+    if (result.source == .system) {
+        err_writer.writeAll("info: seeded user config from /etc/padctl/config.toml\n") catch {};
+    }
     err_writer.writeAll("warning: no controller connected; it will apply when the controller is next connected.\n") catch {};
     return 0;
+}
+
+fn validateMappingFileForOfflineSwitch(
+    allocator: std.mem.Allocator,
+    mapping_path: []const u8,
+    mapping_name: []const u8,
+    err_writer: anytype,
+) bool {
+    const mapping_cfg = @import("config/mapping.zig");
+    const error_hint_mod = @import("cli/error_hint.zig");
+
+    var parsed_mapping = mapping_cfg.parseFile(allocator, mapping_path) catch {
+        _ = error_hint_mod.hintFor(err_writer, "mapping-parse-failed", mapping_name);
+        return false;
+    };
+    parsed_mapping.deinit();
+    return true;
+}
+
+const OfflineConfigSource = enum { none, user, system };
+
+const OfflineConfigResult = struct {
+    count: usize,
+    source: OfflineConfigSource,
+};
+
+fn writeDefaultForOfflineConfig(
+    allocator: std.mem.Allocator,
+    user_dir: []const u8,
+    system_dir: []const u8,
+    mapping_name: []const u8,
+) !OfflineConfigResult {
+    const user_config_mod = @import("config/user_config.zig");
+
+    var user_existing = user_config_mod.loadFromDir(allocator, user_dir) catch |err| switch (err) {
+        error.MalformedConfig => return error.MalformedConfig,
+    };
+    defer if (user_existing) |*e| e.deinit();
+    if (user_existing) |*e| {
+        return .{
+            .count = try writeDefaultFromParsedDevices(allocator, user_dir, e, mapping_name),
+            .source = .user,
+        };
+    }
+
+    var system_existing = user_config_mod.loadFromDir(allocator, system_dir) catch |err| switch (err) {
+        error.MalformedConfig => return error.MalformedConfig,
+    };
+    defer if (system_existing) |*e| e.deinit();
+    if (system_existing) |*e| {
+        return .{
+            .count = try writeDefaultFromParsedDevices(allocator, user_dir, e, mapping_name),
+            .source = .system,
+        };
+    }
+
+    return .{ .count = 0, .source = .none };
 }
 
 /// Set default_mapping = mapping_name for ALL recorded [[device]] entries in
@@ -1738,10 +1799,22 @@ fn writeDefaultForAllDevices(allocator: std.mem.Allocator, dir: []const u8, mapp
     };
     defer if (existing) |*e| e.deinit();
 
-    const old_devices = if (existing) |e| e.value.device else null;
-    if (old_devices == null or old_devices.?.len == 0) return 0;
+    if (existing) |*e| {
+        return writeDefaultFromParsedDevices(allocator, dir, e, mapping_name);
+    }
+    return 0;
+}
 
-    const devs = old_devices.?;
+fn writeDefaultFromParsedDevices(
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    existing: anytype,
+    mapping_name: []const u8,
+) !usize {
+    const user_config_mod = @import("config/user_config.zig");
+
+    const devs = existing.value.device orelse return 0;
+    if (devs.len == 0) return 0;
     const new_devices = try allocator.alloc(user_config_mod.DeviceEntry, devs.len);
     defer allocator.free(new_devices);
 
@@ -1750,11 +1823,11 @@ fn writeDefaultForAllDevices(allocator: std.mem.Allocator, dir: []const u8, mapp
     }
 
     const cfg = user_config_mod.UserConfig{
-        .version = if (existing) |e| e.value.version else null,
+        .version = existing.value.version,
         .device = new_devices,
-        .diagnostics = if (existing) |e| e.value.diagnostics else .{},
-        .supervisor = if (existing) |e| e.value.supervisor else .{},
-        .chord_switch = if (existing) |e| e.value.chord_switch else null,
+        .diagnostics = existing.value.diagnostics,
+        .supervisor = existing.value.supervisor,
+        .chord_switch = existing.value.chord_switch,
     };
 
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir});
@@ -2231,4 +2304,76 @@ test "writeDefaultForAllDevices: no config.toml returns 0" {
 
     const count = try writeDefaultForAllDevices(allocator, dir_path, "nioh");
     try testing.expectEqual(@as(usize, 0), count);
+}
+
+test "writeDefaultForOfflineConfig: missing user config seeds devices from system config" {
+    const allocator = testing.allocator;
+    const user_config_mod = @import("config/user_config.zig");
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("user");
+    try tmp.dir.makeDir("system");
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fs.path.join(allocator, &.{ root, "user" });
+    defer allocator.free(user_dir);
+    const system_dir = try std.fs.path.join(allocator, &.{ root, "system" });
+    defer allocator.free(system_dir);
+
+    const seed =
+        \\version = 1
+        \\
+        \\[diagnostics]
+        \\dump = true
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\default_mapping = "old"
+    ;
+    {
+        const f = try tmp.dir.createFile("system/config.toml", .{});
+        defer f.close();
+        try f.writeAll(seed);
+    }
+
+    const result = try writeDefaultForOfflineConfig(allocator, user_dir, system_dir, "nioh");
+    try testing.expectEqual(@as(usize, 1), result.count);
+    try testing.expectEqual(OfflineConfigSource.system, result.source);
+
+    var user_loaded = (try user_config_mod.loadFromDir(allocator, user_dir)).?;
+    defer user_loaded.deinit();
+    const devs = user_loaded.value.device orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), devs.len);
+    try testing.expectEqualStrings("Vader 5 Pro", devs[0].name);
+    try testing.expectEqualStrings("nioh", devs[0].default_mapping.?);
+    try testing.expectEqual(true, user_loaded.value.diagnostics.dump);
+
+    var system_loaded = (try user_config_mod.loadFromDir(allocator, system_dir)).?;
+    defer system_loaded.deinit();
+    try testing.expectEqualStrings("old", system_loaded.value.device.?[0].default_mapping.?);
+}
+
+test "validateMappingFileForOfflineSwitch: rejects invalid mapping file" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const f = try tmp.dir.createFile("bad.toml", .{});
+        defer f.close();
+        try f.writeAll("[[[broken = not valid toml\n");
+    }
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const path = try std.fs.path.join(allocator, &.{ root, "bad.toml" });
+    defer allocator.free(path);
+
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+
+    try testing.expect(!validateMappingFileForOfflineSwitch(allocator, path, "bad", buf.writer(allocator)));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not be parsed") != null);
 }
