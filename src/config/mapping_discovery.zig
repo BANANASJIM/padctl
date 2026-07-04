@@ -9,6 +9,16 @@ pub const MappingProfile = struct {
     source: Source,
 };
 
+/// Mapping profile names are path stems, not paths. Keep the accepted
+/// vocabulary aligned with install-time mapping identifiers.
+pub fn isSafeMappingName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-') return false;
+    }
+    return true;
+}
+
 /// Scan XDG 3-layer mapping dirs, deduplicate by name (user > system > package).
 /// Caller owns returned slice; call freeProfiles() when done.
 pub fn discoverMappings(allocator: std.mem.Allocator) ![]MappingProfile {
@@ -68,9 +78,14 @@ pub fn discoverMappingsFromDirs(allocator: std.mem.Allocator, dirs: []const []co
 
 /// Find a mapping profile by name. Returns the full path or null. Caller frees.
 pub fn findMapping(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    if (!isSafeMappingName(name)) return null;
     const dirs = try paths.resolveMappingConfigDirs(allocator);
     defer paths.freeConfigDirs(allocator, dirs);
+    return findMappingFromDirs(allocator, name, dirs);
+}
 
+pub fn findMappingFromDirs(allocator: std.mem.Allocator, name: []const u8, dirs: []const []const u8) !?[]const u8 {
+    if (!isSafeMappingName(name)) return null;
     const filename = try std.fmt.allocPrint(allocator, "{s}.toml", .{name});
     defer allocator.free(filename);
 
@@ -169,4 +184,24 @@ test "findMapping: returns null for nonexistent" {
     const allocator = std.testing.allocator;
     const result = try findMapping(allocator, "nonexistent_profile_xyz_12345");
     try std.testing.expectEqual(@as(?[]u8, null), result);
+}
+
+test "findMappingFromDirs: rejects traversal and path separators" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    const mappings_dir = try std.fmt.allocPrint(allocator, "{s}/mappings", .{base});
+    defer allocator.free(mappings_dir);
+    try tmp.dir.makeDir("mappings");
+
+    const escape = try tmp.dir.createFile("escape.toml", .{});
+    escape.close();
+
+    const dirs = [_][]const u8{mappings_dir};
+    try std.testing.expectEqual(@as(?[]const u8, null), try findMappingFromDirs(allocator, "../escape", &dirs));
+    try std.testing.expectEqual(@as(?[]const u8, null), try findMappingFromDirs(allocator, "nested/profile", &dirs));
 }

@@ -503,6 +503,40 @@ fn checkRemapMacros(cfg: *const MappingConfig, map: *const RemapMap) !void {
     }
 }
 
+fn validateTarget(target: []const u8, allow_macro: bool) !void {
+    if (std.mem.startsWith(u8, target, "macro:")) {
+        if (allow_macro) return;
+        return error.InvalidConfig;
+    }
+    _ = remap_mod.resolveTarget(target) catch return error.InvalidConfig;
+}
+
+fn validateMacroSteps(cfg: *const MappingConfig) !void {
+    const macros = cfg.macro orelse return;
+    for (macros) |*m| {
+        for (m.steps) |step| {
+            const target = switch (step) {
+                .tap => |name| name,
+                .down => |name| name,
+                .up => |name| name,
+                .press => |name| name,
+                .delay, .pause_for_release => continue,
+            };
+            try validateTarget(target, false);
+        }
+    }
+}
+
+fn validateRemapSourcesAndTargets(map: *const RemapMap) !void {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        switch (entry.value_ptr.*) {
+            .string => |target| try validateTarget(target, true),
+            .chord_names, .gesture => {},
+        }
+    }
+}
+
 fn gestureLegInvalid(target: []const u8) bool {
     if (std.mem.startsWith(u8, target, "macro:")) return true;
     _ = remap_mod.resolveTarget(target) catch return true;
@@ -908,7 +942,9 @@ pub fn clampNumericRanges(cfg: *MappingConfig) void {
 }
 
 pub fn validate(cfg: *const MappingConfig) !void {
+    try validateMacroSteps(cfg);
     if (cfg.remap) |*m| {
+        try validateRemapSourcesAndTargets(m);
         try checkRemapMacros(cfg, m);
         try checkRemapChords(m);
         try checkRemapGestures(cfg, m, true);
@@ -935,6 +971,8 @@ pub fn validate(cfg: *const MappingConfig) !void {
             if (t < 1 or t > 5000) return error.InvalidConfig;
         }
 
+        _ = std.meta.stringToEnum(ButtonId, layer.trigger) orelse return error.InvalidConfig;
+
         for (seen_buf[0..seen_len]) |name| {
             if (std.mem.eql(u8, name, layer.name)) return error.InvalidConfig;
         }
@@ -946,15 +984,18 @@ pub fn validate(cfg: *const MappingConfig) !void {
             if (std.mem.startsWith(u8, tap, "macro:")) {
                 return error.LayerTapCannotBeMacro;
             }
+            try validateTarget(tap, false);
         }
 
         if (layer.hold) |hold| {
             if (std.mem.startsWith(u8, hold, "macro:")) {
                 return error.LayerHoldCannotBeMacro;
             }
+            try validateTarget(hold, false);
         }
 
         if (layer.remap) |*m| {
+            try validateRemapSourcesAndTargets(m);
             try checkRemapMacros(cfg, m);
             try checkRemapChords(m);
             try checkRemapGestures(cfg, m, false);
@@ -1237,7 +1278,7 @@ const test_toml_macro =
     \\steps = [
     \\    { tap = "B" },
     \\    { delay = 50 },
-    \\    { tap = "LEFT" },
+    \\    { tap = "DPadLeft" },
     \\]
     \\
     \\[[macro]]
@@ -1271,7 +1312,7 @@ test "mapping: [[macro]] multi-entry parse: all step primitives correct" {
     try std.testing.expectEqual(@as(usize, 3), dodge.steps.len);
     try std.testing.expectEqualStrings("B", dodge.steps[0].tap);
     try std.testing.expectEqual(@as(u32, 50), dodge.steps[1].delay);
-    try std.testing.expectEqualStrings("LEFT", dodge.steps[2].tap);
+    try std.testing.expectEqualStrings("DPadLeft", dodge.steps[2].tap);
 
     const shift = macros[1];
     try std.testing.expectEqualStrings("shift_hold", shift.name);
@@ -1338,6 +1379,42 @@ test "mapping: validate: macro:name in layer remap references unknown macro retu
     const result = try parseString(allocator, toml_str);
     defer result.deinit();
     try std.testing.expectError(error.UnknownMacro, validate(&result.value));
+}
+
+test "mapping: validate: unknown remap target returns error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\M1 = "KEY_NOT_A_REAL_KEY"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "mapping: validate: unknown macro step target returns error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[macro]]
+        \\name = "bad"
+        \\steps = [{ tap = "KEY_NOT_A_REAL_KEY" }]
+        \\
+        \\[remap]
+        \\M1 = "macro:bad"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "mapping: validate: invalid layer trigger returns error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "bad"
+        \\trigger = "NOT_A_BUTTON"
+        \\activation = "hold"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
 test "mapping: adaptive_trigger: valid mode parses and validates" {
@@ -1856,6 +1933,32 @@ test "mapping: layer tap and hold both set round-trip" {
     try validate(&result.value);
     try std.testing.expectEqualStrings("KEY_F13", result.value.layer.?[0].tap.?);
     try std.testing.expectEqualStrings("KEY_LEFTSHIFT", result.value.layer.?[0].hold.?);
+}
+
+test "mapping: validate: invalid layer tap target returns error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "sense"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\tap = "KEY_NOT_A_REAL_KEY"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "mapping: validate: invalid layer hold target returns error.InvalidConfig" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "sense"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\hold = "KEY_NOT_A_REAL_KEY"
+    );
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
 test "mapping: validate: layer hold macro: prefix rejected" {

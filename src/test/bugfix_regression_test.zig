@@ -215,3 +215,74 @@ test "layer timer expiry must NOT drain macro queue" {
     try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
     try testing.expectEqual(initial_step_index, m.active_macros.items[0].step_index);
 }
+
+test "macro timer-staged gamepad tap survives layer active change cleanup" {
+    const allocator = testing.allocator;
+
+    var ctx = try helpers.makeMapper(
+        \\[[macro]]
+        \\name = "delayed_a"
+        \\steps = [
+        \\  { delay = 10 },
+        \\  { tap = "A" },
+        \\]
+        \\
+        \\[[layer]]
+        \\name = "menu"
+        \\trigger = "Select"
+        \\activation = "toggle"
+        \\
+        \\[remap]
+        \\M1 = "macro:delayed_a"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const m1_mask = helpers.btnMask(.M1);
+    const select_mask = helpers.btnMask(.Select);
+    const a_mask = helpers.btnMask(.A);
+
+    _ = try m.apply(.{ .buttons = m1_mask | select_mask }, 16, 0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    _ = m.onMacroTimerExpired(11 * std.time.ns_per_ms);
+    try testing.expect((m.macro_timer_tap_pending & a_mask) != 0);
+
+    const ev = try m.apply(.{ .buttons = m1_mask }, 16, 12 * std.time.ns_per_ms);
+    try testing.expect((ev.gamepad.buttons & a_mask) != 0);
+
+    const release = try m.apply(.{ .buttons = m1_mask }, 16, 13 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), release.gamepad.buttons & a_mask);
+}
+
+test "gesture timer-staged gamepad tap survives layer active change cleanup" {
+    const allocator = testing.allocator;
+
+    var ctx = try helpers.makeMapper(
+        \\[[layer]]
+        \\name = "menu"
+        \\trigger = "Select"
+        \\activation = "toggle"
+        \\
+        \\[remap]
+        \\A = { tap = "B", double = "Y", double_ms = 50 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const a_mask = helpers.btnMask(.A);
+    const b_mask = helpers.btnMask(.B);
+    const select_mask = helpers.btnMask(.Select);
+
+    _ = try m.apply(.{ .buttons = a_mask | select_mask }, 16, 0);
+    _ = try m.apply(.{ .buttons = select_mask }, 16, 10 * std.time.ns_per_ms);
+
+    _ = m.onMacroTimerExpired(70 * std.time.ns_per_ms);
+    try testing.expect((m.gesture_timer_tap_pending & b_mask) != 0);
+
+    const ev = try m.apply(.{ .buttons = 0 }, 16, 71 * std.time.ns_per_ms);
+    try testing.expect((ev.gamepad.buttons & b_mask) != 0);
+
+    const release = try m.apply(.{ .buttons = 0 }, 16, 72 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), release.gamepad.buttons & b_mask);
+}

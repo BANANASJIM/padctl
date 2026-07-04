@@ -15,6 +15,7 @@ pub const ButtonId = state.ButtonId;
 // every report with no diagnostic. Reject at validate time instead.
 pub const MAX_REPORT_SIZE: i64 = 512;
 pub const LIBUSB_SLOT_SIZE: i64 = 64;
+pub const MAX_INIT_REPORT_SIZE: i64 = 64;
 
 pub const InterfaceConfig = struct {
     id: i64,
@@ -452,8 +453,15 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
-    // feature_report byte-range validation
+    // [device.init] byte/range validation. Runtime init casts byte arrays to u8
+    // and writes through a fixed 64-byte HID report buffer.
     if (cfg.device.init) |init_cfg| {
+        if (init_cfg.response_prefix) |prefix| {
+            for (prefix) |b| if (b < 0 or b > 255) return error.InvalidConfig;
+        }
+        if (init_cfg.report_size) |rs| {
+            if (rs < 0 or rs > MAX_INIT_REPORT_SIZE) return error.InvalidConfig;
+        }
         if (init_cfg.feature_report) |fr| {
             for (fr) |b| if (b < 0 or b > 255) return error.InvalidConfig;
         }
@@ -1632,6 +1640,86 @@ test "device: feature_report rejects byte < 0" {
         \\class = "hid"
         \\[device.init]
         \\feature_report = [-1]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: response_prefix rejects byte > 255" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\response_prefix = [256]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: response_prefix rejects byte < 0" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\response_prefix = [-1]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: init report_size must fit the 64-byte init buffer" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\report_size = 65
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: init report_size rejects negative values" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\report_size = -1
         \\[[report]]
         \\name = "r"
         \\interface = 0

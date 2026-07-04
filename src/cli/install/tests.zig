@@ -3505,6 +3505,47 @@ test "uninstall: removes /etc/systemd/user/padctl.service on immutable" {
     return error.FileStillExists;
 }
 
+test "uninstall: removes immutable user drop-in without deleting custom drop-ins" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(destdir);
+
+    const dropin_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user/padctl.service.d", .{destdir});
+    defer allocator.free(dropin_dir);
+    try ensureDirAll(allocator, dropin_dir);
+
+    const immutable_path = try std.fmt.allocPrint(allocator, "{s}/immutable.conf", .{dropin_dir});
+    defer allocator.free(immutable_path);
+    const custom_path = try std.fmt.allocPrint(allocator, "{s}/custom.conf", .{dropin_dir});
+    defer allocator.free(custom_path);
+    {
+        var f = try std.fs.createFileAbsolute(immutable_path, .{});
+        f.close();
+    }
+    {
+        var f = try std.fs.createFileAbsolute(custom_path, .{});
+        f.close();
+    }
+
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, .{
+            .prefix = "/usr",
+            .destdir = destdir,
+            .immutable = true,
+            .no_immutable = false,
+            .user_service = false,
+        });
+    }
+
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(immutable_path, .{}));
+    try std.fs.accessAbsolute(custom_path, .{});
+}
+
 test "uninstall: removes /etc/systemd/user/padctl.service on non-immutable /usr/local prefix" {
     const testing = std.testing;
     const allocator = testing.allocator;

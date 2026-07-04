@@ -700,6 +700,9 @@ pub const TouchpadDevice = struct {
         var events: [32]c.input_event = undefined;
         var n: usize = 0;
         const active_slots: usize = @min(@as(usize, self.max_slots), 2);
+        var next_slots = self.prev_slots;
+        var next_btn_touch = self.prev_btn_touch;
+        var next_tracking_id = self.next_tracking_id;
 
         for (0..active_slots) |i| {
             const curr = slots[i];
@@ -710,9 +713,9 @@ pub const TouchpadDevice = struct {
             n += 1;
 
             if (curr.active and !prev.active) {
-                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_TRACKING_ID, .value = self.next_tracking_id, .time = std.mem.zeroes(c.timeval) };
+                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_TRACKING_ID, .value = next_tracking_id, .time = std.mem.zeroes(c.timeval) };
                 n += 1;
-                self.next_tracking_id +%= 1;
+                next_tracking_id +%= 1;
             } else if (!curr.active and prev.active) {
                 events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_TRACKING_ID, .value = -1, .time = std.mem.zeroes(c.timeval) };
                 n += 1;
@@ -729,14 +732,14 @@ pub const TouchpadDevice = struct {
                 }
             }
 
-            self.prev_slots[i] = curr;
+            next_slots[i] = curr;
         }
 
         const any_active = slots[0].active or (active_slots > 1 and slots[1].active);
         if (any_active != self.prev_btn_touch) {
             events[n] = .{ .type = c.EV_KEY, .code = c.BTN_TOUCH, .value = if (any_active) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };
             n += 1;
-            self.prev_btn_touch = any_active;
+            next_btn_touch = any_active;
         }
 
         if (n > 0) {
@@ -744,6 +747,9 @@ pub const TouchpadDevice = struct {
             n += 1;
             try write_exact.writeExact(self.fd, std.mem.sliceAsBytes(events[0..n]));
         }
+        self.prev_slots = next_slots;
+        self.prev_btn_touch = next_btn_touch;
+        self.next_tracking_id = next_tracking_id;
     }
 
     pub fn touchpadOutputDevice(self: *TouchpadDevice) TouchpadOutputDevice {
@@ -1433,6 +1439,24 @@ fn readEvents(read_fd: std.posix.fd_t, out: []c.input_event) usize {
     return bytes / @sizeOf(c.input_event);
 }
 
+fn fillNonblockingPipe(write_fd: std.posix.fd_t) !void {
+    var buf: [4096]u8 = [_]u8{0xaa} ** 4096;
+    while (true) {
+        _ = std.posix.write(write_fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return err,
+        };
+    }
+}
+
+fn drainNonblockingPipe(read_fd: std.posix.fd_t) void {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(read_fd, &buf) catch return;
+        if (n == 0) return;
+    }
+}
+
 test "uinput: UinputDevice.emit: axis diff writes correct input_events via pipe" {
     const pfds = try std.posix.pipe2(.{});
     defer std.posix.close(pfds[0]);
@@ -1613,6 +1637,46 @@ test "uinput: TouchpadDevice.emit: finger lift sends tracking_id=-1" {
     try std.testing.expectEqual(@as(u16, c.ABS_MT_SLOT), events[0].code);
     try std.testing.expectEqual(@as(u16, c.ABS_MT_TRACKING_ID), events[1].code);
     try std.testing.expectEqual(@as(i32, -1), events[1].value);
+}
+
+test "uinput: TouchpadDevice.emit: write failure preserves release diff for retry" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = TouchpadDevice{
+        .fd = pfds[1],
+        .max_slots = 2,
+    };
+
+    var down = state.GamepadState{};
+    down.touch0_active = true;
+    down.touch0_x = 10;
+    down.touch0_y = 20;
+    try dev.emit(down);
+    drainNonblockingPipe(pfds[0]);
+    try std.testing.expect(dev.prev_slots[0].active);
+    try std.testing.expect(dev.prev_btn_touch);
+
+    try fillNonblockingPipe(pfds[1]);
+    const release = state.GamepadState{};
+    try std.testing.expectError(error.WouldBlock, dev.emit(release));
+    try std.testing.expect(dev.prev_slots[0].active);
+    try std.testing.expect(dev.prev_btn_touch);
+
+    drainNonblockingPipe(pfds[0]);
+    try dev.emit(release);
+
+    var events: [16]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    var saw_tracking_release = false;
+    var saw_btn_release = false;
+    for (events[0..n]) |ev| {
+        if (ev.type == c.EV_ABS and ev.code == c.ABS_MT_TRACKING_ID and ev.value == -1) saw_tracking_release = true;
+        if (ev.type == c.EV_KEY and ev.code == c.BTN_TOUCH and ev.value == 0) saw_btn_release = true;
+    }
+    try std.testing.expect(saw_tracking_release);
+    try std.testing.expect(saw_btn_release);
 }
 
 test "uinput: TouchpadDevice.emit: dual finger produces events for both slots" {

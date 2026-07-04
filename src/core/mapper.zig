@@ -784,8 +784,6 @@ pub const Mapper = struct {
             self.active_macros.clearRetainingCapacity();
         }
         releasePendingAuxTapReleases(self, aux, now_ns);
-        // Discard tap bits staged from a cancelled macro's timer expiry.
-        self.macro_timer_tap_pending = 0;
         self.cancelGestureStateForLayerChange(aux, now_ns);
         self.updateLayerHold(aux);
     }
@@ -798,7 +796,6 @@ pub const Mapper = struct {
         }
         self.gesture_tokens.clear();
         self.gesture_engine.reset();
-        self.gesture_timer_tap_pending = 0;
         self.gesture_held_gamepad = 0;
         for (&self.gesture_aux_down_targets) |*target| {
             if (target.*) |down| {

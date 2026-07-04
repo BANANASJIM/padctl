@@ -577,6 +577,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
             "/etc/systemd/system/padctl.service",
             "/etc/systemd/system/padctl.service.d/immutable.conf",
             "/etc/systemd/user/padctl.service",
+            "/etc/systemd/user/padctl.service.d/immutable.conf",
         };
         for (etc_files) |suffix| {
             const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ destdir, suffix });
@@ -589,6 +590,9 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         const dropin_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/system/padctl.service.d", .{destdir});
         defer allocator.free(dropin_dir);
         std.fs.deleteTreeAbsolute(dropin_dir) catch {};
+        const user_dropin_dir = try std.fmt.allocPrint(allocator, "{s}/etc/systemd/user/padctl.service.d", .{destdir});
+        defer allocator.free(user_dropin_dir);
+        std.fs.deleteDirAbsolute(user_dropin_dir) catch {};
     }
 
     for (opts.mappings) |mapping_name| {

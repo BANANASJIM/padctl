@@ -131,6 +131,12 @@ fn formatGuidance(allocator: std.mem.Allocator, safe_name: []const u8, device_na
     , .{ safe_name, device_name, safe_name });
 }
 
+fn writeNewMappingFile(path: []const u8, content: []const u8) !void {
+    const file = try std.fs.createFileAbsolute(path, .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(content);
+}
+
 pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8) !void {
     var pbuf: std.ArrayList(u8) = .{};
     defer pbuf.deinit(allocator);
@@ -216,9 +222,14 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8) !void {
         return err;
     };
 
-    const file = try std.fs.createFileAbsolute(out_path, .{});
-    defer file.close();
-    try file.writeAll(content_buf.items);
+    writeNewMappingFile(out_path, content_buf.items) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            print(allocator, &pbuf, "ERROR: mapping already exists: {s}\n", .{out_path});
+            print(allocator, &pbuf, "Use `padctl config edit {s}` or remove the file first.\n", .{safe});
+            return err;
+        },
+        else => return err,
+    };
 
     print(allocator, &pbuf, "\nCreated: {s}\n", .{out_path});
     print(allocator, &pbuf, "Validation: OK\n", .{});
@@ -426,4 +437,23 @@ test "init: validate-before-write gate rejects invalid TOML and writes no file" 
     const out = try std.fmt.allocPrint(allocator, "{s}/should-not-exist.toml", .{tmp_abs});
     defer allocator.free(out);
     try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(out, .{}));
+}
+
+test "init: writeNewMappingFile refuses to overwrite existing mapping" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_abs = try tmp.dir.realpath(".", &path_buf);
+
+    try tmp.dir.writeFile(.{ .sub_path = "profile.toml", .data = "# custom\n" });
+    const out = try std.fmt.allocPrint(allocator, "{s}/profile.toml", .{tmp_abs});
+    defer allocator.free(out);
+
+    try std.testing.expectError(error.PathAlreadyExists, writeNewMappingFile(out, "# generated\n"));
+
+    const content = try tmp.dir.readFileAlloc(allocator, "profile.toml", 1024);
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("# custom\n", content);
 }

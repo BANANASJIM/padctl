@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const paths = @import("../../config/paths.zig");
+const validate_mod = @import("../../tools/validate.zig");
 
 fn resolveEditor(allocator: std.mem.Allocator) ![]const u8 {
     if (posix.getenv("VISUAL")) |v| return allocator.dupe(u8, v);
@@ -21,6 +22,31 @@ fn resolveMappingPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     if (try paths.findConfig(allocator, filename, dirs)) |found| return found;
     // Default to user layer even if not yet existing
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dirs[0], filename });
+}
+
+fn editorSucceeded(term: std.process.Child.Term) bool {
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
+
+fn validateEditedFile(allocator: std.mem.Allocator, target: []const u8) !void {
+    const errors = validate_mod.validateFile(target, allocator) catch return error.ValidationFailed;
+    defer validate_mod.freeErrors(errors, allocator);
+    if (errors.len == 0) {
+        _ = posix.write(posix.STDOUT_FILENO, "Validation: OK\n") catch 0;
+        return;
+    }
+
+    _ = posix.write(posix.STDERR_FILENO, "Validation errors:\n") catch 0;
+    for (errors) |err| {
+        _ = posix.write(posix.STDERR_FILENO, err.file) catch 0;
+        _ = posix.write(posix.STDERR_FILENO, ": ") catch 0;
+        _ = posix.write(posix.STDERR_FILENO, err.message) catch 0;
+        _ = posix.write(posix.STDERR_FILENO, "\n") catch 0;
+    }
+    return error.ValidationFailed;
 }
 
 pub fn run(allocator: std.mem.Allocator, name: ?[]const u8) !void {
@@ -63,23 +89,12 @@ pub fn run(allocator: std.mem.Allocator, name: ?[]const u8) !void {
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
     const term = try child.spawnAndWait();
-    _ = term;
-
-    // Validate after edit
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "/proc/self/exe", "--validate", target },
-    }) catch null;
-    if (result) |res| {
-        defer allocator.free(res.stdout);
-        defer allocator.free(res.stderr);
-        if (res.term == .Exited and res.term.Exited != 0) {
-            _ = posix.write(posix.STDERR_FILENO, "Validation errors:\n") catch 0;
-            _ = posix.write(posix.STDERR_FILENO, res.stderr) catch 0;
-        } else {
-            _ = posix.write(posix.STDOUT_FILENO, "Validation: OK\n") catch 0;
-        }
+    if (!editorSucceeded(term)) {
+        _ = posix.write(posix.STDERR_FILENO, "Editor failed; not validating.\n") catch 0;
+        return error.EditorFailed;
     }
+
+    try validateEditedFile(allocator, target);
 }
 
 // --- tests ---
@@ -102,4 +117,29 @@ test "edit: resolveMappingPath appends .toml when missing" {
     };
     defer allocator.free(p);
     try std.testing.expect(std.mem.endsWith(u8, p, ".toml"));
+}
+
+test "edit: editorSucceeded only accepts exit code 0" {
+    try std.testing.expect(editorSucceeded(.{ .Exited = 0 }));
+    try std.testing.expect(!editorSucceeded(.{ .Exited = 1 }));
+    try std.testing.expect(!editorSucceeded(.{ .Signal = 9 }));
+}
+
+test "edit: validateEditedFile returns error on invalid mapping" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_abs = try tmp.dir.realpath(".", &buf);
+
+    const bad_mapping =
+        \\[remap]
+        \\M1 = "KEY_NOT_A_REAL_KEY"
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "bad.toml", .data = bad_mapping });
+    const path = try std.fmt.allocPrint(allocator, "{s}/bad.toml", .{tmp_abs});
+    defer allocator.free(path);
+
+    try std.testing.expectError(error.ValidationFailed, validateEditedFile(allocator, path));
 }
