@@ -1693,6 +1693,7 @@ test "DeviceInstance: rebindDeviceIO re-points FfbForwarder at the fresh fd" {
 
     // A force-feedback wheel borrows devices[0]'s fd through the forwarder.
     inst.ffb_forwarder = FfbForwarder.init(inst.devices[0].pollfd().fd);
+    inst.ffb_forwarder.?.state = .disabled;
 
     inst.closeDeviceIO();
 
@@ -1703,6 +1704,7 @@ test "DeviceInstance: rebindDeviceIO re-points FfbForwarder at the fresh fd" {
 
     // Without the re-point the forwarder keeps writing to the closed old fd.
     try testing.expectEqual(mock_b.deviceIO().pollfd().fd, inst.ffb_forwarder.?.physical_fd);
+    try testing.expectEqual(.active, inst.ffb_forwarder.?.state);
 }
 
 // issue #397: openDeviceWithRetry must NOT sleep/retry on the supervisor

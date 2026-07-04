@@ -730,12 +730,12 @@ pub const Mapper = struct {
             self.handleLayerActiveChanged(&events.aux, now_ns);
             events.gamepad = self.currentMappedGamepadFrame();
         } else if (th_res.layer_activated) {
+            // Plain hold activation has no active_changed apply() chokepoint, so
+            // perform the gesture/layer-hold cleanup here without touching the
+            // macro queue; layer-timer expiry is not the macro timerfd.
             self.prev.dpad_x = 0;
             self.prev.dpad_y = 0;
-            // Plain hold activation has no active_changed apply() chokepoint, so
-            // drive the `hold` passthrough here. updateLayerHold releases the
-            // prior layer's hold first, so it must run even when the newly-active
-            // layer has no hold target — otherwise a stale hold leaks forever.
+            self.cancelGestureStateForLayerChange(&events.aux, now_ns);
             self.updateLayerHold(&events.aux);
             events.gamepad = self.currentMappedGamepadFrame();
         }
@@ -786,7 +786,13 @@ pub const Mapper = struct {
         releasePendingAuxTapReleases(self, aux, now_ns);
         // Discard tap bits staged from a cancelled macro's timer expiry.
         self.macro_timer_tap_pending = 0;
-        // Cancel in-flight gestures; mirror the macro-cancel above.
+        self.cancelGestureStateForLayerChange(aux, now_ns);
+        self.updateLayerHold(aux);
+    }
+
+    fn cancelGestureStateForLayerChange(self: *Mapper, aux: *AuxEventList, now_ns: i128) void {
+        // Cancel in-flight gestures and release any key/mouse hold whose release
+        // edge would otherwise be lost when the layer changes source routing.
         for (self.gesture_tokens.entries) |maybe| {
             if (maybe) |e| self.timer_queue.cancel(e.token, now_ns);
         }
@@ -794,15 +800,12 @@ pub const Mapper = struct {
         self.gesture_engine.reset();
         self.gesture_timer_tap_pending = 0;
         self.gesture_held_gamepad = 0;
-        // The engine reset above forgets any in-flight gesture hold; release the
-        // key/mouse it was holding so it isn't stranded down with no release edge.
         for (&self.gesture_aux_down_targets) |*target| {
             if (target.*) |down| {
                 emitAuxDownRelease(down, aux);
                 target.* = null;
             }
         }
-        self.updateLayerHold(aux);
     }
 
     // Single chokepoint for the layer `hold` passthrough output. Releases the
@@ -1543,6 +1546,49 @@ test "mapper: gesture hold key released on layer activation (no stranded key)" {
     try testing.expect(m.gesture_aux_down_targets[a_idx] == null);
     var saw_release = false;
     for (ev.aux.slice()) |e| switch (e) {
+        .key => |k| {
+            if (k.code == key_y and !k.pressed) saw_release = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_release);
+}
+
+test "mapper: gesture hold key released on plain hold layer timer activation" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\hold_timeout = 200
+        \\
+        \\[layer.remap]
+        \\A = "disabled"
+        \\
+        \\[remap]
+        \\A = { tap = "KEY_X", hold = "KEY_Y", hold_ms = 300 }
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_mask = buttonBit("A");
+    const lb_mask = buttonBit("LB");
+    const a_idx = @intFromEnum(ButtonId.A);
+    const key_y: u16 = 21; // KEY_Y
+
+    _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
+    _ = m.onMacroTimerExpired(300 * std.time.ns_per_ms + 1);
+    try testing.expect(m.gesture_aux_down_targets[a_idx] != null);
+
+    _ = try m.apply(.{ .buttons = a_mask | lb_mask }, 16, 310 * std.time.ns_per_ms);
+    const timer = m.onLayerTimerExpiredAt(520 * std.time.ns_per_ms);
+
+    try testing.expect(m.gesture_aux_down_targets[a_idx] == null);
+    var saw_release = false;
+    for (timer.aux.slice()) |e| switch (e) {
         .key => |k| {
             if (k.code == key_y and !k.pressed) saw_release = true;
         },
