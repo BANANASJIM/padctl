@@ -384,6 +384,165 @@ const MockFfOutputDrain = struct {
     fn mockClose(_: *anyopaque) void {}
 };
 
+fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 50 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 300 },
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    // The sequence mock does not drain the fd, so this one byte keeps the FF
+    // slot readable long enough for both PLAY events to arrive in one burst.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+
+    std.Thread.sleep(wait_ns);
+    loop.stop();
+    thread.join();
+
+    return allocator.dupe(u8, mock_dev.write_log.items);
+}
+
+const PriorityProbeOutput = struct {
+    ff_pipe_read: posix.fd_t,
+    mock_device: *MockDeviceIO,
+    ff_before_device_read: bool = false,
+
+    fn outputDevice(self: *PriorityProbeOutput) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = mockEmit,
+        .poll_ff = mockPollFf,
+        .close = mockClose,
+    };
+
+    fn mockEmit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+
+    fn mockPollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        const self: *PriorityProbeOutput = @ptrCast(@alignCast(ptr));
+        var buf: [1]u8 = undefined;
+        _ = posix.read(self.ff_pipe_read, &buf) catch return null;
+        if (self.mock_device.frame_idx == 0) {
+            self.ff_before_device_read = true;
+        }
+        return null;
+    }
+
+    fn mockClose(_: *anyopaque) void {}
+};
+
+test "event_loop: device input is handled before uinput FF when both are ready" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    const frame = [_]u8{ 0x01, 0x00, 0x00 };
+    var mock_dev = try MockDeviceIO.init(allocator, &.{&frame});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var output = PriorityProbeOutput{
+        .ff_pipe_read = ff_pipe[0],
+        .mock_device = &mock_dev,
+    };
+
+    var devs = [_]DeviceIO{dev};
+
+    // Make both fds readable before entering the loop. The design slot order
+    // puts device fds before optional output fds, so this must process the
+    // input frame before looking at the uinput FF wake.
+    try mock_dev.signal();
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        output: *PriorityProbeOutput,
+        cfg: *const device_mod.DeviceConfig,
+    };
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .output = &output,
+        .cfg = &parsed.value,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{
+                .devices = c.devs,
+                .interpreter = c.interp,
+                .output = c.output.outputDevice(),
+                .device_config = c.cfg,
+                .poll_timeout_ms = 100,
+            });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    try testing.expectEqual(@as(usize, 1), mock_dev.frame_idx);
+    try testing.expect(!output.ff_before_device_read);
+}
+
 test "event_loop: stop frame forwarded even within 10ms throttle window" {
     const allocator = testing.allocator;
 
@@ -458,7 +617,7 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
 }
 
-test "event_loop: explicit stop of one of two overlapping effects does not cut the long effect" {
+test "event_loop: stopping a short overlapping effect restores the remaining long effect" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
@@ -479,20 +638,21 @@ test "event_loop: explicit stop of one of two overlapping effects does not cut t
     const interp = Interpreter.init(&parsed.value);
 
     // Sequence:
-    //   1) play A (slot 0, 300ms duration, magnitude 0x8000/0x4000)
-    //   2) play B (slot 1, 100ms duration, magnitude 0x4000/0x2000)
+    //   1) play A (slot 0, 300ms duration, magnitude 0x4000/0x2000)
+    //   2) play B (slot 1, 100ms duration, magnitude 0x8000/0x4000)
     //   3) explicit stop B (slot 1)
     //
     // Use the drain-aware mock so each pipe write advances the mock by
     // exactly one event and the test's wall-clock sleeps actually gate
     // the 10ms play-frame throttle.
     //
-    // Expected: three HID frames — play A, play B, then ONE stop frame
-    // when A's 300ms auto-stop deadline fires. No stop frame from the
-    // explicit stop of B, because A was still live.
+    // Expected: four HID frames — play A, play B, restore A when B stops,
+    // then stop when A's 300ms auto-stop deadline fires. The hardware only
+    // has one rumble command state, so suppressing output while A remains
+    // active leaves B's stronger command stuck on the controller.
     const seq = [_]?uinput.FfEvent{
-        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 300 },
-        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0x4000, .weak = 0x2000, .duration_ms = 100 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 300 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0x8000, .weak = 0x4000, .duration_ms = 100 },
         .{ .effect_type = 0x50, .effect_id = 1, .strong = 0, .weak = 0, .duration_ms = 0 },
         null,
     };
@@ -537,16 +697,16 @@ test "event_loop: explicit stop of one of two overlapping effects does not cut t
     loop.stop();
     thread.join();
 
-    // Expect exactly 3 frames: play A, play B, auto-stop.
-    // The explicit stop of B must NOT have produced a zero frame while A
-    // was still playing.
+    // Expect exactly 4 frames: play A, play B, restore A, auto-stop.
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 3 * frame_size), mock_dev.write_log.items.len);
+    try testing.expectEqual(@as(usize, 4 * frame_size), mock_dev.write_log.items.len);
     const play_a = mock_dev.write_log.items[0..frame_size];
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_a);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, play_a);
     const play_b = mock_dev.write_log.items[frame_size .. 2 * frame_size];
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, play_b);
-    const final_stop = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_b);
+    const restore_a = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, restore_a);
+    const final_stop = mock_dev.write_log.items[3 * frame_size .. 4 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, final_stop);
 }
 
@@ -943,19 +1103,9 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
     try testing.expectEqualSlices(u8, r_off.write_log, r_on.write_log);
 }
 
-test "event_loop: throttled replay after stop still arms auto-stop deadline" {
-    // Regression test for #65 (stuck rumble).
-    //
-    // Sequence:
-    //   T0  FF_PLAY  effect 0, 100ms duration  → emitted, scheduler deadline armed
-    //   T1  FF_STOP  effect 0                  → slot cleared, timerfd disarmed
-    //   T2  FF_PLAY  effect 0, 100ms duration  → THROTTLED (T2-T0 < 10ms)
-    //                                             scheduler MUST still arm deadline
-    //
-    // Pre-fix: onPlay() was gated by `forwarded` (only true when a frame was
-    // emitted). A throttled replay skipped onPlay() → timerfd never rearmed
-    // → motor never stopped → stuck rumble.
-    // Post-fix: onPlay() runs unconditionally whenever scheduler_on.
+test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
+    // STOP clears the play throttle window, so a replay after explicit stop is
+    // forwarded immediately and still arms the new auto-stop deadline.
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
@@ -975,7 +1125,7 @@ test "event_loop: throttled replay after stop still arms auto-stop deadline" {
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
 
-    // play, explicit stop, then a replay of effect 0; the replay is throttled.
+    // play, explicit stop, then a replay of effect 0.
     const seq = [_]?uinput.FfEvent{
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 100 },
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
@@ -1018,14 +1168,42 @@ test "event_loop: throttled replay after stop still arms auto-stop deadline" {
     loop.stop();
     thread.join();
 
-    // Three frames: play, explicit stop, and the auto-stop — the third only
-    // appears if the throttled replay rearmed the deadline.
+    // Four frames: play, explicit stop, replay, and the auto-stop. The final
+    // stop only appears if the replay rearmed the deadline.
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 3 * frame_size), mock_dev.write_log.items.len);
+    try testing.expectEqual(@as(usize, 4 * frame_size), mock_dev.write_log.items.len);
     const play_frame = mock_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
     const explicit_stop = mock_dev.write_log.items[frame_size .. 2 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
-    const auto_stop = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    const replay_frame = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, replay_frame);
+    const auto_stop = mock_dev.write_log.items[3 * frame_size .. 4 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, auto_stop);
+}
+
+test "event_loop: throttled play still rearms auto-stop deadline" {
+    // Regression test for #65 (stuck rumble): scheduler state must update even
+    // when a PLAY frame is suppressed by the 10ms hardware-write throttle.
+    //
+    // Sequence:
+    //   T0  FF_PLAY effect 0, 50ms duration   -> emitted, first deadline armed
+    //   T1  FF_PLAY effect 0, 300ms duration  -> throttled, no HID frame, but
+    //                                            scheduler deadline must extend
+    //
+    // If the second onPlay were gated by "frame forwarded", the first 50ms
+    // deadline would fire and emit a premature stop.
+    const allocator = testing.allocator;
+    const frame_size = 8;
+
+    const early_log = try runThrottledPlayScenario(allocator, 120 * std.time.ns_per_ms);
+    defer allocator.free(early_log);
+    try testing.expectEqual(@as(usize, frame_size), early_log.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, early_log);
+
+    const late_log = try runThrottledPlayScenario(allocator, 420 * std.time.ns_per_ms);
+    defer allocator.free(late_log);
+    try testing.expectEqual(@as(usize, 2 * frame_size), late_log.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, late_log[0..frame_size]);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, late_log[frame_size .. 2 * frame_size]);
 }
