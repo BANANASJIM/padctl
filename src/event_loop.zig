@@ -499,6 +499,14 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
+    fn recordRumbleWrite(self: *EventLoop, frame: RumbleScheduler.Frame, now_ns: i128) void {
+        if (frame.strong == 0 and frame.weak == 0) {
+            self.last_rumble_ns = 0;
+        } else {
+            self.last_rumble_ns = now_ns;
+        }
+    }
+
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         if (ctx.devices.len != self.device_count) {
             self.running = false;
@@ -563,34 +571,8 @@ pub const EventLoop = struct {
                 break;
             }
 
-            // Layer timerfd (slot 2) is handled inline; macro timerfd (slot 4) is
-            // drained after the device fd loop below.
-
-            // Check rumble auto-stop timerfd (slot 3).
-            if (self.pollfds[Slots.rumble_stop].revents & posix.POLL.IN != 0) {
-                var rs_expiry: [8]u8 = undefined;
-                _ = posix.read(self.rumble_stop_fd, &rs_expiry) catch {};
-                const now_ns = monotonicNs();
-                const result = self.rumble_scheduler.onTimerExpired(now_ns);
-                if (padctl_log.shouldWriteToFile(.debug)) {
-                    const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
-                    rumble_log.debug("[{s}] TIMERFD: expired now={d} frame={?} next_dl={?d} {s}", .{
-                        ctx.device_tag, now_ns, result.frame, result.next_deadline_ns, slotStr(&slot_buf),
-                    });
-                }
-                if (result.frame) |frame| {
-                    if (ctx.allocator) |alloc| {
-                        if (ctx.device_config) |dcfg| {
-                            if (emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag)) {
-                                if (frame.strong == 0 and frame.weak == 0) self.last_rumble_ns = 0;
-                            } else {
-                                rumble_log.debug("[{s}] TIMERFD: frame FAILED to emit", .{ctx.device_tag});
-                            }
-                        }
-                    }
-                }
-                armRumbleStopFd(self.rumble_stop_fd, result.next_deadline_ns);
-            }
+            // Layer, rumble-stop, and macro timerfds are drained after the
+            // physical device fd loop below.
 
             // Check device fds
             for (ctx.devices, 0..) |dev, i| {
@@ -703,6 +685,34 @@ pub const EventLoop = struct {
                 }
             }
 
+            // Check rumble auto-stop timerfd (slot 3). This may synchronously
+            // write a HID rumble frame, so it follows physical input fds just
+            // like the optional output-side FF drains.
+            if (self.pollfds[Slots.rumble_stop].revents & posix.POLL.IN != 0) {
+                var rs_expiry: [8]u8 = undefined;
+                _ = posix.read(self.rumble_stop_fd, &rs_expiry) catch {};
+                const now_ns = monotonicNs();
+                const result = self.rumble_scheduler.onTimerExpired(now_ns);
+                if (padctl_log.shouldWriteToFile(.debug)) {
+                    const slot_buf = fmtSchedulerSlots(self.rumble_scheduler.dumpSlots(), now_ns);
+                    rumble_log.debug("[{s}] TIMERFD: expired now={d} frame={?} next_dl={?d} {s}", .{
+                        ctx.device_tag, now_ns, result.frame, result.next_deadline_ns, slotStr(&slot_buf),
+                    });
+                }
+                if (result.frame) |frame| {
+                    if (ctx.allocator) |alloc| {
+                        if (ctx.device_config) |dcfg| {
+                            if (emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag)) {
+                                self.recordRumbleWrite(frame, now_ns);
+                            } else {
+                                rumble_log.debug("[{s}] TIMERFD: frame FAILED to emit", .{ctx.device_tag});
+                            }
+                        }
+                    }
+                }
+                armRumbleStopFd(self.rumble_stop_fd, result.next_deadline_ns);
+            }
+
             // Check uinput FF fd after physical input fds. The optional FF fd
             // is appended after device slots, and preserving that priority keeps
             // rumble-heavy games from delaying controller input handling.
@@ -741,7 +751,7 @@ pub const EventLoop = struct {
                                     if (ctx.allocator) |alloc| {
                                         if (ctx.device_config) |dcfg| {
                                             if (emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag)) {
-                                                if (frame.strong == 0 and frame.weak == 0) self.last_rumble_ns = 0;
+                                                self.recordRumbleWrite(frame, now_ns);
                                             } else {
                                                 rumble_log.debug("[{s}] FF_STOP: frame FAILED to emit", .{ctx.device_tag});
                                             }
@@ -754,7 +764,7 @@ pub const EventLoop = struct {
                                 if (ctx.allocator) |alloc| {
                                     if (ctx.device_config) |dcfg| {
                                         if (emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0, ctx.device_tag)) {
-                                            self.last_rumble_ns = 0;
+                                            self.recordRumbleWrite(.{ .strong = 0, .weak = 0 }, now_ns);
                                         } else {
                                             rumble_log.debug("[{s}] FF_STOP: direct zero frame FAILED to emit", .{ctx.device_tag});
                                         }
@@ -783,7 +793,7 @@ pub const EventLoop = struct {
                                         if (ctx.allocator) |alloc| {
                                             if (ctx.device_config) |dcfg| {
                                                 if (emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag)) {
-                                                    self.last_rumble_ns = now_ns;
+                                                    self.recordRumbleWrite(frame, now_ns);
                                                 } else {
                                                     rumble_log.debug("[{s}] FF_PLAY: emitRumbleFrame FAILED id={d}", .{ ctx.device_tag, ff_ev.effect_id });
                                                 }
@@ -803,7 +813,7 @@ pub const EventLoop = struct {
                                     if (ctx.allocator) |alloc| {
                                         if (ctx.device_config) |dcfg| {
                                             if (emitRumbleFrame(ctx.devices, alloc, dcfg, ff_ev.strong, ff_ev.weak, ctx.device_tag)) {
-                                                self.last_rumble_ns = now_ns;
+                                                self.recordRumbleWrite(.{ .strong = ff_ev.strong, .weak = ff_ev.weak }, now_ns);
                                             } else {
                                                 rumble_log.debug("[{s}] FF_PLAY: emitRumbleFrame FAILED id={d}", .{ ctx.device_tag, ff_ev.effect_id });
                                             }
