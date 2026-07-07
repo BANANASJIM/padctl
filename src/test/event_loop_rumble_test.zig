@@ -5,7 +5,8 @@ const std = @import("std");
 const testing = std.testing;
 const posix = std.posix;
 
-const EventLoop = @import("../event_loop.zig").EventLoop;
+const event_loop_mod = @import("../event_loop.zig");
+const EventLoop = event_loop_mod.EventLoop;
 const DeviceIO = @import("../io/device_io.zig").DeviceIO;
 const Interpreter = @import("../core/interpreter.zig").Interpreter;
 const state = @import("../core/state.zig");
@@ -48,6 +49,28 @@ const ff_toml =
     \\name = "r"
     \\interface = 0
     \\size = 1
+    \\[commands.rumble]
+    \\interface = 0
+    \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+;
+
+const ff_report_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 3
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\left_x = { offset = 1, type = "i16le" }
     \\[commands.rumble]
     \\interface = 0
     \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
@@ -474,6 +497,110 @@ const PriorityProbeOutput = struct {
     fn mockClose(_: *anyopaque) void {}
 };
 
+const TracingDeviceIO = struct {
+    frames: []const []const u8,
+    frame_idx: usize = 0,
+    allocator: std.mem.Allocator,
+    trace: std.ArrayList(u8),
+    write_log: std.ArrayList(u8),
+    pipe_r: posix.fd_t,
+    pipe_w: posix.fd_t,
+
+    fn init(allocator: std.mem.Allocator, frames: []const []const u8) !TracingDeviceIO {
+        var fds: [2]posix.fd_t = undefined;
+        const rc = std.os.linux.socketpair(
+            std.os.linux.AF.UNIX,
+            std.os.linux.SOCK.SEQPACKET | std.os.linux.SOCK.NONBLOCK,
+            0,
+            &fds,
+        );
+        if (rc != 0) return error.SocketPairFailed;
+        return .{
+            .frames = frames,
+            .allocator = allocator,
+            .trace = .{},
+            .write_log = .{},
+            .pipe_r = fds[0],
+            .pipe_w = fds[1],
+        };
+    }
+
+    fn deinit(self: *TracingDeviceIO) void {
+        self.trace.deinit(self.allocator);
+        self.write_log.deinit(self.allocator);
+        posix.close(self.pipe_r);
+        self.closeWriteEnd();
+    }
+
+    fn signal(self: *TracingDeviceIO) !void {
+        _ = try posix.write(self.pipe_w, &[_]u8{1});
+    }
+
+    fn closeWriteEnd(self: *TracingDeviceIO) void {
+        const fd = @atomicRmw(posix.fd_t, &self.pipe_w, .Xchg, -1, .acq_rel);
+        if (fd >= 0) posix.close(fd);
+    }
+
+    fn deviceIO(self: *TracingDeviceIO) DeviceIO {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = DeviceIO.VTable{
+        .read = read,
+        .write = write,
+        .feature_report = featureReport,
+        .pollfd = pollfd,
+        .close = close,
+    };
+
+    fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
+        const self: *TracingDeviceIO = @ptrCast(@alignCast(ptr));
+        if (self.frame_idx >= self.frames.len) {
+            self.closeWriteEnd();
+            return DeviceIO.ReadError.Again;
+        }
+        const frame = self.frames[self.frame_idx];
+        self.frame_idx += 1;
+        const n = @min(buf.len, frame.len);
+        @memcpy(buf[0..n], frame[0..n]);
+        self.trace.append(self.allocator, 'R') catch return DeviceIO.ReadError.Io;
+        return n;
+    }
+
+    fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
+        const self: *TracingDeviceIO = @ptrCast(@alignCast(ptr));
+        self.trace.append(self.allocator, 'W') catch return DeviceIO.WriteError.Io;
+        self.write_log.appendSlice(self.allocator, data) catch return DeviceIO.WriteError.Io;
+    }
+
+    fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
+
+    fn pollfd(ptr: *anyopaque) posix.pollfd {
+        const self: *TracingDeviceIO = @ptrCast(@alignCast(ptr));
+        return .{ .fd = self.pipe_r, .events = posix.POLL.IN, .revents = 0 };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+const NoopOutput = struct {
+    fn outputDevice(self: *NoopOutput) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = emit,
+        .poll_ff = pollFf,
+        .close = close,
+    };
+
+    fn emit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+    fn pollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        return null;
+    }
+    fn close(_: *anyopaque) void {}
+};
+
 test "event_loop: device input is handled before uinput FF when both are ready" {
     const allocator = testing.allocator;
 
@@ -541,6 +668,69 @@ test "event_loop: device input is handled before uinput FF when both are ready" 
 
     try testing.expectEqual(@as(usize, 1), mock_dev.frame_idx);
     try testing.expect(!output.ff_before_device_read);
+}
+
+test "event_loop: device input is handled before rumble auto-stop write when both are ready" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    const frame = [_]u8{ 0x01, 0x00, 0x00 };
+    var trace_dev = try TracingDeviceIO.init(allocator, &.{&frame});
+    defer trace_dev.deinit();
+    const dev = trace_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const parsed = try device_mod.parseString(allocator, ff_report_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    const now_ns = event_loop_mod.monotonicNs();
+    _ = loop.rumble_scheduler.onPlay(0, 0x8000, 0x4000, 1, now_ns - 2 * std.time.ns_per_ms);
+    event_loop_mod.armTimer(loop.rumble_stop_fd, 1);
+    std.Thread.sleep(3 * std.time.ns_per_ms);
+    try trace_dev.signal();
+
+    var output = NoopOutput{};
+    var devs = [_]DeviceIO{dev};
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        output: *NoopOutput,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .output = &output,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{
+                .devices = c.devs,
+                .interpreter = c.interp,
+                .output = c.output.outputDevice(),
+                .allocator = c.alloc,
+                .device_config = c.cfg,
+                .poll_timeout_ms = 100,
+            });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    try testing.expectEqualSlices(u8, "RW", trace_dev.trace.items);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, trace_dev.write_log.items);
 }
 
 test "event_loop: stop frame forwarded even within 10ms throttle window" {
@@ -708,6 +898,77 @@ test "event_loop: stopping a short overlapping effect restores the remaining lon
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, restore_a);
     const final_stop = mock_dev.write_log.items[3 * frame_size .. 4 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, final_stop);
+}
+
+test "event_loop: non-zero restore frame refreshes rumble throttle clock" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0, .weak = 0, .duration_ms = 0 },
+        .{ .effect_type = 0x50, .effect_id = 2, .strong = 0x7000, .weak = 0x3000, .duration_ms = 500 },
+        null,
+    };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0] };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputDrain,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 500 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(15 * std.time.ns_per_ms);
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(15 * std.time.ns_per_ms);
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(30 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 3 * frame_size), mock_dev.write_log.items.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[0..frame_size]);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[frame_size .. 2 * frame_size]);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[2 * frame_size .. 3 * frame_size]);
 }
 
 test "event_loop: auto_stop=false never emits a scheduler-driven stop frame" {
