@@ -211,8 +211,8 @@ fn scanRemapTargets(caps: *DerivedAuxCaps, cfg: *const MappingConfig, remap: *co
     }
 }
 
-// Maximum EV_KEY codes that buildAuxKeyCodes may produce: all key_table entries (97) + 7 mouse buttons
-pub const AUX_KEY_CODES_MAX = 104;
+// Maximum EV_KEY codes that buildAuxKeyCodes may produce: all key_table entries (122) + 7 mouse buttons
+pub const AUX_KEY_CODES_MAX = 129;
 
 /// Build a key_codes slice for AuxDevice.create() from derived caps.
 /// buf must be at least AUX_KEY_CODES_MAX elements.
@@ -2305,6 +2305,20 @@ test "gesture back-compat: chord array remap still parses as chord_names" {
     try std.testing.expectEqual(@as(usize, 2), names.len);
     try std.testing.expectEqualStrings("KEY_K", names[0]);
     try std.testing.expectEqualStrings("KEY_L", names[1]);
+}
+
+test "symbol key remap targets parse" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[remap]
+        \\RM = "KEY_COMMA"
+        \\LM = "KEY_DOT"
+    );
+    defer result.deinit();
+
+    try validate(&result.value);
+    try std.testing.expectEqualStrings("KEY_COMMA", result.value.remap.?.map.get("RM").?.string);
+    try std.testing.expectEqualStrings("KEY_DOT", result.value.remap.?.map.get("LM").?.string);
 }
 
 test "AUX_KEY_CODES_MAX equals all key codes plus all mouse buttons" {

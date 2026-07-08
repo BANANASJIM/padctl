@@ -194,6 +194,8 @@ pub const key_table = [_]CodeEntry{
     .{ .name = "KEY_I", .code = c.KEY_I },
     .{ .name = "KEY_O", .code = c.KEY_O },
     .{ .name = "KEY_P", .code = c.KEY_P },
+    .{ .name = "KEY_LEFTBRACE", .code = c.KEY_LEFTBRACE },
+    .{ .name = "KEY_RIGHTBRACE", .code = c.KEY_RIGHTBRACE },
     .{ .name = "KEY_A", .code = c.KEY_A },
     .{ .name = "KEY_S", .code = c.KEY_S },
     .{ .name = "KEY_D", .code = c.KEY_D },
@@ -203,6 +205,9 @@ pub const key_table = [_]CodeEntry{
     .{ .name = "KEY_J", .code = c.KEY_J },
     .{ .name = "KEY_K", .code = c.KEY_K },
     .{ .name = "KEY_L", .code = c.KEY_L },
+    .{ .name = "KEY_SEMICOLON", .code = c.KEY_SEMICOLON },
+    .{ .name = "KEY_APOSTROPHE", .code = c.KEY_APOSTROPHE },
+    .{ .name = "KEY_GRAVE", .code = c.KEY_GRAVE },
     .{ .name = "KEY_Z", .code = c.KEY_Z },
     .{ .name = "KEY_X", .code = c.KEY_X },
     .{ .name = "KEY_C", .code = c.KEY_C },
@@ -210,6 +215,10 @@ pub const key_table = [_]CodeEntry{
     .{ .name = "KEY_B", .code = c.KEY_B },
     .{ .name = "KEY_N", .code = c.KEY_N },
     .{ .name = "KEY_M", .code = c.KEY_M },
+    .{ .name = "KEY_COMMA", .code = c.KEY_COMMA },
+    .{ .name = "KEY_DOT", .code = c.KEY_DOT },
+    .{ .name = "KEY_SLASH", .code = c.KEY_SLASH },
+    .{ .name = "KEY_BACKSLASH", .code = c.KEY_BACKSLASH },
     .{ .name = "KEY_ENTER", .code = c.KEY_ENTER },
     .{ .name = "KEY_LEFTCTRL", .code = c.KEY_LEFTCTRL },
     .{ .name = "KEY_RIGHTCTRL", .code = c.KEY_RIGHTCTRL },
@@ -259,6 +268,22 @@ pub const key_table = [_]CodeEntry{
     .{ .name = "KEY_SCROLLLOCK", .code = c.KEY_SCROLLLOCK },
     .{ .name = "KEY_PAUSE", .code = c.KEY_PAUSE },
     .{ .name = "KEY_NUMLOCK", .code = c.KEY_NUMLOCK },
+    .{ .name = "KEY_KPSLASH", .code = c.KEY_KPSLASH },
+    .{ .name = "KEY_KPASTERISK", .code = c.KEY_KPASTERISK },
+    .{ .name = "KEY_KPMINUS", .code = c.KEY_KPMINUS },
+    .{ .name = "KEY_KPPLUS", .code = c.KEY_KPPLUS },
+    .{ .name = "KEY_KPENTER", .code = c.KEY_KPENTER },
+    .{ .name = "KEY_KP0", .code = c.KEY_KP0 },
+    .{ .name = "KEY_KP1", .code = c.KEY_KP1 },
+    .{ .name = "KEY_KP2", .code = c.KEY_KP2 },
+    .{ .name = "KEY_KP3", .code = c.KEY_KP3 },
+    .{ .name = "KEY_KP4", .code = c.KEY_KP4 },
+    .{ .name = "KEY_KP5", .code = c.KEY_KP5 },
+    .{ .name = "KEY_KP6", .code = c.KEY_KP6 },
+    .{ .name = "KEY_KP7", .code = c.KEY_KP7 },
+    .{ .name = "KEY_KP8", .code = c.KEY_KP8 },
+    .{ .name = "KEY_KP9", .code = c.KEY_KP9 },
+    .{ .name = "KEY_KPDOT", .code = c.KEY_KPDOT },
     .{ .name = "KEY_MUTE", .code = c.KEY_MUTE },
     .{ .name = "KEY_VOLUMEDOWN", .code = c.KEY_VOLUMEDOWN },
     .{ .name = "KEY_VOLUMEUP", .code = c.KEY_VOLUMEUP },
@@ -361,6 +386,11 @@ test "input_codes: resolveKeyCode: known codes" {
     try std.testing.expectEqual(@as(u16, 0x01), try resolveKeyCode("KEY_ESC"));
     try std.testing.expectEqual(@as(u16, 0x67), try resolveKeyCode("KEY_UP"));
     try std.testing.expectEqual(@as(u16, 0x6c), try resolveKeyCode("KEY_DOWN"));
+    try std.testing.expectEqual(@as(u16, 0x33), try resolveKeyCode("KEY_COMMA"));
+    try std.testing.expectEqual(@as(u16, 0x34), try resolveKeyCode("KEY_DOT"));
+    try std.testing.expectEqual(@as(u16, 0x35), try resolveKeyCode("KEY_SLASH"));
+    try std.testing.expectEqual(@as(u16, 0x62), try resolveKeyCode("KEY_KPSLASH"));
+    try std.testing.expectEqual(@as(u16, 0x37), try resolveKeyCode("KEY_KPASTERISK"));
 }
 
 test "input_codes: resolveKeyCode: unknown returns error" {
