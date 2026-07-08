@@ -61,6 +61,26 @@ const dualsense_buttons = [_]ButtonEntry{
     .{ .name = "Mic", .code = "BTN_MISC" },
 };
 
+const dualsense_edge_buttons = [_]ButtonEntry{
+    .{ .name = "A", .code = "BTN_SOUTH" },
+    .{ .name = "B", .code = "BTN_EAST" },
+    .{ .name = "X", .code = "BTN_WEST" },
+    .{ .name = "Y", .code = "BTN_NORTH" },
+    .{ .name = "LB", .code = "BTN_TL" },
+    .{ .name = "RB", .code = "BTN_TR" },
+    .{ .name = "Select", .code = "BTN_SELECT" },
+    .{ .name = "Start", .code = "BTN_START" },
+    .{ .name = "Home", .code = "BTN_MODE" },
+    .{ .name = "LS", .code = "BTN_THUMBL" },
+    .{ .name = "RS", .code = "BTN_THUMBR" },
+    .{ .name = "M1", .code = "BTN_TRIGGER_HAPPY1" },
+    .{ .name = "M2", .code = "BTN_TRIGGER_HAPPY2" },
+    .{ .name = "M3", .code = "BTN_TRIGGER_HAPPY3" },
+    .{ .name = "M4", .code = "BTN_TRIGGER_HAPPY4" },
+    .{ .name = "TouchPad", .code = "BTN_TOUCH" },
+    .{ .name = "Mic", .code = "BTN_MISC" },
+};
+
 const switch_pro_axes = [_]AxisEntry{
     .{ .name = "left_x", .cfg = .{ .code = "ABS_X", .min = -32768, .max = 32767, .fuzz = 0, .flat = 200 } },
     .{ .name = "left_y", .cfg = .{ .code = "ABS_Y", .min = -32768, .max = 32767, .fuzz = 0, .flat = 200 } },
@@ -106,6 +126,13 @@ const presets = [_]struct { name: []const u8, preset: Preset }{
         .name = "Sony DualSense",
         .axes = &dualsense_axes,
         .buttons = &dualsense_buttons,
+    } },
+    .{ .name = "dualsense-edge", .preset = .{
+        .vid = 0x054c,
+        .pid = 0x0df2,
+        .name = "Sony DualSense Edge",
+        .axes = &xbox360_axes,
+        .buttons = &dualsense_edge_buttons,
     } },
     .{ .name = "switch-pro", .preset = .{
         .vid = 0x057e,
@@ -185,6 +212,30 @@ test "applyPreset: dualsense preset" {
     try applyPreset(arena.allocator(), &out, "dualsense");
     try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
     try std.testing.expectEqual(@as(?i64, 0x0ce6), out.pid);
+}
+
+test "applyPreset: dualsense-edge preset keeps high-resolution sticks and Edge buttons" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var out = device.OutputConfig{};
+    try applyPreset(arena.allocator(), &out, "dualsense-edge");
+
+    try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try std.testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+
+    const axes = out.axes orelse return error.MissingAxes;
+    const left_x = axes.map.get("left_x") orelse return error.MissingLeftX;
+    try std.testing.expectEqual(@as(i64, -32768), left_x.min);
+    try std.testing.expectEqual(@as(i64, 32767), left_x.max);
+
+    const buttons = out.buttons orelse return error.MissingButtons;
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.map.get("M2") orelse return error.MissingM2);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.map.get("M3") orelse return error.MissingM3);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.map.get("M4") orelse return error.MissingM4);
+    try std.testing.expectEqualStrings("BTN_TOUCH", buttons.map.get("TouchPad") orelse return error.MissingTouchPad);
+    try std.testing.expectEqualStrings("BTN_MISC", buttons.map.get("Mic") orelse return error.MissingMic);
 }
 
 test "applyPreset: switch-pro preset" {

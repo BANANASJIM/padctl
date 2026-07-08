@@ -82,6 +82,43 @@ test "E2E emulate: explicit vid overrides preset, pid from preset" {
     try testing.expectEqual(@as(?i64, 0x0ce6), out.pid);
 }
 
+test "E2E emulate: dualsense-edge preset exposes Edge identity and extra buttons" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "My Device"
+        \\vid = 0x1111
+        \\pid = 0x2222
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\emulate = "dualsense-edge"
+    ;
+    const parsed = try device_mod.parseString(allocator, toml_str);
+    defer parsed.deinit();
+
+    const out = parsed.value.output.?;
+    try testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+
+    const axes = out.axes orelse return error.NoAxes;
+    const left_x = axes.map.get("left_x") orelse return error.NoLeftX;
+    try testing.expectEqual(@as(i64, -32768), left_x.min);
+    try testing.expectEqual(@as(i64, 32767), left_x.max);
+
+    const buttons = out.buttons orelse return error.NoButtons;
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.NoM1);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.map.get("M2") orelse return error.NoM2);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.map.get("M3") orelse return error.NoM3);
+    try testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.map.get("M4") orelse return error.NoM4);
+}
+
 test "E2E emulate: switch-pro preset axes count" {
     const allocator = testing.allocator;
     const toml_str =

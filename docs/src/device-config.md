@@ -170,6 +170,25 @@ Declares the uinput device emitted by padctl.
 | `vid` | integer | Emulated vendor ID |
 | `pid` | integer | Emulated product ID |
 
+Built-in `emulate` profiles:
+
+| Profile | VID:PID | Notes |
+|---------|---------|-------|
+| `xbox-360` | `045e:028e` | Standard Xbox 360 layout |
+| `xbox-elite2` | `045e:0b00` | Xbox Elite Series 2 identity |
+| `dualsense` | `054c:0ce6` | DualSense identity with touchpad and mic buttons |
+| `dualsense-edge` | `054c:0df2` | DualSense Edge identity, high-resolution stick ranges, and `M1`-`M4` mapped to `BTN_TRIGGER_HAPPY1`-`BTN_TRIGGER_HAPPY4` |
+| `switch-pro` | `057e:2009` | Nintendo Switch Pro layout |
+
+`emulate` fills only missing `[output]` fields. Explicit `vid`, `pid`, `name`,
+`[output.axes]`, or `[output.buttons]` entries remain authoritative, so a device
+can use a preset identity without losing device-specific stick ranges or extra
+button layout.
+
+These profiles define the virtual gamepad identity and generic evdev/HID button
+layout. They do not synthesize vendor-specific HIDAPI reports such as native
+DualSense gyro, adaptive trigger, or touchpad packet formats.
+
 ### `[output.axes]`
 
 ```toml

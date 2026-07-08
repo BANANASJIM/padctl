@@ -1476,6 +1476,37 @@ test "descriptor: Vader 5 keeps Steam/SDL M2 and M3 paddle order" {
     });
 }
 
+test "descriptor: DualSense Edge preset emits trigger-happy extra buttons" {
+    const alloc = testing.allocator;
+    const parsed = try device.parseString(alloc,
+        \\[device]
+        \\name = "Edge Preset Test"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\emulate = "dualsense-edge"
+    );
+    defer parsed.deinit();
+    const out = parsed.value.output orelse return error.MissingOutputSection;
+
+    const desc = try UhidDescriptorBuilder.buildFromOutput(alloc, out);
+    defer alloc.free(desc);
+
+    // Edge extra buttons map to BTN_TRIGGER_HAPPY1-4, which Linux exposes as
+    // HID Button usages 17-20. BTN_TOUCH / BTN_MISC use fallback button usages.
+    try expectButtonUsages(desc, &.{
+        1,  2,  5,  4,  7,  8, 12, 11, 13, 14,
+        15, 17, 18, 19, 20, 3, 6,
+    });
+}
+
 test "descriptor: button count padding rounds to byte boundary" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
