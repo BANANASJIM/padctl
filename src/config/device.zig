@@ -1246,6 +1246,39 @@ test "device: emulate preset: explicit vid overrides preset" {
     try std.testing.expectEqual(@as(?i64, 0x0ce6), out.pid);
 }
 
+test "device: emulate preset: dualsense-edge resolves identity and preserves explicit axes" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "My Device"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\emulate = "dualsense-edge"
+        \\[output.axes]
+        \\left_x = { code = "ABS_X", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+
+    const out = result.value.output.?;
+    try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try std.testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+    const axes = out.axes orelse return error.MissingAxes;
+    try std.testing.expectEqual(@as(usize, 1), axes.map.count());
+    const left_x = axes.map.get("left_x") orelse return error.MissingLeftX;
+    try std.testing.expectEqual(@as(i64, -32768), left_x.min);
+    try std.testing.expectEqual(@as(i64, 32767), left_x.max);
+}
+
 test "device: emulate preset: unknown preset returns error" {
     const allocator = std.testing.allocator;
     const toml_str =

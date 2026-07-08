@@ -82,7 +82,7 @@ type = "hat"
 | `i16le` centered at 0 | none (already full range) |
 | `u8` trigger (0-255) | none |
 
-**Output emulation:** For maximum game compatibility, emulate Xbox Elite Series 2 (`vid = 0x045e, pid = 0x0b00`). See `devices/flydigi/vader5.toml` for an example. If the device is well-known (like DualSense), use its real VID/PID.
+**Output emulation:** For maximum game compatibility, emulate a well-supported controller profile. `emulate = "xbox-elite2"` gives an Xbox Elite Series 2 identity, while `emulate = "dualsense-edge"` gives a DualSense Edge identity with `M1`-`M4` on the Edge extra-button slots. If the device is well-known and you are publishing its real protocol, use its real VID/PID.
 
 ## Multiple Report Types
 
