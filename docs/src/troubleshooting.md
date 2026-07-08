@@ -102,6 +102,73 @@ If your device is not listed, capture it and open a device-config contribution.
 
 ---
 
+## Mapping target is invalid for symbol keys such as comma or dot
+
+**Symptoms:**
+
+- On v0.1.20 or earlier, `padctl config test <mapping>` rejects symbol
+  targets such as `KEY_COMMA` or `KEY_DOT`.
+- Bare or lowercase spellings such as `comma`, `dot`, `KEY_comma`, or
+  `KEY_dot` are rejected on every version.
+- You want to bind a button such as `RM` or `LM` to punctuation.
+
+**Fix:** use the Linux evdev `KEY_*` name and run v0.1.21 or later:
+
+```toml
+[remap]
+RM = "KEY_COMMA"
+LM = "KEY_DOT"
+C  = "KEY_KPSLASH"
+Z  = "KEY_KPASTERISK"
+```
+
+Supported symbol targets include `KEY_COMMA`, `KEY_DOT`, `KEY_SLASH`,
+`KEY_BACKSLASH`, `KEY_SEMICOLON`, `KEY_APOSTROPHE`, `KEY_LEFTBRACE`,
+`KEY_RIGHTBRACE`, `KEY_GRAVE`, `KEY_KPSLASH`, `KEY_KPASTERISK`,
+`KEY_KPMINUS`, `KEY_KPPLUS`, `KEY_KPENTER`, `KEY_KPDOT`, and `KEY_KP0`
+through `KEY_KP9`.
+
+Lowercase names and bare punctuation names are not accepted; padctl follows the
+kernel event-code names so config files remain unambiguous.
+
+Reference: issue #470.
+
+---
+
+## Vader 5 rumble stays on, disconnects, or controls lag during vibration
+
+**Symptoms:**
+
+- The controller continues vibrating after a short rumble burst.
+- Vader 5 controls lag or stop responding while rumble is active.
+- Logs show a device disconnect/reconnect while rumble was recently active.
+
+**Current behavior:** v0.1.20 and later explicitly quiesce physical rumble after
+device init and after hotplug/rebind, so a fresh hidraw fd receives a neutral
+rumble frame even if the old fd disappeared before the teardown-time stop could
+reach hardware. Persistent non-disconnect rumble write failures are now logged
+and dropped without stopping the input loop; only a real disconnect tears down
+the device instance.
+
+**Collect evidence if it still reproduces:**
+
+```sh
+padctl dump enable
+# reproduce the stuck or lagging rumble
+padctl dump export --period 1h -o rumble.log
+padctl dump disable
+padctl doctor > doctor.txt
+```
+
+Attach both files to the issue. Useful log signals are `HID_WRITE`, `FF_PLAY`,
+`FF_STOP`, `SCHED`, `DISCONNECT`, and `retry limit exceeded`. A clean report
+should include whether the controller was already on before boot, whether it was
+on the dock, and which game/action produced the vibration pattern.
+
+Reference: issue #65 remains open for hardware verification.
+
+---
+
 ## Kernel driver or another mapper still owns the controller
 
 **Symptoms:**

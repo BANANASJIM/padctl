@@ -69,6 +69,13 @@ M2 = "LT"
 
 > **Note:** `BTN_*` values (e.g. `"BTN_SOUTH"`) are routed to the virtual **mouse** device, not the gamepad. To target a gamepad button use a friendly `ButtonId` name (`"A"`, `"Select"`, etc.) instead.
 
+Keyboard targets use Linux evdev `KEY_*` names. Letter and function keys are
+supported, along with common symbol keys such as `KEY_COMMA`, `KEY_DOT`,
+`KEY_SLASH`, `KEY_BACKSLASH`, `KEY_SEMICOLON`, `KEY_APOSTROPHE`,
+`KEY_LEFTBRACE`, `KEY_RIGHTBRACE`, and `KEY_GRAVE`. Keypad symbols use the
+kernel names: `KEY_KPSLASH`, `KEY_KPASTERISK`, `KEY_KPMINUS`, `KEY_KPPLUS`,
+`KEY_KPENTER`, `KEY_KPDOT`, and `KEY_KP0` through `KEY_KP9`.
+
 ```toml
 [remap]
 M1 = "KEY_F13"
@@ -76,6 +83,8 @@ M2 = "mouse_side"
 M3 = "disabled"
 A = "B"
 M4 = "macro:dodge_roll"
+RM = "KEY_COMMA"
+LM = "KEY_DOT"
 ```
 
 Array values (e.g. `M1 = ["KEY_LEFTMETA", "KEY_1"]`) are parsed and resolved as chord targets (2–4 keys) but are not yet dispatched — chord output is planned for a future release.

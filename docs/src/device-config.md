@@ -189,6 +189,13 @@ These profiles define the virtual gamepad identity and generic evdev/HID button
 layout. They do not synthesize vendor-specific HIDAPI reports such as native
 DualSense gyro, adaptive trigger, or touchpad packet formats.
 
+For `dualsense-edge`, the preset is an output identity and layout preset. It is
+useful when a client keys behavior from VID/PID and generic button layout, but
+it is not a complete DualSense Edge firmware clone. If a physical controller has
+higher-resolution sticks than the preset defaults, keep explicit
+`[output.axes]` entries in the device TOML; explicit axis ranges override the
+preset and prevent accidental precision loss.
+
 ### `[output.axes]`
 
 ```toml

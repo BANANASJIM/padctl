@@ -115,6 +115,8 @@ When `dump = true`, padctl adds verbose tracing on top. The coverage today is de
 - **EV_FF PLAY / STOP** events with scheduler decisions (forwarded, throttled, auto-stop timer armed, etc.)
 - **HID rumble frames** written to the physical device, with the first 16 bytes hex-dumped so post-checksum data can be inspected
 - **Scheduler slot state** (all 16 effect slots) before and after every mutation
+- **Rumble write recovery** — retry attempts, retry-limit exhaustion, and whether the input loop stayed alive after a non-disconnect write failure
+- **Hotplug/rebind rumble quiesce** — detach, init, re-init, and neutral rumble frames emitted after a fresh physical fd is bound
 
 Planned areas (no promised order): input-report parsing, layer/remap resolution, hotplug/netlink events, config reload, IPC commands. You can track progress on these in the repo issue tracker.
 
@@ -130,3 +132,7 @@ padctl dump disable
 ```
 
 Attach `issue.log`. Sensitive information in the logs is limited to device names, USB identifiers, and input report bytes — there is no keystroke capture or payload from other applications.
+
+For stuck-rumble reports, also attach `padctl doctor` output and note the game
+action that produced the rumble. The most useful lines are `FF_PLAY`,
+`FF_STOP`, `HID_WRITE`, `SCHED`, `DISCONNECT`, and `retry limit exceeded`.
