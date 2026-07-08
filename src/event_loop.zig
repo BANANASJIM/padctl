@@ -613,12 +613,10 @@ pub const EventLoop = struct {
             1;
 
         if (retry_count > RUMBLE_MAX_RETRY_ATTEMPTS) {
-            rumble_log.debug("[{s}] HID_WRITE: retry limit exceeded strong={d} weak={d}; marking disconnected", .{
+            rumble_log.warn("[{s}] HID_WRITE: retry limit exceeded strong={d} weak={d}; dropping rumble frame and keeping input loop alive", .{
                 ctx.device_tag, frame.strong, frame.weak,
             });
             self.clearPendingRumble();
-            self.disconnected = true;
-            self.running = false;
             return;
         }
 

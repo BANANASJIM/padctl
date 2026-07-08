@@ -1395,7 +1395,7 @@ test "event_loop: disconnected rumble write exits without retry queue" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, fail_dev.write_log.items[0..frame_size]);
 }
 
-test "event_loop: repeated rumble write failures stop retrying and mark disconnected" {
+test "event_loop: repeated rumble write failures stop retrying without disconnecting input loop" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
@@ -1459,11 +1459,12 @@ test "event_loop: repeated rumble write failures stop retrying and mark disconne
     try waitForAck(write_ack_pipe[0]);
     try sendFfAndWait(ff_pipe[1], ack_pipe[0]);
     try waitForNoAck(write_ack_pipe[0], 100);
+    try testing.expect(@atomicLoad(bool, &loop.running, .acquire));
     loop.stop();
     thread.join();
 
     try testing.expectEqual(@as(usize, 5), fail_dev.write_attempts);
-    try testing.expect(loop.disconnected);
+    try testing.expect(!loop.disconnected);
     try testing.expectEqual(@as(?rumble_scheduler_mod.RumbleScheduler.Frame, null), loop.pending_rumble_frame);
     try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
     try testing.expectEqual(@as(usize, frame_size), fail_dev.write_log.items.len);
