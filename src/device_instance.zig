@@ -169,6 +169,17 @@ pub fn openUhidDeviceForTest(
     return openUhidDevice(allocator, cfg, test_fd);
 }
 
+fn quiescePhysicalRumble(
+    loop: *EventLoop,
+    devices: []DeviceIO,
+    allocator: std.mem.Allocator,
+    cfg: *const DeviceConfig,
+) void {
+    // Best-effort physical reset for attach/rebind paths. This uses
+    // commands.rumble directly, so it does not depend on kernel FF state.
+    loop.quiesceTimersAndRumble(devices, allocator, cfg, cfg.device.name);
+}
+
 pub const DeviceInstance = struct {
     allocator: std.mem.Allocator,
     devices: []DeviceIO,
@@ -489,6 +500,7 @@ pub const DeviceInstance = struct {
         } else {
             std.log.info("device \"{s}\": passthrough (no mapping)", .{cfg.device.name});
         }
+        quiescePhysicalRumble(&loop, devices, allocator, cfg);
         std.log.info("device ready: \"{s}\"", .{cfg.device.name});
 
         return .{
@@ -673,7 +685,7 @@ pub const DeviceInstance = struct {
     }
 
     pub fn quiesceOutputs(self: *DeviceInstance, options: QuiesceOptions) void {
-        self.loop.quiesceTimersAndRumble(self.devices, self.allocator, self.device_cfg, self.device_cfg.device.name);
+        quiescePhysicalRumble(&self.loop, self.devices, self.allocator, self.device_cfg);
 
         if (self.mapper) |*m| {
             self.releaseMapperAux(m);
@@ -752,6 +764,7 @@ pub const DeviceInstance = struct {
                 };
             }
         }
+        quiescePhysicalRumble(&self.loop, self.devices, self.allocator, self.device_cfg);
     }
 
     /// Signal the event loop to stop. run() returns after the current ppoll.
@@ -885,6 +898,29 @@ const init_toml =
     \\expect = [0x01]
 ;
 
+const init_with_rumble_toml =
+    \\[device]
+    \\name = "InitRumbleDevice"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[device.init]
+    \\interface = 0
+    \\commands = ["0101"]
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[commands.rumble]
+    \\interface = 0
+    \\template = "aa {strong:u8} {weak:u8} bb"
+;
+
 const strict_init_toml =
     \\[device]
     \\name = "StrictInitDevice"
@@ -1015,6 +1051,26 @@ test "DeviceInstance.init propagates feature_report init errors" {
     });
 
     try testing.expectError(DeviceIO.WriteError.Io, result);
+}
+
+test "DeviceInstance.init quiesces physical rumble after init sequence" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, init_with_rumble_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const devices = try allocator.alloc(DeviceIO, 1);
+    devices[0] = mock.deviceIO();
+
+    var uniq_counter: u16 = 1;
+    var inst = try DeviceInstance.init(allocator, &parsed.value, null, null, &uniq_counter, .{
+        .test_devices_override = devices,
+    });
+    defer inst.deinit();
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x01, 0xaa, 0x00, 0x00, 0xbb }, mock.write_log.items);
 }
 
 const suppress_first_init_toml =
@@ -1235,6 +1291,91 @@ test "DeviceInstance: rerunInitSequence propagates feature_report errors" {
     };
 
     try testing.expectError(DeviceIO.WriteError.Io, inst.rerunInitSequence());
+}
+
+test "DeviceInstance: rerunInitSequence quiesces physical rumble after re-init" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, init_with_rumble_toml);
+    defer parsed.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = mock.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+
+    try inst.rerunInitSequence();
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x01, 0xaa, 0x00, 0x00, 0xbb }, mock.write_log.items);
+}
+
+test "DeviceInstance: rebind then re-init quiesces physical rumble on fresh fd" {
+    const allocator = testing.allocator;
+
+    const parsed = try device_mod.parseString(allocator, init_with_rumble_toml);
+    defer parsed.deinit();
+
+    var old_mock = try MockDeviceIO.init(allocator, &.{});
+    defer old_mock.deinit();
+    var new_mock = try MockDeviceIO.init(allocator, &.{});
+    defer new_mock.deinit();
+    const devices = try allocator.alloc(DeviceIO, 1);
+    defer allocator.free(devices);
+    devices[0] = old_mock.deviceIO();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    try loop.addDevice(devices[0]);
+
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+
+    var new_devices = [_]DeviceIO{new_mock.deviceIO()};
+    try inst.rebindDeviceIO(&new_devices);
+    try inst.rerunInitSequence();
+
+    try testing.expectEqual(@as(usize, 0), old_mock.write_log.items.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x01, 0xaa, 0x00, 0x00, 0xbb }, new_mock.write_log.items);
 }
 
 test "DeviceInstance: stop() causes run() to exit" {
