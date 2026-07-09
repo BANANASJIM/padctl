@@ -64,7 +64,7 @@ max_log_size_mb = 100 # rotation threshold (default 100 MB)
 
 <a id="schema-rewrite"></a>
 
-> ⚠️ **Rewrite behavior.** `padctl dump enable/disable` parses `config.toml`, rewrites it from the known schema, and atomically renames the result into place. Anything outside the documented schema — unknown sections, undocumented keys, hand-written comments — is **not preserved**. If you hand-edit `config.toml` with content that matters (e.g. a forward-looking `[experimental]` block, inline comments documenting a choice), keep it in a sibling file, or drive padctl via `SIGHUP` after the edit instead of using the `dump` subcommand. The current known schema is `version`, `[diagnostics]` (`dump`, `max_log_size_mb`), `[supervisor]` (`suspend_grace_sec`), `[chord_switch]` (`modifier`, `selectors`, `hold_ms`), and `[[device]]` entries (`name`, `default_mapping`).
+> ⚠️ **Rewrite behavior.** `padctl dump enable/disable` parses `config.toml`, rewrites it from the known schema, and atomically renames the result into place. Anything outside the documented schema — unknown sections, undocumented keys, hand-written comments — is **not preserved**. If you hand-edit `config.toml` with content that matters (e.g. a forward-looking `[experimental]` block, inline comments documenting a choice), keep it in a sibling file, or drive padctl via `SIGHUP` after the edit instead of using the `dump` subcommand. The current known schema is `version`, `[diagnostics]` (`dump`, `max_log_size_mb`), `[supervisor]` (`suspend_grace_sec`), `[chord_switch]` (`modifier`, `selectors`, `hold_ms`), and `[[device]]` entries (`name`, `default_mapping`, `output_profile`).
 
 ## Supervisor tunables
 

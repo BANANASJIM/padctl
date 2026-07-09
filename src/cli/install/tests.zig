@@ -2523,6 +2523,40 @@ test "install: writeBinding conflict with force - backup + overwrite" {
     try std.testing.expect(found_bak);
 }
 
+test "install: writeBinding force overwrite preserves output_profile" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    const etc_dir = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl", .{destdir});
+    defer testing_alloc.free(etc_dir);
+    try ensureDirAll(testing_alloc, etc_dir);
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/config.toml", .{etc_dir});
+    defer testing_alloc.free(config_path);
+    {
+        const f = try std.fs.createFileAbsolute(config_path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\version = 1
+            \\
+            \\[[device]]
+            \\name = "Vader"
+            \\default_mapping = "old_map"
+            \\output_profile = "dualsense-edge"
+        );
+    }
+
+    try writeBinding(testing_alloc, destdir, "Vader", "new_map", .force, mockPromptKeep);
+
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"new_map\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "output_profile = \"dualsense-edge\"") != null);
+}
+
 test "install: writeBinding force pure-add does not create backup" {
     const testing_alloc = std.testing.allocator;
 

@@ -8,7 +8,9 @@
 
 | ID | Class | EP IN | EP OUT |
 |----|-------|-------|--------|
-| 1 | hid | — | — |
+| 1 | vendor | 130 | 6 |
+| 2 | suppress | — | — |
+| 3 | suppress | — | — |
 
 ## Report: `extended` (32 bytes, interface 1)
 
@@ -21,9 +23,9 @@ Match: byte[0] = `0x5a`, `0xa5`, `0xef`
 | `left_y` | 5 | `i16le` | negate |
 | `right_y` | 9 | `i16le` | negate |
 | `accel_x` | 23 | `i16le` | — |
-| `gyro_z` | 21 | `i16le` | — |
+| `gyro_z` | 19 | `i16le` | — |
 | `gyro_x` | 17 | `i16le` | — |
-| `gyro_y` | 19 | `i16le` | — |
+| `gyro_y` | 21 | `i16le` | negate |
 | `accel_z` | 27 | `i16le` | — |
 | `accel_y` | 25 | `i16le` | — |
 | `left_x` | 3 | `i16le` | — |
@@ -66,7 +68,7 @@ Source: offset 11, size 4 byte(s)
 
 | Name | Interface | Template |
 |------|-----------|----------|
-| `rumble` | 1 | `5aa5 1206 {strong:u8} {weak:u8} 0000 0000...` |
+| `rumble` | 1 | `5a a5 12 06 {strong:u8} {weak:u8} 00 00 00 00 00 00 00 00 00...` |
 
 ## Output Capabilities
 
@@ -87,26 +89,34 @@ uinput device name: **Xbox Elite Series 2** | VID `0x045e` | PID `0x0b00`
 
 | Button | Event Code |
 |--------|------------|
-| `M2` | `BTN_TRIGGER_HAPPY2` |
-| `M4` | `BTN_TRIGGER_HAPPY4` |
-| `M1` | `BTN_TRIGGER_HAPPY1` |
-| `RM` | `BTN_TRIGGER_HAPPY8` |
-| `LM` | `BTN_TRIGGER_HAPPY7` |
+| `M2` | `BTN_TRIGGER_HAPPY7` |
+| `M4` | `BTN_TRIGGER_HAPPY8` |
+| `M1` | `BTN_TRIGGER_HAPPY5` |
+| `RM` | `BTN_TRIGGER_HAPPY12` |
+| `LM` | `BTN_TRIGGER_HAPPY11` |
 | `B` | `BTN_EAST` |
 | `LS` | `BTN_THUMBL` |
 | `RS` | `BTN_THUMBR` |
 | `X` | `BTN_NORTH` |
-| `Z` | `BTN_TRIGGER_HAPPY6` |
+| `Z` | `BTN_TRIGGER_HAPPY10` |
 | `LB` | `BTN_TL` |
 | `RB` | `BTN_TR` |
 | `A` | `BTN_SOUTH` |
 | `Select` | `BTN_SELECT` |
 | `Home` | `BTN_MODE` |
-| `C` | `BTN_TRIGGER_HAPPY5` |
+| `C` | `BTN_TRIGGER_HAPPY9` |
 | `Start` | `BTN_START` |
-| `O` | `BTN_TRIGGER_HAPPY9` |
+| `O` | `BTN_TRIGGER_HAPPY13` |
 | `Y` | `BTN_WEST` |
-| `M3` | `BTN_TRIGGER_HAPPY3` |
+| `M3` | `BTN_TRIGGER_HAPPY6` |
 
 **Force feedback**: type=`rumble`, max_effects=16
+
+### Output Profiles
+
+Default profile: `xbox-elite2`
+
+| Profile | Device Name | VID | PID | Axes | Buttons |
+|---------|-------------|-----|-----|------|---------|
+| `dualsense-edge` | **Sony DualSense Edge** | `0x054c` | `0x0df2` | 6 | 20 |
 

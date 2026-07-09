@@ -253,9 +253,10 @@ version = 1
 [[device]]
 name = "Flydigi Vader 5 Pro"
 default_mapping = "fps"
+output_profile = "dualsense-edge"  # optional; selects a device-declared output profile
 ```
 
-On daemon start, padctl matches the connected device name (case-insensitive) and loads the named mapping profile automatically. The system path is the fallback for environments where `HOME` is not set (e.g. systemd services).
+On daemon start, padctl matches the connected device name (case-insensitive), loads the named mapping profile automatically, and applies the optional output profile before creating the virtual gamepad. `output_profile` selects a profile declared by the device TOML; do not put it in a mapping file. The system path is the fallback for environments where `HOME` is not set (e.g. systemd services).
 
 `padctl switch <name>` automatically updates the user config, so the choice is remembered for bare `padctl switch` (re-apply without a name). Bare `padctl switch` (no argument) reads `default_mapping` from the connected device's entry in `config.toml`; if no entry exists, it prints `error: no default_mapping in config.toml for device "<name>"` and exits. To make the choice survive reboots, use `padctl switch <name> --persist` which copies the mapping and config to `/etc/padctl/` via sudo.
 

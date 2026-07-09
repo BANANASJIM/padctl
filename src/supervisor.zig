@@ -2378,6 +2378,16 @@ pub const Supervisor = struct {
         return .{ .pr = p, .stem = dm.stem };
     }
 
+    fn applyUserOutputProfile(self: *Supervisor, cfg: *DeviceConfig) void {
+        const ucfg = &(self.user_cfg orelse return);
+        const profile_name = user_config_mod.findOutputProfile(ucfg, cfg.device.name) orelse return;
+        if (config_device.selectOutputProfile(cfg, profile_name)) {
+            std.log.info("output profile: device \"{s}\" profile \"{s}\"", .{ cfg.device.name, profile_name });
+        } else {
+            std.log.warn("output profile \"{s}\" for device \"{s}\" not found; using default output", .{ profile_name, cfg.device.name });
+        }
+    }
+
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
     pub fn startFromDir(self: *Supervisor, dir_path: []const u8) !void {
         return self.startFromDirWithRoot(dir_path, "/dev");
@@ -2411,6 +2421,7 @@ pub const Supervisor = struct {
             };
             const cfg_ptr = try self.allocator.create(config_device.ParseResult);
             cfg_ptr.* = parsed;
+            self.applyUserOutputProfile(&cfg_ptr.value);
 
             const vid: u16 = @intCast(cfg_ptr.value.device.vid);
             const pid: u16 = @intCast(cfg_ptr.value.device.pid);
@@ -4494,6 +4505,63 @@ test "supervisor: hotplug: config retained when no device online, attach finds i
     try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
     try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+}
+
+test "supervisor: user output_profile applies before config is cached for hotplug" {
+    const allocator = testing.allocator;
+    const profile_device_toml =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 3
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\left_x = { offset = 1, type = "i16le" }
+        \\[output]
+        \\name = "Base Output"
+        \\vid = 0x1111
+        \\pid = 0x2222
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\[output.profiles.dualsense-edge]
+        \\emulate = "dualsense-edge"
+    ;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "profile.toml", .data = profile_device_toml });
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    const cfg_str =
+        \\[[device]]
+        \\name = "T"
+        \\output_profile = "dualsense-edge"
+    ;
+    var ucfg_parser = @import("toml").Parser(user_config_mod.UserConfig).init(allocator);
+    defer ucfg_parser.deinit();
+    sup.user_cfg = try ucfg_parser.parseString(cfg_str);
+
+    try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+
+    const out = sup.configs.items[0].value.output orelse return error.MissingOutput;
+    try testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
 }
 
 test "supervisor: Supervisor: duplicate attach devname — only one instance created" {

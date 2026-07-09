@@ -175,6 +175,23 @@ pub const MappingEntry = struct {
 
 pub const OutputConfig = struct {
     emulate: ?[]const u8 = null,
+    default_profile: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    vid: ?i64 = null,
+    pid: ?i64 = null,
+    axes: ?toml.HashMap(AxisConfig) = null,
+    buttons: ?toml.HashMap([]const u8) = null,
+    dpad: ?DpadOutputConfig = null,
+    force_feedback: ?ForceFeedbackConfig = null,
+    aux: ?AuxConfig = null,
+    touchpad: ?TouchpadConfig = null,
+    mapping: ?toml.HashMap(MappingEntry) = null,
+    imu: ?ImuConfig = null,
+    profiles: ?toml.HashMap(OutputProfileConfig) = null,
+};
+
+pub const OutputProfileConfig = struct {
+    emulate: ?[]const u8 = null,
     name: ?[]const u8 = null,
     vid: ?i64 = null,
     pid: ?i64 = null,
@@ -204,6 +221,71 @@ pub const DeviceConfig = struct {
     output: ?OutputConfig = null,
     wasm: ?WasmConfig = null,
 };
+
+fn outputFromProfile(profile: OutputProfileConfig) OutputConfig {
+    return .{
+        .emulate = profile.emulate,
+        .name = profile.name,
+        .vid = profile.vid,
+        .pid = profile.pid,
+        .axes = profile.axes,
+        .buttons = profile.buttons,
+        .dpad = profile.dpad,
+        .force_feedback = profile.force_feedback,
+        .aux = profile.aux,
+        .touchpad = profile.touchpad,
+        .mapping = profile.mapping,
+        .imu = profile.imu,
+    };
+}
+
+fn profileFromOutput(out: OutputConfig) OutputProfileConfig {
+    return .{
+        .emulate = out.emulate,
+        .name = out.name,
+        .vid = out.vid,
+        .pid = out.pid,
+        .axes = out.axes,
+        .buttons = out.buttons,
+        .dpad = out.dpad,
+        .force_feedback = out.force_feedback,
+        .aux = out.aux,
+        .touchpad = out.touchpad,
+        .mapping = out.mapping,
+        .imu = out.imu,
+    };
+}
+
+fn overlayOutputProfile(base: OutputConfig, profile: OutputProfileConfig) OutputConfig {
+    var out = base;
+    if (profile.emulate) |v| out.emulate = v;
+    if (profile.name) |v| out.name = v;
+    if (profile.vid) |v| out.vid = v;
+    if (profile.pid) |v| out.pid = v;
+    if (profile.axes) |v| out.axes = v;
+    if (profile.buttons) |v| out.buttons = v;
+    if (profile.dpad) |v| out.dpad = v;
+    if (profile.force_feedback) |v| out.force_feedback = v;
+    if (profile.aux) |v| out.aux = v;
+    if (profile.touchpad) |v| out.touchpad = v;
+    if (profile.mapping) |v| out.mapping = v;
+    if (profile.imu) |v| out.imu = v;
+    out.default_profile = null;
+    out.profiles = null;
+    return out;
+}
+
+pub fn selectOutputProfile(cfg: *DeviceConfig, profile_name: []const u8) bool {
+    var out = cfg.output orelse return false;
+    if (out.default_profile) |default_profile| {
+        if (std.mem.eql(u8, default_profile, profile_name)) return true;
+    }
+    const profiles = out.profiles orelse return false;
+    const profile = profiles.map.get(profile_name) orelse return false;
+    out = overlayOutputProfile(out, profile);
+    cfg.output = out;
+    return true;
+}
 
 const valid_transforms = [_][]const u8{ "negate", "abs", "scale", "clamp", "deadzone" };
 
@@ -438,17 +520,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     if (cfg.device.mode) |m| {
         if (std.mem.eql(u8, m, "generic")) {
             const out = cfg.output orelse return error.InvalidConfig;
-            const mapping = out.mapping orelse return error.InvalidConfig;
-            var it = mapping.map.iterator();
-            while (it.next()) |entry| {
-                const me = entry.value_ptr.*;
-                _ = input_codes.resolveEventCode(me.event) catch return error.InvalidConfig;
-                // ABS events require range
-                if (std.mem.startsWith(u8, me.event, "ABS_")) {
-                    const range = me.range orelse return error.InvalidConfig;
-                    if (range.len != 2) return error.InvalidConfig;
-                }
-            }
+            _ = out.mapping orelse return error.InvalidConfig;
         }
     }
 
@@ -459,38 +531,66 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
+    if (cfg.output) |out| {
+        try validateOutputConfig(cfg, &out);
+        if (out.profiles) |profiles| {
+            var it = profiles.map.iterator();
+            while (it.next()) |entry| {
+                var profile_out = overlayOutputProfile(out, entry.value_ptr.*);
+                try validateOutputConfig(cfg, &profile_out);
+            }
+        }
+    }
+}
+
+fn validateMappingEntries(mapping: toml.HashMap(MappingEntry)) !void {
+    var it = mapping.map.iterator();
+    while (it.next()) |entry| {
+        const me = entry.value_ptr.*;
+        _ = input_codes.resolveEventCode(me.event) catch return error.InvalidConfig;
+        // ABS events require range
+        if (std.mem.startsWith(u8, me.event, "ABS_")) {
+            const range = me.range orelse return error.InvalidConfig;
+            if (range.len != 2) return error.InvalidConfig;
+        }
+    }
+}
+
+fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !void {
+    if (cfg.device.mode) |m| {
+        if (std.mem.eql(u8, m, "generic") and out.mapping == null) return error.InvalidConfig;
+    }
+
+    if (out.mapping) |mapping| try validateMappingEntries(mapping);
+
     // IMU backend validation: uinput's EVIOCGUNIQ always returns -ENOENT,
     // so SDL's uniq-based pairing fails. Only "uhid" is legal when
     // [output.imu] is declared; unknown strings fail closed.
-    if (cfg.output) |out| {
-        if (out.imu) |imu| {
-            if (!std.mem.eql(u8, imu.backend, "uhid")) return error.InvalidConfig;
-        }
+    if (out.imu) |imu| {
+        if (!std.mem.eql(u8, imu.backend, "uhid")) return error.InvalidConfig;
     }
 
     // Force feedback backend/kind matrix. Absent force_feedback is always legal.
-    if (cfg.output) |out| {
-        if (out.force_feedback) |ffb| {
-            const is_uinput = std.mem.eql(u8, ffb.backend, "uinput");
-            const is_uhid = std.mem.eql(u8, ffb.backend, "uhid");
-            const is_rumble = std.mem.eql(u8, ffb.kind, "rumble");
-            const is_pid = std.mem.eql(u8, ffb.kind, "pid");
+    if (out.force_feedback) |ffb| {
+        const is_uinput = std.mem.eql(u8, ffb.backend, "uinput");
+        const is_uhid = std.mem.eql(u8, ffb.backend, "uhid");
+        const is_rumble = std.mem.eql(u8, ffb.kind, "rumble");
+        const is_pid = std.mem.eql(u8, ffb.kind, "pid");
 
-            if (!is_uinput and !is_uhid) return error.InvalidConfig;
-            if (!is_rumble and !is_pid) return error.InvalidConfig;
+        if (!is_uinput and !is_uhid) return error.InvalidConfig;
+        if (!is_rumble and !is_pid) return error.InvalidConfig;
 
-            if (is_uinput and is_pid) return error.InvalidConfig;
-            if (is_uhid and is_rumble) return error.InvalidConfig;
+        if (is_uinput and is_pid) return error.InvalidConfig;
+        if (is_uhid and is_rumble) return error.InvalidConfig;
 
-            // uhid+pid requires [output.imu] as the UHID routing gate.
-            if (is_uhid and is_pid) {
-                if (out.imu == null) return error.InvalidConfig;
-            }
+        // uhid+pid requires [output.imu] as the UHID routing gate.
+        if (is_uhid and is_pid) {
+            if (out.imu == null) return error.InvalidConfig;
+        }
 
-            // clone_vid_pid=true is meaningless without a real VID/PID to clone.
-            if (ffb.clone_vid_pid) {
-                if (cfg.device.vid == 0 or cfg.device.pid == 0) return error.InvalidConfig;
-            }
+        // clone_vid_pid=true is meaningless without a real VID/PID to clone.
+        if (ffb.clone_vid_pid) {
+            if (cfg.device.vid == 0 or cfg.device.pid == 0) return error.InvalidConfig;
         }
     }
 }
@@ -530,6 +630,22 @@ fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
         std.mem.eql(u8, header, "output.mapping") or
         std.mem.eql(u8, header, "output.aux.buttons")) return null; // free-form
 
+    if (std.mem.startsWith(u8, header, "output.profiles.")) {
+        const rest = header["output.profiles.".len..];
+        const dot = std.mem.indexOfScalar(u8, rest, '.');
+        if (dot == null) return sf(OutputProfileConfig);
+        const child = rest[dot.? + 1 ..];
+        if (std.mem.eql(u8, child, "dpad")) return sf(DpadOutputConfig);
+        if (std.mem.eql(u8, child, "force_feedback")) return sf(ForceFeedbackConfig);
+        if (std.mem.eql(u8, child, "aux")) return sf(AuxConfig);
+        if (std.mem.eql(u8, child, "touchpad")) return sf(TouchpadConfig);
+        if (std.mem.eql(u8, child, "imu")) return sf(ImuConfig);
+        if (std.mem.eql(u8, child, "axes") or
+            std.mem.eql(u8, child, "buttons") or
+            std.mem.eql(u8, child, "mapping") or
+            std.mem.eql(u8, child, "aux.buttons")) return null; // free-form
+    }
+
     if (std.mem.eql(u8, header, "wasm")) return sf(WasmConfig);
     if (std.mem.eql(u8, header, "wasm.overrides")) return sf(WasmOverridesConfig);
 
@@ -566,6 +682,19 @@ pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseR
                 result.deinit();
                 return err;
             };
+        }
+        if (out.profiles) |*profiles| {
+            var it = profiles.map.iterator();
+            while (it.next()) |entry| {
+                var profile_out = outputFromProfile(entry.value_ptr.*);
+                if (profile_out.emulate) |preset_name| {
+                    presets.applyPreset(result.arena.allocator(), &profile_out, preset_name) catch |err| {
+                        result.deinit();
+                        return err;
+                    };
+                    entry.value_ptr.* = profileFromOutput(profile_out);
+                }
+            }
         }
     }
     if (lintUnknownFields(allocator, content)) |findings| {
@@ -699,6 +828,111 @@ test "device: load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
     try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
     try std.testing.expectEqualStrings("extended", cfg.report[0].name);
+}
+
+test "device: output profile overlays default output and preset identity" {
+    const allocator = std.testing.allocator;
+    const toml_with_profile =
+        \\[device]
+        \\name = "Profile Test"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 4
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[report.fields]
+        \\left_x = { offset = 1, type = "i16le" }
+        \\
+        \\[output]
+        \\name = "Base Output"
+        \\vid = 0x1111
+        \\pid = 0x2222
+        \\
+        \\[output.axes]
+        \\left_x = { code = "ABS_X", min = -32768, max = 32767 }
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\
+        \\[output.dpad]
+        \\type = "hat"
+        \\
+        \\[output.force_feedback]
+        \\type = "rumble"
+        \\max_effects = 16
+        \\
+        \\[output.profiles.dualsense-edge]
+        \\emulate = "dualsense-edge"
+    ;
+    var result = try parseString(allocator, toml_with_profile);
+    defer result.deinit();
+
+    try std.testing.expect(selectOutputProfile(&result.value, "dualsense-edge"));
+    const out = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try std.testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+    try std.testing.expectEqualStrings("hat", out.dpad.?.type);
+    try std.testing.expectEqual(@as(?i64, 16), out.force_feedback.?.max_effects);
+
+    const buttons = out.buttons orelse return error.MissingButtons;
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
+    const axes = out.axes orelse return error.MissingAxes;
+    const left_x = axes.map.get("left_x") orelse return error.MissingLeftX;
+    try std.testing.expectEqual(@as(i64, -32768), left_x.min);
+    try std.testing.expectEqual(@as(i64, 32767), left_x.max);
+}
+
+test "device: unknown output profile leaves default output unchanged" {
+    const allocator = std.testing.allocator;
+    var result = try parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer result.deinit();
+
+    try std.testing.expect(!selectOutputProfile(&result.value, "not-a-profile"));
+    const out = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqual(@as(?i64, 0x045e), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0b00), out.pid);
+    try std.testing.expectEqualStrings("Xbox Elite Series 2", out.name.?);
+}
+
+test "device: vader5 dualsense-edge output profile preserves high resolution controls" {
+    const allocator = std.testing.allocator;
+    var result = try parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer result.deinit();
+
+    try std.testing.expect(selectOutputProfile(&result.value, "dualsense-edge"));
+    const out = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try std.testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+
+    const axes = out.axes orelse return error.MissingAxes;
+    const left_x = axes.map.get("left_x") orelse return error.MissingLeftX;
+    try std.testing.expectEqual(@as(i64, -32768), left_x.min);
+    try std.testing.expectEqual(@as(i64, 32767), left_x.max);
+
+    const buttons = out.buttons orelse return error.MissingButtons;
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.map.get("M2") orelse return error.MissingM2);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.map.get("M3") orelse return error.MissingM3);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.map.get("M4") orelse return error.MissingM4);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY5", buttons.map.get("C") orelse return error.MissingC);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY9", buttons.map.get("O") orelse return error.MissingO);
+
+    try std.testing.expectEqualStrings("hat", out.dpad.?.type);
+    try std.testing.expectEqual(@as(?i64, 16), out.force_feedback.?.max_effects);
+    try std.testing.expectEqualStrings("mouse", out.aux.?.type.?);
 }
 
 test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
