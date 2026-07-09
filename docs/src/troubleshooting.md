@@ -135,6 +135,55 @@ Reference: issue #470.
 
 ---
 
+## Vader 5 still appears as Xbox Elite 2 after adding `output.emulate`
+
+**Symptoms:**
+
+- You copied `devices/flydigi/vader5.toml` from `/usr/share` or
+  `/usr/local/share` into `~/.config/padctl/devices/` and added
+  `emulate = "dualsense-edge"`, but Steam Input still shows Xbox Elite 2.
+- You added `output.emulate` or `output_profile` to a mapping file and nothing
+  changed.
+
+**Fix:** select the device-declared profile from `config.toml`:
+
+```toml
+# ~/.config/padctl/config.toml
+version = 1
+
+[[device]]
+name = "Flydigi Vader 5 Pro"
+default_mapping = "vader5"
+output_profile = "dualsense-edge"
+```
+
+Then restart or reload the daemon:
+
+```sh
+padctl reload
+# or
+systemctl --user restart padctl.service
+```
+
+`output_profile` is a per-device startup choice, not a mapping option. The
+Vader 5 builtin device config keeps Xbox Elite 2 as the default and exposes
+`dualsense-edge` as an opt-in profile. Do not create a second Vader 5 device
+TOML with the same physical VID/PID unless you are intentionally replacing the
+installed config; duplicate matches make scan order decide which config wins.
+
+If your service was installed with a system fallback and has no `HOME`, put the
+same `[[device]]` entry in `/etc/padctl/config.toml` or use the documented
+persist flow. `padctl doctor` shows which config paths the daemon can read.
+
+The DualSense Edge profile changes the virtual identity and button layout while
+keeping high-resolution stick ranges. Native SDL/Steam gyro sensor pairing uses
+the separate `[output.imu]` UHID path and has force-feedback caveats; a profile
+name alone is not a full DualSense Edge firmware clone.
+
+Reference: issue #471.
+
+---
+
 ## Vader 5 rumble stays on, disconnects, or controls lag during vibration
 
 **Symptoms:**

@@ -166,6 +166,7 @@ Declares the uinput device emitted by padctl.
 | Field | Type | Description |
 |-------|------|-------------|
 | `emulate` | string | Preset emulation profile |
+| `default_profile` | string | Optional name for the default `[output]` profile |
 | `name` | string | uinput device name |
 | `vid` | integer | Emulated vendor ID |
 | `pid` | integer | Emulated product ID |
@@ -195,6 +196,34 @@ it is not a complete DualSense Edge firmware clone. If a physical controller has
 higher-resolution sticks than the preset defaults, keep explicit
 `[output.axes]` entries in the device TOML; explicit axis ranges override the
 preset and prevent accidental precision loss.
+
+### Output profiles
+
+Device configs may declare named output profiles under `[output.profiles.<name>]`.
+The default `[output]` remains active unless the user selects a profile in
+`config.toml`:
+
+```toml
+# ~/.config/padctl/config.toml
+version = 1
+
+[[device]]
+name = "Flydigi Vader 5 Pro"
+default_mapping = "vader5"
+output_profile = "dualsense-edge"
+```
+
+Profiles overlay the default `[output]`: fields declared by the profile replace
+the default, and fields omitted by the profile inherit the default. When a
+profile sets `emulate`, the preset first fills that profile's missing
+VID/PID/name/buttons/axes, then the result overlays `[output]`. Unknown profile
+names are ignored with a warning and the default output stays active.
+
+For Vader 5, `output_profile = "dualsense-edge"` switches the virtual identity
+to DualSense Edge and keeps explicit `-32768..32767` stick ranges. It is still
+an output identity/layout profile, not a complete native DualSense Edge firmware
+clone. Native SDL/Steam sensor pairing requires the separate `[output.imu]`
+UHID path, which has force-feedback caveats documented below.
 
 ### `[output.axes]`
 

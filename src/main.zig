@@ -626,7 +626,7 @@ fn isHelpFlag(arg: []const u8) bool {
 fn printConfigHelp(sub: ?[]const u8) void {
     const text = if (sub) |s| blk: {
         if (std.mem.eql(u8, s, "init"))
-            break :blk 
+            break :blk
             \\Usage: padctl config init [--device <name>]
             \\
             \\Interactively create a mapping in ~/.config/padctl/mappings/.
@@ -634,7 +634,7 @@ fn printConfigHelp(sub: ?[]const u8) void {
             \\
         ;
         if (std.mem.eql(u8, s, "edit"))
-            break :blk 
+            break :blk
             \\Usage: padctl config edit [name]
             \\
             \\Open a mapping in $VISUAL/$EDITOR; validate on exit.
@@ -642,7 +642,7 @@ fn printConfigHelp(sub: ?[]const u8) void {
             \\
         ;
         if (std.mem.eql(u8, s, "test"))
-            break :blk 
+            break :blk
             \\Usage: padctl config test [--config <path>] [--mapping <path>] [--raw]
             \\
             \\Live input preview decoded into named button/axis events (Ctrl-C to exit).
@@ -1265,7 +1265,7 @@ pub fn main() !void {
 
     const config_path = parsed.config_path.?;
 
-    const device_cfg = config.device.parseFile(allocator, config_path) catch |err| {
+    var device_cfg = config.device.parseFile(allocator, config_path) catch |err| {
         std.log.err("failed to load config '{s}': {}", .{ config_path, err });
         std.process.exit(1);
     };
@@ -1274,6 +1274,15 @@ pub fn main() !void {
     const user_cfg_mod = @import("config/user_config.zig");
     var user_cfg_pr = user_cfg_mod.load(allocator);
     defer if (user_cfg_pr) |*pr| pr.deinit();
+    if (user_cfg_pr) |*ucpr| {
+        if (user_cfg_mod.findOutputProfile(ucpr, device_cfg.value.device.name)) |profile_name| {
+            if (config.device.selectOutputProfile(&device_cfg.value, profile_name)) {
+                std.log.info("output profile: device \"{s}\" profile \"{s}\"", .{ device_cfg.value.device.name, profile_name });
+            } else {
+                std.log.warn("output profile \"{s}\" for device \"{s}\" not found; using default output", .{ profile_name, device_cfg.value.device.name });
+            }
+        }
+    }
 
     var mapping_pr: ?config.mapping.ParseResult = null;
     defer if (mapping_pr) |*pr| pr.deinit();
@@ -1652,7 +1661,7 @@ fn writeConfigToml(
     if (old_devices) |devs| {
         for (devs) |d| {
             if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
-                new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name };
+                new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name, .output_profile = d.output_profile };
             } else {
                 new_devices[idx] = d;
             }
@@ -1819,7 +1828,7 @@ fn writeDefaultFromParsedDevices(
     defer allocator.free(new_devices);
 
     for (devs, 0..) |d, i| {
-        new_devices[i] = .{ .name = d.name, .default_mapping = mapping_name };
+        new_devices[i] = .{ .name = d.name, .default_mapping = mapping_name, .output_profile = d.output_profile };
     }
 
     const cfg = user_config_mod.UserConfig{
@@ -2243,6 +2252,7 @@ test "writeDefaultForAllDevices: updates all devices, preserves other sections" 
         \\[[device]]
         \\name = "Vader 5 Pro"
         \\default_mapping = "fps"
+        \\output_profile = "dualsense-edge"
         \\
         \\[[device]]
         \\name = "Sony DualSense"
@@ -2264,10 +2274,46 @@ test "writeDefaultForAllDevices: updates all devices, preserves other sections" 
     try testing.expectEqual(@as(usize, 2), devs.len);
     for (devs) |d| {
         try testing.expectEqualStrings("nioh", d.default_mapping.?);
+        if (std.ascii.eqlIgnoreCase(d.name, "Vader 5 Pro")) {
+            try testing.expectEqualStrings("dualsense-edge", d.output_profile.?);
+        }
     }
     // Other sections must survive.
     try testing.expectEqual(true, result.value.diagnostics.dump);
     try testing.expectEqual(@as(i64, 30), result.value.supervisor.suspend_grace_sec);
+}
+
+test "writeConfigToml: updates mapping while preserving output_profile" {
+    const allocator = testing.allocator;
+    const user_config_mod = @import("config/user_config.zig");
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+
+    const seed =
+        \\version = 1
+        \\
+        \\[[device]]
+        \\name = "Vader 5 Pro"
+        \\default_mapping = "fps"
+        \\output_profile = "dualsense-edge"
+    ;
+    {
+        const f = try tmp.dir.createFile("config.toml", .{});
+        defer f.close();
+        try f.writeAll(seed);
+    }
+
+    try writeConfigToml(allocator, dir_path, "Vader 5 Pro", "racing");
+
+    var result = (try user_config_mod.loadFromDir(allocator, dir_path)).?;
+    defer result.deinit();
+    const devs = result.value.device orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), devs.len);
+    try testing.expectEqualStrings("racing", devs[0].default_mapping.?);
+    try testing.expectEqualStrings("dualsense-edge", devs[0].output_profile.?);
 }
 
 test "writeDefaultForAllDevices: zero [[device]] entries returns 0" {

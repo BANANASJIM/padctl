@@ -191,6 +191,8 @@ test "E2E docgen: vader5 output contains required sections" {
     try testing.expect(std.mem.indexOf(u8, out, "## Report:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "## Commands") != null);
     try testing.expect(std.mem.indexOf(u8, out, "## Output Capabilities") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "### Output Profiles") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dualsense-edge") != null);
 }
 
 // --- 4. parseFile: all 5 device configs load correctly ---

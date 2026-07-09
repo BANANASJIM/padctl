@@ -247,7 +247,7 @@ pub fn writeBinding(
     if (devices) |devs| {
         for (devs) |d| {
             if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
-                new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name };
+                new_devices[idx] = .{ .name = device_name, .default_mapping = mapping_name, .output_profile = d.output_profile };
             } else {
                 new_devices[idx] = d;
             }

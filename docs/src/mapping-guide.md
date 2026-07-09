@@ -86,9 +86,15 @@ version = 1
 [[device]]
 name = "Flydigi Vader 5 Pro"
 default_mapping = "fps"
+output_profile = "dualsense-edge"  # optional output identity/layout profile
 ```
 
 If you installed with `padctl install --mapping vader5`, the system config is already written for you.
+
+`output_profile` belongs in `config.toml` next to `default_mapping`, not in a
+mapping file. Mapping files control remaps, gyro processing, layers, and macros;
+device output identity such as VID/PID/name/buttons/axes is selected from
+profiles declared by the device config.
 
 ### Manual run
 

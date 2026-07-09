@@ -26,8 +26,7 @@ pub fn generateDevicePage(
                     const s = try std.fmt.bufPrint(&buf, "{d}", .{ep});
                     break :blk s;
                 } else "—",
-                if (iface.ep_out) |ep|
-                blk: {
+                if (iface.ep_out) |ep| blk: {
                     var buf: [8]u8 = undefined;
                     const s = try std.fmt.bufPrint(&buf, "{d}", .{ep});
                     break :blk s;
@@ -163,6 +162,49 @@ pub fn generateDevicePage(
             if (ff.max_effects) |me| try writer.print(", max_effects={d}", .{me});
             try writer.writeAll("\n\n");
         }
+
+        if (out.default_profile != null or out.profiles != null) {
+            try writer.writeAll("### Output Profiles\n\n");
+            if (out.default_profile) |name| {
+                try writer.print("Default profile: `{s}`\n\n", .{name});
+            }
+            if (out.profiles) |profiles| {
+                try writer.writeAll("| Profile | Device Name | VID | PID | Axes | Buttons |\n");
+                try writer.writeAll("|---------|-------------|-----|-----|------|---------|\n");
+                var it = profiles.map.iterator();
+                while (it.next()) |entry| {
+                    const p = entry.value_ptr.*;
+                    const profile_name = p.name orelse out.name orelse "";
+                    const axes_count: usize = if (p.axes) |axes|
+                        axes.map.count()
+                    else if (out.axes) |axes|
+                        axes.map.count()
+                    else
+                        0;
+                    const button_count: usize = if (p.buttons) |buttons|
+                        buttons.map.count()
+                    else if (out.buttons) |buttons|
+                        buttons.map.count()
+                    else
+                        0;
+
+                    try writer.print("| `{s}` | **{s}** | ", .{ entry.key_ptr.*, profile_name });
+                    try writeOptionalHex(writer, p.vid orelse out.vid);
+                    try writer.writeAll(" | ");
+                    try writeOptionalHex(writer, p.pid orelse out.pid);
+                    try writer.print(" | {d} | {d} |\n", .{ axes_count, button_count });
+                }
+                try writer.writeByte('\n');
+            }
+        }
+    }
+}
+
+fn writeOptionalHex(writer: anytype, value: ?i64) !void {
+    if (value) |v| {
+        try writer.print("`0x{x:0>4}`", .{@as(u64, @intCast(v))});
+    } else {
+        try writer.writeAll("—");
     }
 }
 
@@ -171,7 +213,6 @@ fn outputFilename(
     toml_path: []const u8,
     dev_name: []const u8,
 ) ![]u8 {
-    _ = dev_name;
     // derive vendor from directory: devices/<vendor>/model.toml -> vendor
     var vendor: []const u8 = "unknown";
     const basename = std.fs.path.basename(toml_path);
@@ -184,13 +225,36 @@ fn outputFilename(
         vendor = grandparent_base;
     }
 
-    // strip .toml from basename
-    const stem = if (std.mem.endsWith(u8, basename, ".toml"))
+    const fallback_stem = if (std.mem.endsWith(u8, basename, ".toml"))
         basename[0 .. basename.len - 5]
     else
         basename;
+    const stem_source = if (dev_name.len != 0) dev_name else fallback_stem;
+    const stem = try slugify(allocator, stem_source);
+    defer allocator.free(stem);
 
     return std.fmt.allocPrint(allocator, "{s}-{s}.md", .{ vendor, stem });
+}
+
+fn slugify(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+
+    var last_dash = true;
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            try out.append(allocator, std.ascii.toLower(c));
+            last_dash = false;
+        } else if (!last_dash) {
+            try out.append(allocator, '-');
+            last_dash = true;
+        }
+    }
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '-') {
+        _ = out.pop();
+    }
+    if (out.items.len == 0) try out.appendSlice(allocator, "unknown");
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn runDocGen(
@@ -383,5 +447,12 @@ test "docgen: outputFilename derives vendor-slug" {
     const allocator = std.testing.allocator;
     const fname = try outputFilename(allocator, "devices/sony/dualsense.toml", "Sony DualSense");
     defer allocator.free(fname);
-    try std.testing.expectEqualStrings("sony-dualsense.md", fname);
+    try std.testing.expectEqualStrings("sony-sony-dualsense.md", fname);
+}
+
+test "docgen: outputFilename uses device name instead of terse TOML stem" {
+    const allocator = std.testing.allocator;
+    const fname = try outputFilename(allocator, "devices/flydigi/vader5.toml", "Flydigi Vader 5 Pro");
+    defer allocator.free(fname);
+    try std.testing.expectEqualStrings("flydigi-flydigi-vader-5-pro.md", fname);
 }

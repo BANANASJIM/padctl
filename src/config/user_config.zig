@@ -10,6 +10,7 @@ pub const CURRENT_VERSION: i64 = 1;
 pub const DeviceEntry = struct {
     name: []const u8,
     default_mapping: ?[]const u8 = null,
+    output_profile: ?[]const u8 = null,
 };
 
 pub const DiagnosticsConfig = struct {
@@ -170,6 +171,14 @@ pub fn findDefaultMapping(result: *const ParseResult, device_name: []const u8) ?
     return null;
 }
 
+pub fn findOutputProfile(result: *const ParseResult, device_name: []const u8) ?[]const u8 {
+    const entries = result.value.device orelse return null;
+    for (entries) |e| {
+        if (std.ascii.eqlIgnoreCase(e.name, device_name)) return e.output_profile;
+    }
+    return null;
+}
+
 /// Atomically rewrite `config_path` from `cfg`, preserving every section.
 ///
 /// Writes `version`, then `[diagnostics]` and `[supervisor]` (each emitted
@@ -251,6 +260,11 @@ pub fn emitToml(writer: anytype, cfg: *const UserConfig) !void {
             if (d.default_mapping) |m| {
                 try writer.writeAll("default_mapping = \"");
                 try escapeTomlString(writer, m);
+                try writer.writeAll("\"\n");
+            }
+            if (d.output_profile) |p| {
+                try writer.writeAll("output_profile = \"");
+                try escapeTomlString(writer, p);
                 try writer.writeAll("\"\n");
             }
         }
@@ -427,6 +441,25 @@ test "findDefaultMapping: case-insensitive match" {
     // Different casing must still match.
     try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "flydigi vader 5 pro").?);
     try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "FLYDIGI VADER 5 PRO").?);
+}
+
+test "findOutputProfile: parses and matches device name case-insensitively" {
+    const allocator = std.testing.allocator;
+
+    const toml_str =
+        \\[[device]]
+        \\name = "Flydigi Vader 5 Pro"
+        \\default_mapping = "fps"
+        \\output_profile = "dualsense-edge"
+    ;
+
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    var result = try parser.parseString(toml_str);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("dualsense-edge", findOutputProfile(&result, "flydigi vader 5 pro").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), findOutputProfile(&result, "Unknown Device"));
 }
 
 test "findDefaultMapping: no match returns null" {
@@ -654,6 +687,7 @@ test "writeAtomic preserves all sections through device-mutation flow" {
         \\[[device]]
         \\name = "Vader 5 Pro"
         \\default_mapping = "fps"
+        \\output_profile = "dualsense-edge"
     ;
     {
         const f = try tmp.dir.createFile("config.toml", .{});
@@ -667,7 +701,11 @@ test "writeAtomic preserves all sections through device-mutation flow" {
 
     const new_devices = try allocator.alloc(DeviceEntry, 1);
     defer allocator.free(new_devices);
-    new_devices[0] = .{ .name = "Vader 5 Pro", .default_mapping = "racing" };
+    new_devices[0] = .{
+        .name = "Vader 5 Pro",
+        .default_mapping = "racing",
+        .output_profile = loaded.value.device.?[0].output_profile,
+    };
 
     const mutated = UserConfig{
         .version = loaded.value.version,
@@ -683,6 +721,7 @@ test "writeAtomic preserves all sections through device-mutation flow" {
     try std.testing.expectEqual(@as(i64, 50), reloaded.value.diagnostics.max_log_size_mb);
     try std.testing.expectEqual(@as(i64, 30), reloaded.value.supervisor.suspend_grace_sec);
     try std.testing.expectEqualStrings("racing", findDefaultMapping(&reloaded, "Vader 5 Pro").?);
+    try std.testing.expectEqualStrings("dualsense-edge", findOutputProfile(&reloaded, "Vader 5 Pro").?);
 }
 
 test "writeAtomic leaves no .tmp sidecar after success" {
@@ -821,6 +860,7 @@ test "lintUnknownFields: clean user config returns no findings" {
         \\[[device]]
         \\name = "Vader 5 Pro"
         \\default_mapping = "fps"
+        \\output_profile = "dualsense-edge"
     ;
     var findings = try lintUnknownFields(allocator, toml_str);
     defer findings.deinit(allocator);
@@ -899,6 +939,7 @@ test "user_config: switch-style full rewrite preserves [chord_switch]" {
         \\[[device]]
         \\name = "Vader 5 Pro"
         \\default_mapping = "fps"
+        \\output_profile = "dualsense-edge"
     ;
 
     var parser = toml.Parser(UserConfig).init(allocator);
@@ -908,7 +949,11 @@ test "user_config: switch-style full rewrite preserves [chord_switch]" {
 
     // Mirror writeConfigToml: rebuild the config preserving every section
     // except the changed device mapping (here: "fps" -> "racing").
-    var new_devices = [_]DeviceEntry{.{ .name = "Vader 5 Pro", .default_mapping = "racing" }};
+    var new_devices = [_]DeviceEntry{.{
+        .name = "Vader 5 Pro",
+        .default_mapping = "racing",
+        .output_profile = parsed.value.device.?[0].output_profile,
+    }};
     const rewritten = UserConfig{
         .version = parsed.value.version,
         .device = &new_devices,
@@ -930,6 +975,7 @@ test "user_config: switch-style full rewrite preserves [chord_switch]" {
     const devs = roundtripped.value.device orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), devs.len);
     try std.testing.expectEqualStrings("racing", devs[0].default_mapping.?);
+    try std.testing.expectEqualStrings("dualsense-edge", devs[0].output_profile.?);
 
     // [chord_switch] survived the rewrite, byte-for-byte intact.
     const cs = roundtripped.value.chord_switch orelse return error.TestUnexpectedResult;

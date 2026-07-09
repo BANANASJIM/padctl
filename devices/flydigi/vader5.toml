@@ -88,6 +88,7 @@ offset = 8
 # Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and
 # most games apply Xbox button mappings without additional configuration.
 [output]
+default_profile = "xbox-elite2"
 name = "Xbox Elite Series 2"
 vid = 0x045e
 pid = 0x0b00
@@ -132,5 +133,58 @@ type = "mouse"
 name = "Vader 5 Pro Virtual Mouse"
 
 [output.force_feedback]
+type = "rumble"
+max_effects = 16
+
+# Optional Steam Input profile. Select it from config.toml:
+#
+# [[device]]
+# name = "Flydigi Vader 5 Pro"
+# output_profile = "dualsense-edge"
+#
+# The profile keeps 16-bit stick ranges while publishing a DualSense Edge
+# VID/PID/name and Edge-style M1-M4 slots. Native Steam gyro still requires a
+# UHID IMU profile; this safer profile stays on the existing uinput path.
+[output.profiles.dualsense-edge]
+emulate = "dualsense-edge"
+
+[output.profiles.dualsense-edge.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.profiles.dualsense-edge.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_WEST"
+Y      = "BTN_NORTH"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY1"
+M2     = "BTN_TRIGGER_HAPPY2"
+M3     = "BTN_TRIGGER_HAPPY3"
+M4     = "BTN_TRIGGER_HAPPY4"
+C      = "BTN_TRIGGER_HAPPY5"
+Z      = "BTN_TRIGGER_HAPPY6"
+LM     = "BTN_TRIGGER_HAPPY7"
+RM     = "BTN_TRIGGER_HAPPY8"
+O      = "BTN_TRIGGER_HAPPY9"
+
+[output.profiles.dualsense-edge.dpad]
+type = "hat"
+
+[output.profiles.dualsense-edge.aux]
+type = "mouse"
+name = "Vader 5 Pro Virtual Mouse"
+
+[output.profiles.dualsense-edge.force_feedback]
 type = "rumble"
 max_effects = 16

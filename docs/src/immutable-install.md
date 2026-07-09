@@ -112,9 +112,10 @@ version = 1
 [[device]]
 name = "Flydigi Vader 5 Pro"
 default_mapping = "vader5"
+output_profile = "dualsense-edge"  # optional
 ```
 
-The daemon reads this file at startup and auto-applies the mapping — no manual `padctl switch` needed after reboot. User-level overrides in `~/.config/padctl/config.toml` take priority when available.
+The daemon reads this file at startup, auto-applies the mapping, and applies any optional output profile — no manual `padctl switch` needed after reboot. User-level overrides in `~/.config/padctl/config.toml` take priority when available.
 
 You can also persist a mapping change after switching at runtime:
 
