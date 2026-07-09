@@ -626,35 +626,41 @@ fn isHelpFlag(arg: []const u8) bool {
 fn printConfigHelp(sub: ?[]const u8) void {
     const text = if (sub) |s| blk: {
         if (std.mem.eql(u8, s, "init"))
-            break :blk
-            \\Usage: padctl config init [--device <name>]
-            \\
-            \\Interactively create a mapping in ~/.config/padctl/mappings/.
-            \\  --device <name>   Skip the device selection prompt
-            \\
-        ;
+            break :blk config_init_help;
         if (std.mem.eql(u8, s, "edit"))
-            break :blk
-            \\Usage: padctl config edit [name]
-            \\
-            \\Open a mapping in $VISUAL/$EDITOR; validate on exit.
-            \\Omit the name to pick from discovered mappings.
-            \\
-        ;
+            break :blk config_edit_help;
         if (std.mem.eql(u8, s, "test"))
-            break :blk
-            \\Usage: padctl config test [--config <path>] [--mapping <path>] [--raw]
-            \\
-            \\Live input preview decoded into named button/axis events (Ctrl-C to exit).
-            \\  --config <path>    Device config to decode input (default: auto-detect)
-            \\  --mapping <path>   Mapping to apply for display
-            \\  --raw              Show raw report bytes instead of decoded events
-            \\
-        ;
+            break :blk config_test_help;
         break :blk config_group_help;
     } else config_group_help;
     _ = std.posix.write(std.posix.STDOUT_FILENO, text) catch 0;
 }
+
+const config_init_help =
+    \\Usage: padctl config init [--device <name>]
+    \\
+    \\Interactively create a mapping in ~/.config/padctl/mappings/.
+    \\  --device <name>   Skip the device selection prompt
+    \\
+;
+
+const config_edit_help =
+    \\Usage: padctl config edit [name]
+    \\
+    \\Open a mapping in $VISUAL/$EDITOR; validate on exit.
+    \\Omit the name to pick from discovered mappings.
+    \\
+;
+
+const config_test_help =
+    \\Usage: padctl config test [--config <path>] [--mapping <path>] [--raw]
+    \\
+    \\Live input preview decoded into named button/axis events (Ctrl-C to exit).
+    \\  --config <path>    Device config to decode input (default: auto-detect)
+    \\  --mapping <path>   Mapping to apply for display
+    \\  --raw              Show raw report bytes instead of decoded events
+    \\
+;
 
 const config_group_help =
     \\Usage: padctl config <list|init|edit|test>
