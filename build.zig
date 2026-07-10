@@ -396,6 +396,36 @@ pub fn build(b: *std.Build) void {
     uhid_tests.linkLibC();
     uhid_step.dependOn(&b.addRunArtifact(uhid_tests).step);
 
+    // Native DualSense Edge real-kernel contract. Keep compile and run steps
+    // separate so reviewers can typecheck/link the privileged harness without
+    // creating a UHID device on the host. The explicit run target is forced:
+    // missing /dev/uhid, permission, driver bind, or deadlines are failures.
+    const edge_uhid_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/dualsense_edge_uhid_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    edge_uhid_mod.addImport("src", src_mod);
+    const edge_uhid_tests = b.addTest(.{ .root_module = edge_uhid_mod, .filters = test_filters });
+    applyLibusb(b, edge_uhid_tests, use_libusb, vendored);
+    edge_uhid_tests.linkLibC();
+    edge_uhid_tests.setExecCmd(&.{
+        "timeout",
+        "--signal=TERM",
+        "--kill-after=5s",
+        "30s",
+        null,
+    });
+
+    const edge_uhid_check = b.step("check-edge-uhid", "Compile native DualSense Edge UHID kernel test without running it");
+    edge_uhid_check.dependOn(&edge_uhid_tests.step);
+
+    const edge_uhid_step = b.step("test-edge-uhid", "Run native DualSense Edge UHID kernel contract (privileged)");
+    const edge_uhid_run = b.addRunArtifact(edge_uhid_tests);
+    edge_uhid_run.setEnvironmentVariable("PADCTL_TEST_REQUIRE_UHID", "1");
+    edge_uhid_step.dependOn(&edge_uhid_run.step);
+
     // spike (only available when spike/toml_spike.zig exists)
     if (std.fs.cwd().access("spike/toml_spike.zig", .{})) |_| {
         const spike_mod = b.createModule(.{

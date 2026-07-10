@@ -653,7 +653,13 @@ fn validateTouchSynthesis(touch: TouchSynthesisConfig) !void {
 
 fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !void {
     if (cfg.device.mode) |m| {
-        if (std.mem.eql(u8, m, "generic") and out.mapping == null) return error.InvalidConfig;
+        if (std.mem.eql(u8, m, "generic")) {
+            if (out.mapping == null) return error.InvalidConfig;
+            // Generic source-mode owns the GenericUinput pipeline. It cannot
+            // also request a fixed native UHID wire personality; reject the
+            // conflict instead of silently discarding final discriminators.
+            if (std.mem.eql(u8, out.protocol, "dualsense-edge-usb")) return error.InvalidConfig;
+        }
     }
 
     if (out.mapping) |mapping| try validateMappingEntries(mapping);
@@ -677,6 +683,10 @@ fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !voi
         if (out.vid != 0x054c or out.pid != 0x0df2) return error.InvalidConfig;
         const name = out.name orelse return error.InvalidConfig;
         if (name.len == 0) return error.InvalidConfig;
+        // Edge carries accel + gyro in its one native input report. A
+        // companion IMU card would violate both the wire personality and the
+        // single-UHID identity contract.
+        if (out.imu != null) return error.InvalidConfig;
         _ = out.touch_synthesis orelse return error.InvalidConfig;
         const ffb = out.force_feedback orelse return error.InvalidConfig;
         if (!std.mem.eql(u8, ffb.type, "rumble")) return error.InvalidConfig;
@@ -689,6 +699,9 @@ fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !voi
     // [output.imu] is declared; unknown strings fail closed.
     if (out.imu) |imu| {
         if (!std.mem.eql(u8, imu.backend, "uhid")) return error.InvalidConfig;
+        // An explicit root uinput discriminator cannot expose the companion
+        // UHID card. Reject instead of silently dropping configured IMU.
+        if (backend_uinput) return error.InvalidConfig;
     }
 
     // Force feedback backend/kind matrix. Absent force_feedback is always legal.
@@ -1463,6 +1476,12 @@ test "device: backend protocol matrix and native identity rumble requirements fa
         \\
     ++ native_profile_touch;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, wrong_rumble_type));
+
+    const native_with_companion_imu = valid_native_profile_toml ++
+        \\[output.profiles.native.imu]
+        \\backend = "uhid"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, native_with_companion_imu));
 }
 
 test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
@@ -2497,6 +2516,30 @@ test "validate: backend=uinput + [output.imu] present is error.InvalidConfig" {
         \\name = "Pad"
         \\[output.imu]
         \\backend = "uinput"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
+}
+
+test "validate: root output backend=uinput cannot silently drop a UHID IMU" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "Pad"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[output]
+        \\name = "Pad"
+        \\backend = "uinput"
+        \\protocol = "generic"
+        \\[output.imu]
+        \\backend = "uhid"
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
