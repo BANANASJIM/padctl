@@ -44,10 +44,10 @@ pub const Slots = struct {
 };
 
 // signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces;
-// plus 1 uinput FF slot and 1 UHID output slot appended after device fds.
+// plus uinput FF, generic/PID UHID output, or native UHID mailbox wake slots.
 pub const FIXED_SLOT_COUNT: usize = 5;
 pub const MAX_DEVICE_INTERFACES: usize = 6;
-pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 2;
+pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 3;
 
 const signalfd_siginfo_size = 128;
 
@@ -428,6 +428,10 @@ pub const EventLoop = struct {
     uinput_ff_slot: ?usize,
     /// Slot for the primary UHID fd polled for UHID_OUTPUT events.
     uhid_output_slot: ?usize,
+    /// Native protocols keep the UHID fd reader in their dedicated pump;
+    /// EventLoop polls only this mailbox wake and performs the physical write.
+    native_rumble_slot: ?usize,
+    native_rumble_device: ?*UhidDevice,
     disconnected: bool,
     running: bool,
     gamepad_state: state.GamepadState,
@@ -491,6 +495,8 @@ pub const EventLoop = struct {
             .macro_timer_fd = macro_timer_fd,
             .uinput_ff_slot = null,
             .uhid_output_slot = null,
+            .native_rumble_slot = null,
+            .native_rumble_device = null,
             .disconnected = false,
             .running = false,
             .gamepad_state = .{},
@@ -513,7 +519,7 @@ pub const EventLoop = struct {
     }
 
     pub fn addDevice(self: *EventLoop, device: DeviceIO) !void {
-        if (self.uinput_ff_slot != null or self.uhid_output_slot != null) return error.DeviceSlotsClosed;
+        if (self.uinput_ff_slot != null or self.uhid_output_slot != null or self.native_rumble_slot != null) return error.DeviceSlotsClosed;
         if (self.device_count >= MAX_DEVICE_INTERFACES) return error.TooManyDevices;
 
         const slot = self.device_base + self.device_count;
@@ -534,7 +540,7 @@ pub const EventLoop = struct {
     }
 
     pub fn addUinputFf(self: *EventLoop, fd: posix.fd_t) !void {
-        if (self.uinput_ff_slot != null) return error.OutputSlotAlreadyRegistered;
+        if (self.uinput_ff_slot != null or self.native_rumble_slot != null) return error.OutputSlotAlreadyRegistered;
         const slot = self.fd_count;
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
@@ -545,11 +551,29 @@ pub const EventLoop = struct {
     /// Register the primary UHID fd for `UHID_OUTPUT` polling.
     /// Only called when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     pub fn addUhidOutput(self: *EventLoop, fd: posix.fd_t) !void {
-        if (self.uhid_output_slot != null) return error.OutputSlotAlreadyRegistered;
+        if (self.uhid_output_slot != null or self.native_rumble_slot != null) return error.OutputSlotAlreadyRegistered;
         const slot = self.fd_count;
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
         self.uhid_output_slot = slot;
+        self.fd_count += 1;
+    }
+
+    /// Register only the native pump's nonblocking mailbox wake. The native
+    /// UHID fd itself is deliberately absent from EventLoop so the pump
+    /// remains its sole reader from pre-CREATE2 through teardown drain.
+    pub fn addNativeUhidRumble(self: *EventLoop, device: *UhidDevice) !void {
+        if (!device.hasNativePump()) return error.NativePumpNotRunning;
+        if (self.native_rumble_slot != null or self.uinput_ff_slot != null or self.uhid_output_slot != null) {
+            return error.OutputSlotAlreadyRegistered;
+        }
+        const fd = device.rumbleWakeFd();
+        if (fd < 0) return error.NativePumpNotRunning;
+        const slot = self.fd_count;
+        if (slot >= MAX_FDS) return error.TooManyFds;
+        self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+        self.native_rumble_slot = slot;
+        self.native_rumble_device = device;
         self.fd_count += 1;
     }
 
@@ -957,6 +981,25 @@ pub const EventLoop = struct {
                             if (uhid_dev.output_cb) |cb| {
                                 cb(uhid_dev.output_ctx.?, r);
                             }
+                        }
+                    }
+                }
+            }
+
+            // Native UHID fd traffic is consumed exclusively by its pump.
+            // EventLoop sees only a coalesced wake and atomically takes the
+            // latest normalized command before using the existing physical
+            // `[commands.rumble]` formatter/writer.
+            if (self.native_rumble_slot) |slot| {
+                if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
+                    if (self.native_rumble_device) |device| {
+                        device.drainRumbleWake();
+                        if (device.takeRumbleCommand()) |rumble_command| {
+                            self.emitOrQueueRumble(ctx, .{
+                                .strong = rumble_command.strong,
+                                .weak = rumble_command.weak,
+                            }, now);
+                            self.armRumbleTimer(null);
                         }
                     }
                 }

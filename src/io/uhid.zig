@@ -1,10 +1,10 @@
 //! UHID (userspace HID) kernel protocol bindings.
 //!
-//! The Linux `/dev/uhid` character device accepts a stream of fixed-size
-//! `struct uhid_event` records. Each record is a `u32` event type followed by
-//! a union payload; userspace must write exactly `UHID_EVENT_SIZE` bytes per
-//! event regardless of which variant is used (`sizeof(struct uhid_event)` on
-//! a current 64-bit Linux kernel).
+//! The Linux `/dev/uhid` character device exchanges `struct uhid_event`
+//! records. Each record is a `u32` event type followed by a packed union
+//! payload. Kernel reads may be shorter than `UHID_EVENT_SIZE`; userspace must
+//! zero-extend them before decoding and validate the bytes required by the
+//! selected event variant.
 //!
 //! This module exposes the minimal subset padctl needs:
 //!   - `UHID_CREATE2` — create a virtual HID device with an embedded
@@ -16,6 +16,7 @@
 //! and tests can import them without duplication.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const state = @import("../core/state.zig");
 const uinput = @import("uinput.zig");
@@ -27,10 +28,23 @@ const write_exact = @import("write_exact.zig");
 
 /// Destroy a previously-created virtual HID device. No payload.
 pub const UHID_DESTROY: u32 = 1;
+/// Kernel starts/stops and opens/closes a userspace HID device with these
+/// lifecycle notifications.
+pub const UHID_START: u32 = 2;
+pub const UHID_STOP: u32 = 3;
+pub const UHID_OPEN: u32 = 4;
+pub const UHID_CLOSE: u32 = 5;
+/// Kernel sends an output report to userspace.
+pub const UHID_OUTPUT: u32 = 6;
+/// Kernel report control requests and their userspace replies.
+pub const UHID_GET_REPORT: u32 = 9;
+pub const UHID_GET_REPORT_REPLY: u32 = 10;
 /// Create a virtual HID device (variant 2 — embeds descriptor inline).
 pub const UHID_CREATE2: u32 = 11;
 /// Inject an input report from userspace to the kernel (variant 2).
 pub const UHID_INPUT2: u32 = 12;
+pub const UHID_SET_REPORT: u32 = 13;
+pub const UHID_SET_REPORT_REPLY: u32 = 14;
 
 /// Maximum payload size for UHID_INPUT2 / UHID_OUTPUT etc. per kernel UAPI.
 pub const UHID_DATA_MAX: usize = 4096;
@@ -151,16 +165,44 @@ pub fn uhidDestroy(fd: posix.fd_t) void {
     write_exact.writeExact(fd, &buf) catch {};
 }
 
-// --- UHID_OUTPUT types -------------------------------------------------------
+// --- Kernel-to-userspace event decoding ------------------------------------
 
-/// Kernel sends `UHID_OUTPUT` when the HID driver writes an output report.
-pub const UHID_OUTPUT: u32 = 6;
+const TYPE_SIZE: usize = 4;
+const START_TOTAL_SIZE: usize = TYPE_SIZE + 8;
+const GET_REPORT_TOTAL_SIZE: usize = TYPE_SIZE + 4 + 1 + 1;
+const SET_REPORT_HEADER_TOTAL_SIZE: usize = TYPE_SIZE + 4 + 1 + 1 + 2;
+const OUTPUT_DATA_OFFSET: usize = TYPE_SIZE;
+const OUTPUT_SIZE_OFFSET: usize = OUTPUT_DATA_OFFSET + UHID_DATA_MAX;
+const OUTPUT_RTYPE_OFFSET: usize = OUTPUT_SIZE_OFFSET + 2;
+const OUTPUT_HEADER_TOTAL_SIZE: usize = OUTPUT_RTYPE_OFFSET + 1;
 
-/// Mirror of `struct uhid_output_req` from the kernel UAPI.
-/// The kernel struct is __packed__ (4099 bytes); Zig extern struct is 4100 bytes
-/// due to u16 alignment padding after rtype. The trailing pad is harmless because
-/// pollOutputReport reads via pointer cast into a full UHID_EVENT_SIZE buffer.
-/// data[0] is the HID report ID; data[1..size-1] is the payload.
+pub const ReportType = enum(u8) {
+    feature = 0,
+    output = 1,
+    input = 2,
+    _,
+};
+
+pub const StartRequest = struct {
+    dev_flags: u64,
+};
+
+pub const GetReportRequest = struct {
+    id: u32,
+    report_number: u8,
+    report_type: ReportType,
+};
+
+pub const SetReportRequest = struct {
+    id: u32,
+    report_number: u8,
+    report_type: ReportType,
+    data: []const u8,
+};
+
+/// Zig layout helper retained for compatibility assertions. This is not an
+/// exact mirror: the Linux UAPI payload is packed, so decoding uses checked
+/// byte offsets instead of pointer-casting this naturally aligned type.
 pub const UhidOutputReq = extern struct {
     data: [UHID_DATA_MAX]u8,
     size: u16,
@@ -171,8 +213,188 @@ pub const UhidOutputReq = extern struct {
 /// Borrows the caller's read buffer — do not retain past the current frame.
 pub const OutputReport = struct {
     report_id: u8,
+    report_type: ReportType = .output,
     data: []const u8,
 };
+
+/// A checked, typed view of one kernel-to-userspace UHID event. Payload slices
+/// borrow the caller's read buffer.
+pub const UhidEvent = union(enum) {
+    start: StartRequest,
+    stop,
+    open,
+    close,
+    output: OutputReport,
+    get_report: GetReportRequest,
+    set_report: SetReportRequest,
+    unknown: u32,
+};
+
+pub const GetReportResult = struct {
+    err: u16 = 0,
+    size: usize = 0,
+};
+
+/// Injected protocol seam used by regression tests and the native pump. A
+/// GET callback fills `reply_data` and returns its used size; SET returns the
+/// UAPI error value directly. Missing callbacks reject with a nonzero error.
+pub const ControlHandler = struct {
+    ctx: ?*anyopaque = null,
+    get_report: ?*const fn (
+        ctx: *anyopaque,
+        request: GetReportRequest,
+        reply_data: []u8,
+    ) GetReportResult = null,
+    set_report: ?*const fn (ctx: *anyopaque, request: SetReportRequest) u16 = null,
+};
+
+/// Protocol-independent command handed from a native UHID output decoder to
+/// padctl's existing physical `[commands.rumble]` path.
+pub const RumbleCommand = struct {
+    strong: u16,
+    weak: u16,
+};
+
+/// Injected native protocol seam. The pump passes one checked UHID output
+/// report to this callback; a null result means the report is valid traffic
+/// but carries no compatible rumble command.
+pub const NativeOutputHandler = struct {
+    ctx: ?*anyopaque = null,
+    decode: ?*const fn (ctx: *anyopaque, report: OutputReport) ?RumbleCommand = null,
+};
+
+/// Enabling this config transfers sole read ownership of the UHID fd to a
+/// dedicated pump before CREATE2. Generic descriptor/PID devices leave it
+/// null and retain the existing EventLoop reader.
+pub const NativePumpConfig = struct {
+    control_handler: ControlHandler = .{},
+    output_handler: NativeOutputHandler = .{},
+};
+
+// Zig's futex mutex lacks TSan annotations. Match the existing usbraw queue:
+// pthread mutexes provide explicit happens-before edges in sanitizer builds.
+const MailboxMutex = if (builtin.sanitize_thread) struct {
+    m: std.c.pthread_mutex_t = .{},
+
+    fn lock(self: *@This()) void {
+        std.debug.assert(std.c.pthread_mutex_lock(&self.m) == .SUCCESS);
+    }
+
+    fn unlock(self: *@This()) void {
+        std.debug.assert(std.c.pthread_mutex_unlock(&self.m) == .SUCCESS);
+    }
+} else std.Thread.Mutex;
+
+/// Capacity-one, latest-wins mailbox. The pump is the producer and EventLoop
+/// is the consumer; the mutex also makes decoder-independent tests race-free.
+pub const RumbleMailbox = struct {
+    mutex: MailboxMutex = .{},
+    pending: ?RumbleCommand = null,
+
+    pub fn publish(self: *RumbleMailbox, command: RumbleCommand) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.pending = command;
+    }
+
+    pub fn take(self: *RumbleMailbox) ?RumbleCommand {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const command = self.pending;
+        self.pending = null;
+        return command;
+    }
+};
+
+pub const UHID_PROTOCOL_ERROR: u16 = 1;
+
+/// Decode one zero-extended UHID read without relying on compiler alignment
+/// for the packed UAPI payloads. `actual_len` is the byte count returned by
+/// read(2), not the capacity of `buf`.
+pub fn decodeEvent(buf: []const u8, actual_len: usize) !UhidEvent {
+    if (actual_len > buf.len) return error.InvalidEventLength;
+    if (actual_len < TYPE_SIZE) return error.IncompleteUhidEvent;
+
+    const event_type = std.mem.readInt(u32, buf[0..TYPE_SIZE], .little);
+    return switch (event_type) {
+        UHID_START => blk: {
+            if (actual_len < START_TOTAL_SIZE) return error.IncompleteUhidEvent;
+            break :blk .{ .start = .{
+                .dev_flags = std.mem.readInt(u64, buf[TYPE_SIZE..START_TOTAL_SIZE], .little),
+            } };
+        },
+        UHID_STOP => .stop,
+        UHID_OPEN => .open,
+        UHID_CLOSE => .close,
+        UHID_OUTPUT => blk: {
+            // `uhid_output_req` places size/rtype after its fixed 4096-byte
+            // data member, so a valid short event must still reach byte 4103.
+            if (actual_len < OUTPUT_HEADER_TOTAL_SIZE) return error.IncompleteUhidEvent;
+            const declared_size = std.mem.readInt(u16, buf[OUTPUT_SIZE_OFFSET .. OUTPUT_SIZE_OFFSET + 2], .little);
+            const size: usize = declared_size;
+            if (size > UHID_DATA_MAX) return error.OversizedUhidDeclaration;
+            if (actual_len < OUTPUT_DATA_OFFSET + size) return error.IncompleteUhidEvent;
+            const data = buf[OUTPUT_DATA_OFFSET..][0..size];
+            break :blk .{ .output = .{
+                .report_id = if (data.len == 0) 0 else data[0],
+                .report_type = @enumFromInt(buf[OUTPUT_RTYPE_OFFSET]),
+                .data = data,
+            } };
+        },
+        UHID_GET_REPORT => blk: {
+            if (actual_len < GET_REPORT_TOTAL_SIZE) return error.IncompleteUhidEvent;
+            break :blk .{ .get_report = .{
+                .id = std.mem.readInt(u32, buf[4..8], .little),
+                .report_number = buf[8],
+                .report_type = @enumFromInt(buf[9]),
+            } };
+        },
+        UHID_SET_REPORT => blk: {
+            if (actual_len < SET_REPORT_HEADER_TOTAL_SIZE) return error.IncompleteUhidEvent;
+            const declared_size = std.mem.readInt(u16, buf[10..12], .little);
+            const size: usize = declared_size;
+            if (size > UHID_DATA_MAX) return error.OversizedUhidDeclaration;
+            const required = SET_REPORT_HEADER_TOTAL_SIZE + size;
+            if (actual_len < required) return error.IncompleteUhidEvent;
+            break :blk .{ .set_report = .{
+                .id = std.mem.readInt(u32, buf[4..8], .little),
+                .report_number = buf[8],
+                .report_type = @enumFromInt(buf[9]),
+                .data = buf[SET_REPORT_HEADER_TOTAL_SIZE..required],
+            } };
+        },
+        else => .{ .unknown = event_type },
+    };
+}
+
+/// Encode a full, zero-initialized GET_REPORT_REPLY frame. Full-size writes
+/// preserve the existing padctl UHID write contract; all packed fields use
+/// explicit byte offsets.
+pub fn encodeGetReportReply(
+    out: []u8,
+    id: u32,
+    err: u16,
+    data: []const u8,
+) ![]const u8 {
+    if (out.len < UHID_EVENT_SIZE) return error.ReplyBufferTooSmall;
+    if (data.len > UHID_DATA_MAX) return error.ReplyPayloadTooLong;
+    @memset(out[0..UHID_EVENT_SIZE], 0);
+    std.mem.writeInt(u32, out[0..4], UHID_GET_REPORT_REPLY, .little);
+    std.mem.writeInt(u32, out[4..8], id, .little);
+    std.mem.writeInt(u16, out[8..10], err, .little);
+    std.mem.writeInt(u16, out[10..12], @intCast(data.len), .little);
+    @memcpy(out[12..][0..data.len], data);
+    return out[0..UHID_EVENT_SIZE];
+}
+
+pub fn encodeSetReportReply(out: []u8, id: u32, err: u16) ![]const u8 {
+    if (out.len < UHID_EVENT_SIZE) return error.ReplyBufferTooSmall;
+    @memset(out[0..UHID_EVENT_SIZE], 0);
+    std.mem.writeInt(u32, out[0..4], UHID_SET_REPORT_REPLY, .little);
+    std.mem.writeInt(u32, out[4..8], id, .little);
+    std.mem.writeInt(u16, out[8..10], err, .little);
+    return out[0..UHID_EVENT_SIZE];
+}
 
 // --- High-level UhidDevice (T2 + T3) ---------------------------------------
 
@@ -220,6 +442,10 @@ pub const Config = struct {
     /// bypassed. Mutually exclusive with `output` at the emit branch: if
     /// both are set, `output` wins (primary card shape).
     imu: ?device_cfg.ImuConfig = null,
+    /// Native protocols install all handlers before the pump starts. The
+    /// pump is running before CREATE2 so kernel probe GET/SET traffic cannot
+    /// race an EventLoop-owned reader.
+    native_pump: ?NativePumpConfig = null,
 };
 
 /// A UHID-backed output device implementing the shared `OutputDevice` vtable.
@@ -251,6 +477,17 @@ pub const UhidDevice = struct {
     /// the kernel (FFB effect data forwarded to physical hidraw).
     output_cb: ?*const fn (ctx: *anyopaque, report: OutputReport) void = null,
     output_ctx: ?*anyopaque = null,
+    /// Protocol callbacks for GET_REPORT / SET_REPORT control requests.
+    control_handler: ControlHandler = .{},
+    native_output_handler: NativeOutputHandler = .{},
+    rumble_mailbox: RumbleMailbox = .{},
+    mailbox_wake_fd: posix.fd_t = -1,
+    shutdown_wake_fd: posix.fd_t = -1,
+    pump_thread: ?std.Thread = null,
+    pump_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    pump_abort: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    pump_exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    pump_drain_timed_out: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// Construct a `UhidDevice` against a real `/dev/uhid` fd. Opens the
     /// kernel node, populates a `UhidCreate2Req`, and writes it.
@@ -268,16 +505,8 @@ pub const UhidDevice = struct {
             else => |e| return e,
         };
         errdefer posix.close(fd);
-
-        try sendCreate(fd, cfg);
-        // After sendCreate succeeded the kernel has a live UHID device wired
-        // to `fd`; if the allocation below fails we must tear the kernel
-        // side down in addition to closing `fd` (otherwise the virtual
-        // device lingers until the process exits). `uhidDestroy` is
-        // best-effort — errors are swallowed, exactly like `close()` does.
-        errdefer uhidDestroy(fd);
-
         const self = try allocator.create(UhidDevice);
+        errdefer allocator.destroy(self);
         self.* = .{
             .fd = fd,
             .vid = cfg.vid,
@@ -287,6 +516,13 @@ pub const UhidDevice = struct {
             .output = cfg.output,
             .imu = cfg.imu,
         };
+
+        if (cfg.native_pump) |pump_cfg| {
+            self.startNativePump(pump_cfg) catch return error.UhidCreateFailed;
+            errdefer self.abortNativePump();
+        }
+
+        try self.sendCreateOwned(cfg);
         return self;
     }
 
@@ -321,7 +557,24 @@ pub const UhidDevice = struct {
             .output = cfg.output,
             .imu = cfg.imu,
         };
+        if (cfg.native_pump) |pump_cfg| {
+            self.startNativePump(pump_cfg) catch {
+                allocator.destroy(self);
+                return error.UhidCreateFailed;
+            };
+        }
         return self;
+    }
+
+    /// CREATE2 helper for callers using `initWithFd`. Native callers must use
+    /// this method (rather than the static `sendCreate`) so a failed CREATE2
+    /// can stop and join the already-running pre-probe pump without waiting
+    /// for the normal post-DESTROY drain window.
+    pub fn sendCreateOwned(self: *UhidDevice, cfg: Config) InitError!void {
+        sendCreate(self.fd, cfg) catch |err| {
+            self.abortNativePump();
+            return err;
+        };
     }
 
     pub fn sendCreate(fd: posix.fd_t, cfg: Config) InitError!void {
@@ -351,6 +604,199 @@ pub const UhidDevice = struct {
         const bytes = std.mem.asBytes(&ev);
         @memcpy(buf[0..bytes.len], bytes);
         write_exact.writeExact(fd, &buf) catch return error.UhidCreateFailed;
+    }
+
+    const PUMP_DRAIN_TIMEOUT_MS: i64 = 500;
+
+    fn createWakeFd() !posix.fd_t {
+        const ioctl = @import("ioctl_constants.zig");
+        return posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK);
+    }
+
+    fn signalWake(fd: posix.fd_t) !void {
+        var one: u64 = 1;
+        const bytes = std.mem.asBytes(&one);
+        const n = posix.write(fd, bytes) catch |err| switch (err) {
+            // A saturated eventfd already contains a pending wake. The
+            // mailbox has been published, so this is successful coalescing.
+            error.WouldBlock => return,
+            else => return err,
+        };
+        if (n != bytes.len) return error.ShortWakeWrite;
+    }
+
+    fn drainWake(fd: posix.fd_t) void {
+        var value: u64 = 0;
+        while (true) {
+            const n = posix.read(fd, std.mem.asBytes(&value)) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => return,
+            };
+            if (n == 0) return;
+        }
+    }
+
+    fn monotonicNs() i128 {
+        const ts = posix.clock_gettime(.MONOTONIC) catch return 0;
+        return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+    }
+
+    fn startNativePump(self: *UhidDevice, cfg: NativePumpConfig) !void {
+        std.debug.assert(self.pump_thread == null);
+        const mailbox_wake_fd = try createWakeFd();
+        errdefer posix.close(mailbox_wake_fd);
+        const shutdown_wake_fd = try createWakeFd();
+        errdefer posix.close(shutdown_wake_fd);
+
+        self.control_handler = cfg.control_handler;
+        self.native_output_handler = cfg.output_handler;
+        self.mailbox_wake_fd = mailbox_wake_fd;
+        self.shutdown_wake_fd = shutdown_wake_fd;
+        self.pump_shutdown.store(false, .release);
+        self.pump_abort.store(false, .release);
+        self.pump_exited.store(false, .release);
+        self.pump_drain_timed_out.store(false, .release);
+        self.pump_thread = try std.Thread.spawn(.{}, nativePumpMain, .{self});
+    }
+
+    fn nativePumpMain(self: *UhidDevice) void {
+        defer self.pump_exited.store(true, .release);
+
+        var drain_deadline_ns: ?i128 = null;
+        while (true) {
+            if (self.pump_abort.load(.acquire)) return;
+            if (self.pump_shutdown.load(.acquire) and drain_deadline_ns == null) {
+                drain_deadline_ns = monotonicNs() + PUMP_DRAIN_TIMEOUT_MS * std.time.ns_per_ms;
+            }
+
+            const timeout_ms: i32 = if (drain_deadline_ns) |deadline| blk: {
+                const remaining = deadline - monotonicNs();
+                // Check the absolute deadline before poll. A continuously
+                // readable malicious/noisy peer must not keep returning
+                // readiness and thereby evade a timeout==0 check forever.
+                if (remaining <= 0) {
+                    self.recordDrainTimeout();
+                    return;
+                }
+                const rounded_up = @divFloor(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+                break :blk @intCast(@min(rounded_up, PUMP_DRAIN_TIMEOUT_MS));
+            } else -1;
+
+            var pfds = [_]posix.pollfd{
+                .{ .fd = self.fd, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = self.shutdown_wake_fd, .events = posix.POLL.IN, .revents = 0 },
+            };
+            const ready = posix.poll(&pfds, timeout_ms) catch return;
+            if (ready == 0) {
+                if (drain_deadline_ns != null) {
+                    self.recordDrainTimeout();
+                    return;
+                }
+                continue;
+            }
+
+            if (pfds[1].revents & posix.POLL.IN != 0) drainWake(self.shutdown_wake_fd);
+            if (self.pump_abort.load(.acquire)) return;
+
+            if (pfds[0].revents & posix.POLL.IN != 0) {
+                if (self.processOneNativeEvent()) return;
+            }
+            if (pfds[0].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) return;
+        }
+    }
+
+    fn recordDrainTimeout(self: *UhidDevice) void {
+        self.pump_drain_timed_out.store(true, .release);
+        std.log.warn("UHID native pump timed out after {d}ms waiting for STOP/POLLHUP", .{PUMP_DRAIN_TIMEOUT_MS});
+    }
+
+    /// Consume at most one event before returning to the outer deadline
+    /// check. This bounded batch prevents sustained non-STOP traffic from
+    /// starving shutdown while still letting poll immediately re-signal a
+    /// readable fd during normal operation.
+    /// Returns true when STOP or a fatal fd/reply error ends read ownership.
+    fn processOneNativeEvent(self: *UhidDevice) bool {
+        var buf: [UHID_EVENT_SIZE]u8 = undefined;
+        const event = self.readEvent(&buf) catch |err| {
+            // The malformed packet was consumed. Return to poll/deadline
+            // arbitration before accepting another packet.
+            std.log.warn("UHID native pump rejected malformed event: {}", .{err});
+            return false;
+        } orelse return false;
+
+        switch (event) {
+            .stop => return true,
+            .get_report => |request| self.replyToGetReport(request) catch return true,
+            .set_report => |request| self.replyToSetReport(request) catch return true,
+            .output => |report| {
+                if (self.native_output_handler.decode) |decode| {
+                    if (self.native_output_handler.ctx) |ctx| {
+                        if (decode(ctx, report)) |command| {
+                            self.publishRumbleCommand(command) catch |err| {
+                                std.log.warn("UHID native rumble wake failed: {}", .{err});
+                            };
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn closeWakeResources(self: *UhidDevice) void {
+        if (self.mailbox_wake_fd >= 0) {
+            posix.close(self.mailbox_wake_fd);
+            self.mailbox_wake_fd = -1;
+        }
+        if (self.shutdown_wake_fd >= 0) {
+            posix.close(self.shutdown_wake_fd);
+            self.shutdown_wake_fd = -1;
+        }
+    }
+
+    fn abortNativePump(self: *UhidDevice) void {
+        const thread = self.pump_thread orelse return;
+        self.pump_abort.store(true, .release);
+        self.pump_shutdown.store(true, .release);
+        signalWake(self.shutdown_wake_fd) catch {};
+        thread.join();
+        self.pump_thread = null;
+        self.closeWakeResources();
+    }
+
+    pub fn hasNativePump(self: *const UhidDevice) bool {
+        return self.pump_thread != null;
+    }
+
+    pub fn rumbleWakeFd(self: *const UhidDevice) posix.fd_t {
+        return self.mailbox_wake_fd;
+    }
+
+    pub fn drainRumbleWake(self: *UhidDevice) void {
+        if (self.mailbox_wake_fd >= 0) drainWake(self.mailbox_wake_fd);
+    }
+
+    pub fn publishRumbleCommand(self: *UhidDevice, command: RumbleCommand) !void {
+        if (self.mailbox_wake_fd < 0) return error.NativePumpNotRunning;
+        self.rumble_mailbox.publish(command);
+        try signalWake(self.mailbox_wake_fd);
+    }
+
+    pub fn takeRumbleCommand(self: *UhidDevice) ?RumbleCommand {
+        return self.rumble_mailbox.take();
+    }
+
+    pub fn drainTimedOut(self: *const UhidDevice) bool {
+        return self.pump_drain_timed_out.load(.acquire);
+    }
+
+    pub fn pumpExited(self: *const UhidDevice) bool {
+        return self.pump_exited.load(.acquire);
+    }
+
+    pub fn nativeWakeResourcesClosed(self: *const UhidDevice) bool {
+        return self.mailbox_wake_fd < 0 and self.shutdown_wake_fd < 0;
     }
 
     /// Expose this device through the shared `OutputDevice` vtable.
@@ -443,32 +889,76 @@ pub const UhidDevice = struct {
         self.output_ctx = null;
     }
 
-    /// Read one event from the UHID fd. Returns a parsed `OutputReport` if the
-    /// event type is `UHID_OUTPUT`, otherwise null. The returned slice borrows
-    /// `buf`; the caller must not retain it past the next call.
-    ///
-    /// Returns null on `WouldBlock` (no event ready) or a non-OUTPUT event type.
-    /// The caller should loop until null to drain all pending events.
-    pub fn pollOutputReport(self: *UhidDevice, buf: []u8) !?OutputReport {
-        if (buf.len < UHID_EVENT_SIZE) return null;
+    pub fn setControlHandler(self: *UhidDevice, handler: ControlHandler) void {
+        self.control_handler = handler;
+    }
+
+    pub fn clearControlHandler(self: *UhidDevice) void {
+        self.control_handler = .{};
+    }
+
+    /// Read and decode one event. The entire maximum event buffer is cleared
+    /// before every read so a short kernel event is zero-extended exactly as
+    /// required by `linux/uhid.h`.
+    pub fn readEvent(self: *UhidDevice, buf: []u8) !?UhidEvent {
+        if (buf.len < UHID_EVENT_SIZE) return error.EventBufferTooSmall;
+        @memset(buf[0..UHID_EVENT_SIZE], 0);
         const n = posix.read(self.fd, buf[0..UHID_EVENT_SIZE]) catch |err| switch (err) {
             error.WouldBlock => return null,
             else => return err,
         };
-        // A short read leaves buf[n..UHID_EVENT_SIZE] uninitialised; the req.size
-        // field lives past offset 4100, so even a read of 4095 bytes would let us
-        // parse a garbage size and walk off the end of data[].
-        if (n < UHID_EVENT_SIZE) return error.IncompleteUhidEvent;
-        const ev_type = std.mem.readInt(u32, buf[0..4], .little);
-        if (ev_type != UHID_OUTPUT) return null;
-        // kernel struct uhid_event: { u32 type; union payload; }
-        // uhid_output_req at offset 4: { u8 data[4096]; u16 size; u8 rtype; }
-        const req: *const UhidOutputReq = @ptrCast(@alignCast(&buf[4]));
-        const sz = @min(@as(usize, req.size), UHID_DATA_MAX);
-        return OutputReport{
-            .report_id = if (sz > 0) req.data[0] else 0,
-            .data = req.data[0..sz],
-        };
+        if (n == 0) return null;
+        return try decodeEvent(buf[0..UHID_EVENT_SIZE], n);
+    }
+
+    fn replyToGetReport(self: *UhidDevice, request: GetReportRequest) !void {
+        var data: [UHID_DATA_MAX]u8 = std.mem.zeroes([UHID_DATA_MAX]u8);
+        var result = GetReportResult{ .err = UHID_PROTOCOL_ERROR };
+        if (self.control_handler.get_report) |handler| {
+            if (self.control_handler.ctx) |ctx| {
+                result = handler(ctx, request, &data);
+            }
+        }
+
+        if (result.size > UHID_DATA_MAX) {
+            result = .{ .err = UHID_PROTOCOL_ERROR, .size = 0 };
+        }
+        const reply_data = if (result.err == 0) data[0..result.size] else data[0..0];
+        var reply: [UHID_EVENT_SIZE]u8 = undefined;
+        const encoded = try encodeGetReportReply(&reply, request.id, result.err, reply_data);
+        try write_exact.writeExact(self.fd, encoded);
+    }
+
+    fn replyToSetReport(self: *UhidDevice, request: SetReportRequest) !void {
+        var reply_err = UHID_PROTOCOL_ERROR;
+        if (self.control_handler.set_report) |handler| {
+            if (self.control_handler.ctx) |ctx| {
+                reply_err = handler(ctx, request);
+            }
+        }
+        var reply: [UHID_EVENT_SIZE]u8 = undefined;
+        const encoded = try encodeSetReportReply(&reply, request.id, reply_err);
+        try write_exact.writeExact(self.fd, encoded);
+    }
+
+    /// Drain lifecycle/control events until an OUTPUT event or WouldBlock.
+    /// GET/SET are replied to synchronously with their original request IDs;
+    /// missing protocol handlers receive a nonzero error reply. The returned
+    /// output slice borrows `buf` and must not outlive the next call.
+    ///
+    /// Returns null on `WouldBlock` (no event ready) or a non-OUTPUT event type.
+    /// The caller should loop until null to drain all pending events.
+    pub fn pollOutputReport(self: *UhidDevice, buf: []u8) !?OutputReport {
+        if (self.hasNativePump()) return error.NativePumpOwnsReader;
+        while (try self.readEvent(buf)) |event| {
+            switch (event) {
+                .output => |report| return report,
+                .get_report => |request| try self.replyToGetReport(request),
+                .set_report => |request| try self.replyToSetReport(request),
+                else => {},
+            }
+        }
+        return null;
     }
 
     /// Always returns `null` — FF output reports from the kernel are consumed
@@ -486,8 +976,18 @@ pub const UhidDevice = struct {
     pub fn close(self: *UhidDevice) void {
         if (self.fd < 0) return;
         uhidDestroy(self.fd);
+        if (self.pump_thread) |thread| {
+            // DESTROY is written first. The pump then owns the fd until STOP,
+            // POLLHUP, or the bounded drain deadline; only after join do we
+            // close the UHID fd and its wake resources.
+            self.pump_shutdown.store(true, .release);
+            signalWake(self.shutdown_wake_fd) catch {};
+            thread.join();
+            self.pump_thread = null;
+        }
         posix.close(self.fd);
         self.fd = -1;
+        self.closeWakeResources();
     }
 
     /// Map an i16 stick axis (-32768..32767) to a u8 HID logical value

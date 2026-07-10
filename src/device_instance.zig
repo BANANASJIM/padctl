@@ -150,7 +150,7 @@ fn openUhidDevice(
             dev.close();
             allocator.destroy(dev);
         }
-        try uhid_mod.UhidDevice.sendCreate(fd, cfg);
+        try dev.sendCreateOwned(cfg);
         return dev;
     }
     return uhid_mod.UhidDevice.init(allocator, cfg);

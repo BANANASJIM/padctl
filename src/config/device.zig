@@ -165,6 +165,15 @@ pub const TouchpadConfig = struct {
     max_slots: ?i64 = null,
 };
 
+pub const TouchSynthesisConfig = struct {
+    left_button: []const u8,
+    right_button: []const u8,
+    left_x: i64,
+    right_x: i64,
+    y: i64,
+    click: bool,
+};
+
 pub const MappingEntry = struct {
     event: []const u8,
     range: ?[]const i64 = null,
@@ -176,6 +185,8 @@ pub const MappingEntry = struct {
 pub const OutputConfig = struct {
     emulate: ?[]const u8 = null,
     default_profile: ?[]const u8 = null,
+    backend: []const u8 = "auto", // "auto" | "uinput" | "uhid"
+    protocol: []const u8 = "generic", // "generic" | "dualsense-edge-usb"
     name: ?[]const u8 = null,
     vid: ?i64 = null,
     pid: ?i64 = null,
@@ -187,11 +198,16 @@ pub const OutputConfig = struct {
     touchpad: ?TouchpadConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
     imu: ?ImuConfig = null,
+    touch_synthesis: ?TouchSynthesisConfig = null,
     profiles: ?toml.HashMap(OutputProfileConfig) = null,
 };
 
 pub const OutputProfileConfig = struct {
     emulate: ?[]const u8 = null,
+    // Null means inherit the root output. Concrete defaults are applied only
+    // after overlay, where OutputConfig supplies auto/generic.
+    backend: ?[]const u8 = null, // "auto" | "uinput" | "uhid"
+    protocol: ?[]const u8 = null, // "generic" | "dualsense-edge-usb"
     name: ?[]const u8 = null,
     vid: ?i64 = null,
     pid: ?i64 = null,
@@ -203,6 +219,7 @@ pub const OutputProfileConfig = struct {
     touchpad: ?TouchpadConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
     imu: ?ImuConfig = null,
+    touch_synthesis: ?TouchSynthesisConfig = null,
 };
 
 pub const WasmOverridesConfig = struct {
@@ -225,6 +242,8 @@ pub const DeviceConfig = struct {
 fn outputFromProfile(profile: OutputProfileConfig) OutputConfig {
     return .{
         .emulate = profile.emulate,
+        .backend = profile.backend orelse "auto",
+        .protocol = profile.protocol orelse "generic",
         .name = profile.name,
         .vid = profile.vid,
         .pid = profile.pid,
@@ -236,12 +255,15 @@ fn outputFromProfile(profile: OutputProfileConfig) OutputConfig {
         .touchpad = profile.touchpad,
         .mapping = profile.mapping,
         .imu = profile.imu,
+        .touch_synthesis = profile.touch_synthesis,
     };
 }
 
 fn profileFromOutput(out: OutputConfig) OutputProfileConfig {
     return .{
         .emulate = out.emulate,
+        .backend = out.backend,
+        .protocol = out.protocol,
         .name = out.name,
         .vid = out.vid,
         .pid = out.pid,
@@ -253,12 +275,15 @@ fn profileFromOutput(out: OutputConfig) OutputProfileConfig {
         .touchpad = out.touchpad,
         .mapping = out.mapping,
         .imu = out.imu,
+        .touch_synthesis = out.touch_synthesis,
     };
 }
 
 fn overlayOutputProfile(base: OutputConfig, profile: OutputProfileConfig) OutputConfig {
     var out = base;
     if (profile.emulate) |v| out.emulate = v;
+    if (profile.backend) |v| out.backend = v;
+    if (profile.protocol) |v| out.protocol = v;
     if (profile.name) |v| out.name = v;
     if (profile.vid) |v| out.vid = v;
     if (profile.pid) |v| out.pid = v;
@@ -270,6 +295,7 @@ fn overlayOutputProfile(base: OutputConfig, profile: OutputProfileConfig) Output
     if (profile.touchpad) |v| out.touchpad = v;
     if (profile.mapping) |v| out.mapping = v;
     if (profile.imu) |v| out.imu = v;
+    if (profile.touch_synthesis) |v| out.touch_synthesis = v;
     out.default_profile = null;
     out.profiles = null;
     return out;
@@ -556,12 +582,107 @@ fn validateMappingEntries(mapping: toml.HashMap(MappingEntry)) !void {
     }
 }
 
+const NativeAxisRequirement = struct {
+    name: []const u8,
+    code: []const u8,
+};
+
+const native_axis_requirements = [_]NativeAxisRequirement{
+    .{ .name = "left_x", .code = "ABS_X" },
+    .{ .name = "left_y", .code = "ABS_Y" },
+    .{ .name = "right_x", .code = "ABS_RX" },
+    .{ .name = "right_y", .code = "ABS_RY" },
+    .{ .name = "lt", .code = "ABS_Z" },
+    .{ .name = "rt", .code = "ABS_RZ" },
+};
+
+const NativeButtonRequirement = struct {
+    name: []const u8,
+    code: []const u8,
+};
+
+// The logical DualSense Edge table materialized by the dualsense-edge preset.
+// Native profiles may add source-only buttons such as C/Z, but may not omit or
+// retarget any of the protocol's required logical controls.
+const native_button_requirements = [_]NativeButtonRequirement{
+    .{ .name = "A", .code = "BTN_SOUTH" },
+    .{ .name = "B", .code = "BTN_EAST" },
+    .{ .name = "X", .code = "BTN_WEST" },
+    .{ .name = "Y", .code = "BTN_NORTH" },
+    .{ .name = "LB", .code = "BTN_TL" },
+    .{ .name = "RB", .code = "BTN_TR" },
+    .{ .name = "Select", .code = "BTN_SELECT" },
+    .{ .name = "Start", .code = "BTN_START" },
+    .{ .name = "Home", .code = "BTN_MODE" },
+    .{ .name = "LS", .code = "BTN_THUMBL" },
+    .{ .name = "RS", .code = "BTN_THUMBR" },
+    .{ .name = "M1", .code = "BTN_TRIGGER_HAPPY1" },
+    .{ .name = "M2", .code = "BTN_TRIGGER_HAPPY2" },
+    .{ .name = "M3", .code = "BTN_TRIGGER_HAPPY3" },
+    .{ .name = "M4", .code = "BTN_TRIGGER_HAPPY4" },
+    .{ .name = "TouchPad", .code = "BTN_TOUCH" },
+    .{ .name = "Mic", .code = "BTN_MISC" },
+};
+
+fn validateNativeAxes(axes: ?toml.HashMap(AxisConfig)) !void {
+    const native_axes = axes orelse return error.InvalidConfig;
+    if (native_axes.map.count() != native_axis_requirements.len) return error.InvalidConfig;
+
+    for (native_axis_requirements) |required| {
+        const axis = native_axes.map.get(required.name) orelse return error.InvalidConfig;
+        if (!std.mem.eql(u8, axis.code, required.code)) return error.InvalidConfig;
+        if (axis.min != 0 or axis.max != 255) return error.InvalidConfig;
+    }
+}
+
+fn validateNativeButtons(buttons: ?toml.HashMap([]const u8)) !void {
+    const native_buttons = buttons orelse return error.InvalidConfig;
+    for (native_button_requirements) |required| {
+        const code = native_buttons.map.get(required.name) orelse return error.InvalidConfig;
+        if (!std.mem.eql(u8, code, required.code)) return error.InvalidConfig;
+    }
+}
+
+fn validateTouchSynthesis(touch: TouchSynthesisConfig) !void {
+    _ = std.meta.stringToEnum(ButtonId, touch.left_button) orelse return error.InvalidConfig;
+    _ = std.meta.stringToEnum(ButtonId, touch.right_button) orelse return error.InvalidConfig;
+    if (touch.left_x < 0 or touch.left_x > 1919) return error.InvalidConfig;
+    if (touch.right_x < 0 or touch.right_x > 1919) return error.InvalidConfig;
+    if (touch.y < 0 or touch.y > 1079) return error.InvalidConfig;
+}
+
 fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !void {
     if (cfg.device.mode) |m| {
         if (std.mem.eql(u8, m, "generic") and out.mapping == null) return error.InvalidConfig;
     }
 
     if (out.mapping) |mapping| try validateMappingEntries(mapping);
+
+    const backend_auto = std.mem.eql(u8, out.backend, "auto");
+    const backend_uinput = std.mem.eql(u8, out.backend, "uinput");
+    const backend_uhid = std.mem.eql(u8, out.backend, "uhid");
+    const protocol_generic = std.mem.eql(u8, out.protocol, "generic");
+    const protocol_edge = std.mem.eql(u8, out.protocol, "dualsense-edge-usb");
+
+    if (!backend_auto and !backend_uinput and !backend_uhid) return error.InvalidConfig;
+    if (!protocol_generic and !protocol_edge) return error.InvalidConfig;
+    if (protocol_edge and !backend_uhid) return error.InvalidConfig;
+
+    if (out.touch_synthesis) |touch| {
+        if (!protocol_edge) return error.InvalidConfig;
+        try validateTouchSynthesis(touch);
+    }
+
+    if (protocol_edge) {
+        if (out.vid != 0x054c or out.pid != 0x0df2) return error.InvalidConfig;
+        const name = out.name orelse return error.InvalidConfig;
+        if (name.len == 0) return error.InvalidConfig;
+        _ = out.touch_synthesis orelse return error.InvalidConfig;
+        const ffb = out.force_feedback orelse return error.InvalidConfig;
+        if (!std.mem.eql(u8, ffb.type, "rumble")) return error.InvalidConfig;
+        try validateNativeButtons(out.buttons);
+        try validateNativeAxes(out.axes);
+    }
 
     // IMU backend validation: uinput's EVIOCGUNIQ always returns -ENOENT,
     // so SDL's uniq-based pairing fails. Only "uhid" is legal when
@@ -624,6 +745,7 @@ fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
     if (std.mem.eql(u8, header, "output.force_feedback")) return sf(ForceFeedbackConfig);
     if (std.mem.eql(u8, header, "output.aux")) return sf(AuxConfig);
     if (std.mem.eql(u8, header, "output.touchpad")) return sf(TouchpadConfig);
+    if (std.mem.eql(u8, header, "output.touch_synthesis")) return sf(TouchSynthesisConfig);
     if (std.mem.eql(u8, header, "output.imu")) return sf(ImuConfig);
     if (std.mem.eql(u8, header, "output.axes") or
         std.mem.eql(u8, header, "output.buttons") or
@@ -639,6 +761,7 @@ fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
         if (std.mem.eql(u8, child, "force_feedback")) return sf(ForceFeedbackConfig);
         if (std.mem.eql(u8, child, "aux")) return sf(AuxConfig);
         if (std.mem.eql(u8, child, "touchpad")) return sf(TouchpadConfig);
+        if (std.mem.eql(u8, child, "touch_synthesis")) return sf(TouchSynthesisConfig);
         if (std.mem.eql(u8, child, "imu")) return sf(ImuConfig);
         if (std.mem.eql(u8, child, "axes") or
             std.mem.eql(u8, child, "buttons") or
@@ -686,13 +809,21 @@ pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseR
         if (out.profiles) |*profiles| {
             var it = profiles.map.iterator();
             while (it.next()) |entry| {
+                // Applying a preset needs a concrete OutputConfig, but its
+                // auto/generic defaults must not turn absent profile fields
+                // into explicit overrides during conversion back.
+                const backend = entry.value_ptr.backend;
+                const protocol = entry.value_ptr.protocol;
                 var profile_out = outputFromProfile(entry.value_ptr.*);
                 if (profile_out.emulate) |preset_name| {
                     presets.applyPreset(result.arena.allocator(), &profile_out, preset_name) catch |err| {
                         result.deinit();
                         return err;
                     };
-                    entry.value_ptr.* = profileFromOutput(profile_out);
+                    var expanded = profileFromOutput(profile_out);
+                    expanded.backend = backend;
+                    expanded.protocol = protocol;
+                    entry.value_ptr.* = expanded;
                 }
             }
         }
@@ -933,6 +1064,405 @@ test "device: vader5 dualsense-edge output profile preserves high resolution con
     try std.testing.expectEqualStrings("hat", out.dpad.?.type);
     try std.testing.expectEqual(@as(?i64, 16), out.force_feedback.?.max_effects);
     try std.testing.expectEqualStrings("mouse", out.aux.?.type.?);
+}
+
+const native_profile_base_toml =
+    \\[device]
+    \\name = "Synthetic Native Profile Test"
+    \\vid = 0x1234
+    \\pid = 0x5678
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "main"
+    \\interface = 0
+    \\size = 4
+    \\[output]
+    \\name = "Base Output"
+    \\vid = 0x1111
+    \\pid = 0x2222
+    \\[output.axes]
+    \\left_x = { code = "ABS_X", min = -32768, max = 32767 }
+    \\[output.buttons]
+    \\A = "BTN_SOUTH"
+    \\[output.force_feedback]
+    \\type = "rumble"
+    \\
+;
+
+const native_profile_header =
+    \\[output.profiles.native]
+    \\emulate = "dualsense-edge"
+    \\backend = "uhid"
+    \\protocol = "dualsense-edge-usb"
+    \\
+;
+
+const native_profile_axes =
+    \\[output.profiles.native.axes]
+    \\left_x = { code = "ABS_X", min = 0, max = 255 }
+    \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+    \\right_x = { code = "ABS_RX", min = 0, max = 255 }
+    \\right_y = { code = "ABS_RY", min = 0, max = 255 }
+    \\lt = { code = "ABS_Z", min = 0, max = 255 }
+    \\rt = { code = "ABS_RZ", min = 0, max = 255 }
+    \\
+;
+
+const native_profile_force_feedback =
+    \\[output.profiles.native.force_feedback]
+    \\type = "rumble"
+    \\
+;
+
+const native_profile_touch =
+    \\[output.profiles.native.touch_synthesis]
+    \\left_button = "C"
+    \\right_button = "Z"
+    \\left_x = 480
+    \\right_x = 1440
+    \\y = 540
+    \\click = true
+    \\
+;
+
+const valid_native_profile_toml = native_profile_base_toml ++
+    native_profile_header ++
+    native_profile_axes ++
+    native_profile_force_feedback ++
+    native_profile_touch;
+
+const native_root_for_profile_overlay_toml =
+    \\[device]
+    \\name = "Synthetic Native Root Test"
+    \\vid = 0x1234
+    \\pid = 0x5678
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "main"
+    \\interface = 0
+    \\size = 4
+    \\[output]
+    \\emulate = "dualsense-edge"
+    \\backend = "uhid"
+    \\protocol = "dualsense-edge-usb"
+    \\[output.axes]
+    \\left_x = { code = "ABS_X", min = 0, max = 255 }
+    \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+    \\right_x = { code = "ABS_RX", min = 0, max = 255 }
+    \\right_y = { code = "ABS_RY", min = 0, max = 255 }
+    \\lt = { code = "ABS_Z", min = 0, max = 255 }
+    \\rt = { code = "ABS_RZ", min = 0, max = 255 }
+    \\[output.force_feedback]
+    \\type = "rumble"
+    \\[output.touch_synthesis]
+    \\left_button = "C"
+    \\right_button = "Z"
+    \\left_x = 480
+    \\right_x = 1440
+    \\y = 540
+    \\click = true
+    \\
+;
+
+test "device: output backend and protocol default to generic auto routing" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    const out = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("auto", out.backend);
+    try std.testing.expectEqualStrings("generic", out.protocol);
+}
+
+test "device: profile absent backend and protocol inherit native root" {
+    const allocator = std.testing.allocator;
+    const toml_str = native_root_for_profile_overlay_toml ++
+        \\[output.profiles.renamed]
+        \\name = "Renamed Native Output"
+    ;
+    var result = try parseString(allocator, toml_str);
+    defer result.deinit();
+
+    const parsed_out = result.value.output orelse return error.MissingOutput;
+    const profiles = parsed_out.profiles orelse return error.MissingProfiles;
+    const profile = profiles.map.get("renamed") orelse return error.MissingProfile;
+    try std.testing.expect(profile.backend == null);
+    try std.testing.expect(profile.protocol == null);
+
+    try std.testing.expect(selectOutputProfile(&result.value, "renamed"));
+    const selected = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("Renamed Native Output", selected.name.?);
+    try std.testing.expectEqualStrings("uhid", selected.backend);
+    try std.testing.expectEqualStrings("dualsense-edge-usb", selected.protocol);
+}
+
+test "device: profile explicit native backend and protocol override generic root" {
+    const allocator = std.testing.allocator;
+    var result = try parseString(allocator, valid_native_profile_toml);
+    defer result.deinit();
+
+    const root = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("auto", root.backend);
+    try std.testing.expectEqualStrings("generic", root.protocol);
+
+    try std.testing.expect(selectOutputProfile(&result.value, "native"));
+    const selected = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("uhid", selected.backend);
+    try std.testing.expectEqualStrings("dualsense-edge-usb", selected.protocol);
+}
+
+test "device: profile preset expansion preserves absent routing fields" {
+    const allocator = std.testing.allocator;
+    const toml_str = native_root_for_profile_overlay_toml ++
+        \\[output.profiles.preset]
+        \\emulate = "dualsense-edge"
+        \\name = "Preset Expanded Native Output"
+        \\[output.profiles.preset.axes]
+        \\left_x = { code = "ABS_X", min = 0, max = 255 }
+        \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+        \\right_x = { code = "ABS_RX", min = 0, max = 255 }
+        \\right_y = { code = "ABS_RY", min = 0, max = 255 }
+        \\lt = { code = "ABS_Z", min = 0, max = 255 }
+        \\rt = { code = "ABS_RZ", min = 0, max = 255 }
+    ;
+    var result = try parseString(allocator, toml_str);
+    defer result.deinit();
+
+    const parsed_out = result.value.output orelse return error.MissingOutput;
+    const profiles = parsed_out.profiles orelse return error.MissingProfiles;
+    const profile = profiles.map.get("preset") orelse return error.MissingProfile;
+    try std.testing.expect(profile.backend == null);
+    try std.testing.expect(profile.protocol == null);
+
+    try std.testing.expect(selectOutputProfile(&result.value, "preset"));
+    const selected = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("uhid", selected.backend);
+    try std.testing.expectEqualStrings("dualsense-edge-usb", selected.protocol);
+}
+
+test "device: synthetic native profile expands complete buttons and replaces preset axes" {
+    const allocator = std.testing.allocator;
+    var result = try parseString(allocator, valid_native_profile_toml);
+    defer result.deinit();
+
+    try std.testing.expect(selectOutputProfile(&result.value, "native"));
+    const out = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("uhid", out.backend);
+    try std.testing.expectEqualStrings("dualsense-edge-usb", out.protocol);
+    try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try std.testing.expect(out.profiles == null);
+
+    const axes = out.axes orelse return error.MissingAxes;
+    try std.testing.expectEqual(@as(usize, 6), axes.map.count());
+    for (native_axis_requirements) |required| {
+        const axis = axes.map.get(required.name) orelse return error.MissingAxis;
+        try std.testing.expectEqualStrings(required.code, axis.code);
+        try std.testing.expectEqual(@as(i64, 0), axis.min);
+        try std.testing.expectEqual(@as(i64, 255), axis.max);
+    }
+
+    const buttons = out.buttons orelse return error.MissingButtons;
+    try std.testing.expectEqual(@as(usize, native_button_requirements.len), buttons.map.count());
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.map.get("M2") orelse return error.MissingM2);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.map.get("M3") orelse return error.MissingM3);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.map.get("M4") orelse return error.MissingM4);
+
+    const touch = out.touch_synthesis orelse return error.MissingTouchSynthesis;
+    try std.testing.expectEqualStrings("C", touch.left_button);
+    try std.testing.expectEqualStrings("Z", touch.right_button);
+    try std.testing.expectEqual(@as(i64, 480), touch.left_x);
+    try std.testing.expectEqual(@as(i64, 1440), touch.right_x);
+    try std.testing.expectEqual(@as(i64, 540), touch.y);
+    try std.testing.expect(touch.click);
+}
+
+test "device: native protocol requires touch synthesis" {
+    const allocator = std.testing.allocator;
+    const missing_touch = native_profile_base_toml ++
+        native_profile_header ++
+        native_profile_axes ++
+        native_profile_force_feedback;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, missing_touch));
+}
+
+test "device: native protocol requires non-empty output name" {
+    const allocator = std.testing.allocator;
+    var result = try parseString(allocator, valid_native_profile_toml);
+    defer result.deinit();
+    try std.testing.expect(selectOutputProfile(&result.value, "native"));
+
+    var out = result.value.output orelse return error.MissingOutput;
+    out.name = null;
+    result.value.output = out;
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+
+    out.name = "";
+    result.value.output = out;
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "device: native profile rejects partial replacement button table" {
+    const allocator = std.testing.allocator;
+    const partial_buttons = native_profile_base_toml ++
+        native_profile_header ++
+        native_profile_axes ++
+        native_profile_force_feedback ++
+        native_profile_touch ++
+        \\[output.profiles.native.buttons]
+        \\A = "BTN_SOUTH"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, partial_buttons));
+}
+
+test "device: native profile rejects partial extra wrong-code and wrong-range axes" {
+    const allocator = std.testing.allocator;
+
+    const partial_axes = native_profile_base_toml ++
+        native_profile_header ++
+        \\[output.profiles.native.axes]
+        \\left_x = { code = "ABS_X", min = 0, max = 255 }
+        \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+        \\right_x = { code = "ABS_RX", min = 0, max = 255 }
+        \\right_y = { code = "ABS_RY", min = 0, max = 255 }
+        \\lt = { code = "ABS_Z", min = 0, max = 255 }
+    ++ native_profile_force_feedback ++
+        native_profile_touch;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, partial_axes));
+
+    const extra_axes = native_profile_base_toml ++
+        native_profile_header ++
+        native_profile_axes ++
+        \\extra = { code = "ABS_MISC", min = 0, max = 255 }
+    ++ native_profile_force_feedback ++
+        native_profile_touch;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, extra_axes));
+
+    const wrong_code_axes = native_profile_base_toml ++
+        native_profile_header ++
+        \\[output.profiles.native.axes]
+        \\left_x = { code = "ABS_RX", min = 0, max = 255 }
+        \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+        \\right_x = { code = "ABS_RX", min = 0, max = 255 }
+        \\right_y = { code = "ABS_RY", min = 0, max = 255 }
+        \\lt = { code = "ABS_Z", min = 0, max = 255 }
+        \\rt = { code = "ABS_RZ", min = 0, max = 255 }
+    ++ native_profile_force_feedback ++
+        native_profile_touch;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, wrong_code_axes));
+
+    const wrong_range_axes = native_profile_base_toml ++
+        native_profile_header ++
+        \\[output.profiles.native.axes]
+        \\left_x = { code = "ABS_X", min = 0, max = 254 }
+        \\left_y = { code = "ABS_Y", min = 0, max = 255 }
+        \\right_x = { code = "ABS_RX", min = 0, max = 255 }
+        \\right_y = { code = "ABS_RY", min = 0, max = 255 }
+        \\lt = { code = "ABS_Z", min = 0, max = 255 }
+        \\rt = { code = "ABS_RZ", min = 0, max = 255 }
+    ++ native_profile_force_feedback ++
+        native_profile_touch;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, wrong_range_axes));
+}
+
+test "device: native touch synthesis validates protocol sources and coordinate bounds" {
+    const allocator = std.testing.allocator;
+
+    const generic_touch = test_toml ++ "\n" ++
+        \\[output.touch_synthesis]
+        \\left_button = "C"
+        \\right_button = "Z"
+        \\left_x = 480
+        \\right_x = 1440
+        \\y = 540
+        \\click = true
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, generic_touch));
+
+    const bad_source = native_profile_base_toml ++
+        native_profile_header ++
+        native_profile_axes ++
+        native_profile_force_feedback ++
+        \\[output.profiles.native.touch_synthesis]
+        \\left_button = "not-a-button"
+        \\right_button = "Z"
+        \\left_x = 480
+        \\right_x = 1440
+        \\y = 540
+        \\click = true
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_source));
+
+    const bad_coordinates = native_profile_base_toml ++
+        native_profile_header ++
+        native_profile_axes ++
+        native_profile_force_feedback ++
+        \\[output.profiles.native.touch_synthesis]
+        \\left_button = "C"
+        \\right_button = "Z"
+        \\left_x = -1
+        \\right_x = 1920
+        \\y = 1080
+        \\click = true
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_coordinates));
+}
+
+test "device: backend protocol matrix and native identity rumble requirements fail closed" {
+    const allocator = std.testing.allocator;
+
+    const unknown_backend = native_profile_base_toml ++
+        \\[output.profiles.native]
+        \\backend = "magic"
+        \\protocol = "generic"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, unknown_backend));
+
+    const unknown_protocol = native_profile_base_toml ++
+        \\[output.profiles.native]
+        \\backend = "uhid"
+        \\protocol = "unknown"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, unknown_protocol));
+
+    const auto_native = native_profile_base_toml ++
+        \\[output.profiles.native]
+        \\backend = "auto"
+        \\protocol = "dualsense-edge-usb"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, auto_native));
+
+    const uinput_native = native_profile_base_toml ++
+        \\[output.profiles.native]
+        \\backend = "uinput"
+        \\protocol = "dualsense-edge-usb"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, uinput_native));
+
+    const wrong_identity = native_profile_base_toml ++
+        \\[output.profiles.native]
+        \\backend = "uhid"
+        \\protocol = "dualsense-edge-usb"
+        \\vid = 0x054c
+        \\pid = 0x0ce6
+    ++ "\n" ++ native_profile_axes ++
+        native_profile_force_feedback ++
+        native_profile_touch;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, wrong_identity));
+
+    const wrong_rumble_type = native_profile_base_toml ++
+        native_profile_header ++
+        native_profile_axes ++
+        \\[output.profiles.native.force_feedback]
+        \\type = "pid"
+        \\
+    ++ native_profile_touch;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, wrong_rumble_type));
 }
 
 test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
