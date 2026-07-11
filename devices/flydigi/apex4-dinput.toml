@@ -1,0 +1,112 @@
+# Flydigi Apex 4 — 2.4G dongle / wired USB, DInput mode.
+#
+# All Flydigi V1-protocol pads share the dongle identity 04b4:2412 (Cypress)
+# and report the vendor "extended" stream on interface 2. The controller model
+# is distinguished at runtime by device ID (Apex 4 = 84), reported in the
+# response to command 0xEC; padctl matches statically, so select this profile
+# in config.toml when the connected pad is an Apex 4.
+#
+# Byte layout from SDL SDL_hidapi_flydigi.c (HandleStatePacketV1), verified
+# upstream against Apex 4 hardware (libsdl-org/SDL#12874), cross-checked with
+# pipe01/flydigictl (dongle enumeration + command channel).
+#
+# NOTE: this layout intentionally differs from vader4-pro-04b4-2412.toml —
+# SDL places the dpad bitmask in the low nibble of byte 9 and the face
+# buttons in the high nibble; verify against a live hidraw capture before
+# trusting either.
+
+[device]
+name = "Flydigi Apex 4 (DInput/2.4G)"
+vid = 0x04b4
+pid = 0x2412
+
+# V1 pads carry the vendor protocol on interface 2.
+[[device.interface]]
+id = 2
+class = "hid"
+
+# --- Extended input (header 0x04 0xFE, 32 bytes) ---
+# offset 0-2:  header 04 FE 66
+# offset 7:    M1-M4 (bits 2-5; bits 0-1 are C/Z on Vader models, absent here)
+# offset 8:    bit3 = Home; bit0 = '+' gyro-mouse toggle (not exposed)
+# offset 9:    low nibble = dpad bitmask (1=up 2=right 4=down 8=left),
+#              bit4=A bit5=B bit6=Select bit7=X
+# offset 10:   bit0=Y bit1=Start bit2=LB bit3=RB bit6=LS bit7=RS
+# offset 17/19/21/22: LX/LY/RX/RY (u8, center 0x7f)
+# offset 23/24: analog LT/RT (u8)
+# IMU bytes (11-16 accel, 18/20/26-30 gyro) are only populated when the pad's
+# gyro-mouse mode is enabled, so no gyro/accel fields are mapped here.
+[[report]]
+name = "extended"
+interface = 2
+size = 32
+
+[report.match]
+offset = 0
+expect = [0x04, 0xfe]
+
+[report.fields]
+# No negate on Y: the pad sends HID-convention +Y=down (up=0x00), which is
+# already what evdev expects (ABS_Y negative = up, as xpad reports for the
+# emulated Elite 2). Verified live in KDE's game-controller KCM — with negate
+# both Y axes were inverted.
+left_x  = { offset = 17, type = "u8", transform = "scale(-32768, 32767)" }
+left_y  = { offset = 19, type = "u8", transform = "scale(-32768, 32767)" }
+right_x = { offset = 21, type = "u8", transform = "scale(-32768, 32767)" }
+right_y = { offset = 22, type = "u8", transform = "scale(-32768, 32767)" }
+lt      = { offset = 23, type = "u8" }
+rt      = { offset = 24, type = "u8" }
+
+# Bit indices are LSB-first within the 4-byte group at offset 7
+# (bit 0 = byte 7 bit 0, bit 31 = byte 10 bit 7).
+[report.button_group]
+source = { offset = 7, size = 4 }
+map = { M1 = 2, M2 = 3, M3 = 4, M4 = 5, Home = 11, DPadUp = 16, DPadRight = 17, DPadDown = 18, DPadLeft = 19, A = 20, B = 21, Select = 22, X = 23, Y = 24, Start = 25, LB = 26, RB = 27, LS = 30, RS = 31 }
+
+# --- Commands ---
+# V1 haptics: report 0x05, command 0x0F, one strength byte per motor.
+[commands.rumble]
+interface = 2
+template = "05 0f {strong:u8} {weak:u8} 00 00 00 00 00 00 00 00"
+
+# --- Output device ---
+# Masquerade as Xbox Elite Series 2 so Steam and most games pick up Xbox
+# mappings without configuration (same approach as vader5.toml).
+[output]
+default_profile = "xbox-elite2"
+name = "Xbox Elite Series 2"
+vid = 0x045e
+pid = 0x0b00
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_NORTH"
+Y      = "BTN_WEST"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY5"
+# Elite 2 paddles P1-P4 are BTN_TRIGGER_HAPPY5-8 (Linux xpad); M2/M3 swapped
+# so M2 lands at P3 and M3 at P2, matching vader5.toml.
+M2     = "BTN_TRIGGER_HAPPY7"
+M3     = "BTN_TRIGGER_HAPPY6"
+M4     = "BTN_TRIGGER_HAPPY8"
+
+[output.dpad]
+type = "hat"
+
+[output.force_feedback]
+type = "rumble"
