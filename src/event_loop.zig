@@ -655,6 +655,30 @@ pub const EventLoop = struct {
         }
     }
 
+    fn handleNativeRumbleAt(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) void {
+        const is_stop = frame.strong == 0 and frame.weak == 0;
+        if (is_stop) {
+            // STOP must not wait behind a throttled non-zero frame: cancel the
+            // stale frame and emit zero immediately so rumble cannot stick.
+            self.clearPendingRumble();
+            self.emitOrQueueRumble(ctx, frame, now_ns);
+        } else {
+            const elapsed = now_ns - self.last_rumble_ns;
+            if (elapsed >= RUMBLE_MIN_INTERVAL_NS) {
+                self.emitOrQueueRumble(ctx, frame, now_ns);
+            } else {
+                // The mailbox and this pending slot are both capacity one.
+                // A newer native command replaces the older throttled frame
+                // without moving the original 10ms physical-write deadline.
+                self.queuePendingRumble(frame, self.last_rumble_ns + RUMBLE_MIN_INTERVAL_NS, 0);
+                rumble_log.debug("[{s}] NATIVE_RUMBLE: THROTTLED elapsed={d}ns", .{
+                    ctx.device_tag, elapsedNsForLog(elapsed),
+                });
+            }
+        }
+        self.armRumbleTimer(null);
+    }
+
     fn flushPendingRumbleIfDue(self: *EventLoop, ctx: EventLoopContext, now_ns: i128) void {
         const deadline = self.pending_rumble_deadline_ns orelse return;
         if (deadline > now_ns) return;
@@ -851,6 +875,29 @@ pub const EventLoop = struct {
                 }
             }
 
+            // Drain native rumble before the shared timerfd. When a mailbox
+            // wake and a pending-frame deadline become ready together, the
+            // newest native command replaces the stale pending frame before
+            // the timer flushes it. EventLoop remains the only physical writer.
+            if (self.native_rumble_slot) |slot| {
+                if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
+                    if (self.native_rumble_device) |device| {
+                        device.drainRumbleWake();
+                        if (device.takeRumbleCommand()) |rumble_command| {
+                            // Physical input/mapping work earlier in this poll
+                            // cycle may be expensive. Sample again at the
+                            // actual output boundary so last_rumble_ns tracks
+                            // physical-write time rather than ppoll wake time.
+                            const native_now_ns = monotonicNs();
+                            self.handleNativeRumbleAt(ctx, .{
+                                .strong = rumble_command.strong,
+                                .weak = rumble_command.weak,
+                            }, native_now_ns);
+                        }
+                    }
+                }
+            }
+
             // Check rumble auto-stop timerfd (slot 3). This may synchronously
             // write a HID rumble frame, so it follows physical input fds just
             // like the optional output-side FF drains.
@@ -981,25 +1028,6 @@ pub const EventLoop = struct {
                             if (uhid_dev.output_cb) |cb| {
                                 cb(uhid_dev.output_ctx.?, r);
                             }
-                        }
-                    }
-                }
-            }
-
-            // Native UHID fd traffic is consumed exclusively by its pump.
-            // EventLoop sees only a coalesced wake and atomically takes the
-            // latest normalized command before using the existing physical
-            // `[commands.rumble]` formatter/writer.
-            if (self.native_rumble_slot) |slot| {
-                if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
-                    if (self.native_rumble_device) |device| {
-                        device.drainRumbleWake();
-                        if (device.takeRumbleCommand()) |rumble_command| {
-                            self.emitOrQueueRumble(ctx, .{
-                                .strong = rumble_command.strong,
-                                .weak = rumble_command.weak,
-                            }, now);
-                            self.armRumbleTimer(null);
                         }
                     }
                 }
@@ -1527,6 +1555,69 @@ test "event_loop: rumble template OOM queues retry as write failure" {
 
     try testing.expectEqual(RumbleEmitResult.write_failed, result);
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
+}
+
+test "event_loop: native throttle keeps latest while stop cancels pending" {
+    const allocator = testing.allocator;
+    const rumble_toml =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[commands.rumble]
+        \\interface = 0
+        \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+    ;
+    const parsed = try device_mod.parseString(allocator, rumble_toml);
+    defer parsed.deinit();
+    const interpreter = Interpreter.init(&parsed.value);
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    var devices = [_]DeviceIO{mock_dev.deviceIO()};
+    var output = MockOutput.init(allocator);
+    defer output.deinit();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    const ctx = EventLoopContext{
+        .devices = &devices,
+        .interpreter = &interpreter,
+        .output = output.outputDevice(),
+        .allocator = allocator,
+        .device_config = &parsed.value,
+        .device_tag = "native-throttle-test",
+    };
+
+    const base = monotonicNs();
+    loop.last_rumble_ns = base;
+    const first = RumbleScheduler.Frame{ .strong = 0x1100, .weak = 0x2200 };
+    const latest = RumbleScheduler.Frame{ .strong = 0x6600, .weak = 0x9900 };
+    loop.handleNativeRumbleAt(ctx, first, base + std.time.ns_per_ms);
+    loop.handleNativeRumbleAt(ctx, latest, base + 2 * std.time.ns_per_ms);
+
+    try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
+    try testing.expectEqual(latest, loop.pending_rumble_frame.?);
+    try testing.expectEqual(@as(?i128, base + RUMBLE_MIN_INTERVAL_NS), loop.pending_rumble_deadline_ns);
+
+    // A zero frame is a safety command: it cancels the stale non-zero frame,
+    // writes immediately, and resets the throttle clock so replay is immediate.
+    loop.handleNativeRumbleAt(ctx, .{ .strong = 0, .weak = 0 }, base + 3 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?RumbleScheduler.Frame, null), loop.pending_rumble_frame);
+    try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
+    try testing.expectEqual(@as(i128, 0), loop.last_rumble_ns);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, mock_dev.write_log.items);
+
+    loop.handleNativeRumbleAt(ctx, latest, base + 4 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 16), mock_dev.write_log.items.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x66, 0x99, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[8..16]);
 }
 
 test "event_loop: EventLoop mini: device frame dispatched to interpreter and output" {
