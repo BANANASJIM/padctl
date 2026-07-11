@@ -114,9 +114,9 @@ uinput device name: **Xbox Elite Series 2** | VID `0x045e` | PID `0x0b00`
 
 ### Output Profiles
 
-Default profile: `xbox-elite2`
-
-| Profile | Device Name | VID | PID | Axes | Buttons |
-|---------|-------------|-----|-----|------|---------|
-| `dualsense-edge` | **Sony DualSense Edge** | `0x054c` | `0x0df2` | 6 | 20 |
+| Profile | Backend | Protocol | Device Name | VID | PID | Stick Range | Buttons |
+|---------|---------|----------|-------------|-----|-----|-------------|---------|
+| `xbox-elite2` (default) | `uinput` | `generic` | **Xbox Elite Series 2** | `0x045e` | `0x0b00` | `-32768..32767` | 20 |
+| `dualsense-edge-native` | `uhid` | `dualsense-edge-usb` | **Sony DualSense Edge** | `0x054c` | `0x0df2` | `0..255` | 17 |
+| `dualsense-edge` | `uinput` | `generic` | **Sony DualSense Edge** | `0x054c` | `0x0df2` | `-32768..32767` | 20 |
 

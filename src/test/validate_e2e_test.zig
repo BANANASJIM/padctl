@@ -193,6 +193,10 @@ test "E2E docgen: vader5 output contains required sections" {
     try testing.expect(std.mem.indexOf(u8, out, "## Output Capabilities") != null);
     try testing.expect(std.mem.indexOf(u8, out, "### Output Profiles") != null);
     try testing.expect(std.mem.indexOf(u8, out, "dualsense-edge") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "`xbox-elite2` (default) | `uinput` | `generic`") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "`dualsense-edge` | `uinput` | `generic`") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "`dualsense-edge-native` | `uhid` | `dualsense-edge-usb`") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "`0..255`") != null);
 }
 
 // --- 4. parseFile: all 5 device configs load correctly ---

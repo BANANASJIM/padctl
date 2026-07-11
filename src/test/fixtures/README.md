@@ -7,6 +7,21 @@ Test-time fixtures that exercise the production code. Each fixture either:
 
 ## Fixtures
 
+### `dualsense_edge_usb/`
+
+Audited wired DualSense Edge protocol fixtures for the native UHID codec:
+
+- hhd-derived USB report descriptor and feature reports `0x05`, `0x09`, and
+  `0x20`, pinned to one immutable LGPL-2.1-or-later commit; and
+- padctl-authored asymmetric compatible-rumble vectors in the accepted 48-byte
+  SDL and 63-byte Linux forms.
+
+See [`dualsense_edge_usb/PROVENANCE.md`](dualsense_edge_usb/PROVENANCE.md) for
+the per-file source expression, transformation, immutable oracle references,
+length, SHA-256, license, and reproduction procedure. The output vectors are
+synthetic; they are not copied from the behavior-oracle implementations and
+the 63-byte form is not descriptor padding.
+
 ### `golden/steam_deck_hid_descriptor.bin`
 
 HID 1.11 report descriptor bytes that `UhidDescriptorBuilder.buildFromOutput`

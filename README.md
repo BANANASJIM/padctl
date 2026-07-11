@@ -26,7 +26,7 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Persistent mapping** — `padctl install --mapping <name>` writes a device binding to `/etc/padctl/config.toml` that auto-applies on every boot
 - **User config** — `~/.config/padctl/config.toml` for per-device default mappings (system fallback: `/etc/padctl/config.toml`)
 - **Opt-in diagnostic logging** — `padctl dump enable` turns on a general-purpose, togglable file logger so users can produce a structured log for any class of bug report (force-feedback, input, mapping, hotplug, …). Today it is wired deepest into the rumble/HID path; more subsystems will be instrumented over time. Rotated, bounded on disk, and zero overhead when disabled (default)
-- **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl config init/edit/test`, `padctl dump enable/disable/status/export/clear`
+- **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl output-profile list/select/reset`, `padctl config init/edit/test`, `padctl dump enable/disable/status/export/clear`
 
 ## Architecture
 
@@ -75,8 +75,8 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
                 |            |
                 v            v
       +----------------+  +------------------+
-      | gamepad output |  | generic output   |
-      | uinput + aux   |  | generic + touch  |
+      | gamepad output |  | auxiliary output |
+      | uinput or UHID |  | mouse/touch/keys |
       +----------------+  +------------------+
 ```
 
@@ -148,6 +148,8 @@ padctl status                                         # check daemon and detecte
 padctl config init                                    # create a mapping in ~/.config/padctl/mappings/ interactively
 padctl list-mappings                                  # show generated and installed mapping profiles
 padctl switch <name>                                  # switch mapping profile without restart
+padctl output-profile list --device "Flydigi Vader 5 Pro"
+padctl output-profile select dualsense-edge-native --device "Flydigi Vader 5 Pro"  # wired USB native; 8-bit sticks
 ```
 
 padctl runs as a **systemd user service**. The default root install writes the
@@ -177,6 +179,9 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | `padctl devices` | List detected HID/USB devices |
 | `padctl list-mappings` | Show available mapping profiles |
 | `padctl switch <name>` | Switch to a named mapping profile |
+| `padctl output-profile list [--device <name>]` | Compare virtual output identities and protocols |
+| `padctl output-profile select <profile> --device <name>` | Save a per-device output profile |
+| `padctl output-profile reset --device <name>` | Restore the device's default output profile |
 | `padctl config init [--device <name>]` | Interactively create a new mapping file in `~/.config/padctl/mappings/` from a template (`default`, `fps`, `racing`, `fighting`) |
 | `padctl config edit <mapping>` | Open mapping in `$VISUAL` or `$EDITOR` |
 | `padctl config test <mapping>` | Live input preview against the mapping (no apply) |

@@ -145,7 +145,20 @@ Reference: issue #470.
 - You added `output.emulate` or `output_profile` to a mapping file and nothing
   changed.
 
-**Fix:** select the device-declared profile from `config.toml`:
+**Fix:** inspect and select a device-declared output profile:
+
+```sh
+padctl output-profile list --device "Flydigi Vader 5 Pro"
+padctl output-profile select dualsense-edge --device "Flydigi Vader 5 Pro"
+```
+
+If `dualsense-edge-native` is missing from the list, an older Vader TOML under
+`~/.config/padctl/devices/` is shadowing the packaged config. Update that copy
+from the same padctl release or remove it so the packaged config is visible,
+then run the list command again.
+
+The CLI saves the same per-device setting shown below. A running user daemon
+normally notices the atomic config update and reconnects the virtual device:
 
 ```toml
 # ~/.config/padctl/config.toml
@@ -167,18 +180,28 @@ systemctl --user restart padctl.service
 
 `output_profile` is a per-device startup choice, not a mapping option. The
 Vader 5 builtin device config keeps Xbox Elite 2 as the default and exposes
-`dualsense-edge` as an opt-in profile. Do not create a second Vader 5 device
-TOML with the same physical VID/PID unless you are intentionally replacing the
-installed config; duplicate matches make scan order decide which config wins.
+`dualsense-edge` plus `dualsense-edge-native` as opt-in profiles. Do not create
+a second Vader 5 device TOML with the same physical VID/PID unless you are
+intentionally replacing the installed config; the higher-priority XDG config
+owns that physical identity.
 
 If your service was installed with a system fallback and has no `HOME`, put the
 same `[[device]]` entry in `/etc/padctl/config.toml` or use the documented
 persist flow. `padctl doctor` shows which config paths the daemon can read.
 
-The DualSense Edge profile changes the virtual identity and button layout while
-keeping high-resolution stick ranges. Native SDL/Steam gyro sensor pairing uses
-the separate `[output.imu]` UHID path and has force-feedback caveats; a profile
-name alone is not a full DualSense Edge firmware clone.
+Choose between:
+
+- `dualsense-edge`: the unchanged generic uinput identity/layout profile with
+  `-32768..32767` sticks. It does not speak the native DualSense HID protocol.
+- `dualsense-edge-native`: wired USB-only native Edge UHID with `0..255` axes,
+  Fn buttons/paddles, two C/Z touch contacts and click, and accelerometer/gyro
+  in the same UHID report. Compatible SDL HIDAPI rumble is forwarded to the
+  Vader `[commands.rumble]` path.
+
+The native profile has no separate IMU companion, though Vader's auxiliary
+mouse may still coexist. Bluetooth, private configuration reports,
+audio/speaker endpoints, and adaptive triggers are not implemented. If stick
+precision is the priority, keep the 16-bit generic profile.
 
 Reference: issue #471.
 

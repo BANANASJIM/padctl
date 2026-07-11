@@ -166,39 +166,57 @@ pub fn generateDevicePage(
 
         if (out.default_profile != null or out.profiles != null) {
             try writer.writeAll("### Output Profiles\n\n");
-            if (out.default_profile) |name| {
-                try writer.print("Default profile: `{s}`\n\n", .{name});
-            }
+            try writer.writeAll("| Profile | Backend | Protocol | Device Name | VID | PID | Stick Range | Buttons |\n");
+            try writer.writeAll("|---------|---------|----------|-------------|-----|-----|-------------|---------|\n");
+            if (out.default_profile) |name| try writeProfileRow(writer, name, true, out);
             if (out.profiles) |profiles| {
-                try writer.writeAll("| Profile | Device Name | VID | PID | Axes | Buttons |\n");
-                try writer.writeAll("|---------|-------------|-----|-----|------|---------|\n");
                 var it = profiles.map.iterator();
                 while (it.next()) |entry| {
-                    const p = entry.value_ptr.*;
-                    const profile_name = p.name orelse out.name orelse "";
-                    const axes_count: usize = if (p.axes) |axes|
-                        axes.map.count()
-                    else if (out.axes) |axes|
-                        axes.map.count()
-                    else
-                        0;
-                    const button_count: usize = if (p.buttons) |buttons|
-                        buttons.map.count()
-                    else if (out.buttons) |buttons|
-                        buttons.map.count()
-                    else
-                        0;
-
-                    try writer.print("| `{s}` | **{s}** | ", .{ entry.key_ptr.*, profile_name });
-                    try writeOptionalHex(writer, p.vid orelse out.vid);
-                    try writer.writeAll(" | ");
-                    try writeOptionalHex(writer, p.pid orelse out.pid);
-                    try writer.print(" | {d} | {d} |\n", .{ axes_count, button_count });
+                    var resolved_cfg = cfg.*;
+                    if (!device.selectOutputProfile(&resolved_cfg, entry.key_ptr.*)) continue;
+                    const resolved = resolved_cfg.output orelse continue;
+                    try writeProfileRow(writer, entry.key_ptr.*, false, resolved);
                 }
-                try writer.writeByte('\n');
             }
+            try writer.writeByte('\n');
         }
     }
+}
+
+fn writeProfileRow(writer: anytype, name: []const u8, is_default: bool, out: device.OutputConfig) !void {
+    const button_count: usize = if (out.buttons) |buttons| buttons.map.count() else 0;
+    try writer.print("| `{s}`{s} | `{s}` | `{s}` | **{s}** | ", .{
+        name,
+        if (is_default) " (default)" else "",
+        resolvedBackend(out),
+        out.protocol,
+        out.name orelse "",
+    });
+    try writeOptionalHex(writer, out.vid);
+    try writer.writeAll(" | ");
+    try writeOptionalHex(writer, out.pid);
+    try writer.writeAll(" | ");
+    if (out.axes) |axes| {
+        if (axes.map.get("left_x")) |stick| {
+            try writer.print("`{d}..{d}`", .{ stick.min, stick.max });
+        } else {
+            try writer.writeAll("—");
+        }
+    } else {
+        try writer.writeAll("—");
+    }
+    try writer.print(" | {d} |\n", .{button_count});
+}
+
+fn resolvedBackend(out: device.OutputConfig) []const u8 {
+    if (!std.mem.eql(u8, out.backend, "auto")) return out.backend;
+    if (out.imu) |imu| {
+        if (std.mem.eql(u8, imu.backend, "uhid")) return "uhid";
+    }
+    if (out.force_feedback) |ffb| {
+        if (std.mem.eql(u8, ffb.backend, "uhid")) return "uhid";
+    }
+    return "uinput";
 }
 
 fn writeOptionalHex(writer: anytype, value: ?i64) !void {

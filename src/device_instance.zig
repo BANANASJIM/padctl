@@ -18,6 +18,9 @@ const GenericOutputDevice = uinput.GenericOutputDevice;
 const uhid_mod = @import("io/uhid.zig");
 const uhid_descriptor = @import("io/uhid_descriptor.zig");
 const uniq_mod = @import("io/uniq.zig");
+const edge_identity = @import("io/edge_identity.zig");
+const edge_codec = @import("io/dualsense_edge_usb.zig");
+const EdgeRuntime = @import("io/dualsense_edge_runtime.zig").EdgeRuntime;
 const ffb_mod = @import("io/ffb_forwarder.zig");
 const FfbForwarder = ffb_mod.FfbForwarder;
 const WedgeAtomics = @import("io/wedge_atomics.zig").WedgeAtomics;
@@ -129,10 +132,20 @@ pub const Owner = union(enum) {
 pub const InitOptions = struct {
     test_primary_uhid_fd: ?posix.fd_t = null,
     test_imu_uhid_fd: ?posix.fd_t = null,
+    /// Optional ownership acknowledgements for privileged tests. Set to true
+    /// immediately before the corresponding fd is handed to openUhidDevice;
+    /// from that point the helper closes it on failure or the returned
+    /// DeviceInstance closes it on deinit. False means the caller still owns
+    /// the numeric fd after an earlier init failure.
+    test_primary_uhid_fd_consumed: ?*bool = null,
+    test_imu_uhid_fd_consumed: ?*bool = null,
     test_devices_override: ?[]DeviceIO = null,
     /// Test-only: substitute for the physical hidraw write-end used by FfbForwarder.
     /// When non-null, FfbForwarder.init receives this fd instead of the real device fd.
     test_physical_hidraw_fd: ?posix.fd_t = null,
+    /// Test-only deterministic failure after output ownership has been fully
+    /// established. Exercises function-scope rollback of UHID pumps/runtime.
+    test_fail_after_output_route: bool = false,
 };
 
 /// Build a `UhidDevice` — either against a caller-supplied test fd (pipe
@@ -145,12 +158,15 @@ fn openUhidDevice(
     test_fd: ?posix.fd_t,
 ) !*uhid_mod.UhidDevice {
     if (test_fd) |fd| {
-        const dev = try uhid_mod.UhidDevice.initWithFd(allocator, fd, cfg);
+        const dev = uhid_mod.UhidDevice.initWithFd(allocator, fd, cfg) catch |err| {
+            if (fd >= 0) posix.close(fd);
+            return err;
+        };
         errdefer {
             dev.close();
             allocator.destroy(dev);
         }
-        try uhid_mod.UhidDevice.sendCreate(fd, cfg);
+        try dev.sendCreateOwned(cfg);
         return dev;
     }
     return uhid_mod.UhidDevice.init(allocator, cfg);
@@ -190,6 +206,9 @@ pub const DeviceInstance = struct {
     interp: Interpreter,
     mapper: ?Mapper,
     owner: Owner = .none,
+    /// Stateful native codec adapter. The primary UHID remains owned by
+    /// `owner`; deinit closes/joins it before freeing this box.
+    edge_runtime: ?*EdgeRuntime = null,
     primary_output: ?OutputDevice = null,
     imu_output: ?OutputDevice = null,
     /// IMU UHID companion card (T4). Separate from `owner` — the union models
@@ -227,11 +246,13 @@ pub const DeviceInstance = struct {
     ///
     /// - `init_mapping`: optional MappingConfig used to auto-derive aux
     ///   capabilities when [output.aux] is absent from the device config.
-    /// - `phys_key`: sysfs phys path of the backing hidraw node (owned by the
-    ///   caller). Feeds the UHID `uniq` hash when `[output.imu].backend = "uhid"`;
-    ///   when null the fallback daemon counter is used.
+    /// - `phys_key`: canonical persistent phys identity of the backing device
+    ///   (owned by the caller). Feeds generic UHID pairing when present. The
+    ///   native Edge protocol requires a non-empty, non-absolute value and
+    ///   fails closed instead of using the counter fallback.
     /// - `uniq_counter`: pointer to the daemon-wide u16 counter owned by the
-    ///   Supervisor. Read snapshot + incremented ONLY when phys_key is null.
+    ///   Supervisor. Generic UHID reads/increments it only when phys_key is
+    ///   null; native Edge never reads or increments it.
     pub fn init(
         allocator: std.mem.Allocator,
         cfg: *const DeviceConfig,
@@ -240,6 +261,9 @@ pub const DeviceInstance = struct {
         uniq_counter: *u16,
         opts: InitOptions,
     ) !DeviceInstance {
+        if (opts.test_primary_uhid_fd_consumed) |consumed| consumed.* = false;
+        if (opts.test_imu_uhid_fd_consumed) |consumed| consumed.* = false;
+
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
 
@@ -302,6 +326,7 @@ pub const DeviceInstance = struct {
         const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
 
         var owner: Owner = .none;
+        var edge_runtime_ptr: ?*EdgeRuntime = null;
         var primary_output: ?OutputDevice = null;
         var imu_output: ?OutputDevice = null;
         var imu_dev_ptr: ?*uhid_mod.UhidDevice = null;
@@ -312,6 +337,46 @@ pub const DeviceInstance = struct {
         var generic_state: ?generic.GenericDeviceState = null;
         var generic_uinput: ?GenericUinputDevice = null;
 
+        // Output ownership can be established deep inside a routing branch,
+        // while later aux/touchpad setup may still fail. Keep rollback in the
+        // function scope so every post-route error follows the same lifetime
+        // order as deinit: IMU, owner (including native pump join), runtime,
+        // then the remaining companion resources. Nested errdefers disappear
+        // when their block succeeds and therefore cannot protect this tail.
+        errdefer {
+            if (imu_dev_ptr) |p| {
+                p.close();
+                allocator.destroy(p);
+            }
+            if (imu_name_ptr) |name| allocator.free(name);
+            switch (owner) {
+                .none => {},
+                .uinput => |p| {
+                    p.close();
+                    allocator.destroy(p);
+                },
+                .uhid => |p| {
+                    p.clearOutputCallback();
+                    p.close();
+                    allocator.destroy(p);
+                },
+            }
+            if (edge_runtime_ptr) |runtime| allocator.destroy(runtime);
+            if (ffb_fwd) |*fwd| fwd.deinit();
+            if (aux_dev) |*aux| aux.close();
+            if (touchpad_dev) |*touchpad| touchpad.close();
+            if (generic_uinput) |*output| output.close();
+        }
+
+        if (is_generic) {
+            if (cfg.output) |out_cfg| {
+                // Defense in depth for callers that bypass parse/validation:
+                // native protocol routing must never be swallowed by the
+                // generic-device GenericUinput path.
+                if (std.mem.eql(u8, out_cfg.protocol, "dualsense-edge-usb")) return error.InvalidConfig;
+            }
+        }
+
         if (is_generic) {
             generic_state = try generic.compileGenericState(cfg);
             if (cfg.output) |*out_cfg| {
@@ -319,9 +384,14 @@ pub const DeviceInstance = struct {
             }
         } else if (cfg.output) |*out_cfg| {
             const imu_cfg_opt: ?device_cfg.ImuConfig = if (out_cfg.imu) |imu| imu else null;
-            // Enter UHID path when IMU backend=uhid (gamepad+IMU pair) OR
-            // when force_feedback.backend=uhid (racing wheel PID FFB).
+            const is_native_edge = std.mem.eql(u8, out_cfg.backend, "uhid") and
+                std.mem.eql(u8, out_cfg.protocol, "dualsense-edge-usb");
+            // The resolved root discriminators are authoritative. `auto`
+            // preserves the previous IMU/PID OR-gate; explicit uhid/uinput
+            // select their generic backends directly.
             const use_uhid = blk: {
+                if (std.mem.eql(u8, out_cfg.backend, "uhid")) break :blk true;
+                if (std.mem.eql(u8, out_cfg.backend, "uinput")) break :blk false;
                 if (imu_cfg_opt) |imu_cfg| {
                     if (std.mem.eql(u8, imu_cfg.backend, "uhid")) break :blk true;
                 }
@@ -332,116 +402,154 @@ pub const DeviceInstance = struct {
             };
 
             if (use_uhid) {
-                // Primary + IMU cards share a byte-identical uniq. Snapshot the
-                // counter once, bump only if the counter branch was taken
-                // (phys_key == null).
-                const counter_snapshot: u16 = uniq_counter.*;
-                const uniq_z = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
-                defer allocator.free(uniq_z);
-                if (phys_key == null) uniq_counter.* += 1;
-
-                // PID devices need the HID PID descriptor so that kernel
-                // hid-universal-pidff's pidff_find_reports finds all 8 mandatory
-                // usages; buildFromOutput emits only a gamepad descriptor.
-                const primary_descriptor = if (out_cfg.force_feedback) |ffb|
-                    if (std.mem.eql(u8, ffb.backend, "uhid") and std.mem.eql(u8, ffb.kind, "pid"))
-                        try uhid_descriptor.UhidDescriptorBuilder.buildForPid(allocator, out_cfg.*, ffb)
-                    else
-                        try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*)
-                else
-                    try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
-                defer allocator.free(primary_descriptor);
-
-                const ffb_cfg = out_cfg.force_feedback orelse device_cfg.ForceFeedbackConfig{};
-                // clone_vid_pid=true: wheel's real VID/PID (hid-universal-pidff modalias binding).
-                // clone_vid_pid=false (default): daemon identity so non-PID devices stay as FADE:C001.
-                const effective_vid: u16 = if (ffb_cfg.clone_vid_pid)
-                    @intCast(cfg.device.vid)
-                else
-                    0xFADE;
-                const effective_pid: u16 = if (ffb_cfg.clone_vid_pid)
-                    @intCast(cfg.device.pid)
-                else
-                    0xC001;
-
-                const primary_cfg = uhid_mod.Config{
-                    .name = cfg.device.name,
-                    .uniq = std.mem.sliceTo(uniq_z, 0),
-                    .vid = effective_vid,
-                    .pid = effective_pid,
-                    .descriptor = primary_descriptor,
-                    .output = out_cfg.*,
-                };
-                const primary_uhid = try openUhidDevice(allocator, primary_cfg, opts.test_primary_uhid_fd);
-                errdefer {
-                    primary_uhid.close();
-                    allocator.destroy(primary_uhid);
-                }
-
-                owner = .{ .uhid = primary_uhid };
-                primary_output = primary_uhid.outputDevice();
-
-                if (imu_cfg_opt) |imu_cfg| {
-                    const imu_desc = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(allocator, imu_cfg);
-                    defer allocator.free(imu_desc);
-
-                    const imu_name_alloc: []const u8 = if (imu_cfg.name) |n|
-                        try allocator.dupe(u8, n)
-                    else
-                        try std.fmt.allocPrint(allocator, "{s} IMU", .{cfg.device.name});
-                    errdefer allocator.free(imu_name_alloc);
-
-                    const imu_cfg_uhid = uhid_mod.Config{
-                        .name = imu_name_alloc,
-                        .uniq = std.mem.sliceTo(uniq_z, 0),
-                        .vid = @intCast(imu_cfg.vid orelse cfg.device.vid),
-                        .pid = @intCast(imu_cfg.pid orelse cfg.device.pid),
-                        .descriptor = imu_desc,
-                        .output = null,
-                        .imu = imu_cfg,
+                if (is_native_edge) {
+                    // Native Edge never falls back to a daemon counter or an
+                    // absolute discovery path: both would change identity
+                    // across restarts or hotplug ordering.
+                    if (imu_cfg_opt != null) return error.InvalidConfig;
+                    const physical_identity = phys_key orelse return error.UnstablePhysicalIdentity;
+                    const stable_identity = try edge_identity.deriveStableIdentity(physical_identity);
+                    const touch_cfg = out_cfg.touch_synthesis orelse return error.InvalidConfig;
+                    const touch = edge_codec.TouchSynthesis{
+                        .left_button = std.meta.stringToEnum(ButtonId, touch_cfg.left_button) orelse return error.InvalidConfig,
+                        .right_button = std.meta.stringToEnum(ButtonId, touch_cfg.right_button) orelse return error.InvalidConfig,
+                        .left_x = @intCast(touch_cfg.left_x),
+                        .right_x = @intCast(touch_cfg.right_x),
+                        .y = @intCast(touch_cfg.y),
+                        .click = touch_cfg.click,
                     };
-                    const imu_uhid = try openUhidDevice(allocator, imu_cfg_uhid, opts.test_imu_uhid_fd);
-                    errdefer {
-                        imu_uhid.close();
-                        allocator.destroy(imu_uhid);
-                    }
-                    imu_dev_ptr = imu_uhid;
-                    imu_name_ptr = imu_name_alloc;
-                    imu_output = imu_uhid.outputDevice();
-                }
 
-                // Wire FfbForwarder when backend=uhid + kind=pid. Callback
-                // registration is deferred to run() so the pointer to
-                // ffb_forwarder is stable (DeviceInstance is heap-allocated by
-                // the Supervisor before run() is called).
-                if (out_cfg.force_feedback) |pid_ffb| {
-                    if (std.mem.eql(u8, pid_ffb.backend, "uhid") and
-                        std.mem.eql(u8, pid_ffb.kind, "pid"))
-                    {
-                        // TODO: devices[0] is a heuristic — correct for single-interface
-                        // wheels but may select the wrong interface on multi-interface
-                        // devices (e.g. a separate HID++ control interface at index 0
-                        // and the FFB interface at index 1).
-                        if (devices.len > 1) {
-                            std.log.warn("PID FFB: {d} interfaces found; using devices[0] as hidraw fd — may be wrong for multi-interface wheels", .{devices.len});
+                    const runtime = try allocator.create(EdgeRuntime);
+                    runtime.* = EdgeRuntime.init(stable_identity, touch);
+                    edge_runtime_ptr = runtime;
+
+                    const primary_cfg = uhid_mod.Config{
+                        .name = out_cfg.name orelse return error.InvalidConfig,
+                        .uniq = &runtime.identity.uniq,
+                        .vid = @intCast(out_cfg.vid orelse return error.InvalidConfig),
+                        .pid = @intCast(out_cfg.pid orelse return error.InvalidConfig),
+                        .descriptor = edge_codec.descriptor(),
+                        // Native encoding is owned by EdgeRuntime, not the
+                        // generic descriptor/IMU encoders in UhidDevice.
+                        .output = null,
+                        .imu = null,
+                        .native_pump = runtime.nativePumpConfig(),
+                    };
+                    if (opts.test_primary_uhid_fd != null) {
+                        if (opts.test_primary_uhid_fd_consumed) |consumed| consumed.* = true;
+                    }
+                    const primary_uhid = try openUhidDevice(allocator, primary_cfg, opts.test_primary_uhid_fd);
+                    owner = .{ .uhid = primary_uhid };
+                    runtime.bindDevice(primary_uhid);
+                    try loop.addNativeUhidRumble(primary_uhid);
+
+                    primary_output = runtime.outputDevice();
+                    // The Edge input report already carries accel + gyro.
+                    // Deliberately leave imu_output/imu_dev null: one UHID.
+                } else {
+                    // Primary + IMU cards share a byte-identical uniq. Snapshot the
+                    // counter once, bump only if the counter branch was taken
+                    // (phys_key == null).
+                    const counter_snapshot: u16 = uniq_counter.*;
+                    const uniq_z = try uniq_mod.buildUniq(allocator, cfg.device.name, phys_key, counter_snapshot);
+                    defer allocator.free(uniq_z);
+                    if (phys_key == null) uniq_counter.* += 1;
+
+                    // PID devices need the HID PID descriptor so that kernel
+                    // hid-universal-pidff's pidff_find_reports finds all 8 mandatory
+                    // usages; buildFromOutput emits only a gamepad descriptor.
+                    const primary_descriptor = if (out_cfg.force_feedback) |ffb|
+                        if (std.mem.eql(u8, ffb.backend, "uhid") and std.mem.eql(u8, ffb.kind, "pid"))
+                            try uhid_descriptor.UhidDescriptorBuilder.buildForPid(allocator, out_cfg.*, ffb)
+                        else
+                            try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*)
+                    else
+                        try uhid_descriptor.UhidDescriptorBuilder.buildFromOutput(allocator, out_cfg.*);
+                    defer allocator.free(primary_descriptor);
+
+                    const ffb_cfg = out_cfg.force_feedback orelse device_cfg.ForceFeedbackConfig{};
+                    // clone_vid_pid=true: wheel's real VID/PID (hid-universal-pidff modalias binding).
+                    // clone_vid_pid=false (default): daemon identity so non-PID devices stay as FADE:C001.
+                    const effective_vid: u16 = if (ffb_cfg.clone_vid_pid)
+                        @intCast(cfg.device.vid)
+                    else
+                        0xFADE;
+                    const effective_pid: u16 = if (ffb_cfg.clone_vid_pid)
+                        @intCast(cfg.device.pid)
+                    else
+                        0xC001;
+
+                    const primary_cfg = uhid_mod.Config{
+                        .name = cfg.device.name,
+                        .uniq = std.mem.sliceTo(uniq_z, 0),
+                        .vid = effective_vid,
+                        .pid = effective_pid,
+                        .descriptor = primary_descriptor,
+                        .output = out_cfg.*,
+                    };
+                    if (opts.test_primary_uhid_fd != null) {
+                        if (opts.test_primary_uhid_fd_consumed) |consumed| consumed.* = true;
+                    }
+                    const primary_uhid = try openUhidDevice(allocator, primary_cfg, opts.test_primary_uhid_fd);
+                    owner = .{ .uhid = primary_uhid };
+                    primary_output = primary_uhid.outputDevice();
+
+                    if (imu_cfg_opt) |imu_cfg| {
+                        const imu_desc = try uhid_descriptor.UhidDescriptorBuilder.buildForImu(allocator, imu_cfg);
+                        defer allocator.free(imu_desc);
+
+                        const imu_name_alloc: []const u8 = if (imu_cfg.name) |n|
+                            try allocator.dupe(u8, n)
+                        else
+                            try std.fmt.allocPrint(allocator, "{s} IMU", .{cfg.device.name});
+                        imu_name_ptr = imu_name_alloc;
+
+                        const imu_cfg_uhid = uhid_mod.Config{
+                            .name = imu_name_alloc,
+                            .uniq = std.mem.sliceTo(uniq_z, 0),
+                            .vid = @intCast(imu_cfg.vid orelse cfg.device.vid),
+                            .pid = @intCast(imu_cfg.pid orelse cfg.device.pid),
+                            .descriptor = imu_desc,
+                            .output = null,
+                            .imu = imu_cfg,
+                        };
+                        if (opts.test_imu_uhid_fd != null) {
+                            if (opts.test_imu_uhid_fd_consumed) |consumed| consumed.* = true;
                         }
-                        const phys_fd = opts.test_physical_hidraw_fd orelse
-                            if (devices.len > 0) devices[0].pollfd().fd else -1;
-                        if (phys_fd >= 0) {
-                            ffb_fwd = FfbForwarder.init(phys_fd);
-                            try loop.addUhidOutput(primary_uhid.fd);
+                        const imu_uhid = try openUhidDevice(allocator, imu_cfg_uhid, opts.test_imu_uhid_fd);
+                        imu_dev_ptr = imu_uhid;
+                        imu_output = imu_uhid.outputDevice();
+                    }
+
+                    // Wire FfbForwarder when backend=uhid + kind=pid. Callback
+                    // registration is deferred to run() so the pointer to
+                    // ffb_forwarder is stable (DeviceInstance is heap-allocated by
+                    // the Supervisor before run() is called).
+                    if (out_cfg.force_feedback) |pid_ffb| {
+                        if (std.mem.eql(u8, pid_ffb.backend, "uhid") and
+                            std.mem.eql(u8, pid_ffb.kind, "pid"))
+                        {
+                            // TODO: devices[0] is a heuristic — correct for single-interface
+                            // wheels but may select the wrong interface on multi-interface
+                            // devices (e.g. a separate HID++ control interface at index 0
+                            // and the FFB interface at index 1).
+                            if (devices.len > 1) {
+                                std.log.warn("PID FFB: {d} interfaces found; using devices[0] as hidraw fd — may be wrong for multi-interface wheels", .{devices.len});
+                            }
+                            const phys_fd = opts.test_physical_hidraw_fd orelse
+                                if (devices.len > 0) devices[0].pollfd().fd else -1;
+                            if (phys_fd >= 0) {
+                                ffb_fwd = FfbForwarder.init(phys_fd);
+                                try loop.addUhidOutput(primary_uhid.fd);
+                            }
                         }
                     }
-                }
-                if (ffbUnavailableOverUhid(true, out_cfg.force_feedback)) {
-                    std.log.warn("force_feedback is configured but evdev force feedback is unavailable over the UHID backend (active when imu.backend=uhid): the kernel binds force feedback only for allowlisted device IDs. Wine/Lutris evdev rumble will not work; rumble via SDL/Steam HIDAPI is unaffected.", .{});
+                    if (ffbUnavailableOverUhid(true, out_cfg.force_feedback)) {
+                        std.log.warn("force_feedback is configured but evdev force feedback is unavailable over the UHID backend (active when imu.backend=uhid): the kernel binds force feedback only for allowlisted device IDs. Wine/Lutris evdev rumble will not work; rumble via SDL/Steam HIDAPI is unaffected.", .{});
+                    }
                 }
             } else {
                 const uinput_ptr = try UinputDevice.initBoxed(allocator, out_cfg);
-                errdefer {
-                    uinput_ptr.close();
-                    allocator.destroy(uinput_ptr);
-                }
                 uinput_ptr.log_tag = cfg.device.name;
                 owner = .{ .uinput = uinput_ptr };
                 primary_output = uinput_ptr.outputDevice();
@@ -487,6 +595,7 @@ pub const DeviceInstance = struct {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
         }
+        if (opts.test_fail_after_output_route) return error.TestPostOutputRouteFailure;
         const mapper: ?Mapper = if (init_mapping) |mcfg|
             Mapper.init(mcfg, loop.macro_timer_fd, allocator) catch |err| blk: {
                 std.log.warn("failed to init mapper from default_mapping: {}", .{err});
@@ -511,6 +620,7 @@ pub const DeviceInstance = struct {
             .interp = interp,
             .mapper = mapper,
             .owner = owner,
+            .edge_runtime = edge_runtime_ptr,
             .primary_output = primary_output,
             .imu_output = imu_output,
             .imu_dev = imu_dev_ptr,
@@ -568,6 +678,9 @@ pub const DeviceInstance = struct {
                 self.allocator.destroy(p);
             },
         }
+        // EdgeRuntime's callbacks are borrowed by the native pump, so the
+        // owner UHID must complete DESTROY/drain/join before this box is freed.
+        if (self.edge_runtime) |runtime| self.allocator.destroy(runtime);
         if (self.ffb_forwarder) |*fwd| fwd.deinit();
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();

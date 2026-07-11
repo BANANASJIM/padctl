@@ -31,6 +31,7 @@ pub const cli = struct {
     pub const error_hint = @import("cli/error_hint.zig");
     pub const perm_hint = @import("cli/perm_hint.zig");
     pub const switch_mapping = @import("cli/switch_mapping.zig");
+    pub const output_profile = @import("cli/output_profile.zig");
     pub const status = @import("cli/status.zig");
     pub const doctor = @import("cli/doctor.zig");
     pub const devices = @import("cli/devices.zig");
@@ -76,6 +77,8 @@ pub const io = struct {
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
     pub const uhid = @import("io/uhid.zig");
+    pub const dualsense_edge_usb = @import("io/dualsense_edge_usb.zig");
+    pub const edge_identity = @import("io/edge_identity.zig");
     pub const uhid_descriptor = @import("io/uhid_descriptor.zig");
     pub const uniq = @import("io/uniq.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
@@ -124,6 +127,12 @@ pub const testing_support = struct {
     pub const event_loop_rumble_test = @import("test/event_loop_rumble_test.zig");
     pub const event_loop_ff_erase_test = @import("test/event_loop_ff_erase_test.zig");
     pub const uhid_output_dispatch_test = @import("test/uhid_output_dispatch_test.zig");
+    pub const uhid_t1_strict_red_green_test = @import("test/uhid_t1_strict_red_green_test.zig");
+    pub const uhid_native_pump_test = @import("test/uhid_native_pump_test.zig");
+    pub const dualsense_edge_fixture_test = @import("test/dualsense_edge_fixture_test.zig");
+    pub const dualsense_edge_usb_codec_test = @import("test/dualsense_edge_usb_codec_test.zig");
+    pub const device_instance_edge_native_test = @import("test/device_instance_edge_native_test.zig");
+    pub const dualsense_edge_rumble_test = @import("test/dualsense_edge_rumble_test.zig");
     pub const pidff_e2e_test = @import("test/pidff_e2e_test.zig");
     pub const chord_output_e2e_test = @import("test/chord_output_e2e_test.zig");
     pub const chord_switch_e2e_test = @import("test/chord_switch_e2e_test.zig");
@@ -248,6 +257,7 @@ const Cli = struct {
     pid_file: ?[]const u8 = null,
     config_cmd: ?ConfigCmd = null,
     switch_cmd: ?struct { name: ?[]const u8 = null, device_id: ?[]const u8 = null, persist: bool = false } = null,
+    output_profile_cmd: ?cli.output_profile.Action = null,
     status_cmd: bool = false,
     doctor_cmd: bool = false,
     devices_cmd: bool = false,
@@ -505,6 +515,31 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 cli.errors.unknownSubcommand(stderr_writer, "config", sub);
                 return error.UnknownArgument;
             }
+        } else if (std.mem.eql(u8, arg, "output-profile")) {
+            var output_profile_args: [16][]const u8 = undefined;
+            var output_profile_argc: usize = 0;
+            while (args.next()) |sub_arg| {
+                if (isHelpFlag(sub_arg)) {
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, cli.output_profile.help_text) catch 0;
+                    std.process.exit(0);
+                }
+                if (output_profile_argc >= output_profile_args.len) {
+                    cli.errors.message(stderr_writer, "too many output-profile arguments");
+                    return error.UnknownArgument;
+                }
+                output_profile_args[output_profile_argc] = sub_arg;
+                output_profile_argc += 1;
+            }
+            parsed_cli.output_profile_cmd = cli.output_profile.parseArgs(output_profile_args[0..output_profile_argc]) catch |err| {
+                switch (err) {
+                    error.MissingSubcommand => cli.errors.message(stderr_writer, "output-profile requires list, select, or reset"),
+                    error.MissingArgument => cli.errors.message(stderr_writer, "output-profile is missing a required argument"),
+                    error.MissingDevice => cli.errors.message(stderr_writer, "output-profile select/reset requires --device <name>"),
+                    error.UnknownSubcommand => cli.errors.message(stderr_writer, "unknown output-profile subcommand"),
+                    error.UnexpectedArgument => cli.errors.message(stderr_writer, "unexpected output-profile argument"),
+                }
+                return error.UnknownArgument;
+            };
         } else if (std.mem.eql(u8, arg, "switch")) {
             var name: ?[]const u8 = null;
             var device_id: ?[]const u8 = null;
@@ -686,6 +721,9 @@ pub const help_text =
     \\       padctl list-mappings [--config-dir <dir>]
     \\       padctl reload [--pid <pid>]
     \\       padctl switch <name> [--device <id>] [--socket <path>]
+    \\       padctl output-profile list [--device <name>]
+    \\       padctl output-profile select <profile> --device <name>
+    \\       padctl output-profile reset --device <name>
     \\       padctl status [--socket <path>]
     \\       padctl devices [--socket <path>]
     \\       padctl doctor [--socket <path>]
@@ -720,6 +758,11 @@ pub const help_text =
     \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
     \\    --device <id>       Apply only to specific device
     \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+    \\  output-profile        List or persist a device output profile
+    \\    list                Show final backend, protocol, and stick range
+    \\    select <profile>    Select an exact profile for a device name
+    \\    reset               Clear the per-device selection
+    \\    --device <name>     Device name (case-insensitive; select/reset require it)
     \\  status                Show daemon status (current mapping, devices)
     \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
     \\  doctor                Print self-contained diagnostic (daemon/device/hidraw/scope)
@@ -750,7 +793,7 @@ pub const help_text =
     \\  --mapping <path>    Mapping config TOML file (optional)
     \\  --validate <path>   Validate device or mapping config and exit (returns 0/1)
     \\  --pid-file <path>   Write PID to file on start, remove on exit
-    \\  --doc-gen           Generate Markdown device reference from --config path(s)
+    \\  --doc-gen           Generate Markdown device reference from --config path
     \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
     \\  --help, -h          Show this help
     \\  --version, -V       Show version
@@ -820,6 +863,168 @@ fn runFromDirs(allocator: std.mem.Allocator, dirs: []const []const u8, pid_file:
     defer if (pid_file) |pf| deletePidFile(pf);
 
     sup.serveMulti(dirs);
+}
+
+const DirectPhysicalCandidate = struct {
+    interface_id: u8,
+    physical_path: []const u8,
+};
+
+fn directNeedsStablePhysicalIdentity(cfg: *const config.device.DeviceConfig) bool {
+    const out = cfg.output orelse return false;
+    return std.mem.eql(u8, out.backend, "uhid") and
+        std.mem.eql(u8, out.protocol, "dualsense-edge-usb");
+}
+
+fn requireDirectInterfaceId(interface_id: ?u8) error{UnstablePhysicalIdentity}!u8 {
+    return interface_id orelse error.UnstablePhysicalIdentity;
+}
+
+fn directInterfaceDeclared(interfaces: []const config.device.InterfaceConfig, interface_id: u8) bool {
+    return for (interfaces) |interface| {
+        if (interface.id == interface_id) break true;
+    } else false;
+}
+
+fn selectUniqueDirectPhysicalKey(
+    allocator: std.mem.Allocator,
+    interfaces: []const config.device.InterfaceConfig,
+    candidates: []const DirectPhysicalCandidate,
+) ![]u8 {
+    var selected: ?[]const u8 = null;
+    for (candidates) |candidate| {
+        if (!directInterfaceDeclared(interfaces, candidate.interface_id)) continue;
+
+        if (candidate.physical_path.len == 0 or std.fs.path.isAbsolute(candidate.physical_path))
+            return error.UnstablePhysicalIdentity;
+        if (selected) |existing| {
+            // Several declared interfaces on one controller are expected.
+            if (!std.mem.eql(u8, existing, candidate.physical_path))
+                return error.AmbiguousPhysicalDevices;
+        } else {
+            selected = candidate.physical_path;
+        }
+    }
+    return allocator.dupe(u8, selected orelse return error.NoMatchingPhysicalDevice);
+}
+
+/// Resolve the single-config native route's stable identity before
+/// DeviceInstance opens/claims any interface. A direct invocation cannot
+/// choose between two controllers with the same VID:PID, so ambiguity fails
+/// closed and directs the user to supervisor mode instead.
+fn resolveDirectNativePhysicalKey(
+    allocator: std.mem.Allocator,
+    cfg: *const config.device.DeviceConfig,
+) ![]u8 {
+    const vid: u16 = @intCast(cfg.device.vid);
+    const pid: u16 = @intCast(cfg.device.pid);
+    const paths = try io.hidraw.HidrawDevice.discoverAll(allocator, vid, pid);
+    defer {
+        for (paths) |path| allocator.free(path);
+        allocator.free(paths);
+    }
+
+    var candidates: std.ArrayList(DirectPhysicalCandidate) = .{};
+    defer {
+        for (candidates.items) |candidate| allocator.free(candidate.physical_path);
+        candidates.deinit(allocator);
+    }
+    for (paths) |path| {
+        // Every matching VID:PID node must be classifiable. Silently dropping
+        // one could hide a second physical controller and turn ambiguity into
+        // a false unique match.
+        const interface_id = try requireDirectInterfaceId(io.hidraw.readInterfaceId(path));
+        // Mirror supervisor filtering, but do it before readPhysicalPath so an
+        // unrelated interface's incomplete sysfs metadata cannot block the
+        // declared device route.
+        if (!directInterfaceDeclared(cfg.device.interface, interface_id)) continue;
+        const physical_path = try io.hidraw.readPhysicalPath(allocator, path);
+        candidates.append(allocator, .{
+            .interface_id = interface_id,
+            .physical_path = physical_path,
+        }) catch |err| {
+            allocator.free(physical_path);
+            return err;
+        };
+    }
+    return selectUniqueDirectPhysicalKey(allocator, cfg.device.interface, candidates.items);
+}
+
+test "direct native identity accepts several declared interfaces on one physical controller" {
+    const allocator = std.testing.allocator;
+    const interfaces = [_]config.device.InterfaceConfig{
+        .{ .id = 1, .class = "vendor" },
+        .{ .id = 3, .class = "suppress" },
+    };
+    const candidates = [_]DirectPhysicalCandidate{
+        .{ .interface_id = 1, .physical_path = "usb-0000:10:00.0-3" },
+        .{ .interface_id = 3, .physical_path = "usb-0000:10:00.0-3" },
+    };
+    const key = try selectUniqueDirectPhysicalKey(allocator, &interfaces, &candidates);
+    defer allocator.free(key);
+    try std.testing.expectEqualStrings("usb-0000:10:00.0-3", key);
+}
+
+test "direct native identity rejects two physical controllers" {
+    const interfaces = [_]config.device.InterfaceConfig{.{ .id = 1, .class = "vendor" }};
+    const candidates = [_]DirectPhysicalCandidate{
+        .{ .interface_id = 1, .physical_path = "usb-port-a" },
+        .{ .interface_id = 1, .physical_path = "usb-port-b" },
+    };
+    try std.testing.expectError(
+        error.AmbiguousPhysicalDevices,
+        selectUniqueDirectPhysicalKey(std.testing.allocator, &interfaces, &candidates),
+    );
+}
+
+test "direct native identity rejects no declared-interface candidate" {
+    const interfaces = [_]config.device.InterfaceConfig{.{ .id = 1, .class = "vendor" }};
+    try std.testing.expect(directInterfaceDeclared(&interfaces, 1));
+    try std.testing.expect(!directInterfaceDeclared(&interfaces, 2));
+    const candidates = [_]DirectPhysicalCandidate{.{ .interface_id = 2, .physical_path = "usb-port-a" }};
+    try std.testing.expectError(
+        error.NoMatchingPhysicalDevice,
+        selectUniqueDirectPhysicalKey(std.testing.allocator, &interfaces, &candidates),
+    );
+}
+
+test "direct native identity rejects matching path with missing interface metadata" {
+    try std.testing.expectError(error.UnstablePhysicalIdentity, requireDirectInterfaceId(null));
+    try std.testing.expectEqual(@as(u8, 3), try requireDirectInterfaceId(3));
+}
+
+test "direct native identity rejects absolute hidraw fallback" {
+    const interfaces = [_]config.device.InterfaceConfig{.{ .id = 1, .class = "vendor" }};
+    const candidates = [_]DirectPhysicalCandidate{.{ .interface_id = 1, .physical_path = "/dev/hidraw12" }};
+    try std.testing.expectError(
+        error.UnstablePhysicalIdentity,
+        selectUniqueDirectPhysicalKey(std.testing.allocator, &interfaces, &candidates),
+    );
+}
+
+test "direct native identity resolution is native Edge only" {
+    const allocator = std.testing.allocator;
+    const interfaces = [_]config.device.InterfaceConfig{.{ .id = 1, .class = "vendor" }};
+    var cfg = config.device.DeviceConfig{
+        .device = .{ .name = "test", .vid = 1, .pid = 2, .interface = &interfaces },
+        .report = &.{},
+        .output = .{ .backend = "uhid", .protocol = "dualsense-edge-usb" },
+    };
+    try std.testing.expect(directNeedsStablePhysicalIdentity(&cfg));
+
+    cfg.output.?.protocol = "generic";
+    try std.testing.expect(!directNeedsStablePhysicalIdentity(&cfg));
+    cfg.output.?.backend = "uinput";
+    cfg.output.?.protocol = "dualsense-edge-usb";
+    try std.testing.expect(!directNeedsStablePhysicalIdentity(&cfg));
+    cfg.output = null;
+    try std.testing.expect(!directNeedsStablePhysicalIdentity(&cfg));
+
+    var vader = try config.device.parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer vader.deinit();
+    try std.testing.expect(!directNeedsStablePhysicalIdentity(&vader.value));
+    try std.testing.expect(config.device.selectOutputProfile(&vader.value, "dualsense-edge-native"));
+    try std.testing.expect(directNeedsStablePhysicalIdentity(&vader.value));
 }
 
 pub fn main() !void {
@@ -1049,6 +1254,12 @@ pub fn main() !void {
             stderr_writer.writeAll("warning: dump setting was NOT persisted across restarts — fix the malformed user config.toml first\n") catch {};
         }
         std.process.exit(0);
+    }
+
+    // output-profile only persists user config; it never requests a reload.
+    // A daemon not watching that user file needs a later reload/restart.
+    if (parsed.output_profile_cmd) |action| {
+        std.process.exit(cli.output_profile.run(allocator, action, stdout_writer, stderr_writer));
     }
 
     // switch subcommand
@@ -1318,11 +1529,35 @@ pub fn main() !void {
         break :blk null;
     };
 
-    // One-shot daemon has a single device with no phys_key probe, so buildUniq
-    // falls back to the counter. Starting at 1 keeps the instance hex "0001"
-    // stable across runs for consistent uniq strings.
+    const direct_vid: u16 = @intCast(device_cfg.value.device.vid);
+    const direct_pid: u16 = @intCast(device_cfg.value.device.pid);
+    const direct_phys_key: ?[]u8 = if (directNeedsStablePhysicalIdentity(&device_cfg.value))
+        resolveDirectNativePhysicalKey(allocator, &device_cfg.value) catch |err| {
+            switch (err) {
+                error.NoMatchingPhysicalDevice => std.log.err(
+                    "native output requires one matching physical device (VID={x:0>4} PID={x:0>4}), but none with a declared interface was found",
+                    .{ direct_vid, direct_pid },
+                ),
+                error.AmbiguousPhysicalDevices => std.log.err(
+                    "native output found multiple physical devices with VID={x:0>4} PID={x:0>4}; direct --config is ambiguous, use --config-dir",
+                    .{ direct_vid, direct_pid },
+                ),
+                error.UnstablePhysicalIdentity => std.log.err(
+                    "native output found a matching device but could not derive a stable physical identity; use --config-dir after sysfs settles",
+                    .{},
+                ),
+                else => std.log.err("failed to resolve native physical identity: {}", .{err}),
+            }
+            std.process.exit(1);
+        }
+    else
+        null;
+    defer if (direct_phys_key) |key| allocator.free(key);
+
+    // Generic one-shot output retains its historical null-identity counter
+    // fallback. Native Edge receives the unique stable key resolved above.
     var main_uniq_counter: u16 = 1;
-    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null, &main_uniq_counter, .{}) catch |err| {
+    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, direct_phys_key, &main_uniq_counter, .{}) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };

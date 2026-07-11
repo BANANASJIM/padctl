@@ -219,11 +219,28 @@ profile sets `emulate`, the preset first fills that profile's missing
 VID/PID/name/buttons/axes, then the result overlays `[output]`. Unknown profile
 names are ignored with a warning and the default output stays active.
 
-For Vader 5, `output_profile = "dualsense-edge"` switches the virtual identity
-to DualSense Edge and keeps explicit `-32768..32767` stick ranges. It is still
-an output identity/layout profile, not a complete native DualSense Edge firmware
-clone. Native SDL/Steam sensor pairing requires the separate `[output.imu]`
-UHID path, which has force-feedback caveats documented below.
+Vader 5 exposes two opt-in DualSense Edge choices. List or select them without
+hand-editing `config.toml`:
+
+```sh
+padctl output-profile list --device "Flydigi Vader 5 Pro"
+padctl output-profile select dualsense-edge-native --device "Flydigi Vader 5 Pro"
+```
+
+| Profile | Output path | Stick range | Native features |
+|---------|-------------|-------------|-----------------|
+| `dualsense-edge` | generic uinput identity/layout | `-32768..32767` | no native HID protocol; preserves 16-bit stick resolution |
+| `dualsense-edge-native` | wired USB DualSense Edge UHID | `0..255` | SDL HIDAPI buttons, touch, accelerometer/gyro, and compatible rumble |
+
+The native profile uses one Edge UHID for gamepad input, two synthesized C/Z
+touch contacts and click, and motion sensors; it does not create a separate IMU
+companion. Vader's inherited auxiliary mouse may still coexist. The 8-bit axes
+are an intentional property of the native USB report. Use `dualsense-edge` when
+16-bit stick resolution matters more than native HIDAPI recognition.
+
+The native scope is deliberately narrow: USB only. Bluetooth, private
+configuration reports, audio/speaker endpoints, and adaptive triggers are not
+implemented.
 
 ### `[output.axes]`
 
@@ -270,6 +287,11 @@ auto_stop = true     # default; set false to disable userspace auto-stop
 | `auto_stop` | bool | `true` | Enable userspace rumble auto-stop. When `true`, padctl emits a stop frame to the HID device after each effect's `replay.length` elapses — compensating for the fact that uinput does not use the kernel's `ff-memless` auto-stop timer. Set to `false` only for devices whose firmware handles auto-stop internally. |
 | `backend` | string | `"uinput"` | `"uinput"` (rumble) or `"uhid"` (PID passthrough — see below). |
 | `kind` | string | `"rumble"` | `"rumble"` or `"pid"`. |
+
+For `protocol = "dualsense-edge-usb"`, `type = "rumble"` also names the
+physical command used by the native compatible-rumble path. SDL HIDAPI report
+`0x02` output is decoded by the UHID pump and forwarded through the same
+`[commands.rumble]` formatter; it does not use uinput FF or HID PID effects.
 
 #### HID PID passthrough (UHID, racing wheels)
 
@@ -336,7 +358,13 @@ Touchpad output device.
 
 ### `[output.imu]`
 
-IMU (accelerometer + gyroscope) output via a separate UHID node. When declared, padctl creates a second UHID device that shares the same `uniq` as the primary gamepad output, enabling SDL3 to pair the IMU sensor with the controller automatically (ADR-015 UHID IMU migration; see PR #159).
+IMU (accelerometer + gyroscope) output via a separate UHID node for generic
+output protocols. When declared, padctl creates a second UHID device that
+shares the same `uniq` as the primary gamepad output, enabling SDL3 to pair the
+IMU sensor with the controller automatically (ADR-015 UHID IMU migration; see
+PR #159). Native `dualsense-edge-usb` is different: its single gamepad report
+already carries motion sensors, and the validator rejects a companion
+`[output.imu]`.
 
 > **Validation rule:** when `[output.imu]` is present, `backend` must be `"uhid"`. The validator rejects `"uinput"` per ADR-015 — UHID is the only supported backend for IMU output. Omitting `[output.imu]` entirely keeps the legacy uinput-primary path.
 
