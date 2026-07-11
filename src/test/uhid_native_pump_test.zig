@@ -108,6 +108,14 @@ fn waitForCalls(ctx: *const NativeStubCtx, expected: usize) !void {
     try testing.expectEqual(expected, ctx.calls.load(.acquire));
 }
 
+fn waitForPublishes(dev: *uhid.UhidDevice, expected: u64) !void {
+    var attempts: usize = 0;
+    while (dev.rumbleMailboxSnapshot().publish_count < expected and attempts < 200) : (attempts += 1) {
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    try testing.expectEqual(expected, dev.rumbleMailboxSnapshot().publish_count);
+}
+
 fn waitReadable(fd: posix.fd_t, timeout_ms: i32) !void {
     var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, timeout_ms);
@@ -198,12 +206,21 @@ test "uhid_native_t4: pump mailbox burst keeps only normalized latest command" {
     try sendStubOutput(fds[1], 0x11);
     try sendStubOutput(fds[1], 0x22);
     try sendStubOutput(fds[1], 0x33);
-    try waitForCalls(&stub, 3);
+    try waitForPublishes(dev, 3);
 
-    try testing.expectEqual(uhid.RumbleCommand{
+    const latest = uhid.RumbleCommand{
         .strong = 0x3333,
         .weak = 0xCCCC,
-    }, dev.takeRumbleCommand().?);
+    };
+    try testing.expectEqual(
+        uhid.RumbleMailbox.Snapshot{ .publish_count = 3, .pending = latest },
+        dev.rumbleMailboxSnapshot(),
+    );
+    try testing.expectEqual(latest, dev.takeRumbleCommand().?);
+    try testing.expectEqual(
+        uhid.RumbleMailbox.Snapshot{ .publish_count = 3, .pending = null },
+        dev.rumbleMailboxSnapshot(),
+    );
     try testing.expectEqual(@as(?uhid.RumbleCommand, null), dev.takeRumbleCommand());
 
     var stop = fullEvent(uhid.UHID_STOP);
@@ -234,7 +251,7 @@ test "uhid_native_t4: saturated nonblocking wake coalesces without losing public
     var saturated: u64 = std.math.maxInt(u64) - 1;
     try testing.expectEqual(@as(usize, 8), try posix.write(dev.rumbleWakeFd(), std.mem.asBytes(&saturated)));
     try sendStubOutput(fds[1], 0x7B);
-    try waitForCalls(&stub, 1);
+    try waitForPublishes(dev, 1);
     try testing.expectEqual(uhid.RumbleCommand{
         .strong = 0x7B7B,
         .weak = 0x8484,
@@ -591,7 +608,7 @@ test "uhid_native_t4: pump never writes physical device and EventLoop drains mai
     try loop.addNativeUhidRumble(dev);
 
     try sendStubOutput(fds[1], 0x66);
-    try waitForCalls(&stub, 1);
+    try waitForPublishes(dev, 1);
     // The pump has decoded and published, but has no DeviceIO and therefore
     // cannot perform the physical command write itself.
     try testing.expectEqual(@as(usize, 0), physical.write_len.load(.acquire));

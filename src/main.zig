@@ -31,6 +31,7 @@ pub const cli = struct {
     pub const error_hint = @import("cli/error_hint.zig");
     pub const perm_hint = @import("cli/perm_hint.zig");
     pub const switch_mapping = @import("cli/switch_mapping.zig");
+    pub const output_profile = @import("cli/output_profile.zig");
     pub const status = @import("cli/status.zig");
     pub const doctor = @import("cli/doctor.zig");
     pub const devices = @import("cli/devices.zig");
@@ -256,6 +257,7 @@ const Cli = struct {
     pid_file: ?[]const u8 = null,
     config_cmd: ?ConfigCmd = null,
     switch_cmd: ?struct { name: ?[]const u8 = null, device_id: ?[]const u8 = null, persist: bool = false } = null,
+    output_profile_cmd: ?cli.output_profile.Action = null,
     status_cmd: bool = false,
     doctor_cmd: bool = false,
     devices_cmd: bool = false,
@@ -513,6 +515,31 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 cli.errors.unknownSubcommand(stderr_writer, "config", sub);
                 return error.UnknownArgument;
             }
+        } else if (std.mem.eql(u8, arg, "output-profile")) {
+            var output_profile_args: [16][]const u8 = undefined;
+            var output_profile_argc: usize = 0;
+            while (args.next()) |sub_arg| {
+                if (isHelpFlag(sub_arg)) {
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, cli.output_profile.help_text) catch 0;
+                    std.process.exit(0);
+                }
+                if (output_profile_argc >= output_profile_args.len) {
+                    cli.errors.message(stderr_writer, "too many output-profile arguments");
+                    return error.UnknownArgument;
+                }
+                output_profile_args[output_profile_argc] = sub_arg;
+                output_profile_argc += 1;
+            }
+            parsed_cli.output_profile_cmd = cli.output_profile.parseArgs(output_profile_args[0..output_profile_argc]) catch |err| {
+                switch (err) {
+                    error.MissingSubcommand => cli.errors.message(stderr_writer, "output-profile requires list, select, or reset"),
+                    error.MissingArgument => cli.errors.message(stderr_writer, "output-profile is missing a required argument"),
+                    error.MissingDevice => cli.errors.message(stderr_writer, "output-profile select/reset requires --device <name>"),
+                    error.UnknownSubcommand => cli.errors.message(stderr_writer, "unknown output-profile subcommand"),
+                    error.UnexpectedArgument => cli.errors.message(stderr_writer, "unexpected output-profile argument"),
+                }
+                return error.UnknownArgument;
+            };
         } else if (std.mem.eql(u8, arg, "switch")) {
             var name: ?[]const u8 = null;
             var device_id: ?[]const u8 = null;
@@ -694,6 +721,9 @@ pub const help_text =
     \\       padctl list-mappings [--config-dir <dir>]
     \\       padctl reload [--pid <pid>]
     \\       padctl switch <name> [--device <id>] [--socket <path>]
+    \\       padctl output-profile list [--device <name>]
+    \\       padctl output-profile select <profile> --device <name>
+    \\       padctl output-profile reset --device <name>
     \\       padctl status [--socket <path>]
     \\       padctl devices [--socket <path>]
     \\       padctl doctor [--socket <path>]
@@ -728,6 +758,11 @@ pub const help_text =
     \\    --persist           Copy mapping + config to /etc/padctl/ (survives reboot, uses sudo)
     \\    --device <id>       Apply only to specific device
     \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
+    \\  output-profile        List or persist a device output profile
+    \\    list                Show final backend, protocol, and stick range
+    \\    select <profile>    Select an exact profile for a device name
+    \\    reset               Clear the per-device selection
+    \\    --device <name>     Device name (case-insensitive; select/reset require it)
     \\  status                Show daemon status (current mapping, devices)
     \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
     \\  doctor                Print self-contained diagnostic (daemon/device/hidraw/scope)
@@ -758,7 +793,7 @@ pub const help_text =
     \\  --mapping <path>    Mapping config TOML file (optional)
     \\  --validate <path>   Validate device or mapping config and exit (returns 0/1)
     \\  --pid-file <path>   Write PID to file on start, remove on exit
-    \\  --doc-gen           Generate Markdown device reference from --config path(s)
+    \\  --doc-gen           Generate Markdown device reference from --config path
     \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
     \\  --help, -h          Show this help
     \\  --version, -V       Show version
@@ -1057,6 +1092,12 @@ pub fn main() !void {
             stderr_writer.writeAll("warning: dump setting was NOT persisted across restarts — fix the malformed user config.toml first\n") catch {};
         }
         std.process.exit(0);
+    }
+
+    // output-profile only persists user config; it never requests a reload.
+    // A daemon not watching that user file needs a later reload/restart.
+    if (parsed.output_profile_cmd) |action| {
+        std.process.exit(cli.output_profile.run(allocator, action, stdout_writer, stderr_writer));
     }
 
     // switch subcommand

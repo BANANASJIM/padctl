@@ -188,3 +188,30 @@ name = "Vader 5 Pro Virtual Mouse"
 [output.profiles.dualsense-edge.force_feedback]
 type = "rumble"
 max_effects = 16
+
+# Native USB DualSense Edge personality for SDL HIDAPI. Unlike the generic
+# dualsense-edge option above, this uses the controller's real 8-bit USB wire
+# ranges and the single-UHID native route.
+[output.profiles.dualsense-edge-native]
+emulate = "dualsense-edge"
+backend = "uhid"
+protocol = "dualsense-edge-usb"
+
+[output.profiles.dualsense-edge-native.axes]
+left_x  = { code = "ABS_X",  min = 0, max = 255 }
+left_y  = { code = "ABS_Y",  min = 0, max = 255 }
+right_x = { code = "ABS_RX", min = 0, max = 255 }
+right_y = { code = "ABS_RY", min = 0, max = 255 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.profiles.dualsense-edge-native.force_feedback]
+type = "rumble"
+
+[output.profiles.dualsense-edge-native.touch_synthesis]
+left_button = "C"
+right_button = "Z"
+left_x = 480
+right_x = 1440
+y = 540
+click = true

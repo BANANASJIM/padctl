@@ -13,6 +13,7 @@ const posix = std.posix;
 const testing = std.testing;
 
 const device_config = @import("../config/device.zig");
+const command = @import("../core/command.zig");
 const DeviceInstance = @import("../device_instance.zig").DeviceInstance;
 const DeviceIO = @import("../io/device_io.zig").DeviceIO;
 const uhid = @import("../io/uhid.zig");
@@ -56,6 +57,28 @@ const NATIVE_RUMBLE_TOML =
     \\y = 540
     \\click = true
 ;
+
+test "T9 shipped Vader native profile formats the physical 32-byte rumble frame" {
+    const allocator = testing.allocator;
+    var parsed = try device_config.parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer parsed.deinit();
+    try testing.expect(device_config.selectOutputProfile(&parsed.value, "dualsense-edge-native"));
+
+    const commands = parsed.value.commands orelse return error.MissingCommands;
+    const rumble = commands.map.get("rumble") orelse return error.MissingRumbleCommand;
+    try testing.expectEqual(@as(i64, 1), rumble.interface);
+    const frame = try command.fillTemplate(allocator, rumble.template, &.{
+        .{ .name = "strong", .value = 0xA5A5 },
+        .{ .name = "weak", .value = 0x3C3C },
+    });
+    defer allocator.free(frame);
+    if (rumble.checksum) |*checksum| command.applyChecksum(frame, checksum);
+
+    var expected = [_]u8{0} ** 32;
+    const expected_header = [_]u8{ 0x5A, 0xA5, 0x12, 0x06, 0xA5, 0x3C, 0, 0, 0xF9 };
+    @memcpy(expected[0..expected_header.len], &expected_header);
+    try testing.expectEqualSlices(u8, &expected, frame);
+}
 
 fn socketPair() ![2]posix.fd_t {
     var fds: [2]posix.fd_t = undefined;

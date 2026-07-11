@@ -232,7 +232,7 @@ test "DeviceInstance native Edge routes by final discriminators with stable iden
     try testing.expectEqual(@as(u32, 0x0df2), create.payload.product);
     try testing.expectEqual(@as(u16, 389), create.payload.rd_size);
     try testing.expectEqualSlices(u8, edge_codec.descriptor(), create.payload.rd_data[0..create.payload.rd_size]);
-    try testing.expectEqualStrings("padctl/edge-5694565d7152", std.mem.sliceTo(&create.payload.uniq, 0));
+    try testing.expectEqualStrings("52:71:5d:56:94:56", std.mem.sliceTo(&create.payload.uniq, 0));
 
     const stable = try edge_identity.deriveStableIdentity("phys-abc");
     try expectFeatureReply(pair[1], &scratch, 0x05050505, 0x05, stable.edge);

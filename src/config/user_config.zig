@@ -199,13 +199,23 @@ pub fn writeAtomic(
     defer buf.deinit(allocator);
     try emitToml(buf.writer(allocator), cfg);
 
+    try writeBytesAtomic(allocator, config_path, buf.items);
+}
+
+/// Atomically write already-rendered TOML bytes.
+fn writeBytesAtomic(
+    allocator: std.mem.Allocator,
+    config_path: []const u8,
+    content: []const u8,
+) !void {
+
     // Skip the rename when the rendered content matches what's already on disk:
     // an identical-content write would still fire an inotify MOVED_TO and, via
     // the daemon's config watch, trigger a destructive reload + driver reattach
     // that regenerates the hidraw add uevent — a self-sustaining hotplug loop (#355).
     if (std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024)) |existing| {
         defer allocator.free(existing);
-        if (std.mem.eql(u8, existing, buf.items)) return;
+        if (std.mem.eql(u8, existing, content)) return;
     } else |_| {}
 
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{config_path});
@@ -214,7 +224,7 @@ pub fn writeAtomic(
     {
         var f = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
         defer f.close();
-        f.writeAll(buf.items) catch |err| {
+        f.writeAll(content) catch |err| {
             std.fs.deleteFileAbsolute(tmp_path) catch {};
             return err;
         };
@@ -222,6 +232,156 @@ pub fn writeAtomic(
     }
     errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
     try std.posix.rename(tmp_path, config_path);
+}
+
+pub const OutputProfileUpdateError = error{
+    MalformedConfig,
+    OutOfMemory,
+    NoHomeDir,
+    AccessDenied,
+    FileNotFound,
+    NoSpaceLeft,
+    SystemResources,
+    InputOutput,
+    IsDir,
+    NotDir,
+    FileTooBig,
+    InvalidArgument,
+    Unexpected,
+};
+
+/// Set or clear one canonical device's `output_profile` in the user config.
+///
+/// The update is performed through the typed schema, preserving every known
+/// config field. Comments, formatting, and unknown fields are not promised to
+/// survive normalization. If the user file does not exist, the system config
+/// seeds the typed document. Malformed input is rejected before any write.
+pub fn updateOutputProfile(
+    allocator: std.mem.Allocator,
+    device_name: []const u8,
+    profile_name: ?[]const u8,
+) OutputProfileUpdateError!void {
+    const user_dir = paths.userConfigDir(allocator) catch |err| switch (err) {
+        error.NoHomeDir => return error.NoHomeDir,
+        else => return error.Unexpected,
+    };
+    defer allocator.free(user_dir);
+    return updateOutputProfileInDirs(allocator, user_dir, paths.systemConfigDir(), device_name, profile_name);
+}
+
+/// Explicit-path variant used by the CLI tests and by callers that already
+/// resolved configuration roots.
+pub fn updateOutputProfileInDirs(
+    allocator: std.mem.Allocator,
+    user_dir: []const u8,
+    system_dir: []const u8,
+    device_name: []const u8,
+    profile_name: ?[]const u8,
+) OutputProfileUpdateError!void {
+    var user_parse = try loadForOutputProfileUpdate(allocator, user_dir);
+    defer if (user_parse) |*pr| pr.deinit();
+
+    var system_parse: ?ParseResult = null;
+    defer if (system_parse) |*pr| pr.deinit();
+    if (user_parse == null) {
+        system_parse = try loadForOutputProfileUpdate(allocator, system_dir);
+    }
+
+    const base: ?*const ParseResult = if (user_parse) |*pr| pr else if (system_parse) |*pr| pr else null;
+    const old_devices = if (base) |pr| pr.value.device else null;
+    var target_found = false;
+    var target_has_profile = false;
+    if (old_devices) |devices| {
+        for (devices) |device| {
+            if (std.ascii.eqlIgnoreCase(device.name, device_name)) {
+                target_found = true;
+                target_has_profile = device.output_profile != null;
+                break;
+            }
+        }
+    }
+
+    // Resetting an entry which has no selected profile is a true no-op. In
+    // particular, do not create a user layer that would shadow system config.
+    if (profile_name == null and (!target_found or !target_has_profile)) return;
+
+    const old_count = if (old_devices) |devices| devices.len else 0;
+    const new_count = old_count + @intFromBool(profile_name != null and !target_found);
+    const new_devices = allocator.alloc(DeviceEntry, new_count) catch return error.OutOfMemory;
+    defer allocator.free(new_devices);
+
+    var index: usize = 0;
+    if (old_devices) |devices| {
+        for (devices) |device| {
+            if (std.ascii.eqlIgnoreCase(device.name, device_name)) {
+                new_devices[index] = .{
+                    .name = device_name,
+                    .default_mapping = device.default_mapping,
+                    .output_profile = profile_name,
+                };
+            } else {
+                new_devices[index] = device;
+            }
+            index += 1;
+        }
+    }
+    if (!target_found) {
+        new_devices[index] = .{ .name = device_name, .output_profile = profile_name };
+    }
+
+    const cfg = UserConfig{
+        .version = if (base) |pr| pr.value.version else null,
+        .device = new_devices,
+        .diagnostics = if (base) |pr| pr.value.diagnostics else .{},
+        .supervisor = if (base) |pr| pr.value.supervisor else .{},
+        .chord_switch = if (base) |pr| pr.value.chord_switch else null,
+    };
+
+    std.fs.cwd().makePath(user_dir) catch |err| return mapOutputProfileIoError(err);
+    const user_path = std.fmt.allocPrint(allocator, "{s}/config.toml", .{user_dir}) catch return error.OutOfMemory;
+    defer allocator.free(user_path);
+    writeAtomic(allocator, user_path, &cfg) catch |err| return mapOutputProfileIoError(err);
+}
+
+/// Strict tri-state loader for mutations: only a missing file is `null`.
+/// Existing-but-unreadable files must block writes so they cannot be mistaken
+/// for an absent layer and overwritten from fallback/default state.
+fn loadForOutputProfileUpdate(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+) OutputProfileUpdateError!?ParseResult {
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config.toml", .{dir_path}) catch return error.OutOfMemory;
+    defer allocator.free(config_path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, config_path, 256 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return mapOutputProfileIoError(err),
+    };
+    defer allocator.free(content);
+
+    var parser = toml.Parser(UserConfig).init(allocator);
+    defer parser.deinit();
+    return parser.parseString(content) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.MalformedConfig,
+    };
+}
+
+fn mapOutputProfileIoError(err: anyerror) OutputProfileUpdateError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.AccessDenied => error.AccessDenied,
+        error.FileNotFound => error.FileNotFound,
+        error.NoSpaceLeft => error.NoSpaceLeft,
+        error.SystemResources => error.SystemResources,
+        error.InputOutput => error.InputOutput,
+        error.IsDir => error.IsDir,
+        error.NotDir => error.NotDir,
+        error.FileTooBig => error.FileTooBig,
+        error.InvalidArgument => error.InvalidArgument,
+        error.InvalidDeviceName => error.InvalidArgument,
+        else => error.Unexpected,
+    };
 }
 
 /// Serialise `cfg` to a TOML writer. Sections with all-default values are
@@ -301,6 +461,228 @@ pub fn escapeTomlString(writer: anytype, s: []const u8) !void {
 }
 
 // --- tests ---
+
+test "output profile typed update safely normalizes quoted keys and multiline strings" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("user");
+    try tmp.dir.makeDir("system");
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{root});
+    defer allocator.free(user_dir);
+    const system_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{root});
+    defer allocator.free(system_dir);
+
+    {
+        const f = try tmp.dir.createFile("user/config.toml", .{});
+        defer f.close();
+        try f.writeAll(
+            \\version = 1
+            \\future_multiline = """
+            \\This legal multiline basic string contains scanner traps:
+            \\[[device]]
+            \\output_profile = "not a field"
+            \\"""
+            \\[[device]]
+            \\"name" = "flydigi vader 5 pro"
+            \\"default_mapping" = "fps"
+            \\"output_profile" = "dualsense-edge"
+        );
+    }
+
+    try updateOutputProfileInDirs(allocator, user_dir, system_dir, "Flydigi Vader 5 Pro", "dualsense-edge-native");
+    var result = (try loadFromDir(allocator, user_dir)).?;
+    defer result.deinit();
+    try std.testing.expectEqualStrings("dualsense-edge-native", findOutputProfile(&result, "Flydigi Vader 5 Pro").?);
+    try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "Flydigi Vader 5 Pro").?);
+    try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", result.value.device.?[0].name);
+}
+
+test "output profile reset preserves all known fields and other devices" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("user");
+    try tmp.dir.makeDir("system");
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{root});
+    defer allocator.free(user_dir);
+    const system_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{root});
+    defer allocator.free(system_dir);
+    {
+        const f = try tmp.dir.createFile("user/config.toml", .{});
+        defer f.close();
+        try f.writeAll(
+            \\version = 1
+            \\[diagnostics]
+            \\dump = true
+            \\max_log_size_mb = 50
+            \\[supervisor]
+            \\suspend_grace_sec = 30
+            \\[[device]]
+            \\name = "Flydigi Vader 5 Pro"
+            \\default_mapping = "fps"
+            \\output_profile = "dualsense-edge-native"
+            \\[[device]]
+            \\name = "Other Pad"
+            \\output_profile = "other"
+        );
+    }
+
+    try updateOutputProfileInDirs(allocator, user_dir, system_dir, "Flydigi Vader 5 Pro", null);
+    var result = (try loadFromDir(allocator, user_dir)).?;
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), findOutputProfile(&result, "Flydigi Vader 5 Pro"));
+    try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "Flydigi Vader 5 Pro").?);
+    try std.testing.expectEqualStrings("other", findOutputProfile(&result, "Other Pad").?);
+    try std.testing.expect(result.value.diagnostics.dump);
+    try std.testing.expectEqual(@as(i64, 50), result.value.diagnostics.max_log_size_mb);
+    try std.testing.expectEqual(@as(i64, 30), result.value.supervisor.suspend_grace_sec);
+}
+
+test "output profile update seeds an absent user config from system config" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("system");
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{root});
+    defer allocator.free(user_dir);
+    const system_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{root});
+    defer allocator.free(system_dir);
+
+    {
+        const f = try tmp.dir.createFile("system/config.toml", .{});
+        defer f.close();
+        try f.writeAll(
+            \\version = 3
+            \\system_extension = "preserve"
+            \\[[device]]
+            \\name = "Flydigi Vader 5 Pro"
+            \\default_mapping = "fps"
+        );
+    }
+
+    try updateOutputProfileInDirs(allocator, user_dir, system_dir, "Flydigi Vader 5 Pro", "dualsense-edge-native");
+    const user_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{user_dir});
+    defer allocator.free(user_path);
+    const written = try std.fs.cwd().readFileAlloc(allocator, user_path, 4096);
+    defer allocator.free(written);
+    // Typed normalization intentionally makes no promise for unknown fields.
+    try std.testing.expect(std.mem.indexOf(u8, written, "system_extension") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "default_mapping = \"fps\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "output_profile = \"dualsense-edge-native\"") != null);
+    var result = (try loadFromDir(allocator, user_dir)).?;
+    defer result.deinit();
+    try std.testing.expectEqual(@as(?i64, 3), result.value.version);
+    try std.testing.expectEqualStrings("fps", findDefaultMapping(&result, "Flydigi Vader 5 Pro").?);
+    try std.testing.expectEqualStrings("dualsense-edge-native", findOutputProfile(&result, "Flydigi Vader 5 Pro").?);
+}
+
+test "output profile reset is no-op when absent user has no selected system target" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("system");
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{root});
+    defer allocator.free(user_dir);
+    const system_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{root});
+    defer allocator.free(system_dir);
+    {
+        const f = try tmp.dir.createFile("system/config.toml", .{});
+        defer f.close();
+        try f.writeAll(
+            \\version = 1
+            \\[[device]]
+            \\name = "Flydigi Vader 5 Pro"
+            \\default_mapping = "fps"
+        );
+    }
+
+    try updateOutputProfileInDirs(allocator, user_dir, system_dir, "Flydigi Vader 5 Pro", null);
+    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(user_dir, .{}));
+}
+
+test "output profile update rejects malformed user config without fallback" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("user");
+    try tmp.dir.makeDir("system");
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{root});
+    defer allocator.free(user_dir);
+    const system_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{root});
+    defer allocator.free(system_dir);
+
+    {
+        const f = try tmp.dir.createFile("user/config.toml", .{});
+        defer f.close();
+        try f.writeAll("this is {{{ invalid");
+    }
+    {
+        const f = try tmp.dir.createFile("system/config.toml", .{});
+        defer f.close();
+        try f.writeAll("version = 1\n");
+    }
+
+    try std.testing.expectError(error.MalformedConfig, updateOutputProfileInDirs(
+        allocator,
+        user_dir,
+        system_dir,
+        "Flydigi Vader 5 Pro",
+        "dualsense-edge-native",
+    ));
+    const unchanged = try tmp.dir.readFileAlloc(allocator, "user/config.toml", 4096);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings("this is {{{ invalid", unchanged);
+}
+
+test "output profile update rejects oversized existing user config byte-exact" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("user");
+    try tmp.dir.makeDir("system");
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fmt.allocPrint(allocator, "{s}/user", .{root});
+    defer allocator.free(user_dir);
+    const system_dir = try std.fmt.allocPrint(allocator, "{s}/system", .{root});
+    defer allocator.free(system_dir);
+
+    const oversized = try allocator.alloc(u8, 256 * 1024 + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 'x');
+    {
+        const file = try tmp.dir.createFile("user/config.toml", .{});
+        defer file.close();
+        try file.writeAll(oversized);
+    }
+    {
+        const file = try tmp.dir.createFile("system/config.toml", .{});
+        defer file.close();
+        try file.writeAll("version = 1\n");
+    }
+
+    try std.testing.expectError(error.FileTooBig, updateOutputProfileInDirs(
+        allocator,
+        user_dir,
+        system_dir,
+        "Flydigi Vader 5 Pro",
+        "dualsense-edge-native",
+    ));
+    const unchanged = try tmp.dir.readFileAlloc(allocator, "user/config.toml", oversized.len);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualSlices(u8, oversized, unchanged);
+}
 
 test "load: returns null when config.toml absent" {
     const allocator = std.testing.allocator;

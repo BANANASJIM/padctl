@@ -288,13 +288,20 @@ const MailboxMutex = if (builtin.sanitize_thread) struct {
 /// Capacity-one, latest-wins mailbox. The pump is the producer and EventLoop
 /// is the consumer; the mutex also makes decoder-independent tests race-free.
 pub const RumbleMailbox = struct {
+    pub const Snapshot = struct {
+        publish_count: u64,
+        pending: ?RumbleCommand,
+    };
+
     mutex: MailboxMutex = .{},
     pending: ?RumbleCommand = null,
+    publish_count: u64 = 0,
 
     pub fn publish(self: *RumbleMailbox, command: RumbleCommand) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.pending = command;
+        self.publish_count += 1;
     }
 
     pub fn take(self: *RumbleMailbox) ?RumbleCommand {
@@ -303,6 +310,18 @@ pub const RumbleMailbox = struct {
         const command = self.pending;
         self.pending = null;
         return command;
+    }
+
+    /// A post-publication fence for privileged integration tests and other
+    /// read-only observers. The count and capacity-one pending command are
+    /// copied under the same mutex used by publish/take.
+    pub fn snapshot(self: *RumbleMailbox) Snapshot {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return .{
+            .publish_count = self.publish_count,
+            .pending = self.pending,
+        };
     }
 };
 
@@ -787,6 +806,10 @@ pub const UhidDevice = struct {
         return self.rumble_mailbox.take();
     }
 
+    pub fn rumbleMailboxSnapshot(self: *UhidDevice) RumbleMailbox.Snapshot {
+        return self.rumble_mailbox.snapshot();
+    }
+
     pub fn drainTimedOut(self: *const UhidDevice) bool {
         return self.pump_drain_timed_out.load(.acquire);
     }
@@ -1013,6 +1036,33 @@ pub const UhidDevice = struct {
 // --- Tests -----------------------------------------------------------------
 
 const testing = std.testing;
+
+test "uhid: rumble mailbox snapshot is post-publish latest-wins evidence" {
+    var mailbox = RumbleMailbox{};
+    try testing.expectEqual(
+        RumbleMailbox.Snapshot{ .publish_count = 0, .pending = null },
+        mailbox.snapshot(),
+    );
+
+    const first = RumbleCommand{ .strong = 0x1111, .weak = 0x2222 };
+    mailbox.publish(first);
+    try testing.expectEqual(
+        RumbleMailbox.Snapshot{ .publish_count = 1, .pending = first },
+        mailbox.snapshot(),
+    );
+
+    const latest = RumbleCommand{ .strong = 0xA5A5, .weak = 0x3C3C };
+    mailbox.publish(latest);
+    try testing.expectEqual(
+        RumbleMailbox.Snapshot{ .publish_count = 2, .pending = latest },
+        mailbox.snapshot(),
+    );
+    try testing.expectEqual(latest, mailbox.take().?);
+    try testing.expectEqual(
+        RumbleMailbox.Snapshot{ .publish_count = 2, .pending = null },
+        mailbox.snapshot(),
+    );
+}
 
 test "uhid: constants and struct layout" {
     // These are load-bearing for the kernel UAPI — regressions here are

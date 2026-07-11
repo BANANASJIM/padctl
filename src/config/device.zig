@@ -1060,11 +1060,25 @@ test "device: vader5 dualsense-edge output profile preserves high resolution con
     try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
     try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
     try std.testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+    // This existing option deliberately stays on the generic auto route.
+    // With no IMU or UHID PID request, DeviceInstance resolves it to uinput.
+    try std.testing.expectEqualStrings("auto", out.backend);
+    try std.testing.expectEqualStrings("generic", out.protocol);
+    try std.testing.expect(out.imu == null);
+    try std.testing.expect(out.touch_synthesis == null);
 
     const axes = out.axes orelse return error.MissingAxes;
-    const left_x = axes.map.get("left_x") orelse return error.MissingLeftX;
-    try std.testing.expectEqual(@as(i64, -32768), left_x.min);
-    try std.testing.expectEqual(@as(i64, 32767), left_x.max);
+    try std.testing.expectEqual(@as(usize, 6), axes.map.count());
+    for (&[_][]const u8{ "left_x", "left_y", "right_x", "right_y" }) |name| {
+        const axis = axes.map.get(name) orelse return error.MissingAxis;
+        try std.testing.expectEqual(@as(i64, -32768), axis.min);
+        try std.testing.expectEqual(@as(i64, 32767), axis.max);
+    }
+    for (&[_][]const u8{ "lt", "rt" }) |name| {
+        const axis = axes.map.get(name) orelse return error.MissingAxis;
+        try std.testing.expectEqual(@as(i64, 0), axis.min);
+        try std.testing.expectEqual(@as(i64, 255), axis.max);
+    }
 
     const buttons = out.buttons orelse return error.MissingButtons;
     try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
@@ -1077,6 +1091,67 @@ test "device: vader5 dualsense-edge output profile preserves high resolution con
     try std.testing.expectEqualStrings("hat", out.dpad.?.type);
     try std.testing.expectEqual(@as(?i64, 16), out.force_feedback.?.max_effects);
     try std.testing.expectEqualStrings("mouse", out.aux.?.type.?);
+}
+
+test "device: vader5 dualsense-edge-native profile is complete native USB without custom buttons or IMU" {
+    const allocator = std.testing.allocator;
+    const path = "devices/flydigi/vader5.toml";
+    const source = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(source);
+
+    // Preset expansion must own the complete Edge button table. A partial
+    // profile table would replace it wholesale, while a companion IMU would
+    // violate the single-UHID native protocol contract.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        source,
+        "[output.profiles.dualsense-edge-native.buttons]",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        source,
+        "[output.profiles.dualsense-edge-native.imu]",
+    ) == null);
+
+    var result = try parseFile(allocator, path);
+    defer result.deinit();
+    try std.testing.expect(selectOutputProfile(&result.value, "dualsense-edge-native"));
+
+    const out = result.value.output orelse return error.MissingOutput;
+    try std.testing.expectEqualStrings("dualsense-edge", out.emulate.?);
+    try std.testing.expectEqualStrings("uhid", out.backend);
+    try std.testing.expectEqualStrings("dualsense-edge-usb", out.protocol);
+    try std.testing.expectEqual(@as(?i64, 0x054c), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0df2), out.pid);
+    try std.testing.expectEqualStrings("Sony DualSense Edge", out.name.?);
+    try std.testing.expect(out.profiles == null);
+    try std.testing.expect(out.imu == null);
+
+    const axes = out.axes orelse return error.MissingAxes;
+    try std.testing.expectEqual(@as(usize, native_axis_requirements.len), axes.map.count());
+    for (native_axis_requirements) |required| {
+        const axis = axes.map.get(required.name) orelse return error.MissingAxis;
+        try std.testing.expectEqualStrings(required.code, axis.code);
+        try std.testing.expectEqual(@as(i64, 0), axis.min);
+        try std.testing.expectEqual(@as(i64, 255), axis.max);
+    }
+
+    const buttons = out.buttons orelse return error.MissingButtons;
+    try std.testing.expectEqual(@as(usize, native_button_requirements.len), buttons.map.count());
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY1", buttons.map.get("M1") orelse return error.MissingM1);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY2", buttons.map.get("M2") orelse return error.MissingM2);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY3", buttons.map.get("M3") orelse return error.MissingM3);
+    try std.testing.expectEqualStrings("BTN_TRIGGER_HAPPY4", buttons.map.get("M4") orelse return error.MissingM4);
+
+    const ff = out.force_feedback orelse return error.MissingForceFeedback;
+    try std.testing.expectEqualStrings("rumble", ff.type);
+    const touch = out.touch_synthesis orelse return error.MissingTouchSynthesis;
+    try std.testing.expectEqualStrings("C", touch.left_button);
+    try std.testing.expectEqualStrings("Z", touch.right_button);
+    try std.testing.expectEqual(@as(i64, 480), touch.left_x);
+    try std.testing.expectEqual(@as(i64, 1440), touch.right_x);
+    try std.testing.expectEqual(@as(i64, 540), touch.y);
+    try std.testing.expect(touch.click);
 }
 
 const native_profile_base_toml =

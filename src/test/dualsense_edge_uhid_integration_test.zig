@@ -457,6 +457,7 @@ test "native DualSense Edge production route satisfies real UHID and hid-playsta
     const devices = try allocator.alloc(DeviceIO, 1);
     devices[0] = physical.deviceIO();
     var devices_transferred = false;
+    defer if (!devices_transferred) allocator.free(devices);
 
     const uhid_fd = try openRequiredUhid();
     cleanup.registerUhidFd(uhid_fd);
@@ -468,7 +469,6 @@ test "native DualSense Edge production route satisfies real UHID and hid-playsta
     defer {
         if (hidraw_fd) |fd| posix.close(fd);
         if (instance) |*live| live.deinit();
-        if (!devices_transferred) allocator.free(devices);
         if (registered) cleanup.unregisterUhidFd(uhid_fd);
         if (test_owns_uhid_fd) {
             uhid.uhidDestroy(uhid_fd);

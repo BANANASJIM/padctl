@@ -426,6 +426,40 @@ pub fn build(b: *std.Build) void {
     edge_uhid_run.setEnvironmentVariable("PADCTL_TEST_REQUIRE_UHID", "1");
     edge_uhid_step.dependOn(&edge_uhid_run.step);
 
+    // SDL3's public gamepad contract over the same native Edge route. Force
+    // host pkg-config and dynamic linkage: this harness is Linux-host-only,
+    // privileged, and deliberately not part of ordinary test aggregates.
+    const edge_sdl_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/dualsense_edge_sdl_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    edge_sdl_mod.addImport("src", src_mod);
+    const edge_sdl_tests = b.addTest(.{ .root_module = edge_sdl_mod, .filters = test_filters });
+    applyLibusb(b, edge_sdl_tests, use_libusb, vendored);
+    edge_sdl_tests.root_module.linkSystemLibrary("sdl3", .{
+        .use_pkg_config = .force,
+        .preferred_link_mode = .dynamic,
+        .search_strategy = .mode_first,
+    });
+    edge_sdl_tests.linkLibC();
+    edge_sdl_tests.setExecCmd(&.{
+        "timeout",
+        "--signal=TERM",
+        "--kill-after=5s",
+        "40s",
+        null,
+    });
+
+    const edge_sdl_check = b.step("check-edge-sdl", "Compile SDL3 native DualSense Edge contract without running it");
+    edge_sdl_check.dependOn(&edge_sdl_tests.step);
+
+    const edge_sdl_step = b.step("test-edge-sdl", "Run SDL3 native DualSense Edge contract (privileged)");
+    const edge_sdl_run = b.addRunArtifact(edge_sdl_tests);
+    edge_sdl_run.setEnvironmentVariable("PADCTL_TEST_REQUIRE_UHID", "1");
+    edge_sdl_step.dependOn(&edge_sdl_run.step);
+
     // spike (only available when spike/toml_spike.zig exists)
     if (std.fs.cwd().access("spike/toml_spike.zig", .{})) |_| {
         const spike_mod = b.createModule(.{
