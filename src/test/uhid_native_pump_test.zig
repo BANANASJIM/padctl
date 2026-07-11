@@ -11,7 +11,8 @@ const posix = std.posix;
 const testing = std.testing;
 
 const uhid = @import("../io/uhid.zig");
-const EventLoop = @import("../event_loop.zig").EventLoop;
+const event_loop = @import("../event_loop.zig");
+const EventLoop = event_loop.EventLoop;
 const Interpreter = @import("../core/interpreter.zig").Interpreter;
 const device_config = @import("../config/device.zig");
 const DeviceIO = @import("../io/device_io.zig").DeviceIO;
@@ -116,6 +117,14 @@ fn waitForPublishes(dev: *uhid.UhidDevice, expected: u64) !void {
     try testing.expectEqual(expected, dev.rumbleMailboxSnapshot().publish_count);
 }
 
+fn waitForPhysicalWrites(physical: *const PhysicalWriteMock, expected: usize) !void {
+    var attempts: usize = 0;
+    while (physical.write_count.load(.acquire) < expected and attempts < 1000) : (attempts += 1) {
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    try testing.expectEqual(expected, physical.write_count.load(.acquire));
+}
+
 fn waitReadable(fd: posix.fd_t, timeout_ms: i32) !void {
     var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, timeout_ms);
@@ -136,6 +145,11 @@ const PhysicalWriteMock = struct {
     poll_w: posix.fd_t,
     bytes: [32]u8 = undefined,
     write_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    write_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    write_times_ns: [8]i128 = [_]i128{0} ** 8,
+    next_read_delay_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    publish_after_first: ?*uhid.UhidDevice = null,
+    publish_after_first_command: uhid.RumbleCommand = .{ .strong = 0, .weak = 0 },
 
     fn init() !PhysicalWriteMock {
         const fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
@@ -151,15 +165,36 @@ const PhysicalWriteMock = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
-    fn read(_: *anyopaque, _: []u8) DeviceIO.ReadError!usize {
+    fn delayNextRead(self: *PhysicalWriteMock, delay_ns: u64) !void {
+        self.next_read_delay_ns.store(delay_ns, .release);
+        _ = try posix.write(self.poll_w, &[_]u8{1});
+    }
+
+    fn read(context: *anyopaque, _: []u8) DeviceIO.ReadError!usize {
+        const self: *PhysicalWriteMock = @ptrCast(@alignCast(context));
+        var wake: [1]u8 = undefined;
+        _ = posix.read(self.poll_r, &wake) catch {};
+        const delay_ns = self.next_read_delay_ns.swap(0, .acq_rel);
+        if (delay_ns != 0) {
+            std.Thread.sleep(delay_ns);
+        }
         return DeviceIO.ReadError.Again;
     }
 
     fn write(context: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *PhysicalWriteMock = @ptrCast(@alignCast(context));
         if (data.len > self.bytes.len) return DeviceIO.WriteError.Io;
+        const write_index = self.write_count.load(.monotonic);
+        if (write_index >= self.write_times_ns.len) return DeviceIO.WriteError.Io;
         @memcpy(self.bytes[0..data.len], data);
+        self.write_times_ns[write_index] = event_loop.monotonicNs();
         self.write_len.store(data.len, .release);
+        _ = self.write_count.fetchAdd(1, .release);
+        if (write_index == 0) {
+            if (self.publish_after_first) |dev| {
+                dev.publishRumbleCommand(self.publish_after_first_command) catch return DeviceIO.WriteError.Io;
+            }
+        }
     }
 
     fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
@@ -554,7 +589,7 @@ test "uhid_native_t4: failed CREATE2 after pump start joins thread and releases 
     dev.close();
 }
 
-test "uhid_native_t4: pump never writes physical device and EventLoop drains mailbox" {
+test "uhid_native_t4: EventLoop throttles native mailbox writes and keeps latest command" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     const config_toml =
@@ -607,11 +642,21 @@ test "uhid_native_t4: pump never writes physical device and EventLoop drains mai
     defer dev.close();
     try loop.addNativeUhidRumble(dev);
 
+    try sendStubOutput(fds[1], 0x11);
     try sendStubOutput(fds[1], 0x66);
-    try waitForPublishes(dev, 1);
+    try waitForPublishes(dev, 2);
     // The pump has decoded and published, but has no DeviceIO and therefore
     // cannot perform the physical command write itself.
     try testing.expectEqual(@as(usize, 0), physical.write_len.load(.acquire));
+
+    // Make both the physical fd and native mailbox readable before ppoll. The
+    // physical read deliberately consumes 30ms before native output handling.
+    // The first physical write publishes another native command from inside
+    // the writer, guaranteeing that the follow-up wake occurs immediately
+    // after the first write rather than depending on test-thread scheduling.
+    try physical.delayNextRead(30 * std.time.ns_per_ms);
+    physical.publish_after_first = dev;
+    physical.publish_after_first_command = .{ .strong = 0x3333, .weak = 0xCCCC };
 
     var output = MockOutput.init(testing.allocator);
     defer output.deinit();
@@ -642,16 +687,17 @@ test "uhid_native_t4: pump never writes physical device and EventLoop drains mai
         .config = &parsed.value,
     };
     const event_thread = try std.Thread.spawn(.{}, RunCtx.run, .{&run_ctx});
-    var attempts: usize = 0;
-    while (physical.write_len.load(.acquire) == 0 and attempts < 500) : (attempts += 1) {
-        std.Thread.sleep(std.time.ns_per_ms);
-    }
+    try waitForPhysicalWrites(&physical, 2);
+
     loop.stop();
     event_thread.join();
 
     const write_len = physical.write_len.load(.acquire);
+    try testing.expectEqual(@as(u64, 3), dev.rumbleMailboxSnapshot().publish_count);
+    try testing.expectEqual(@as(usize, 2), physical.write_count.load(.acquire));
     try testing.expectEqual(@as(usize, 5), write_len);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xA5, 0x66, 0x66, 0x99, 0x99 }, physical.bytes[0..write_len]);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xA5, 0x33, 0x33, 0xCC, 0xCC }, physical.bytes[0..write_len]);
+    try testing.expect(physical.write_times_ns[1] - physical.write_times_ns[0] >= 8 * std.time.ns_per_ms);
 
     var stop = fullEvent(uhid.UHID_STOP);
     try sendEvent(fds[1], stop[0..4]);

@@ -538,7 +538,6 @@ pub const UhidDevice = struct {
 
         if (cfg.native_pump) |pump_cfg| {
             self.startNativePump(pump_cfg) catch return error.UhidCreateFailed;
-            errdefer self.abortNativePump();
         }
 
         try self.sendCreateOwned(cfg);
