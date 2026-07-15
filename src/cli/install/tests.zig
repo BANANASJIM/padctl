@@ -1404,7 +1404,7 @@ test "install: generateReconnectLaunchScript guards systemd-run behind PID1 chec
 
     try testing.expect(std.mem.startsWith(u8, script, "#!/bin/sh"));
     try testing.expect(std.mem.indexOf(u8, script, "[ -d /run/systemd/system ]") != null);
-    try testing.expect(std.mem.indexOf(u8, script, "exec systemd-run --no-block /usr/local/bin/padctl-reconnect") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "exec /usr/bin/systemd-run --no-block /usr/local/bin/padctl-reconnect") != null);
     // Fallback for non-systemd hosts (OpenRC/runit/eudev): detach with setsid
     // so the reconnect survives udev's control-group teardown (issue #485).
     try testing.expect(std.mem.indexOf(u8, script, "setsid /usr/local/bin/padctl-reconnect </dev/null >/dev/null 2>&1 &") != null);
