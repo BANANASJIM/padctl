@@ -564,27 +564,8 @@ pub const AuxDevice = struct {
     }
 
     pub fn emitAux(self: *AuxDevice, events: []const AuxEvent) !void {
-        var buf: [MAX_EVENTS]c.input_event = undefined;
-        var n: usize = 0;
-        for (events) |ev| {
-            if (n >= MAX_EVENTS - 1) break;
-            switch (ev) {
-                .key => |k| {
-                    buf[n] = .{ .type = c.EV_KEY, .code = k.code, .value = if (k.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };
-                    n += 1;
-                },
-                .mouse_button => |mb| {
-                    buf[n] = .{ .type = c.EV_KEY, .code = mb.code, .value = if (mb.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };
-                    n += 1;
-                },
-                .rel => |r| {
-                    if (r.value != 0) {
-                        buf[n] = .{ .type = c.EV_REL, .code = r.code, .value = r.value, .time = std.mem.zeroes(c.timeval) };
-                        n += 1;
-                    }
-                },
-            }
-        }
+        var buf: [MAX_EVENTS + 1]c.input_event = undefined;
+        var n = convertAuxEvents(events, buf[0..MAX_EVENTS]);
         if (n > 0) {
             buf[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
             n += 1;
@@ -597,6 +578,30 @@ pub const AuxDevice = struct {
         std.posix.close(self.fd);
     }
 };
+
+fn convertAuxEvents(events: []const AuxEvent, buf: []c.input_event) usize {
+    var n: usize = 0;
+    for (events) |ev| {
+        if (n >= buf.len) break;
+        switch (ev) {
+            .key => |k| {
+                buf[n] = .{ .type = c.EV_KEY, .code = k.code, .value = if (k.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };
+                n += 1;
+            },
+            .mouse_button => |mb| {
+                buf[n] = .{ .type = c.EV_KEY, .code = mb.code, .value = if (mb.pressed) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };
+                n += 1;
+            },
+            .rel => |r| {
+                if (r.value != 0) {
+                    buf[n] = .{ .type = c.EV_REL, .code = r.code, .value = r.value, .time = std.mem.zeroes(c.timeval) };
+                    n += 1;
+                }
+            },
+        }
+    }
+    return n;
+}
 
 pub const TouchpadOutputDevice = struct {
     ptr: *anyopaque,
@@ -1465,6 +1470,40 @@ test "uinput: UinputDevice.emit: axis diff writes correct input_events via pipe"
     try std.testing.expectEqual(@as(i32, -300), events[1].value);
     try std.testing.expectEqual(@as(u16, c.EV_SYN), events[2].type);
     try std.testing.expectEqual(@as(u16, c.SYN_REPORT), events[2].code);
+}
+
+test "uinput: convertAuxEvents converts all 64 events including slot 63" {
+    var aux: [64]AuxEvent = undefined;
+    for (0..63) |i| aux[i] = .{ .key = .{ .code = @intCast(i), .pressed = true } };
+    aux[63] = .{ .key = .{ .code = 99, .pressed = false } };
+
+    var buf: [MAX_EVENTS]c.input_event = undefined;
+    const n = convertAuxEvents(&aux, &buf);
+    try std.testing.expectEqual(@as(usize, 64), n);
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), buf[63].type);
+    try std.testing.expectEqual(@as(u16, 99), buf[63].code);
+    try std.testing.expectEqual(@as(i32, 0), buf[63].value);
+}
+
+test "uinput: AuxDevice.emitAux writes 64 events plus SYN via pipe" {
+    const pfds = try std.posix.pipe2(.{});
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = AuxDevice{ .fd = pfds[1] };
+    var aux: [64]AuxEvent = undefined;
+    for (0..63) |i| aux[i] = .{ .key = .{ .code = @intCast(i), .pressed = true } };
+    aux[63] = .{ .key = .{ .code = 99, .pressed = false } };
+    try dev.emitAux(&aux);
+
+    var events: [66]c.input_event = undefined;
+    const n = readEvents(pfds[0], &events);
+    try std.testing.expectEqual(@as(usize, 65), n);
+    try std.testing.expectEqual(@as(u16, c.EV_KEY), events[63].type);
+    try std.testing.expectEqual(@as(u16, 99), events[63].code);
+    try std.testing.expectEqual(@as(i32, 0), events[63].value);
+    try std.testing.expectEqual(@as(u16, c.EV_SYN), events[64].type);
+    try std.testing.expectEqual(@as(u16, c.SYN_REPORT), events[64].code);
 }
 
 test "uinput: UinputDevice.emit: no change produces no write" {
