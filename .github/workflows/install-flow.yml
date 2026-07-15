@@ -375,6 +375,7 @@ jobs:
           cp _install_stage/usr/lib/udev/rules.d/*.rules "${STAGING}/install/"
           cp _install_stage/usr/lib/modules-load.d/padctl.conf "${STAGING}/install/padctl.conf"
           [ -f _install_stage/usr/bin/padctl-reconnect ] && cp _install_stage/usr/bin/padctl-reconnect "${STAGING}/install/"
+          [ -f _install_stage/usr/bin/padctl-reconnect-launch ] && cp _install_stage/usr/bin/padctl-reconnect-launch "${STAGING}/install/"
           cp -r devices "${STAGING}/"
           cp LICENSE README.md "${STAGING}/"
           tar czf "${STAGING}.tar.gz" "${STAGING}"
@@ -404,10 +405,11 @@ jobs:
                    "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/lib/modules-load.d" \
                    "${DEST}/usr/share/padctl" "${DEST}/usr/share/doc/padctl"
 
-          for bin in padctl padctl-capture padctl-debug padctl-reconnect; do
+          for bin in padctl padctl-capture padctl-debug padctl-reconnect padctl-reconnect-launch; do
             [ -f "${SRC}/bin/${bin}" ] && install -Dm755 "${SRC}/bin/${bin}" "${DEST}/usr/bin/${bin}"
           done
           [ -f "${SRC}/install/padctl-reconnect" ] && install -Dm755 "${SRC}/install/padctl-reconnect" "${DEST}/usr/bin/padctl-reconnect"
+          [ -f "${SRC}/install/padctl-reconnect-launch" ] && install -Dm755 "${SRC}/install/padctl-reconnect-launch" "${DEST}/usr/bin/padctl-reconnect-launch"
 
           cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
           cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
@@ -424,6 +426,8 @@ jobs:
           OUT=$(dpkg-deb -c padctl_0.0.0-ci_amd64.deb)
           echo "${OUT}" | grep -q ' \./usr/bin/padctl$' \
             || { echo "FAIL: /usr/bin/padctl missing"; echo "${OUT}"; exit 1; }
+          echo "${OUT}" | grep -qE '^-rwxr-xr-x .* \./usr/bin/padctl-reconnect-launch$' \
+            || { echo "FAIL: executable /usr/bin/padctl-reconnect-launch missing (udev RUN+= target)"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/lib/systemd/user/padctl\.service$' \
             || { echo "FAIL: padctl.service missing"; echo "${OUT}"; exit 1; }
           echo "${OUT}" | grep -q ' \./usr/lib/udev/rules\.d/60-padctl\.rules$' \

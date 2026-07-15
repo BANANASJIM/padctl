@@ -37,6 +37,8 @@ const ImmutableKind = plan_mod.ImmutableKind;
 const generateServiceContent = services_mod.generateServiceContent;
 const generateSystemServiceContent = services_mod.generateSystemServiceContent;
 const generateReconnectScript = services_mod.generateReconnectScript;
+const generateReconnectLaunchScript = services_mod.generateReconnectLaunchScript;
+const installExecutableScript = services_mod.installExecutableScript;
 const immutable_dropin_content = services_mod.immutable_dropin_content;
 const buildSystemctlUserArgv = services_mod.buildSystemctlUserArgv;
 const freeArgv = services_mod.freeArgv;
@@ -1395,6 +1397,50 @@ test "services: generateReconnectScript embeds correct mappings dir for prefix=/
     try testing.expect(std.mem.indexOf(u8, script, "/usr/local/etc") == null);
 }
 
+test "install: generateReconnectLaunchScript guards systemd-run behind PID1 check with setsid fallback" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const script = try generateReconnectLaunchScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    try testing.expect(std.mem.startsWith(u8, script, "#!/bin/sh"));
+    try testing.expect(std.mem.indexOf(u8, script, "[ -d /run/systemd/system ]") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "exec /usr/bin/systemd-run --no-block /usr/local/bin/padctl-reconnect") != null);
+    // Fallback for non-systemd hosts (OpenRC/runit/eudev): detach with setsid
+    // so the reconnect survives udev's control-group teardown (issue #485).
+    try testing.expect(std.mem.indexOf(u8, script, "setsid /usr/local/bin/padctl-reconnect </dev/null >/dev/null 2>&1 &") != null);
+}
+
+test "install: installExecutableScript installs an executable launcher" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const script = try generateReconnectLaunchScript(allocator, "/usr/local");
+    defer allocator.free(script);
+
+    const launch_path = try std.fmt.allocPrint(allocator, "{s}/padctl-reconnect-launch", .{tmp_path});
+    defer allocator.free(launch_path);
+    {
+        var silence = try SilencedStdout.begin();
+        defer silence.end();
+        try installExecutableScript(launch_path, script, "warning: could not chmod padctl-reconnect-launch\n");
+    }
+
+    const stat = try std.fs.cwd().statFile(launch_path);
+    try testing.expect(stat.mode & 0o111 != 0);
+
+    var f = try std.fs.openFileAbsolute(launch_path, .{});
+    defer f.close();
+    const written = try f.readToEndAlloc(allocator, 8192);
+    defer allocator.free(written);
+    try testing.expectEqualStrings(script, written);
+}
+
 test "install: generateUdevRules includes hotplug reconnect rules" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -1430,10 +1476,14 @@ test "install: generateUdevRules includes hotplug reconnect rules" {
     const content = try file.readToEndAlloc(allocator, 8192);
     defer allocator.free(content);
 
-    // Should have hotplug reconnect rules
-    try testing.expect(std.mem.indexOf(u8, content, "padctl-reconnect") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "systemd-run --no-block") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "/usr/local/bin/padctl-reconnect") != null);
+    // Should have hotplug reconnect rules, routed through the portable
+    // launcher rather than invoking systemd-run directly (issue #485:
+    // systemd-run is absent/non-functional on non-systemd hosts).
+    try testing.expect(std.mem.indexOf(u8, content, "padctl-reconnect-launch") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/usr/local/bin/padctl-reconnect-launch") != null);
+    const run_line_start = std.mem.indexOf(u8, content, "RUN+=").?;
+    const run_line_end = std.mem.indexOfScalarPos(u8, content, run_line_start, '\n').?;
+    try testing.expect(std.mem.indexOf(u8, content[run_line_start..run_line_end], "systemd-run") == null);
     // Should still have standard rules
     try testing.expect(std.mem.indexOf(u8, content, "SUBSYSTEM==\"hidraw\"") != null);
     try testing.expect(std.mem.indexOf(u8, content, "TAG+=\"uaccess\"") != null);

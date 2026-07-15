@@ -415,7 +415,7 @@ pub fn generateUdevRulesFromEntries(allocator: std.mem.Allocator, entries: []con
     for (entries) |e| {
         const hotplug_line = try std.fmt.allocPrint(
             allocator,
-            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", RUN+=\"/usr/bin/systemd-run --no-block {s}/bin/padctl-reconnect\"\n",
+            "ACTION==\"add\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{x:0>4}\", ATTRS{{idProduct}}==\"{x:0>4}\", RUN+=\"{s}/bin/padctl-reconnect-launch\"\n",
             .{ e.vid, e.pid, prefix },
         );
         defer allocator.free(hotplug_line);

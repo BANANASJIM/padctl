@@ -454,6 +454,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/bin/padctl-capture",
         "/bin/padctl-debug",
         "/bin/padctl-reconnect",
+        "/bin/padctl-reconnect-launch",
         "/lib/systemd/system/padctl.service",
         "/lib/systemd/system/padctl-resume.service",
         "/lib/systemd/user/padctl-resume.service",
