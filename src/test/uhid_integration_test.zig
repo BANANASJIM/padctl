@@ -17,6 +17,7 @@ const uhidInput = uhid.uhidInput;
 const uhidDestroy = uhid.uhidDestroy;
 const UHID_EVENT_SIZE = uhid.UHID_EVENT_SIZE;
 const cleanup = src.testing_support.uhid_test_cleanup;
+const gate = src.testing_support.uhid_gate;
 
 // Minimal HID report descriptor: 2 axes (X, Y), 4-byte report
 const test_rd = [_]u8{
@@ -63,7 +64,10 @@ fn findHidraw(vid: u16, pid: u16) !?[64]u8 {
 
 test "uhid: virtual device appears as hidraw" {
     cleanup.ensureSignalHandlersInstalled();
-    const uhid_fd = try openUhid();
+    const uhid_fd = openUhid() catch |err| switch (err) {
+        error.SkipZigTest => return gate.reportMissingUhid("/dev/uhid open failed (missing or EACCES)"),
+        else => return err,
+    };
     cleanup.registerUhidFd(uhid_fd);
     defer {
         cleanup.unregisterUhidFd(uhid_fd);
@@ -76,8 +80,15 @@ test "uhid: virtual device appears as hidraw" {
     // Give the kernel a moment to create the hidraw node
     std.Thread.sleep(100 * std.time.ns_per_ms);
 
-    const found = try findHidraw(TEST_VID, TEST_PID);
-    if (found == null) return error.SkipZigTest; // kernel may not have created it in time
+    var found = try findHidraw(TEST_VID, TEST_PID);
+    {
+        var attempts: u32 = 0;
+        while (found == null and attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            found = try findHidraw(TEST_VID, TEST_PID);
+        }
+    }
+    if (found == null) return gate.reportMissingUhid("hidraw node absent after UHID_CREATE + bounded poll");
 
     // Open the hidraw node and inject a report
     const path_buf = found.?;
@@ -94,7 +105,7 @@ test "uhid: virtual device appears as hidraw" {
     // Poll for data
     var pfd = [1]posix.pollfd{.{ .fd = hidraw_fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 500);
-    if (ready == 0) return error.SkipZigTest; // timeout, kernel too slow
+    if (ready == 0) return gate.reportMissingUhid("no hidraw data within 500ms of UHID_INPUT2 (kernel too slow or delivery broken)");
 
     var buf: [64]u8 = undefined;
     const n = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
@@ -127,7 +138,10 @@ test "uhid: full pipeline hidraw read through interpreter" {
     const allocator = testing.allocator;
 
     cleanup.ensureSignalHandlersInstalled();
-    const uhid_fd = try openUhid();
+    const uhid_fd = openUhid() catch |err| switch (err) {
+        error.SkipZigTest => return gate.reportMissingUhid("/dev/uhid open failed (missing or EACCES)"),
+        else => return err,
+    };
     cleanup.registerUhidFd(uhid_fd);
     defer {
         cleanup.unregisterUhidFd(uhid_fd);
@@ -138,8 +152,15 @@ test "uhid: full pipeline hidraw read through interpreter" {
     try uhidCreate(uhid_fd, TEST_VID, TEST_PID, &test_rd);
     std.Thread.sleep(100 * std.time.ns_per_ms);
 
-    const found = try findHidraw(TEST_VID, TEST_PID);
-    if (found == null) return error.SkipZigTest;
+    var found = try findHidraw(TEST_VID, TEST_PID);
+    {
+        var attempts: u32 = 0;
+        while (found == null and attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            found = try findHidraw(TEST_VID, TEST_PID);
+        }
+    }
+    if (found == null) return gate.reportMissingUhid("hidraw node absent after UHID_CREATE + bounded poll");
 
     const path_buf = found.?;
     const path_end = std.mem.indexOfScalar(u8, &path_buf, 0) orelse path_buf.len;
@@ -160,14 +181,14 @@ test "uhid: full pipeline hidraw read through interpreter" {
     // Read from hidraw
     var pfd = [1]posix.pollfd{.{ .fd = hidraw_fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 500);
-    if (ready == 0) return error.SkipZigTest;
+    if (ready == 0) return gate.reportMissingUhid("no hidraw data within 500ms of UHID_INPUT2 (kernel too slow or delivery broken)");
 
     var buf: [64]u8 = undefined;
     const n = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
     try testing.expectEqual(@as(usize, 4), n);
 
     // Pass through interpreter (interface 0, no match filter)
-    const delta = (try interp.processReport(0, buf[0..n])) orelse return error.SkipZigTest;
+    const delta = (try interp.processReport(0, buf[0..n])) orelse return gate.reportMissingUhid("interpreter produced no delta from a delivered report");
 
     try testing.expectEqual(@as(?i16, 100), delta.ax);
     try testing.expectEqual(@as(?i16, 200), delta.ay);
@@ -254,7 +275,10 @@ test "uhid: rumble gamepad exposes capabilities/ff=0 — #444 kernel FF wall (AD
     defer allocator.free(descriptor);
 
     cleanup.ensureSignalHandlersInstalled();
-    const uhid_fd = try openUhid();
+    const uhid_fd = openUhid() catch |err| switch (err) {
+        error.SkipZigTest => return gate.reportMissingUhid("/dev/uhid open failed (missing or EACCES)"),
+        else => return err,
+    };
     cleanup.registerUhidFd(uhid_fd);
     defer {
         cleanup.unregisterUhidFd(uhid_fd);
@@ -267,7 +291,15 @@ test "uhid: rumble gamepad exposes capabilities/ff=0 — #444 kernel FF wall (AD
     // Let the kernel bind hid-generic and create the evdev node.
     std.Thread.sleep(300 * std.time.ns_per_ms);
 
-    const found = (try findEvdevByVidPid(FF_TEST_VID, FF_TEST_PID)) orelse return error.SkipZigTest;
+    var found_opt = try findEvdevByVidPid(FF_TEST_VID, FF_TEST_PID);
+    {
+        var attempts: u32 = 0;
+        while (found_opt == null and attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            found_opt = try findEvdevByVidPid(FF_TEST_VID, FF_TEST_PID);
+        }
+    }
+    const found = found_opt orelse return gate.reportMissingUhid("evdev node absent after UHID_CREATE + bounded poll");
     const path_end = std.mem.indexOfScalar(u8, &found, 0) orelse found.len;
     const ev_path = found[0..path_end];
 

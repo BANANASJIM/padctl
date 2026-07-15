@@ -8,6 +8,7 @@ const device_mod = src.config.device;
 const DeviceInstance = src.device_instance.DeviceInstance;
 const Supervisor = src.supervisor.Supervisor;
 const UhidSimulator = src.testing_support.uhid_simulator.UhidSimulator;
+const gate = src.testing_support.uhid_gate;
 
 const TEST_VID: u16 = 0xFADE;
 const TEST_PID: u16 = 0xCAFE;
@@ -60,13 +61,13 @@ test "issue-131-A integration: UHID disconnect triggers grace teardown on real k
         .uniq = TEST_UNIQ,
         .descriptor = &test_rd,
     }) catch |err| switch (err) {
-        error.SkipZigTest, error.HidrawNotFound, error.KernelBusy => return error.SkipZigTest,
+        error.SkipZigTest, error.HidrawNotFound, error.KernelBusy => return gate.reportMissingUhid("UhidSimulator.create failed (/dev/uhid missing, hidraw node absent, or kernel busy)"),
         else => |e| return e,
     };
     var sim_alive = true;
     defer if (sim_alive) sim.destroy();
 
-    const hidraw_path = sim.hidrawPath() orelse return error.SkipZigTest;
+    const hidraw_path = sim.hidrawPath() orelse return gate.reportMissingUhid("hidraw path unexpectedly null after successful UhidSimulator.create");
 
     const parsed = try device_mod.parseString(allocator, test_toml);
     defer parsed.deinit();
@@ -120,12 +121,12 @@ test "issue-131-A integration: rebind within grace keeps uinput alive" {
         .uniq = TEST_UNIQ,
         .descriptor = &test_rd,
     }) catch |err| switch (err) {
-        error.SkipZigTest, error.HidrawNotFound, error.KernelBusy => return error.SkipZigTest,
+        error.SkipZigTest, error.HidrawNotFound, error.KernelBusy => return gate.reportMissingUhid("UhidSimulator.create failed (/dev/uhid missing, hidraw node absent, or kernel busy)"),
         else => |e| return e,
     };
     defer sim.destroy();
 
-    const hidraw_path = sim.hidrawPath() orelse return error.SkipZigTest;
+    const hidraw_path = sim.hidrawPath() orelse return gate.reportMissingUhid("hidraw path unexpectedly null after successful UhidSimulator.create");
 
     const parsed = try device_mod.parseString(allocator, test_toml);
     defer parsed.deinit();

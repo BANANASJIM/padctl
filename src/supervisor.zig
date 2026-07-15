@@ -1745,7 +1745,7 @@ pub const Supervisor = struct {
         };
         defer self.reload_hook = null;
 
-        // 7 base fds + 1 listen + 4 clients = 12
+        // 8 base fds + 1 listen + 4 clients = 13
         var pollfds: [SUPERVISOR_MAX_FDS]posix.pollfd = undefined;
         const set = SupervisorPollSet.init(self, &pollfds);
 

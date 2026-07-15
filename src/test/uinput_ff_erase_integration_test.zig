@@ -39,21 +39,7 @@ const c = @cImport({
     @cInclude("linux/input.h");
 });
 
-fn requireUinput() bool {
-    const v = std.posix.getenv("PADCTL_TEST_REQUIRE_UINPUT") orelse return false;
-    return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
-}
-
-fn reportMissingUinput(reason: []const u8) error{ SkipZigTest, UinputAccessRequired } {
-    std.log.warn(
-        "uinput_ff_erase_integration_test: /dev/uinput unavailable ({s}) — pollFf UI_FF_ERASE wiring CI signal is SILENT. " ++
-            "Run in a privileged environment with /dev/uinput, " ++
-            "or set PADCTL_TEST_REQUIRE_UINPUT=1 to turn this into a hard failure.",
-        .{reason},
-    );
-    if (requireUinput()) return error.UinputAccessRequired;
-    return error.SkipZigTest;
-}
+const gate = src.testing_support.uhid_gate;
 
 const FF_VID: u16 = 0xFAD7;
 const FF_PID: u16 = 0x2401;
@@ -143,15 +129,15 @@ test "uinput: pollFf turns a real UI_FF_ERASE into a zero-magnitude stop frame" 
     const out_cfg = parsed.value.output orelse return error.NoOutput;
 
     var dev = uinput.UinputDevice.create(&out_cfg) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return reportMissingUinput("/dev/uinput open failed"),
-        error.PermissionDenied => return reportMissingUinput("/dev/uinput ioctl permission denied"),
+        error.AccessDenied, error.FileNotFound => return gate.reportMissingUinput("/dev/uinput open failed"),
+        error.PermissionDenied => return gate.reportMissingUinput("/dev/uinput ioctl permission denied"),
         else => return err,
     };
     defer dev.close();
 
     var name_buf: [40]u8 = undefined;
     const node = findEventNode(FF_VID, FF_PID, &name_buf) orelse
-        return reportMissingUinput("created uinput node did not appear under /dev/input");
+        return gate.reportMissingUinput("created uinput node did not appear under /dev/input");
 
     var client = Client{ .node = node };
     const thread = try std.Thread.spawn(.{}, Client.run, .{&client});

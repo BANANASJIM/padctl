@@ -20,6 +20,7 @@ const GamepadStateDelta = src.core.state.GamepadStateDelta;
 const ref = src.testing_support.reference_interp;
 const helpers = src.testing_support.helpers;
 const cleanup = src.testing_support.uhid_test_cleanup;
+const gate = src.testing_support.uhid_gate;
 
 // --- UHID kernel protocol ---
 
@@ -55,7 +56,7 @@ const UhidInput2Event = extern struct {
 
 fn openUhid() !posix.fd_t {
     return posix.open("/dev/uhid", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.AccessDenied, error.FileNotFound => return gate.reportMissingUhid("/dev/uhid open failed (missing or EACCES)"),
         else => return err,
     };
 }
@@ -565,7 +566,7 @@ fn runAllDevicesMode(mode: PacketMode, use_uhid: bool) !void {
 
     if (use_uhid and tested == 0) {
         // All UHID injections were skipped (e.g. no hidraw nodes appeared in time)
-        return error.SkipZigTest;
+        return gate.reportMissingUhid("no device config completed a UHID round-trip (all skipped)");
     }
     try testing.expect(tested > 0);
 }
