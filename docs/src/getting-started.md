@@ -197,6 +197,12 @@ and re-log in — `install` prints this only as a hint, it does not change
 group membership. Without both the udev rules and `input` group
 membership, a non-root OpenRC service cannot access the hardware.
 
+Hotplug/resume reconnect also works without systemd: the udev rule invokes
+`padctl-reconnect-launch`, which detaches via `setsid` instead of
+`systemd-run` when it does not find a live systemd PID 1 at
+`/run/systemd/system`. This keeps the reconnect working under OpenRC,
+runit, and standalone/eudev setups.
+
 Create `/etc/init.d/padctl`:
 
 ```sh
