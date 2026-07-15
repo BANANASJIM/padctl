@@ -10,7 +10,7 @@ var overflow_warned = std.atomic.Value(bool).init(false);
 
 fn warnOverflowOnce() void {
     if (overflow_warned.cmpxchgStrong(false, true, .monotonic, .monotonic) == null) {
-        std.log.warn("aux event buffer overflow (64 slots): shedding a press to keep key releases; check for oversized single-frame macros", .{});
+        std.log.warn("aux event buffer overflow (64 slots): some events dropped or shed; check for oversized single-frame macros", .{});
     }
 }
 
