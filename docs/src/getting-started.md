@@ -182,6 +182,54 @@ Each managed device prints one space-separated triple: `device=<name>`,
 devices appear on the same line. Exit code is 0 when the daemon answered
 and 1 when the response begins with `ERR` or the socket is unreachable.
 
+### OpenRC (non-systemd)
+
+padctl ships only a systemd unit, but the daemon itself has no systemd
+dependency — an OpenRC service works the same way. Run `padctl install`
+first regardless of init system: it installs the udev rules
+(`GROUP="input", MODE="0660"` on `hidraw`/`uinput`/`uhid`) that let a
+non-root service open the devices. On a host without systemd, `install`
+may print harmless notes about skipped `systemctl` steps.
+
+Then add your user to the `input` group yourself with
+`sudo usermod -aG input $USER` (see [udev Permissions](#udev-permissions))
+and re-log in — `install` prints this only as a hint, it does not change
+group membership. Without both the udev rules and `input` group
+membership, a non-root OpenRC service cannot access the hardware.
+
+Create `/etc/init.d/padctl`:
+
+```sh
+#!/sbin/openrc-run
+
+name="padctl"
+description="padctl gamepad compatibility daemon"
+
+command="/usr/bin/padctl"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+command_user="<user>:<user>"
+
+start_pre() {
+    checkpath --directory --owner <user>:<user> /run/padctl
+}
+
+depend() {
+    need localmount
+}
+```
+
+Replace `<user>` with the login user. Enable and start:
+
+```sh
+doas chmod +x /etc/init.d/padctl
+doas rc-update add padctl default
+doas rc-service padctl start
+```
+
+(`sudo` works the same as `doas`.) Contributed by @K1D77A, verified working
+on a Flydigi Vader 5 including Steam Input key rebinding.
+
 ## Run Manually
 
 Bare invocation — padctl auto-discovers configs via XDG paths:
