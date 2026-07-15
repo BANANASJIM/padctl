@@ -43,6 +43,8 @@ package() {
         "${pkgdir}/usr/lib/systemd/user/padctl-resume.service"
     [[ -f install/padctl-reconnect ]] && install -Dm755 install/padctl-reconnect \
         "${pkgdir}/usr/bin/padctl-reconnect"
+    [[ -f install/padctl-reconnect-launch ]] && install -Dm755 install/padctl-reconnect-launch \
+        "${pkgdir}/usr/bin/padctl-reconnect-launch"
 
     install -Dm644 install/60-padctl.rules \
         "${pkgdir}/usr/lib/udev/rules.d/60-padctl.rules"

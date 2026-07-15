@@ -201,7 +201,9 @@ Hotplug/resume reconnect also works without systemd: the udev rule invokes
 `padctl-reconnect-launch`, which detaches via `setsid` instead of
 `systemd-run` when it does not find a live systemd PID 1 at
 `/run/systemd/system`. This keeps the reconnect working under OpenRC,
-runit, and standalone/eudev setups.
+runit, and standalone/eudev setups. The reconnect script itself needs
+`bash` and util-linux (`setsid`, `runuser`) — busybox-only hosts
+(e.g. stock Alpine) must install them.
 
 Create `/etc/init.d/padctl`:
 

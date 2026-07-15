@@ -491,7 +491,7 @@ pub fn installServiceFiles(allocator: std.mem.Allocator, plan: *const InstallPla
     updateLegacySystemService(allocator, plan.opts.destdir, plan.prefix, plan_mod.hostHasInputGroup());
 }
 
-fn installExecutableScript(path: []const u8, content: []const u8, warn_msg: []const u8) !void {
+pub fn installExecutableScript(path: []const u8, content: []const u8, warn_msg: []const u8) !void {
     {
         var f = try std.fs.createFileAbsolute(path, .{ .truncate = true });
         defer f.close();

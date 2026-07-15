@@ -38,6 +38,7 @@ const generateServiceContent = services_mod.generateServiceContent;
 const generateSystemServiceContent = services_mod.generateSystemServiceContent;
 const generateReconnectScript = services_mod.generateReconnectScript;
 const generateReconnectLaunchScript = services_mod.generateReconnectLaunchScript;
+const installExecutableScript = services_mod.installExecutableScript;
 const immutable_dropin_content = services_mod.immutable_dropin_content;
 const buildSystemctlUserArgv = services_mod.buildSystemctlUserArgv;
 const freeArgv = services_mod.freeArgv;
@@ -1410,7 +1411,7 @@ test "install: generateReconnectLaunchScript guards systemd-run behind PID1 chec
     try testing.expect(std.mem.indexOf(u8, script, "setsid /usr/local/bin/padctl-reconnect </dev/null >/dev/null 2>&1 &") != null);
 }
 
-test "install: installReconnectScript-equivalent write installs an executable launcher" {
+test "install: installExecutableScript installs an executable launcher" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -1425,14 +1426,19 @@ test "install: installReconnectScript-equivalent write installs an executable la
     const launch_path = try std.fmt.allocPrint(allocator, "{s}/padctl-reconnect-launch", .{tmp_path});
     defer allocator.free(launch_path);
     {
-        var f = try std.fs.createFileAbsolute(launch_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll(script);
+        var silence = try SilencedStdout.begin();
+        defer silence.end();
+        try installExecutableScript(launch_path, script, "warning: could not chmod padctl-reconnect-launch\n");
     }
-    try std.posix.fchmodat(std.fs.cwd().fd, launch_path, 0o755, 0);
 
     const stat = try std.fs.cwd().statFile(launch_path);
     try testing.expect(stat.mode & 0o111 != 0);
+
+    var f = try std.fs.openFileAbsolute(launch_path, .{});
+    defer f.close();
+    const written = try f.readToEndAlloc(allocator, 8192);
+    defer allocator.free(written);
+    try testing.expectEqualStrings(script, written);
 }
 
 test "install: generateUdevRules includes hotplug reconnect rules" {
