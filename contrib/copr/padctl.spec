@@ -44,6 +44,7 @@ systemd socket activation and udev integration.
 %{_bindir}/padctl-capture
 %{_bindir}/padctl-debug
 %{_bindir}/padctl-reconnect
+%{_bindir}/padctl-reconnect-launch
 %{_userunitdir}/padctl.service
 %{_udevrulesdir}/60-padctl.rules
 %{_udevrulesdir}/61-padctl-driver-block.rules

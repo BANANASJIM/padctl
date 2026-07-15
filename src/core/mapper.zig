@@ -410,6 +410,7 @@ pub const Mapper = struct {
             const existing = self.pending_tap_release orelse 0;
             self.pending_tap_release = existing | self.macro_timer_tap_pending;
             self.macro_timer_tap_pending = 0;
+            for (self.active_macros.items) |*p| p.staged_timer_taps = 0;
         }
 
         // Promote gesture-timer tap bits staged at last expiry.
@@ -769,10 +770,12 @@ pub const Mapper = struct {
                     // step() didn't finish (delay after pause_for_release, etc.) — cancel.
                     self.timer_queue.cancel(p.timer_token, now_ns);
                     p.emitPendingReleases(aux, &self.injected_buttons);
+                    self.macro_timer_tap_pending &= ~p.staged_timer_taps;
                     _ = self.active_macros.swapRemove(0);
                 } else {
                     self.timer_queue.cancel(p.timer_token, now_ns);
                     p.emitPendingReleases(aux, &self.injected_buttons);
+                    self.macro_timer_tap_pending &= ~p.staged_timer_taps;
                     _ = self.active_macros.swapRemove(0);
                 }
             }
@@ -780,12 +783,11 @@ pub const Mapper = struct {
             for (self.active_macros.items) |*p| {
                 self.timer_queue.cancel(p.timer_token, now_ns);
                 p.emitPendingReleases(aux, &self.injected_buttons);
+                self.macro_timer_tap_pending &= ~p.staged_timer_taps;
             }
             self.active_macros.clearRetainingCapacity();
         }
         releasePendingAuxTapReleases(self, aux, now_ns);
-        // Discard tap bits staged from a cancelled macro's timer expiry.
-        self.macro_timer_tap_pending = 0;
         self.cancelGestureStateForLayerChange(aux, now_ns);
         self.updateLayerHold(aux);
     }
@@ -798,7 +800,6 @@ pub const Mapper = struct {
         }
         self.gesture_tokens.clear();
         self.gesture_engine.reset();
-        self.gesture_timer_tap_pending = 0;
         self.gesture_held_gamepad = 0;
         for (&self.gesture_aux_down_targets) |*target| {
             if (target.*) |down| {
@@ -1045,6 +1046,7 @@ pub const Mapper = struct {
             var idx: usize = 0;
             while (idx < self.active_macros.items.len) {
                 if (self.active_macros.items[idx].timer_token == d.token) {
+                    const before = macro_tap_release;
                     const done = self.active_macros.items[idx].step(
                         &aux,
                         &self.timer_queue,
@@ -1059,6 +1061,7 @@ pub const Mapper = struct {
                     if (done) {
                         _ = self.active_macros.swapRemove(idx);
                     } else {
+                        self.active_macros.items[idx].staged_timer_taps |= macro_tap_release & ~before;
                         idx += 1;
                     }
                     break;

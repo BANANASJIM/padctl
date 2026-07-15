@@ -44,6 +44,12 @@ pub const MacroPlayer = struct {
     // for now_ns to reach this deadline before restarting from step_index = 0.
     // Same gating mechanism as next_step_eligible_at_ns.
     awaiting_restart_at_ns: ?i128,
+    // Tap bits this still-active player contributed to the mapper's
+    // macro_timer_tap_pending at its last timer expiry (e.g. repeat restarts).
+    // Used to distinguish a completed macro's staged tap (which must survive a
+    // same-frame layer transition) from a still-live player's staged tap (which
+    // is discarded when the layer cancels the player).
+    staged_timer_taps: u64 = 0,
 
     pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
         return .{
@@ -490,6 +496,41 @@ test "macro_player: repeat_delay_ms — release mid-iteration completes current 
     try testing.expect(done1);
     try testing.expectEqual(@as(usize, 2), ctx.aux.len); // KEY_B press+release
     try testing.expect(p.awaiting_restart_at_ns == null);
+}
+
+test "macro_player: burst overflow keeps final KEY_A release (F-3)" {
+    const allocator = testing.allocator;
+    // down KEY_B + 32× tap KEY_A = 1 + 64 = 65 aux events in a single frame,
+    // one past the 64-slot AuxEventList. The final KEY_A release must survive
+    // (dropping it would leave KEY_A stuck at the OS level).
+    var steps: [33]MacroStep = undefined;
+    steps[0] = .{ .down = "KEY_B" };
+    for (1..33) |i| steps[i] = .{ .tap = "KEY_A" };
+    const m = Macro{ .name = "burst", .steps = &steps };
+    var player = makePlayer(&m);
+    var ctx = StepCtx.init(allocator);
+    defer ctx.deinit();
+
+    const done = try ctx.step(&player);
+    try testing.expect(done);
+    try testing.expectEqual(@as(usize, 64), ctx.aux.len);
+
+    const a_target = remap.resolveTarget("KEY_A") catch unreachable;
+    const a_code: u16 = switch (a_target) {
+        .key => |c| c,
+        else => unreachable,
+    };
+    var last_a_pressed: ?bool = null;
+    for (ctx.aux.slice()) |ev| {
+        switch (ev) {
+            .key => |k| if (k.code == a_code) {
+                last_a_pressed = k.pressed;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(last_a_pressed != null);
+    try testing.expect(!last_a_pressed.?);
 }
 
 test "macro_player: repeat_delay_ms absent — legacy single-shot completion" {
