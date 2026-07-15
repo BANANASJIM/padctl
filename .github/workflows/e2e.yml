@@ -108,8 +108,16 @@ jobs:
             echo "::error::/dev/uhid unexpectedly present in the unprivileged gate-proof container — cannot prove the gate"
             exit 1
           fi
-          if PADCTL_TEST_REQUIRE_UHID=1 zig build test-e2e; then
+          if PADCTL_TEST_REQUIRE_UHID=1 zig build test-e2e >gate-proof.log 2>&1; then
             echo "::error::test-e2e exited 0 with PADCTL_TEST_REQUIRE_UHID=1 and no /dev/uhid — the gate is NOT enforcing (silent SkipZigTest regression)"
+            tail -50 gate-proof.log
             exit 1
           fi
-          echo "OK: PADCTL_TEST_REQUIRE_UHID=1 turned the absent-/dev/uhid e2e run RED as required"
+          # A bare nonzero exit could also be a compile error — require the
+          # specific gate error so the proof only passes when the gate fired.
+          if ! grep -q "UhidAccessRequired" gate-proof.log; then
+            echo "::error::test-e2e failed WITHOUT error.UhidAccessRequired in its output — failure came from something other than the UHID gate (e.g. compile error)"
+            tail -50 gate-proof.log
+            exit 1
+          fi
+          echo "OK: PADCTL_TEST_REQUIRE_UHID=1 turned the absent-/dev/uhid e2e run RED via error.UhidAccessRequired as required"

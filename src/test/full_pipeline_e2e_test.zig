@@ -389,12 +389,12 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
     std.Thread.sleep(20 * std.time.ns_per_ms);
     try uhidInput(uhid_fd, &[_]u8{ 200, 100 });
 
-    const ev = readDataEvent(ev_fd, 500) catch |err| {
+    const ev = readDataEvent(ev_fd, 5000) catch |err| {
         loop.stop();
         thread.join();
         // DeviceIO close frees the heap-allocated HidrawDevice
         devices[0].close();
-        return if (err == error.Timeout) gate.reportMissingUhid("no output event within 500ms deadline (pipeline delivered nothing)") else err;
+        return if (err == error.Timeout) gate.reportMissingUhid("no output event within 5000ms deadline (pipeline delivered nothing)") else err;
     };
 
     loop.stop();
@@ -498,11 +498,11 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     std.Thread.sleep(20 * std.time.ns_per_ms);
     try uhidInput(uhid_fd, &[_]u8{0x01}); // bit 0 = A button
 
-    const ev = readDataEvent(ev_fd, 500) catch |err| {
+    const ev = readDataEvent(ev_fd, 5000) catch |err| {
         loop.stop();
         thread.join();
         devices[0].close();
-        return if (err == error.Timeout) gate.reportMissingUhid("no output event within 500ms deadline (pipeline delivered nothing)") else err;
+        return if (err == error.Timeout) gate.reportMissingUhid("no output event within 5000ms deadline (pipeline delivered nothing)") else err;
     };
 
     loop.stop();

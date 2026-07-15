@@ -129,8 +129,8 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
     try sim.injectReport(&a_report);
 
     var pfd = [1]posix.pollfd{.{ .fd = hidraw_fd, .events = posix.POLL.IN, .revents = 0 }};
-    const ready = try posix.poll(&pfd, 500);
-    if (ready == 0) return gate.reportMissingUhid("no hidraw data within 500ms of injectReport (kernel too slow or delivery broken)");
+    const ready = try posix.poll(&pfd, 2000);
+    if (ready == 0) return gate.reportMissingUhid("no hidraw data within 2000ms of injectReport (kernel too slow or delivery broken)");
 
     var buf: [128]u8 = undefined;
     const n = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
@@ -146,8 +146,8 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
     try sim.injectReport(&stick_report);
 
     pfd[0].revents = 0;
-    const ready2 = try posix.poll(&pfd, 500);
-    if (ready2 == 0) return gate.reportMissingUhid("no hidraw data within 500ms of stick injectReport (kernel too slow or delivery broken)");
+    const ready2 = try posix.poll(&pfd, 2000);
+    if (ready2 == 0) return gate.reportMissingUhid("no hidraw data within 2000ms of stick injectReport (kernel too slow or delivery broken)");
     const n2 = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
     if (n2 < 56) return gate.reportMissingUhid("truncated hidraw read (n < 56) — stick report not delivered intact");
 
