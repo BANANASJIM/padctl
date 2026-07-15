@@ -12,6 +12,7 @@ const Interpreter = src.core.interpreter.Interpreter;
 const DeviceIO = src.io.device_io.DeviceIO;
 const ioctl_mod = src.io.ioctl_constants;
 const cleanup = src.testing_support.uhid_test_cleanup;
+const gate = src.testing_support.uhid_gate;
 
 // --- UHID kernel protocol (minimal, reused from uhid_integration_test) ---
 
@@ -148,14 +149,14 @@ const button_toml =
 
 fn openUhid() !posix.fd_t {
     return posix.open("/dev/uhid", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.AccessDenied, error.FileNotFound => return gate.reportMissingUhid("/dev/uhid open failed (missing or EACCES)"),
         else => return err,
     };
 }
 
 fn checkUinput() !void {
     const fd = posix.open("/dev/uinput", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.AccessDenied, error.FileNotFound => return gate.reportMissingUinput("/dev/uinput open failed (missing or EACCES)"),
         else => return err,
     };
     posix.close(fd);
@@ -316,8 +317,9 @@ fn runThread(arg: *RunArg) void {
 test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
     const allocator = testing.allocator;
 
-    try checkUinput();
     cleanup.ensureSignalHandlersInstalled();
+    // Gate on /dev/uhid first so PADCTL_TEST_REQUIRE_UHID fails fast before the
+    // /dev/uinput probe (which is governed by PADCTL_TEST_REQUIRE_UINPUT).
     const uhid_fd = try openUhid();
     cleanup.registerUhidFd(uhid_fd);
     defer {
@@ -325,11 +327,20 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
+    try checkUinput();
 
     try uhidCreate(uhid_fd, TEST_VID, TEST_PID, &test_rd);
     udevadmSettle();
 
-    const hidraw_path = (try findHidraw(allocator, TEST_VID, TEST_PID)) orelse return error.SkipZigTest;
+    var hidraw_opt = try findHidraw(allocator, TEST_VID, TEST_PID);
+    {
+        var attempts: u32 = 0;
+        while (hidraw_opt == null and attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            hidraw_opt = try findHidraw(allocator, TEST_VID, TEST_PID);
+        }
+    }
+    const hidraw_path = hidraw_opt orelse return gate.reportMissingUhid("hidraw node absent after UHID_CREATE + udevadm settle + bounded poll");
     defer allocator.free(hidraw_path);
 
     const parsed = try device_mod.parseString(allocator, output_toml);
@@ -339,7 +350,15 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
     defer udev.close();
     udevadmSettle();
 
-    const ev_fd = findEventNode(OUT_VID, OUT_PID) catch return error.SkipZigTest;
+    const ev_fd = ev_blk: {
+        if (findEventNode(OUT_VID, OUT_PID)) |fd| break :ev_blk fd else |_| {}
+        var attempts: u32 = 0;
+        while (attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            if (findEventNode(OUT_VID, OUT_PID)) |fd| break :ev_blk fd else |_| {}
+        }
+        return gate.reportMissingUhid("output evdev node absent after UinputDevice.create + udevadm settle + bounded poll");
+    };
     defer posix.close(ev_fd);
 
     // Heap-allocate HidrawDevice so DeviceIO vtable close is safe.
@@ -375,7 +394,7 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
         thread.join();
         // DeviceIO close frees the heap-allocated HidrawDevice
         devices[0].close();
-        return if (err == error.Timeout) error.SkipZigTest else err;
+        return if (err == error.Timeout) gate.reportMissingUhid("no output event within 500ms deadline (pipeline delivered nothing)") else err;
     };
 
     loop.stop();
@@ -392,8 +411,9 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
 test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     const allocator = testing.allocator;
 
-    try checkUinput();
     cleanup.ensureSignalHandlersInstalled();
+    // Gate on /dev/uhid first so PADCTL_TEST_REQUIRE_UHID fails fast before the
+    // /dev/uinput probe (which is governed by PADCTL_TEST_REQUIRE_UINPUT).
     const uhid_fd = try openUhid();
     cleanup.registerUhidFd(uhid_fd);
     defer {
@@ -401,6 +421,7 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
+    try checkUinput();
 
     // HID descriptor: 1-byte report (8 buttons)
     const btn_rd = [_]u8{
@@ -421,7 +442,15 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     try uhidCreate(uhid_fd, TEST_VID, TEST_PID, &btn_rd);
     std.Thread.sleep(150 * std.time.ns_per_ms);
 
-    const hidraw_path = (try findHidraw(allocator, TEST_VID, TEST_PID)) orelse return error.SkipZigTest;
+    var hidraw_opt = try findHidraw(allocator, TEST_VID, TEST_PID);
+    {
+        var attempts: u32 = 0;
+        while (hidraw_opt == null and attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            hidraw_opt = try findHidraw(allocator, TEST_VID, TEST_PID);
+        }
+    }
+    const hidraw_path = hidraw_opt orelse return gate.reportMissingUhid("hidraw node absent after UHID_CREATE + udevadm settle + bounded poll");
     defer allocator.free(hidraw_path);
 
     const parsed = try device_mod.parseString(allocator, button_toml);
@@ -431,7 +460,15 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     defer udev.close();
     udevadmSettle();
 
-    const ev_fd = findEventNode(OUT_VID, OUT_PID) catch return error.SkipZigTest;
+    const ev_fd = ev_blk: {
+        if (findEventNode(OUT_VID, OUT_PID)) |fd| break :ev_blk fd else |_| {}
+        var attempts: u32 = 0;
+        while (attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            if (findEventNode(OUT_VID, OUT_PID)) |fd| break :ev_blk fd else |_| {}
+        }
+        return gate.reportMissingUhid("output evdev node absent after UinputDevice.create + udevadm settle + bounded poll");
+    };
     defer posix.close(ev_fd);
 
     const hidraw = try allocator.create(HidrawDevice);
@@ -465,7 +502,7 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
         loop.stop();
         thread.join();
         devices[0].close();
-        return if (err == error.Timeout) error.SkipZigTest else err;
+        return if (err == error.Timeout) gate.reportMissingUhid("no output event within 500ms deadline (pipeline delivered nothing)") else err;
     };
 
     loop.stop();
@@ -482,8 +519,9 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
 test "T-E2E-3: report with bad match byte produces no output event" {
     const allocator = testing.allocator;
 
-    try checkUinput();
     cleanup.ensureSignalHandlersInstalled();
+    // Gate on /dev/uhid first so PADCTL_TEST_REQUIRE_UHID fails fast before the
+    // /dev/uinput probe (which is governed by PADCTL_TEST_REQUIRE_UINPUT).
     const uhid_fd = try openUhid();
     cleanup.registerUhidFd(uhid_fd);
     defer {
@@ -491,6 +529,7 @@ test "T-E2E-3: report with bad match byte produces no output event" {
         uhidDestroy(uhid_fd);
         posix.close(uhid_fd);
     }
+    try checkUinput();
 
     // Config requires match byte 0 = 0xAB; we will inject 0xFF
     const match_toml =
@@ -530,7 +569,15 @@ test "T-E2E-3: report with bad match byte produces no output event" {
     try uhidCreate(uhid_fd, TEST_VID, TEST_PID, &match_rd);
     std.Thread.sleep(150 * std.time.ns_per_ms);
 
-    const hidraw_path = (try findHidraw(allocator, TEST_VID, TEST_PID)) orelse return error.SkipZigTest;
+    var hidraw_opt = try findHidraw(allocator, TEST_VID, TEST_PID);
+    {
+        var attempts: u32 = 0;
+        while (hidraw_opt == null and attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            hidraw_opt = try findHidraw(allocator, TEST_VID, TEST_PID);
+        }
+    }
+    const hidraw_path = hidraw_opt orelse return gate.reportMissingUhid("hidraw node absent after UHID_CREATE + udevadm settle + bounded poll");
     defer allocator.free(hidraw_path);
 
     const parsed = try device_mod.parseString(allocator, match_toml);
@@ -540,7 +587,15 @@ test "T-E2E-3: report with bad match byte produces no output event" {
     defer udev.close();
     udevadmSettle();
 
-    const ev_fd = findEventNode(OUT_VID, OUT_PID) catch return error.SkipZigTest;
+    const ev_fd = ev_blk: {
+        if (findEventNode(OUT_VID, OUT_PID)) |fd| break :ev_blk fd else |_| {}
+        var attempts: u32 = 0;
+        while (attempts < 20) : (attempts += 1) {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            if (findEventNode(OUT_VID, OUT_PID)) |fd| break :ev_blk fd else |_| {}
+        }
+        return gate.reportMissingUhid("output evdev node absent after UinputDevice.create + udevadm settle + bounded poll");
+    };
     defer posix.close(ev_fd);
 
     const hidraw = try allocator.create(HidrawDevice);

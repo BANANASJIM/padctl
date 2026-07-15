@@ -36,24 +36,9 @@ const uhid_descriptor = @import("../io/uhid_descriptor.zig");
 const device_cfg = @import("../config/device.zig");
 const ioctl_constants = @import("../io/ioctl_constants.zig");
 const cleanup = @import("uhid_test_cleanup.zig");
+const gate = @import("uhid_gate.zig");
 
 const SHARED_UNIQ = "padctl/uniq-pair-test-0";
-
-fn requireUhid() bool {
-    const v = std.posix.getenv("PADCTL_TEST_REQUIRE_UHID") orelse return false;
-    return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
-}
-
-fn reportMissingUhid(reason: []const u8) error{ SkipZigTest, UhidAccessRequired } {
-    std.log.warn(
-        "uhid_uniq_pairing_test: /dev/uhid unavailable ({s}) — uniq pairing CI signal is SILENT. " ++
-            "Install udev rules via 'sudo ./zig-out/bin/padctl install' and reload udev, " ++
-            "or set PADCTL_TEST_REQUIRE_UHID=1 to turn this into a hard failure.",
-        .{reason},
-    );
-    if (requireUhid()) return error.UhidAccessRequired;
-    return error.SkipZigTest;
-}
 
 fn waitForEvdevNode(vid: u16, pid: u16, uniq: []const u8, timeout_ms: u32) !?[64]u8 {
     const start = std.time.milliTimestamp();
@@ -262,7 +247,7 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU" {
     // emit a loud warning so the gap is visible in logs rather than
     // silently passing.
     const probe = uhid.openUhid() catch |err| switch (err) {
-        error.SkipZigTest => return reportMissingUhid("openUhid returned SkipZigTest"),
+        error.SkipZigTest => return gate.reportMissingUhid("openUhid returned SkipZigTest"),
         else => |e| return e,
     };
     posix.close(probe);
@@ -300,9 +285,9 @@ test "uhid: EVIOCGUNIQ returns identical strings on a paired main-pad + IMU" {
 
     // Wait for evdev nodes to appear.
     const main_path = (try waitForEvdevNode(MAIN_VID, MAIN_PID, SHARED_UNIQ, 2000)) orelse
-        return reportMissingUhid("main-pad evdev node did not appear (input subsystem denied?)");
+        return gate.reportMissingUhid("main-pad evdev node did not appear (input subsystem denied?)");
     const imu_path = (try waitForEvdevNode(IMU_VID, IMU_PID, SHARED_UNIQ, 2000)) orelse
-        return reportMissingUhid("imu evdev node did not appear");
+        return gate.reportMissingUhid("imu evdev node did not appear");
 
     const main_path_len = std.mem.indexOfScalar(u8, &main_path, 0) orelse main_path.len;
     const imu_path_len = std.mem.indexOfScalar(u8, &imu_path, 0) orelse imu_path.len;

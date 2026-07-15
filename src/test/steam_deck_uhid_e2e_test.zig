@@ -34,6 +34,7 @@ const Interpreter = src.core.interpreter.Interpreter;
 // each source file belonging to exactly one module.
 const UhidSimulator = src.testing_support.uhid_simulator.UhidSimulator;
 const steam_deck = src.testing_support.steam_deck_fixture;
+const gate = src.testing_support.uhid_gate;
 
 test "steam_deck_fixture_round_trip: fixture + interpreter agree on Steam Deck TOML" {
     const allocator = testing.allocator;
@@ -112,12 +113,12 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
         .uniq = "padctl/deck-e2e-0",
         .descriptor = &descriptor,
     }) catch |err| switch (err) {
-        error.SkipZigTest, error.HidrawNotFound, error.AccessDenied => return error.SkipZigTest,
+        error.SkipZigTest, error.HidrawNotFound, error.AccessDenied => return gate.reportMissingUhid("UhidSimulator.create failed (/dev/uhid missing, EACCES, or hidraw node did not appear)"),
         else => |e| return e,
     };
     defer sim.destroy();
 
-    const hidraw_fd = sim.openHidraw() catch return error.SkipZigTest;
+    const hidraw_fd = sim.openHidraw() catch return gate.reportMissingUhid("openHidraw failed on the simulator's /dev/hidrawN node");
     defer posix.close(hidraw_fd);
 
     var gen = steam_deck.ReportGenerator{};
@@ -129,14 +130,14 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
 
     var pfd = [1]posix.pollfd{.{ .fd = hidraw_fd, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 500);
-    if (ready == 0) return error.SkipZigTest;
+    if (ready == 0) return gate.reportMissingUhid("no hidraw data within 500ms of injectReport (kernel too slow or delivery broken)");
 
     var buf: [128]u8 = undefined;
     const n = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
-    if (n < 16) return error.SkipZigTest;
+    if (n < 16) return gate.reportMissingUhid("truncated hidraw read (n < 16) — report not delivered intact");
 
     const delta_a = (try interp.processReport(2, buf[0..n])) orelse
-        return error.SkipZigTest;
+        return gate.reportMissingUhid("interpreter produced no delta from the delivered button report");
     const expected_a_mask: u64 = 1 << 0;
     try testing.expectEqual(expected_a_mask, delta_a.buttons.?);
 
@@ -146,12 +147,12 @@ test "steam_deck_uhid_end_to_end: simulator → hidraw → interpreter" {
 
     pfd[0].revents = 0;
     const ready2 = try posix.poll(&pfd, 500);
-    if (ready2 == 0) return error.SkipZigTest;
+    if (ready2 == 0) return gate.reportMissingUhid("no hidraw data within 500ms of stick injectReport (kernel too slow or delivery broken)");
     const n2 = posix.read(hidraw_fd, &buf) catch return error.SkipZigTest;
-    if (n2 < 56) return error.SkipZigTest;
+    if (n2 < 56) return gate.reportMissingUhid("truncated hidraw read (n < 56) — stick report not delivered intact");
 
     const delta_s = (try interp.processReport(2, buf[0..n2])) orelse
-        return error.SkipZigTest;
+        return gate.reportMissingUhid("interpreter produced no delta from the delivered stick report");
     try testing.expectEqual(@as(?i16, 100), delta_s.ax);
     try testing.expectEqual(@as(?i16, 100), delta_s.ay); // negated by TOML transform
 }

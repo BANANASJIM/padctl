@@ -41,6 +41,7 @@ const config_gen = src.testing_support.gen.config_gen;
 const sequence_gen = src.testing_support.gen.sequence_gen;
 const oracle_mod = src.testing_support.gen.mapper_oracle;
 const cleanup = src.testing_support.uhid_test_cleanup;
+const gate = src.testing_support.uhid_gate;
 
 // --- UHID kernel protocol ---
 
@@ -148,14 +149,14 @@ const AuxCapture = struct {
 
 fn openUhid() !posix.fd_t {
     return posix.open("/dev/uhid", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.AccessDenied, error.FileNotFound => return gate.reportMissingUhid("/dev/uhid open failed (missing or EACCES)"),
         else => return err,
     };
 }
 
 fn checkUinput() !void {
     const fd = posix.open("/dev/uinput", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-        error.AccessDenied, error.FileNotFound => return error.SkipZigTest,
+        error.AccessDenied, error.FileNotFound => return gate.reportMissingUinput("/dev/uinput open failed (missing or EACCES)"),
         else => return err,
     };
     posix.close(fd);
@@ -728,6 +729,9 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
     const allocator = testing.allocator;
 
     cleanup.ensureSignalHandlersInstalled();
+    // Gate on /dev/uhid first so PADCTL_TEST_REQUIRE_UHID fails fast before the
+    // /dev/uinput probe (governed by PADCTL_TEST_REQUIRE_UINPUT).
+    posix.close(try openUhid());
     try checkUinput();
     setupTestUdev();
 
@@ -1122,7 +1126,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         std.debug.print("OK [{s}] {d} frames, {d} events\n", .{ config_path, frames_verified, events_received });
     }
 
-    if (devices_tested == 0) return error.SkipZigTest;
+    if (devices_tested == 0) return gate.reportMissingUhid("no device config completed the UHID pipeline (all skipped)");
 
     // Fix 3: minimum coverage — at least half of configs must actually run
     try testing.expect(devices_tested >= paths.items.len / 2);
@@ -1137,6 +1141,9 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
     const allocator = testing.allocator;
 
     cleanup.ensureSignalHandlersInstalled();
+    // Gate on /dev/uhid first so PADCTL_TEST_REQUIRE_UHID fails fast before the
+    // /dev/uinput probe (governed by PADCTL_TEST_REQUIRE_UINPUT).
+    posix.close(try openUhid());
     try checkUinput();
     setupTestUdev();
 
@@ -1528,7 +1535,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         std.debug.print("OK [gen-ci={d}] {d} frames, {d} events\n", .{ ci, frames_verified, events_received });
     }
 
-    if (configs_tested == 0) return error.SkipZigTest;
+    if (configs_tested == 0) return gate.reportMissingUhid("no generated config completed the UHID pipeline (all skipped)");
 
     // Fix 6: coverage assertion for random configs
     try testing.expect(configs_tested > 0);

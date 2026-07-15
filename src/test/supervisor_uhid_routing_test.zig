@@ -17,8 +17,10 @@
 //! routing switch inside `init` is exercised directly — the prior tests
 //! would stay green even if that switch degenerated to always-uinput.
 //! Additional coverage at the `/dev/uhid` kernel level lives in the Layer 2
-//! integration tests (`supervisor_uhid_grace_integration_test.zig`,
-//! privilege-gated on `PADCTL_TEST_REQUIRE_UHID`).
+//! integration tests (`supervisor_uhid_grace_integration_test.zig`). Those
+//! tests skip when /dev/uhid is unavailable, but hard-fail (rather than
+//! silently skipping) when `PADCTL_TEST_REQUIRE_UHID=1` is set — the shared
+//! `uhid_gate.zig` policy the privileged e2e job enforces.
 
 const std = @import("std");
 const posix = std.posix;

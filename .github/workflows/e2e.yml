@@ -67,7 +67,10 @@ jobs:
           fi
       - name: Run e2e tests
         env:
+          # The L3 e2e pipeline exercises BOTH /dev/uhid (input) and /dev/uinput
+          # (output), so enforce both gates when the devices are accessible.
           PADCTL_TEST_REQUIRE_UHID: ${{ steps.uhid_probe.outputs.uhid_ok == 'true' && '1' || '0' }}
+          PADCTL_TEST_REQUIRE_UINPUT: ${{ steps.uinput_probe.outputs.uinput_ok == 'true' && '1' || '0' }}
         run: zig build test-e2e
       - name: Run integration tests (UHID + uinput)
         if: steps.uhid_probe.outputs.uhid_ok == 'true' || steps.uinput_probe.outputs.uinput_ok == 'true'
@@ -80,3 +83,33 @@ jobs:
         env:
           PADCTL_TEST_REQUIRE_UHID: "1"
         run: zig build test-uhid
+
+  # Negative proof for the PADCTL_TEST_REQUIRE_UHID gate. Runs in a plain
+  # (non-privileged, no /dev mount) container where /dev/uhid is absent, so
+  # PADCTL_TEST_REQUIRE_UHID=1 must turn the L3 e2e suite RED instead of
+  # silently SkipZigTest-ing to green. This step is RED on pre-gate main
+  # (test-e2e exits 0 via skips) and GREEN once the gate enforces. Kept as its
+  # own job so it can never poison the privileged `e2e` job's real device runs.
+  e2e-gate-proof:
+    name: e2e-gate-proof
+    runs-on: ubuntu-22.04
+    needs: [image-ref]
+    container:
+      image: ${{ needs.image-ref.outputs.ref }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert REQUIRE_UHID hard-fails when /dev/uhid is absent
+        run: |
+          set -uo pipefail
+          if [ -e /dev/uhid ]; then
+            echo "::error::/dev/uhid unexpectedly present in the unprivileged gate-proof container — cannot prove the gate"
+            exit 1
+          fi
+          if PADCTL_TEST_REQUIRE_UHID=1 zig build test-e2e; then
+            echo "::error::test-e2e exited 0 with PADCTL_TEST_REQUIRE_UHID=1 and no /dev/uhid — the gate is NOT enforcing (silent SkipZigTest regression)"
+            exit 1
+          fi
+          echo "OK: PADCTL_TEST_REQUIRE_UHID=1 turned the absent-/dev/uhid e2e run RED as required"
