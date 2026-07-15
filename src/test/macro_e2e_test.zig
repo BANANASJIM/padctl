@@ -782,3 +782,110 @@ test "macro #119: non-repeat macro unaffected (single-shot completion)" {
     _ = try m.apply(.{ .buttons = c_mask }, 4, t0 + 4 * ns_per_ms);
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
 }
+
+// --- F-2: completed macro / resolved gesture timer-staged taps survive a
+// same-frame layer transition. A layer active-state change used to zero
+// macro_timer_tap_pending / gesture_timer_tap_pending before the apply()
+// promotion block, silently dropping a tap staged by a macro that had already
+// finished (and was removed) at its timer expiry.
+
+test "macro F-2: completed macro timer-staged tap survives same-frame layer toggle" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\X = "macro:delayed_a"
+        \\
+        \\[[macro]]
+        \\name = "delayed_a"
+        \\steps = [
+        \\  { delay = 50 },
+        \\  { tap = "A" },
+        \\]
+        \\
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "LB"
+        \\activation = "toggle"
+        \\
+        \\[layer.remap]
+        \\Y = "KEY_F1"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const x_mask = btnMask(.X);
+    const lb_mask = btnMask(.LB);
+    const a_bit = btnMask(.A);
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000_000_000;
+
+    // Frame 1: X rising edge spawns the macro (delay step arms the timer); LB
+    // press only arms the toggle (toggle flips on release).
+    _ = try m.apply(.{ .buttons = x_mask | lb_mask }, 16, t0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    // Frame 2: X released, LB still held. Macro remains in-flight on its delay.
+    _ = try m.apply(.{ .buttons = lb_mask }, 4, t0 + 4 * ns_per_ms);
+
+    // Timer expiry: delay elapses, tap "A" runs, macro completes and is removed.
+    // The tap bit is staged for the next apply() promotion.
+    _ = m.onMacroTimerExpired(t0 + 60 * ns_per_ms);
+    try testing.expectEqual(a_bit, m.macro_timer_tap_pending);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+
+    // Frame 3: LB released -> toggle flips -> layer active_changed. The staged
+    // tap from the already-completed macro must survive to the promotion block.
+    const ev = try m.apply(.{ .buttons = 0 }, 4, t0 + 61 * ns_per_ms);
+    try testing.expectEqual(a_bit, ev.gamepad.buttons & a_bit);
+}
+
+// Guard (green before and after): a still-active repeat macro's staged tap is
+// discarded when the layer transition cancels that macro. This pins the
+// cancelled-macro semantics the fix must preserve.
+test "macro F-2 guard: still-active repeat macro's staged tap discarded on layer cancel" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\C = "macro:spam_a"
+        \\
+        \\[[macro]]
+        \\name = "spam_a"
+        \\repeat_delay_ms = 50
+        \\steps = [
+        \\  { tap = "A" },
+        \\]
+        \\
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "LB"
+        \\activation = "toggle"
+        \\
+        \\[layer.remap]
+        \\Y = "KEY_F1"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const c_mask = btnMask(.C);
+    const lb_mask = btnMask(.LB);
+    const a_bit = btnMask(.A);
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000_000_000;
+
+    // Frame 1: C spawns the repeat macro (first tap emitted immediately); LB arms toggle.
+    _ = try m.apply(.{ .buttons = c_mask | lb_mask }, 16, t0);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    // Frame 2: first tap release; macro still active awaiting restart.
+    _ = try m.apply(.{ .buttons = c_mask | lb_mask }, 4, t0 + 4 * ns_per_ms);
+
+    // Restart timer fires: macro restarts, stages a new tap while still active.
+    _ = m.onMacroTimerExpired(t0 + 50 * ns_per_ms);
+    try testing.expectEqual(a_bit, m.macro_timer_tap_pending);
+    try testing.expectEqual(@as(usize, 1), m.active_macros.items.len);
+
+    // Frame 3: LB released -> toggle flips -> layer cancels the active macro.
+    // Its staged tap belongs to a cancelled macro and must NOT reach output.
+    const ev = try m.apply(.{ .buttons = 0 }, 4, t0 + 51 * ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & a_bit);
+}
