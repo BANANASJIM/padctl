@@ -889,3 +889,79 @@ test "macro F-2 guard: still-active repeat macro's staged tap discarded on layer
     const ev = try m.apply(.{ .buttons = 0 }, 4, t0 + 51 * ns_per_ms);
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & a_bit);
 }
+
+// Guard (green before and after): when a HOLD layer DEACTIVATES, both
+// deactivation cancel paths must subtract the cancelled player's staged taps —
+// the waiting_for_release drain-then-cancel path (delay after
+// pause_for_release) and the plain not-waiting cancel path. Two macros with
+// distinct staged bits pin both sites.
+test "macro F-2 guard: layer deactivation subtracts staged taps of cancelled waiting and repeat macros" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\X = "macro:waiter"
+        \\C = "macro:spam_b"
+        \\
+        \\[[macro]]
+        \\name = "waiter"
+        \\steps = [
+        \\  { delay = 50 },
+        \\  { tap = "A" },
+        \\  "pause_for_release",
+        \\  { delay = 60000 },
+        \\]
+        \\
+        \\[[macro]]
+        \\name = "spam_b"
+        \\repeat_delay_ms = 50
+        \\steps = [
+        \\  { tap = "B" },
+        \\]
+        \\
+        \\[[layer]]
+        \\name = "combo"
+        \\trigger = "LB"
+        \\activation = "hold"
+        \\hold_timeout = 50
+        \\
+        \\[layer.remap]
+        \\Y = "KEY_F1"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const lb_mask = btnMask(.LB);
+    const x_mask = btnMask(.X);
+    const c_mask = btnMask(.C);
+    const a_bit = btnMask(.A);
+    const b_bit = btnMask(.B);
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000_000_000;
+
+    // LB pressed -> layer PENDING; mock timer expiry -> ACTIVE.
+    _ = try m.apply(.{ .buttons = lb_mask }, 16, t0);
+    _ = m.layer.onTimerExpired();
+    // Absorb the activation active_changed before spawning macros.
+    _ = try m.apply(.{ .buttons = lb_mask }, 4, t0 + ns_per_ms);
+
+    // Spawn both macros while the layer is active. waiter parks on its delay;
+    // spam_b taps B immediately and schedules a restart.
+    _ = try m.apply(.{ .buttons = lb_mask | x_mask | c_mask }, 4, t0 + 2 * ns_per_ms);
+    try testing.expectEqual(@as(usize, 2), m.active_macros.items.len);
+    _ = try m.apply(.{ .buttons = lb_mask | x_mask | c_mask }, 4, t0 + 3 * ns_per_ms);
+
+    // Timer expiry: waiter runs tap "A" then parks at pause_for_release
+    // (still active, waiting); spam_b restarts and stages another "B"
+    // (still active, not waiting). Both bits staged for promotion.
+    _ = m.onMacroTimerExpired(t0 + 60 * ns_per_ms);
+    try testing.expectEqual(a_bit | b_bit, m.macro_timer_tap_pending);
+    try testing.expectEqual(@as(usize, 2), m.active_macros.items.len);
+
+    // LB released -> hold layer DEACTIVATES, cancelling both macros. waiter's
+    // drain yields on the post-pause delay (waiting cancel path); spam_b takes
+    // the plain cancel path. Both staged bits must be discarded, not promoted.
+    const ev = try m.apply(.{ .buttons = 0 }, 4, t0 + 61 * ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & (a_bit | b_bit));
+    try testing.expectEqual(@as(u64, 0), m.macro_timer_tap_pending);
+    try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
+}
