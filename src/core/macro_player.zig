@@ -44,6 +44,12 @@ pub const MacroPlayer = struct {
     // for now_ns to reach this deadline before restarting from step_index = 0.
     // Same gating mechanism as next_step_eligible_at_ns.
     awaiting_restart_at_ns: ?i128,
+    // Tap bits this still-active player contributed to the mapper's
+    // macro_timer_tap_pending at its last timer expiry (e.g. repeat restarts).
+    // Used to distinguish a completed macro's staged tap (which must survive a
+    // same-frame layer transition) from a still-live player's staged tap (which
+    // is discarded when the layer cancels the player).
+    staged_timer_taps: u64 = 0,
 
     pub fn init(m: *const Macro, token: u32, src_idx: u6) MacroPlayer {
         return .{
