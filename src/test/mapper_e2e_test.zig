@@ -1045,3 +1045,46 @@ test "e2e gesture back-compat: chord array remap A=[KEY_LEFTMETA,KEY_1] unchange
     try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expectEqual(@as(usize, 0), ev.aux.len);
 }
+
+// --- F-2: a resolved gesture's timer-staged gamepad tap survives a same-frame
+// layer transition. The double-tap window expiring to a single tap stages the
+// tap bit; a layer active-state change on the next frame used to zero
+// gesture_timer_tap_pending before the apply() promotion block, dropping it.
+
+test "gesture F-2: resolved single-tap gamepad bit survives same-frame layer toggle" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "B", double = "X", double_ms = 250 }
+        \\
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "LB"
+        \\activation = "toggle"
+        \\
+        \\[layer.remap]
+        \\Y = "KEY_F1"
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const lb_mask = btnMask(.LB);
+    const b_bit = btnMask(.B);
+    const ns_per_ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000_000_000;
+
+    // Frame 1: A press (gesture wait_decide); LB press arms toggle.
+    _ = try m.apply(.{ .buttons = btnMask(.A) | lb_mask }, 16, t0);
+
+    // Frame 2: A release opens the double window; LB still held.
+    _ = try m.apply(.{ .buttons = lb_mask }, 16, t0 + 40 * ns_per_ms);
+
+    // Double window expires with no second press -> single tap "B" staged.
+    _ = m.onMacroTimerExpired(t0 + 300 * ns_per_ms);
+    try testing.expectEqual(b_bit, m.gesture_timer_tap_pending);
+
+    // Frame 3: LB released -> toggle flips -> layer active_changed. The resolved
+    // gesture's staged tap must survive to the promotion block.
+    const ev = try m.apply(.{ .buttons = 0 }, 16, t0 + 301 * ns_per_ms);
+    try testing.expectEqual(b_bit, ev.gamepad.buttons & b_bit);
+}
