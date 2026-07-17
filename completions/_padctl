@@ -1,0 +1,195 @@
+#compdef padctl
+
+local -a padctl_commands
+padctl_commands=(
+  'install:install padctl and its system integration'
+  'uninstall:remove installed padctl files'
+  'scan:list connected HID devices and config matches'
+  'list-mappings:list discovered mapping profiles'
+  'reload:reload device configs'
+  'switch:switch or re-apply a mapping'
+  'output-profile:list or persist a device output profile'
+  'status:show daemon status'
+  'devices:list connected devices through the daemon'
+  'doctor:print a self-contained diagnostic'
+  'dump:manage diagnostic logging'
+  'config:manage device and mapping configs'
+)
+
+_padctl_install() {
+  _arguments -s \
+    '--prefix[installation prefix]:directory:_directories' \
+    '--destdir[package staging root]:directory:_directories' \
+    '--immutable[use immutable OS placement]' \
+    '--no-immutable[force standard placement]' \
+    '*--mapping[mapping profile name]:mapping name:' \
+    '--force-mapping[overwrite existing mapping files]' \
+    '--force-binding[overwrite device bindings]' \
+    '--user-service[force user-scope service installation]' \
+    '--no-user-service[skip user service enable and start]' \
+    '--no-enable[skip systemctl enable]' \
+    '--no-start[skip systemctl start]' \
+    '--scope[installation scope]:scope:(system user package)' \
+    '(-h --help)'{-h,--help}'[show help]'
+}
+
+_padctl_uninstall() {
+  _arguments -s \
+    '--prefix[installation prefix]:directory:_directories' \
+    '--destdir[package staging root]:directory:_directories' \
+    '--immutable[also remove immutable-specific files]' \
+    '--no-immutable[force standard placement]' \
+    '*--mapping[mapping profile name]:mapping name:' \
+    '--scope[uninstallation scope]:scope:(system user package)' \
+    '(-h --help)'{-h,--help}'[show help]'
+}
+
+_padctl_scan() {
+  _arguments '--config-dir[device config directory]:directory:_directories' '(-h --help)'{-h,--help}'[show help]'
+}
+
+_padctl_reload() {
+  _arguments '--pid[daemon process id]:process id:' '(-h --help)'{-h,--help}'[show help]'
+}
+
+_padctl_switch() {
+  _arguments \
+    '--persist[persist mapping and config]' \
+    '--device[limit to a device]:device id:' \
+    '--socket[daemon socket]:socket path:_files' \
+    '1:mapping name:_guard "^-*" "mapping name"' \
+    '(-h --help)'{-h,--help}'[show help]'
+}
+
+_padctl_mapping_path() {
+  [[ $PREFIX == -* ]] && return 1
+  _files
+}
+
+_padctl_socket_command() {
+  _arguments '--socket[daemon socket]:socket path:_files' '(-h --help)'{-h,--help}'[show help]'
+}
+
+_padctl_output_profile() {
+  local context state line
+  local -a subcommands
+  subcommands=(
+    'list:show the final backend, protocol, and stick range'
+    'select:select an exact profile for a device'
+    'reset:clear the per-device selection'
+  )
+  _arguments -C \
+    '1:subcommand:->subcommand' \
+    '*::argument:->arguments' \
+    '(-h --help)'{-h,--help}'[show help]'
+  case $state in
+    subcommand) _describe 'output-profile subcommand' subcommands ;;
+    arguments)
+      case $line[1] in
+        list) _arguments '--device[device name]:device name:' '(-h --help)'{-h,--help}'[show help]' ;;
+        select) _arguments '1:profile name:_guard "^-*" "profile name"' '--device[device name]:device name:' '(-h --help)'{-h,--help}'[show help]' ;;
+        reset) _arguments '--device[device name]:device name:' '(-h --help)'{-h,--help}'[show help]' ;;
+      esac
+      ;;
+  esac
+}
+
+_padctl_dump() {
+  local context state line
+  local -a subcommands
+  subcommands=(
+    'enable:turn on diagnostic logging'
+    'disable:turn off diagnostic logging'
+    'status:show dump state and log information'
+    'export:export filtered logs'
+    'clear:delete all log files'
+  )
+  _arguments -C \
+    '1:subcommand:->subcommand' \
+    '*::argument:->arguments' \
+    '(-h --help)'{-h,--help}'[show help]'
+  case $state in
+    subcommand) _describe 'dump subcommand' subcommands ;;
+    arguments)
+      if [[ $line[1] == export ]]; then
+        _arguments \
+          '--period[time window such as 30m, 2h, or 1d]:duration:' \
+          '--socket[daemon socket]:socket path:_files' \
+          '-o[write to a file]:output file:_files' \
+          '(-h --help)'{-h,--help}'[show help]'
+      else
+        _arguments '--socket[daemon socket]:socket path:_files' '(-h --help)'{-h,--help}'[show help]'
+      fi
+      ;;
+  esac
+}
+
+_padctl_config() {
+  local context state line
+  local -a subcommands
+  subcommands=(
+    'list:list XDG-layer device and mapping configs'
+    'init:interactively create a mapping'
+    'edit:open and validate a mapping'
+    'test:preview live decoded input'
+  )
+  _arguments -C \
+    '1:subcommand:->subcommand' \
+    '*::argument:->arguments' \
+    '(-h --help)'{-h,--help}'[show help]'
+  case $state in
+    subcommand) _describe 'config subcommand' subcommands ;;
+    arguments)
+      case $line[1] in
+        list) _arguments '(-h --help)'{-h,--help}'[show help]' ;;
+        init) _arguments '--device[skip the device prompt]:device name:' '(-h --help)'{-h,--help}'[show help]' ;;
+        edit) _arguments '1:mapping name:_guard "^-*" "mapping name"' '(-h --help)'{-h,--help}'[show help]' ;;
+        test)
+          _arguments \
+            '--config[device config]:config file:_files' \
+            '--mapping[mapping config]:mapping file:_files' \
+            '--raw[show raw report bytes]' \
+            '1:mapping name or path:_padctl_mapping_path' \
+            '(-h --help)'{-h,--help}'[show help]'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_padctl() {
+  local context state line
+  _arguments -C \
+    '--config[device config TOML]:config file:_files' \
+    '--config-dir[discover device configs in a directory]:directory:_directories' \
+    '--mapping[mapping config TOML]:mapping file:_files' \
+    '*--validate[validate a config and exit]:config file:_files' \
+    '--pid-file[write the daemon PID]:PID file:_files' \
+    '--doc-gen[generate Markdown device reference]' \
+    '--output[documentation output directory]:directory:_directories' \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '(-V --version)'{-V,--version}'[show version]' \
+    '1:command:->command' \
+    '*::argument:->arguments'
+
+  case $state in
+    command)
+      _describe 'padctl command' padctl_commands
+      ;;
+    arguments)
+      case $line[1] in
+        install) _padctl_install ;;
+        uninstall) _padctl_uninstall ;;
+        scan|list-mappings) _padctl_scan ;;
+        reload) _padctl_reload ;;
+        switch) _padctl_switch ;;
+        output-profile) _padctl_output_profile ;;
+        status|devices|doctor) _padctl_socket_command ;;
+        dump) _padctl_dump ;;
+        config) _padctl_config ;;
+      esac
+      ;;
+  esac
+}
+
+_padctl "$@"

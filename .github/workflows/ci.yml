@@ -181,10 +181,22 @@ jobs:
           timeout 600 zig build ${{ matrix.zig_args }} test-safe --summary all 2>&1 | tee test-safe.log
           timeout 600 zig build ${{ matrix.zig_args }} check-fmt 2>&1 | tee check-fmt.log
 
+  shell-completions:
+    name: shell-completions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bash completion 2.11 and Zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bash-completion zsh util-linux
+      - name: Test Bash and Zsh completions
+        run: bash scripts/test-shell-completions.sh
+
   check:
     name: check
     runs-on: ubuntu-22.04
-    needs: [lean-oracle, check-matrix]
+    needs: [lean-oracle, check-matrix, shell-completions]
     if: ${{ always() }}
     steps:
       - name: Require lean-oracle and check matrix success
@@ -195,6 +207,10 @@ jobs:
           fi
           if [ "${{ needs.check-matrix.result }}" != "success" ]; then
             echo "check-matrix result: ${{ needs.check-matrix.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.shell-completions.result }}" != "success" ]; then
+            echo "shell-completions result: ${{ needs.shell-completions.result }}"
             exit 1
           fi
 

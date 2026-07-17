@@ -23,7 +23,10 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	./zig-out/bin/padctl install --destdir $(CURDIR)/debian/padctl --prefix /usr
+	mkdir -p $(CURDIR)/debian/padctl/usr/share/zsh/vendor-completions
+	mv $(CURDIR)/debian/padctl/usr/share/zsh/site-functions/_padctl \
+		$(CURDIR)/debian/padctl/usr/share/zsh/vendor-completions/_padctl
+	rmdir $(CURDIR)/debian/padctl/usr/share/zsh/site-functions
 
 override_dh_auto_test:
 	zig build test
-

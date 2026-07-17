@@ -56,6 +56,11 @@ package() {
     install -Dm644 install/padctl.conf \
         "${pkgdir}/usr/lib/modules-load.d/padctl.conf"
 
+    install -Dm644 completions/padctl.bash \
+        "${pkgdir}/usr/share/bash-completion/completions/padctl.bash"
+    install -Dm644 completions/_padctl \
+        "${pkgdir}/usr/share/zsh/site-functions/_padctl"
+
     while IFS= read -r -d '' toml; do
         install -Dm644 "${toml}" "${pkgdir}/usr/share/padctl/${toml}"
     done < <(find devices -name '*.toml' -print0)

@@ -716,8 +716,8 @@ fn printHelp() void {
 
 pub const help_text =
     \\Usage: padctl [options]
-    \\       padctl install [--prefix /usr] [--immutable] [--mapping <name>...]
-    \\       padctl uninstall [--prefix /usr] [--immutable] [--mapping <name>...]
+    \\       padctl install [--prefix /usr] [--immutable] [--scope system|user|package] [--mapping <name>...]
+    \\       padctl uninstall [--prefix /usr] [--immutable] [--scope system|user|package] [--mapping <name>...]
     \\       padctl scan [--config-dir <dir>]
     \\       padctl list-mappings [--config-dir <dir>]
     \\       padctl reload [--pid <pid>]
@@ -744,12 +744,14 @@ pub const help_text =
     \\    --no-user-service   Skip user-service enable/start (even under sudo)
     \\    --no-enable         Skip systemctl enable
     \\    --no-start          Skip systemctl start
+    \\    --scope <scope>     Installation scope: system, user, or package
     \\  uninstall             Remove installed files, stop and disable service
     \\    --prefix <dir>      Installation prefix (default: /usr)
     \\    --destdir <dir>     Staging root for package builds (default: "")
     \\    --no-immutable      Force standard uninstall even on detected immutable OS
     \\    --immutable         Also remove immutable-specific files from /etc/
     \\    --mapping <name>    Remove a specific mapping from /etc/padctl/mappings/ (repeatable)
+    \\    --scope <scope>     Uninstallation scope: system, user, or package
     \\  scan                  List connected HID devices and config match status
     \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
     \\  list-mappings         List discovered mapping profiles from XDG paths
