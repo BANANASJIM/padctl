@@ -667,6 +667,8 @@ pub const Mapper = struct {
             emit_state.dpad_y = 0;
         }
 
+        applyGamepadStickDeadzones(&emit_state, &left_cfg, &right_cfg);
+
         // gyro joystick mode: override or blend stick axes, suppress originals
         if (suppress_right_stick_gyro) {
             if (gyro_joy_x) |jx| emit_state.rx = if (gyro_blend_stick)
@@ -707,6 +709,7 @@ pub const Mapper = struct {
             masked_prev.dpad_x = 0;
             masked_prev.dpad_y = 0;
         }
+        applyGamepadStickDeadzones(&masked_prev, &left_cfg, &right_cfg);
 
         self.prev = self.state;
 
@@ -922,6 +925,7 @@ pub const Mapper = struct {
 
         const left_cfg = self.effectiveStickConfig(.left);
         const right_cfg = self.effectiveStickConfig(.right);
+        applyGamepadStickDeadzones(&emit_state, &left_cfg, &right_cfg);
         if (left_cfg.suppress_gamepad or !std.mem.eql(u8, left_cfg.mode, "gamepad")) {
             emit_state.ax = 0;
             emit_state.ay = 0;
@@ -1166,12 +1170,24 @@ fn resolveGyroAxis(axis: ?[]const u8, default: gyro.GyroAxis) gyro.GyroAxis {
 }
 
 fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {
+    const mode = mc.mode;
     return .{
-        .mode = mc.mode,
-        .deadzone = if (mc.deadzone) |v| @intCast(v) else 128,
+        .mode = mode,
+        .deadzone = if (mc.deadzone) |v| @intCast(v) else if (std.mem.eql(u8, mode, "gamepad")) 0 else 128,
         .sensitivity = if (mc.sensitivity) |v| @floatCast(v) else 1.0,
         .suppress_gamepad = mc.suppress_gamepad orelse false,
     };
+}
+
+fn applyGamepadStickDeadzones(gs: *GamepadState, left_cfg: *const stick.StickConfig, right_cfg: *const stick.StickConfig) void {
+    if (std.mem.eql(u8, left_cfg.mode, "gamepad")) {
+        gs.ax = stick.applyAxisDeadzone(gs.ax, left_cfg.deadzone);
+        gs.ay = stick.applyAxisDeadzone(gs.ay, left_cfg.deadzone);
+    }
+    if (std.mem.eql(u8, right_cfg.mode, "gamepad")) {
+        gs.rx = stick.applyAxisDeadzone(gs.rx, right_cfg.deadzone);
+        gs.ry = stick.applyAxisDeadzone(gs.ry, right_cfg.deadzone);
+    }
 }
 
 fn freeResolvedRemap(allocator: std.mem.Allocator, r: ResolvedRemap) void {
@@ -3035,6 +3051,57 @@ test "mapper: dt_ms propagation: stick mouse output scales with dt" {
     // 4 frames × dt=4 ≡ 1 frame × dt=16 in total motion budget
     const diff = @abs(total4 - total16);
     try testing.expect(diff <= 2);
+}
+
+test "mapper: issue 491 gamepad stick deadzone suppresses in-zone axes" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[stick.left]
+        \\mode = "gamepad"
+        \\deadzone = 32767
+        \\sensitivity = 1.0
+        \\
+        \\[stick.right]
+        \\mode = "gamepad"
+        \\deadzone = 32767
+        \\sensitivity = 1.0
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    _ = try m.apply(.{ .ax = 100, .ay = -100, .rx = 100, .ry = -100 }, 16, 0);
+    const in_zone = try m.apply(.{ .ax = 200, .ay = -200, .rx = 200, .ry = -200 }, 16, 0);
+    try testing.expectEqual(@as(i16, 0), in_zone.gamepad.ax);
+    try testing.expectEqual(@as(i16, 0), in_zone.gamepad.ay);
+    try testing.expectEqual(@as(i16, 0), in_zone.gamepad.rx);
+    try testing.expectEqual(@as(i16, 0), in_zone.gamepad.ry);
+    try testing.expectEqual(@as(i16, 0), in_zone.prev.ax);
+    try testing.expectEqual(@as(i16, 0), in_zone.prev.ay);
+    try testing.expectEqual(@as(i16, 0), in_zone.prev.rx);
+    try testing.expectEqual(@as(i16, 0), in_zone.prev.ry);
+
+    const boundary = try m.apply(.{ .ax = 32767, .ay = -32768, .rx = 32767, .ry = -32768 }, 16, 0);
+    try testing.expectEqual(@as(i16, 32767), boundary.gamepad.ax);
+    try testing.expectEqual(@as(i16, -32768), boundary.gamepad.ay);
+    try testing.expectEqual(@as(i16, 32767), boundary.gamepad.rx);
+    try testing.expectEqual(@as(i16, -32768), boundary.gamepad.ry);
+}
+
+test "mapper: issue 491 omitted gamepad deadzone preserves passthrough" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping("", allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const ev = try m.apply(.{ .ax = 100, .ay = -100, .rx = 100, .ry = -100 }, 16, 0);
+    try testing.expectEqual(@as(i16, 100), ev.gamepad.ax);
+    try testing.expectEqual(@as(i16, -100), ev.gamepad.ay);
+    try testing.expectEqual(@as(i16, 100), ev.gamepad.rx);
+    try testing.expectEqual(@as(i16, -100), ev.gamepad.ry);
 }
 
 test "mapper: dpad prev mask: suppress_dpad_hat applied to masked_prev" {

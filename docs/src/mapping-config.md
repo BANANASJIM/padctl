@@ -179,7 +179,7 @@ suppress_gamepad = true
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | string | `"gamepad"` | `"gamepad"`, `"mouse"`, or `"scroll"` |
-| `deadzone` | integer | — | Stick deadzone threshold |
+| `deadzone` | integer | `0` (`"gamepad"`), `128` (`"mouse"`/`"scroll"`) | Stick deadzone threshold. In `"gamepad"` mode, axis values with an absolute magnitude below this value are emitted as zero. |
 | `sensitivity` | float | — | Sensitivity multiplier |
 | `suppress_gamepad` | bool | — | Suppress gamepad axis output when in mouse/scroll mode |
 
