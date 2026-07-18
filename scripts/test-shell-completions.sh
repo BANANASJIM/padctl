@@ -118,13 +118,15 @@ if command -v zsh >/dev/null 2>&1; then
     ZDOTDIR=$tmp_dir zsh -f -c '
         fpath=("$1" $fpath)
         autoload -Uz compinit
-        compinit -D
+        # CI runners may add unrelated group-writable directories to fpath.
+        # Ignore those instead of trying to prompt from this non-interactive test.
+        compinit -D -i
         [[ ${_comps[padctl]-} == _padctl ]]
     ' zsh-test "$tmp_dir/zsh/site-functions"
     ZDOTDIR=$tmp_dir zsh -f -c '
         fpath=("$1" $fpath)
         autoload -Uz compinit
-        compinit -D
+        compinit -D -i
 
         # Load the autoloaded file once with harmless completion builtins.
         _arguments() { state=command }
@@ -167,7 +169,7 @@ if command -v zsh >/dev/null 2>&1; then
 
     if command -v script >/dev/null 2>&1 &&
         script --version 2>&1 | grep -Fq 'util-linux'; then
-        zle_setup='PROMPT=; RPROMPT=; unset zle_bracketed_paste; fpath=("$PADCTL_ZSH_FPATH" $fpath); autoload -Uz compinit; compinit -D; bindkey "^I" complete-word; _capture_completion_buffer() { local quoted=${(q)BUFFER}; BUFFER="print -r -- CAPTURE:$quoted"; zle accept-line; }; zle -N _capture_completion_buffer; bindkey "^Xx" _capture_completion_buffer'
+        zle_setup='PROMPT=; RPROMPT=; unset zle_bracketed_paste; fpath=("$PADCTL_ZSH_FPATH" $fpath); autoload -Uz compinit; compinit -D -i; bindkey "^I" complete-word; _capture_completion_buffer() { local quoted=${(q)BUFFER}; BUFFER="print -r -- CAPTURE:$quoted"; zle accept-line; }; zle -N _capture_completion_buffer; bindkey "^Xx" _capture_completion_buffer'
         zle_input=$zle_setup$'\n'
         zle_input+=$'padctl output-profile l\t\030x'
         zle_input+=$'padctl --pid-file /tmp/pid dump export --p\t\030x'
