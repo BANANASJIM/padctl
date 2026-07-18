@@ -323,7 +323,7 @@ padctl switch [name] [--device <id>]       # switch mapping; omit name to fall b
 padctl switch <name> --persist             # switch + copy to /etc/padctl/ for reboot persistence (sudo)
 padctl status [--socket <path>]            # show daemon status
 padctl devices [--socket <path>]           # list connected devices
-padctl list-mappings [--config-dir <dir>]  # list available mapping profiles
+padctl list-mappings [--config-dir <dir>] [--names]  # list profiles; --names is one name per line
 padctl output-profile list [--device <name>]  # compare device output identities/protocols
 padctl output-profile select <name> --device <name>  # save a per-device output profile
 padctl output-profile reset --device <name>  # return to the device default output

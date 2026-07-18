@@ -3,6 +3,10 @@ const mapping_discovery = @import("../config/mapping_discovery.zig");
 const MappingProfile = mapping_discovery.MappingProfile;
 const Source = mapping_discovery.Source;
 
+fn lessProfileName(_: void, a: MappingProfile, b: MappingProfile) bool {
+    return std.mem.lessThan(u8, a.name, b.name);
+}
+
 fn padRight(buf: []u8, s: []const u8, width: usize) []const u8 {
     const len = @min(s.len, width);
     @memcpy(buf[0..len], s[0..len]);
@@ -76,9 +80,38 @@ pub fn run(allocator: std.mem.Allocator, extra_dir: ?[]const u8, writer: anytype
     try writer.print("\n{d} mapping(s) found.\n", .{profiles.len});
 }
 
+fn writeNames(profiles: []MappingProfile, writer: anytype) !void {
+    std.mem.sort(MappingProfile, profiles, {}, lessProfileName);
+    for (profiles) |profile| {
+        if (std.mem.indexOfScalar(u8, profile.name, '\n') != null) continue;
+        try writer.print("{s}\n", .{profile.name});
+    }
+}
+
+/// Stable, machine-readable mapping names for shell completion and scripts.
+/// Names are sorted and emitted one per line; table headers and summaries are
+/// intentionally omitted so callers never need to parse the human display.
+pub fn runNames(allocator: std.mem.Allocator, writer: anytype) !void {
+    const profiles = try mapping_discovery.discoverMappings(allocator);
+    defer mapping_discovery.freeProfiles(allocator, profiles);
+    try writeNames(profiles, writer);
+}
+
 // --- tests ---
 
 test "list_mappings: smoke (no panic)" {
     const allocator = std.testing.allocator;
     run(allocator, null, std.io.null_writer) catch {};
+}
+
+test "list_mappings: machine-readable names are sorted without table output" {
+    var profiles = [_]MappingProfile{
+        .{ .name = "racing", .path = "/tmp/racing.toml", .source = .system },
+        .{ .name = "arcade", .path = "/tmp/arcade.toml", .source = .user },
+    };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeNames(&profiles, &output.writer);
+    try std.testing.expectEqualStrings("arcade\nracing\n", output.written());
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "SOURCE") == null);
 }

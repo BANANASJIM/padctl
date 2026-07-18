@@ -177,7 +177,7 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | `padctl status` | Show daemon state and active devices |
 | `padctl doctor` | Diagnose daemon, service, and device problems with next-step hints |
 | `padctl devices` | List detected HID/USB devices |
-| `padctl list-mappings` | Show available mapping profiles |
+| `padctl list-mappings [--names]` | Show available mapping profiles; `--names` emits one name per line for scripts |
 | `padctl switch <name>` | Switch to a named mapping profile |
 | `padctl output-profile list [--device <name>]` | Compare virtual output identities and protocols |
 | `padctl output-profile select <profile> --device <name>` | Save a per-device output profile |

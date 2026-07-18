@@ -2,15 +2,36 @@
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$repo_root/scripts/generate-shell-completions.py" --check
+    mapfile -t public_commands < <(
+        python3 -c 'import json, sys; print("\n".join(command["name"] for command in json.load(open(sys.argv[1]))["commands"]))' \
+            "$repo_root/completions/spec.json"
+    )
+else
+    printf '%s\n' 'SKIP: python3 is not installed; generated-file drift check not run'
+    public_commands=(
+        install uninstall scan list-mappings reload switch output-profile status
+        devices doctor dump config
+    )
+fi
+
+mkdir -p "$tmp_dir/bin"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ $1 == list-mappings && $2 == --names ]]; then' \
+    '    printf '\''%s\n'\'' racing vader5' \
+    'fi' >"$tmp_dir/bin/padctl"
+chmod +x "$tmp_dir/bin/padctl"
+PATH="$tmp_dir/bin:$PATH"
 
 bash -n "$repo_root/completions/padctl.bash"
 # shellcheck source=/dev/null
 source "$repo_root/completions/padctl.bash"
 
-public_commands=(
-    install uninstall scan list-mappings reload switch output-profile status
-    devices doctor dump config
-)
 for command_name in "${public_commands[@]}"; do
     grep -Fq "\"$command_name\"" "$repo_root/src/main.zig"
     grep -Fq "$command_name" "$repo_root/completions/padctl.bash"
@@ -23,8 +44,8 @@ if grep -Eq -- '--[[:alnum:]-]+=\[' "$repo_root/completions/_padctl"; then
     printf '%s\n' 'Zsh specs must complete option values as separate arguments, not --option=' >&2
     exit 1
 fi
-grep -Fq '_guard "^-*"' "$repo_root/completions/_padctl"
-grep -Fq '_padctl_mapping_path' "$repo_root/completions/_padctl"
+grep -Fq '_padctl_mapping_names' "$repo_root/completions/_padctl"
+grep -Fq '_padctl_mapping_or_file' "$repo_root/completions/_padctl"
 ! grep -Fq 'setup-test-udev' "$repo_root/completions/padctl.bash"
 ! grep -Fq 'setup-test-udev' "$repo_root/completions/_padctl"
 
@@ -57,6 +78,9 @@ contains system
 contains user
 contains package
 
+complete_case padctl install --scope=u
+contains --scope=user
+
 complete_case padctl config ""
 contains list
 contains init
@@ -82,13 +106,30 @@ contains --raw
 complete_case padctl --pid-file /tmp/pid output-profile select --d
 contains --device
 
-tmp_dir=$(mktemp -d)
-trap 'rm -rf "$tmp_dir"' EXIT
 touch "$tmp_dir/device.toml"
 complete_case padctl --config "$tmp_dir/dev"
 contains "$tmp_dir/device.toml"
 
-if [[ -r /usr/share/bash-completion/bash_completion ]]; then
+complete_case padctl --config="$tmp_dir/dev"
+contains --config="$tmp_dir/device.toml"
+
+complete_case padctl switch ra
+contains racing
+
+complete_case padctl config edit va
+contains vader5
+
+complete_case padctl config test ra
+contains racing
+
+complete_case padctl config test "$tmp_dir/dev"
+contains "$tmp_dir/device.toml"
+
+complete_case padctl config test --mapping va
+contains vader5
+
+bash_completion_file=${PADCTL_BASH_COMPLETION_FILE:-/usr/share/bash-completion/bash_completion}
+if [[ -r $bash_completion_file ]]; then
     mkdir -p "$tmp_dir/home" "$tmp_dir/xdg/bash-completion/completions"
     cp "$repo_root/completions/padctl.bash" \
         "$tmp_dir/xdg/bash-completion/completions/padctl.bash"
@@ -96,11 +137,16 @@ if [[ -r /usr/share/bash-completion/bash_completion ]]; then
         PATH="$PATH" \
         HOME="$tmp_dir/home" \
         XDG_DATA_HOME="$tmp_dir/xdg" \
+        PADCTL_BASH_COMPLETION_FILE="$bash_completion_file" \
+        PADCTL_BASH_COMPLETION_EXPECTED="${PADCTL_BASH_COMPLETION_EXPECTED:-}" \
         bash --noprofile --norc -c '
             set -e
-            source /usr/share/bash-completion/bash_completion
-            [[ ${BASH_COMPLETION_VERSINFO[0]} -eq 2 ]]
-            [[ ${BASH_COMPLETION_VERSINFO[1]} -eq 11 ]]
+            source "$PADCTL_BASH_COMPLETION_FILE"
+            if [[ -n $PADCTL_BASH_COMPLETION_EXPECTED ]]; then
+                IFS=. read -r expected_major expected_minor <<< "$PADCTL_BASH_COMPLETION_EXPECTED"
+                [[ ${BASH_COMPLETION_VERSINFO[0]} -eq $expected_major ]]
+                [[ ${BASH_COMPLETION_VERSINFO[1]} -eq $expected_minor ]]
+            fi
             loader_rc=0
             _completion_loader padctl || loader_rc=$?
             [[ $loader_rc -eq 124 ]]
@@ -112,6 +158,9 @@ else
 fi
 
 if command -v zsh >/dev/null 2>&1; then
+    if [[ -n ${PADCTL_ZSH_VERSION_EXPECTED:-} ]]; then
+        [[ $(zsh --version) == "zsh $PADCTL_ZSH_VERSION_EXPECTED"* ]]
+    fi
     zsh -n "$repo_root/completions/_padctl"
     mkdir -p "$tmp_dir/zsh/site-functions"
     cp "$repo_root/completions/_padctl" "$tmp_dir/zsh/site-functions/_padctl"
@@ -175,6 +224,7 @@ if command -v zsh >/dev/null 2>&1; then
         zle_input+=$'padctl --pid-file /tmp/pid dump export --p\t\030x'
         zle_input+=$'padctl config test --m\t\030x'
         zle_input+=$'padctl config list --h\t\030x'
+        zle_input+=$'padctl switch ra\t\030x'
         zle_input+=$'exit\n'
 
         if ! zle_output=$(
@@ -192,7 +242,7 @@ if command -v zsh >/dev/null 2>&1; then
                 tr -d '\r' |
                 grep '^CAPTURE:' || true
         )
-        expected_captures=$'CAPTURE:padctl output-profile list\x20\nCAPTURE:padctl --pid-file /tmp/pid dump export --period\x20\nCAPTURE:padctl config test --mapping\x20\nCAPTURE:padctl config list --help\x20'
+        expected_captures=$'CAPTURE:padctl output-profile list\x20\nCAPTURE:padctl --pid-file /tmp/pid dump export --period\x20\nCAPTURE:padctl config test --mapping\x20\nCAPTURE:padctl config list --help\x20\nCAPTURE:padctl switch racing\x20'
         if [[ $zle_captures != "$expected_captures" ]]; then
             printf '%s\n' 'unexpected real Zsh completion buffers:' >&2
             printf 'expected:\n%s\nactual:\n%s\n' "$expected_captures" "$zle_captures" >&2

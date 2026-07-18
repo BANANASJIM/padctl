@@ -182,15 +182,46 @@ jobs:
           timeout 600 zig build ${{ matrix.zig_args }} check-fmt 2>&1 | tee check-fmt.log
 
   shell-completions:
-    name: shell-completions
-    runs-on: ubuntu-22.04
+    name: shell-completions / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: bash-completion-2.11-zsh-5.8
+            os: ubuntu-22.04
+            bash_completion_version: "2.11"
+            bash_completion_file: /usr/share/bash-completion/bash_completion
+            zsh_version: "5.8"
+            upstream: false
+          - name: bash-completion-2.18-zsh-5.9
+            os: ubuntu-24.04
+            bash_completion_version: "2.18"
+            bash_completion_file: /tmp/bash-completion-2.18/share/bash-completion/bash_completion
+            zsh_version: "5.9"
+            upstream: true
     steps:
       - uses: actions/checkout@v4
-      - name: Install Bash completion 2.11 and Zsh
+      - name: Install shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bash-completion zsh util-linux
+          sudo apt-get install -y --no-install-recommends bash-completion curl make xz-utils zsh util-linux
+      - name: Install Bash completion 2.18.0
+        if: matrix.upstream
+        run: |
+          curl -fsSLo /tmp/bash-completion-2.18.0.tar.xz \
+            https://github.com/scop/bash-completion/releases/download/2.18.0/bash-completion-2.18.0.tar.xz
+          echo '88bcf85124f77f74f2f2f8bcd16ac4382d807a827ede742a64940c7116aea33f  /tmp/bash-completion-2.18.0.tar.xz' | sha256sum -c -
+          tar -C /tmp -xf /tmp/bash-completion-2.18.0.tar.xz
+          cd /tmp/bash-completion-2.18.0
+          ./configure --prefix=/tmp/bash-completion-2.18
+          make -j2
+          make install
       - name: Test Bash and Zsh completions
+        env:
+          PADCTL_BASH_COMPLETION_EXPECTED: ${{ matrix.bash_completion_version }}
+          PADCTL_BASH_COMPLETION_FILE: ${{ matrix.bash_completion_file }}
+          PADCTL_ZSH_VERSION_EXPECTED: ${{ matrix.zsh_version }}
         run: bash scripts/test-shell-completions.sh
 
   check:

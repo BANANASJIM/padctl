@@ -241,6 +241,18 @@ pub fn build(b: *std.Build) void {
     smoke_validate.addCheck(.{ .expect_stdout_match = ": OK" });
     test_step.dependOn(&smoke_validate.step);
 
+    const smoke_validate_inline = b.addRunArtifact(exe);
+    smoke_validate_inline.addArg("--validate=devices/sony/dualsense.toml");
+    smoke_validate_inline.addFileInput(b.path("devices/sony/dualsense.toml"));
+    smoke_validate_inline.expectExitCode(0);
+    smoke_validate_inline.addCheck(.{ .expect_stdout_match = ": OK" });
+    test_step.dependOn(&smoke_validate_inline.step);
+
+    const smoke_mapping_names = b.addRunArtifact(exe);
+    smoke_mapping_names.addArgs(&.{ "list-mappings", "--names" });
+    smoke_mapping_names.expectExitCode(0);
+    test_step.dependOn(&smoke_mapping_names.step);
+
     // test-integration: Layer 2 (UHID, requires privilege)
     const integration_step = b.step("test-integration", "Run Layer 2 integration tests (UHID, local)");
     const integ_mod = b.createModule(.{
