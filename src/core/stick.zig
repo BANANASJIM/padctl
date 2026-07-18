@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const StickConfig = struct {
     mode: []const u8 = "gamepad", // "gamepad" | "mouse" | "scroll"
-    deadzone: i16 = 128,
+    deadzone: i16 = 0,
     sensitivity: f32 = 1.0,
     suppress_gamepad: bool = false,
 };
@@ -77,8 +77,12 @@ pub const StickProcessor = struct {
 };
 
 fn applyDeadzone(val: i16, deadzone: i16) f32 {
+    return @floatFromInt(applyAxisDeadzone(val, deadzone));
+}
+
+pub fn applyAxisDeadzone(val: i16, deadzone: i16) i16 {
     if (@abs(@as(i32, val)) < deadzone) return 0;
-    return @floatFromInt(val);
+    return val;
 }
 
 // --- tests ---
