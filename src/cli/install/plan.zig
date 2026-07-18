@@ -52,10 +52,18 @@ pub fn shouldAbortForImmutable(kind: ImmutableKind, opts: InstallOptions) bool {
     return kind != .none and !opts.immutable and !opts.no_immutable;
 }
 
-pub fn resolveServiceDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8, immutable: bool, user_service: bool) ![]const u8 {
+pub fn resolveServiceDir(
+    allocator: std.mem.Allocator,
+    destdir: []const u8,
+    prefix: []const u8,
+    immutable: bool,
+    user_service: bool,
+    home: ?[]const u8,
+) ![]const u8 {
     if (user_service) {
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
-        return std.fmt.allocPrint(allocator, "{s}{s}/.config/systemd/user", .{ destdir, home });
+        const user_home = home orelse return error.NoHomeDir;
+        if (user_home.len == 0) return error.NoHomeDir;
+        return std.fmt.allocPrint(allocator, "{s}{s}/.config/systemd/user", .{ destdir, user_home });
     }
     if (immutable) {
         return std.fmt.allocPrint(allocator, "{s}/etc/systemd/user", .{destdir});
@@ -73,6 +81,31 @@ pub fn resolveUdevDir(allocator: std.mem.Allocator, destdir: []const u8, prefix:
         return std.fmt.allocPrint(allocator, "{s}/etc/udev/rules.d", .{destdir});
     }
     return std.fmt.allocPrint(allocator, "{s}{s}/lib/udev/rules.d", .{ destdir, prefix });
+}
+
+pub fn resolveBashCompletionDir(
+    allocator: std.mem.Allocator,
+    destdir: []const u8,
+    prefix: []const u8,
+    scope: LifecycleScope,
+    home: ?[]const u8,
+    xdg_data_home: ?[]const u8,
+) ![]const u8 {
+    if (scope == .user) {
+        if (xdg_data_home) |data_home| {
+            if (data_home.len != 0 and std.fs.path.isAbsolute(data_home)) {
+                return std.fmt.allocPrint(allocator, "{s}/bash-completion/completions", .{data_home});
+            }
+        }
+        const user_home = home orelse return error.NoHomeDir;
+        if (user_home.len == 0) return error.NoHomeDir;
+        return std.fmt.allocPrint(allocator, "{s}/.local/share/bash-completion/completions", .{user_home});
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}/share/bash-completion/completions", .{ destdir, prefix });
+}
+
+pub fn resolveZshCompletionDir(allocator: std.mem.Allocator, destdir: []const u8, prefix: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}{s}/share/zsh/site-functions", .{ destdir, prefix });
 }
 
 pub fn writeAll(fd: std.posix.fd_t, s: []const u8) void {
@@ -293,6 +326,7 @@ pub const EnvSnapshot = struct {
     sudo_uid: ?[]const u8,
     install_phase: ?[]const u8 = null,
     destdir_env: ?[]const u8 = null,
+    xdg_data_home: ?[]const u8 = null,
 
     pub fn fromProcess() EnvSnapshot {
         return .{
@@ -302,6 +336,7 @@ pub const EnvSnapshot = struct {
             .sudo_uid = std.posix.getenv("SUDO_UID"),
             .install_phase = std.posix.getenv("PADCTL_INSTALL_PHASE"),
             .destdir_env = std.posix.getenv("DESTDIR"),
+            .xdg_data_home = std.posix.getenv("XDG_DATA_HOME"),
         };
     }
 };
@@ -337,6 +372,8 @@ pub const InstallPlan = struct {
     service_dir: []const u8,
     share_dir: []const u8,
     udev_dir: []const u8,
+    bash_completion_dir: []const u8,
+    zsh_completion_dir: []const u8,
 
     /// True iff this plan describes a staged package build. Single chokepoint
     /// for "skip live runtime touch" decisions.
@@ -403,17 +440,37 @@ pub const InstallPlan = struct {
         var service_dir: []const u8 = &.{};
         var share_dir: []const u8 = &.{};
         var udev_dir: []const u8 = &.{};
+        var bash_completion_dir: []const u8 = &.{};
+        var zsh_completion_dir: []const u8 = &.{};
         errdefer {
             if (bin_dir.len != 0) allocator.free(bin_dir);
             if (service_dir.len != 0) allocator.free(service_dir);
             if (share_dir.len != 0) allocator.free(share_dir);
             if (udev_dir.len != 0) allocator.free(udev_dir);
+            if (bash_completion_dir.len != 0) allocator.free(bash_completion_dir);
+            if (zsh_completion_dir.len != 0) allocator.free(zsh_completion_dir);
         }
 
         bin_dir = try std.fmt.allocPrint(allocator, "{s}{s}/bin", .{ destdir, prefix });
-        service_dir = try resolveServiceDir(allocator, destdir, prefix, effective_immutable, effective_user_service);
+        service_dir = try resolveServiceDir(
+            allocator,
+            destdir,
+            prefix,
+            effective_immutable,
+            effective_user_service,
+            env.home,
+        );
         share_dir = try std.fmt.allocPrint(allocator, "{s}{s}/share/padctl/devices", .{ destdir, prefix });
         udev_dir = try resolveUdevDir(allocator, destdir, prefix, effective_immutable);
+        bash_completion_dir = try resolveBashCompletionDir(
+            allocator,
+            destdir,
+            prefix,
+            scope,
+            env.home,
+            env.xdg_data_home,
+        );
+        zsh_completion_dir = try resolveZshCompletionDir(allocator, destdir, prefix);
 
         return .{
             .opts = opts,
@@ -435,6 +492,8 @@ pub const InstallPlan = struct {
             .service_dir = service_dir,
             .share_dir = share_dir,
             .udev_dir = udev_dir,
+            .bash_completion_dir = bash_completion_dir,
+            .zsh_completion_dir = zsh_completion_dir,
         };
     }
 
@@ -443,5 +502,7 @@ pub const InstallPlan = struct {
         allocator.free(self.service_dir);
         allocator.free(self.share_dir);
         allocator.free(self.udev_dir);
+        allocator.free(self.bash_completion_dir);
+        allocator.free(self.zsh_completion_dir);
     }
 };

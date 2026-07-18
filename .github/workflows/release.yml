@@ -153,7 +153,7 @@ jobs:
         run: |
           ARCHIVE=padctl-${TAG}-${TARGET}.tar.gz
           STAGING=padctl-${TAG}-${TARGET}
-          mkdir -p "${STAGING}/bin" "${STAGING}/install"
+          mkdir -p "${STAGING}/bin" "${STAGING}/install" "${STAGING}/completions"
           for bin in padctl padctl-capture padctl-debug; do
             [ -f "zig-out/bin/${bin}" ] && cp "zig-out/bin/${bin}" "${STAGING}/bin/"
           done
@@ -162,6 +162,8 @@ jobs:
           cp staging/usr/lib/modules-load.d/padctl.conf "${STAGING}/install/padctl.conf"
           [ -f staging/usr/bin/padctl-reconnect ] && cp staging/usr/bin/padctl-reconnect "${STAGING}/install/"
           [ -f staging/usr/bin/padctl-reconnect-launch ] && cp staging/usr/bin/padctl-reconnect-launch "${STAGING}/install/"
+          cp staging/usr/share/bash-completion/completions/padctl.bash "${STAGING}/completions/"
+          cp staging/usr/share/zsh/site-functions/_padctl "${STAGING}/completions/"
           cp -r devices "${STAGING}/"
           cp LICENSE README.md "${STAGING}/"
           tar czf "${ARCHIVE}" "${STAGING}"
@@ -223,7 +225,9 @@ jobs:
 
           mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/user" \
                    "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/lib/modules-load.d" \
-                   "${DEST}/usr/share/padctl" "${DEST}/usr/share/doc/padctl"
+                   "${DEST}/usr/share/padctl" "${DEST}/usr/share/doc/padctl" \
+                   "${DEST}/usr/share/bash-completion/completions" \
+                   "${DEST}/usr/share/zsh/vendor-completions"
 
           for bin in padctl padctl-capture padctl-debug padctl-reconnect padctl-reconnect-launch; do
             [ -f "${SRC}/bin/${bin}" ] && install -Dm755 "${SRC}/bin/${bin}" "${DEST}/usr/bin/${bin}"
@@ -234,6 +238,8 @@ jobs:
           cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/user/"
           cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
           install -Dm644 "${SRC}/install/padctl.conf" "${DEST}/usr/lib/modules-load.d/padctl.conf"
+          install -Dm644 "${SRC}/completions/padctl.bash" "${DEST}/usr/share/bash-completion/completions/padctl.bash"
+          install -Dm644 "${SRC}/completions/_padctl" "${DEST}/usr/share/zsh/vendor-completions/_padctl"
 
           cp -r "${SRC}/devices" "${DEST}/usr/share/padctl/"
           install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
@@ -286,6 +292,8 @@ jobs:
             test -d /usr/share/padctl/devices/
             test -f /usr/lib/udev/rules.d/90-padctl.rules
             test -f /usr/lib/modules-load.d/padctl.conf
+            test -f /usr/share/bash-completion/completions/padctl.bash
+            test -f /usr/share/zsh/vendor-completions/_padctl
             grep -qx uhid /usr/lib/modules-load.d/padctl.conf
             grep -qx uinput /usr/lib/modules-load.d/padctl.conf
           "

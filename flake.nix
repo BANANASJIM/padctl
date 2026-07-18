@@ -27,6 +27,12 @@
             src = ./.;
             inherit zigTarget;
             zigBuildFlags = [ "-Doptimize=ReleaseSafe" ];
+            postInstall = ''
+              install -Dm644 completions/padctl.bash \
+                $out/share/bash-completion/completions/padctl.bash
+              install -Dm644 completions/_padctl \
+                $out/share/zsh/site-functions/_padctl
+            '';
             meta = {
               description = "HID gamepad remapper — declarative TOML config, uinput output";
               homepage = "https://github.com/BANANASJIM/padctl";

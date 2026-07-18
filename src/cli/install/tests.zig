@@ -9,6 +9,7 @@ const udev_mod = @import("udev.zig");
 const migration_mod = @import("migration.zig");
 const mappings_mod = @import("mappings.zig");
 const phase_mod = @import("phase.zig");
+const completions_mod = @import("completions.zig");
 const user_config_mod = @import("../../config/user_config.zig");
 const paths = @import("../../config/paths.zig");
 const toml_extract = @import("../toml_extract.zig");
@@ -626,7 +627,7 @@ test "install: resolveServiceDir immutable routes to /etc/systemd/user" {
     // installs.
     const testing = std.testing;
     const allocator = testing.allocator;
-    const result = try resolveServiceDir(allocator, "/staging", "/usr/local", true, false);
+    const result = try resolveServiceDir(allocator, "/staging", "/usr/local", true, false, null);
     defer allocator.free(result);
     try testing.expectEqualStrings("/staging/etc/systemd/user", result);
 }
@@ -634,7 +635,7 @@ test "install: resolveServiceDir immutable routes to /etc/systemd/user" {
 test "install: resolveServiceDir /usr non-immutable routes to /usr/lib/systemd/user" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const result = try resolveServiceDir(allocator, "", "/usr", false, false);
+    const result = try resolveServiceDir(allocator, "", "/usr", false, false, null);
     defer allocator.free(result);
     try testing.expectEqualStrings("/usr/lib/systemd/user", result);
 }
@@ -2666,7 +2667,7 @@ test "install: resolveServiceDir user service uses HOME" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
-    const dir = try resolveServiceDir(allocator, "", "/usr", false, true);
+    const dir = try resolveServiceDir(allocator, "", "/usr", false, true, home);
     defer allocator.free(dir);
     const expected = try std.fmt.allocPrint(allocator, "{s}/.config/systemd/user", .{home});
     defer allocator.free(expected);
@@ -2676,7 +2677,7 @@ test "install: resolveServiceDir user service uses HOME" {
 test "install: resolveServiceDir system install uses user lib path" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const dir = try resolveServiceDir(allocator, "", "/usr", false, false);
+    const dir = try resolveServiceDir(allocator, "", "/usr", false, false, null);
     defer allocator.free(dir);
     try testing.expectEqualStrings("/usr/lib/systemd/user", dir);
 }
@@ -2684,7 +2685,7 @@ test "install: resolveServiceDir system install uses user lib path" {
 test "install: resolveServiceDir non-usr prefix falls back to /etc/systemd/user" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const result = try resolveServiceDir(allocator, "", "/usr/local", false, false);
+    const result = try resolveServiceDir(allocator, "", "/usr/local", false, false, null);
     defer allocator.free(result);
     try testing.expectEqualStrings("/etc/systemd/user", result);
 }
@@ -3179,10 +3180,7 @@ test "install: InstallPlan case E — root + explicit --user-service" {
     const testing = std.testing;
     const opts = InstallOptions{ .user_service = true };
     const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
-    // Save existing HOME, set it to a tmpdir so resolveServiceDir succeeds; restore after.
-    // resolveServiceDir needs HOME to be present when user_service=true.
-    const saved_home = std.posix.getenv("HOME");
-    _ = saved_home;
+    // Explicit EnvSnapshot.home keeps this pure and independent of process HOME.
     const plan = try InstallPlan.compute(testing.allocator, opts, env);
     defer plan.deinit(testing.allocator);
     try testing.expect(plan.effective_user_service);
@@ -4498,4 +4496,250 @@ test "install: verify gate on reachable bus + dead daemon returns DaemonNotRespo
     // reaches the poll/error path even against the same dead socket.
     const deferred = services_mod.StartOutcome{ .start_attempted = true, .start_ran = false };
     try testing.expect(phase_mod.verifyGateAction(true, deferred) != .verify);
+}
+
+// ---------------------------------------------------------------------------
+// Shell completion installation
+// ---------------------------------------------------------------------------
+
+test "plan: completion directories cover package, system, and user XDG paths" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    {
+        const opts = InstallOptions{ .prefix = "/usr", .destdir = "/tmp/padctl-completion-stage" };
+        const env = EnvSnapshot{ .uid = 0, .home = null, .sudo_user = null, .sudo_uid = null };
+        var plan = try InstallPlan.compute(allocator, opts, env);
+        defer plan.deinit(allocator);
+        try testing.expectEqualStrings(
+            "/tmp/padctl-completion-stage/usr/share/bash-completion/completions",
+            plan.bash_completion_dir,
+        );
+        try testing.expectEqualStrings(
+            "/tmp/padctl-completion-stage/usr/share/zsh/site-functions",
+            plan.zsh_completion_dir,
+        );
+    }
+
+    {
+        const opts = InstallOptions{ .prefix = "/opt/padctl", .scope = .system };
+        const env = EnvSnapshot{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null };
+        var plan = try InstallPlan.compute(allocator, opts, env);
+        defer plan.deinit(allocator);
+        try testing.expectEqualStrings(
+            "/opt/padctl/share/bash-completion/completions",
+            plan.bash_completion_dir,
+        );
+        try testing.expectEqualStrings(
+            "/opt/padctl/share/zsh/site-functions",
+            plan.zsh_completion_dir,
+        );
+    }
+
+    {
+        const opts = InstallOptions{ .prefix = "/home/alice/.local", .scope = .user };
+        const env = EnvSnapshot{
+            .uid = 1000,
+            .home = "/home/alice",
+            .sudo_user = null,
+            .sudo_uid = null,
+            .xdg_data_home = "/home/alice/xdg-data",
+        };
+        var plan = try InstallPlan.compute(allocator, opts, env);
+        defer plan.deinit(allocator);
+        try testing.expectEqualStrings(
+            "/home/alice/xdg-data/bash-completion/completions",
+            plan.bash_completion_dir,
+        );
+        try testing.expectEqualStrings(
+            "/home/alice/.local/share/zsh/site-functions",
+            plan.zsh_completion_dir,
+        );
+    }
+}
+
+test "plan: sudo user scope retargets service and completion homes together" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const opts = InstallOptions{ .prefix = "/home/alice/.local", .scope = .user };
+    const process_env = EnvSnapshot{
+        .uid = 0,
+        .home = "/root",
+        .sudo_user = "alice",
+        .sudo_uid = "1000",
+        .xdg_data_home = "/root/custom-data",
+    };
+    try testing.expect(phase_mod.shouldResolveTargetUserHome(opts, process_env));
+
+    const target_env = phase_mod.retargetUserEnv(process_env, "/home/alice");
+    var plan = try InstallPlan.compute(allocator, opts, target_env);
+    defer plan.deinit(allocator);
+
+    try testing.expectEqual(LifecycleScope.user, plan.scope);
+    try testing.expectEqualStrings("/home/alice/.config/systemd/user", plan.service_dir);
+    try testing.expectEqualStrings(
+        "/home/alice/.local/share/bash-completion/completions",
+        plan.bash_completion_dir,
+    );
+    try testing.expectEqual(@as(?[]const u8, null), target_env.xdg_data_home);
+
+    try testing.expect(!phase_mod.shouldResolveTargetUserHome(
+        .{ .prefix = "/home/alice/.local", .scope = .user },
+        .{ .uid = 0, .home = "/root", .sudo_user = null, .sudo_uid = null },
+    ));
+    try testing.expect(!phase_mod.shouldResolveTargetUserHome(
+        .{ .scope = .system },
+        process_env,
+    ));
+    try testing.expect(!phase_mod.shouldResolveTargetUserHome(
+        .{ .destdir = "/tmp/stage", .scope = .user },
+        process_env,
+    ));
+    try testing.expectEqualStrings(
+        "/root/custom-data",
+        phase_mod.targetUserXdgDataHome(null, process_env.xdg_data_home).?,
+    );
+}
+
+test "plan: empty or relative XDG_DATA_HOME falls back to non-empty HOME" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const resolved = try plan_mod.resolveBashCompletionDir(
+        allocator,
+        "",
+        "/home/alice/.local",
+        .user,
+        "/home/alice",
+        "",
+    );
+    defer allocator.free(resolved);
+    try testing.expectEqualStrings(
+        "/home/alice/.local/share/bash-completion/completions",
+        resolved,
+    );
+
+    const relative_resolved = try plan_mod.resolveBashCompletionDir(
+        allocator,
+        "",
+        "/home/alice/.local",
+        .user,
+        "/home/alice",
+        "relative/data",
+    );
+    defer allocator.free(relative_resolved);
+    try testing.expectEqualStrings(
+        "/home/alice/.local/share/bash-completion/completions",
+        relative_resolved,
+    );
+
+    try testing.expectError(
+        error.NoHomeDir,
+        plan_mod.resolveBashCompletionDir(allocator, "", "/home/alice/.local", .user, "", ""),
+    );
+}
+
+test "install: embedded completions are atomic 0644 files and uninstall removes them" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const opts = InstallOptions{ .prefix = "/usr", .destdir = staging, .scope = .package };
+    const env = EnvSnapshot{ .uid = 0, .home = null, .sudo_user = null, .sudo_uid = null };
+    var plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+
+    try completions_mod.install(allocator, &plan);
+
+    const bash_path = try std.fs.path.join(allocator, &.{ plan.bash_completion_dir, "padctl.bash" });
+    defer allocator.free(bash_path);
+    const zsh_path = try std.fs.path.join(allocator, &.{ plan.zsh_completion_dir, "_padctl" });
+    defer allocator.free(zsh_path);
+
+    const bash_content = try std.fs.cwd().readFileAlloc(allocator, bash_path, 1024 * 1024);
+    defer allocator.free(bash_content);
+    const zsh_content = try std.fs.cwd().readFileAlloc(allocator, zsh_path, 1024 * 1024);
+    defer allocator.free(zsh_content);
+    try testing.expectEqualStrings(completions_mod.bash_source, bash_content);
+    try testing.expectEqualStrings(completions_mod.zsh_source, zsh_content);
+
+    const bash_stat = try std.fs.cwd().statFile(bash_path);
+    const zsh_stat = try std.fs.cwd().statFile(zsh_path);
+    try testing.expectEqual(@as(u32, 0o644), @as(u32, @intCast(bash_stat.mode & 0o777)));
+    try testing.expectEqual(@as(u32, 0o644), @as(u32, @intCast(zsh_stat.mode & 0o777)));
+
+    // Debian/Ubuntu relocate the Zsh function after self-installer staging.
+    // The uninstall path must clean that vendor location as well as the
+    // generic upstream site-functions location.
+    const zsh_share_dir = std.fs.path.dirname(plan.zsh_completion_dir).?;
+    const vendor_dir = try std.fs.path.join(allocator, &.{ zsh_share_dir, "vendor-completions" });
+    defer allocator.free(vendor_dir);
+    try ensureDirAll(allocator, vendor_dir);
+    const vendor_path = try std.fs.path.join(allocator, &.{ vendor_dir, "_padctl" });
+    defer allocator.free(vendor_path);
+    try std.posix.rename(zsh_path, vendor_path);
+
+    {
+        var silencer = try SilencedStdout.begin();
+        defer silencer.end();
+        try uninstall(allocator, opts);
+    }
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(bash_path, .{}));
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(zsh_path, .{}));
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(vendor_path, .{}));
+}
+
+test "install: completion rename failure cleans temporary file without double close" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staging = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(staging);
+
+    const opts = InstallOptions{ .prefix = "/usr", .destdir = staging, .scope = .package };
+    const env = EnvSnapshot{ .uid = 0, .home = null, .sudo_user = null, .sudo_uid = null };
+    var plan = try InstallPlan.compute(allocator, opts, env);
+    defer plan.deinit(allocator);
+
+    try ensureDirAll(allocator, plan.bash_completion_dir);
+    const blocking_dir = try std.fs.path.join(allocator, &.{ plan.bash_completion_dir, "padctl.bash" });
+    defer allocator.free(blocking_dir);
+    try ensureDirAll(allocator, blocking_dir);
+
+    try testing.expectError(error.IsDir, completions_mod.install(allocator, &plan));
+
+    const temporary_path = try std.fmt.allocPrint(allocator, "{s}.new", .{blocking_dir});
+    defer allocator.free(temporary_path);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(temporary_path, .{}));
+}
+
+test "install: completion activation hints cover live user and custom prefixes only" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        completions_mod.ActivationHintKind.user_zsh,
+        completions_mod.activationHintKind(.user, "/home/alice/.local"),
+    );
+    try testing.expectEqual(
+        completions_mod.ActivationHintKind.custom_prefix,
+        completions_mod.activationHintKind(.system, "/opt/padctl"),
+    );
+    try testing.expectEqual(
+        completions_mod.ActivationHintKind.none,
+        completions_mod.activationHintKind(.system, "/usr"),
+    );
+    try testing.expectEqual(
+        completions_mod.ActivationHintKind.none,
+        completions_mod.activationHintKind(.system, "/usr/local"),
+    );
+    try testing.expectEqual(
+        completions_mod.ActivationHintKind.none,
+        completions_mod.activationHintKind(.package, "/opt/padctl"),
+    );
 }

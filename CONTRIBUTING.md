@@ -107,6 +107,20 @@ zig build test
 zig build check-all
 ```
 
+### Shell completions
+
+`completions/spec.json` is the canonical command metadata for both Bash and
+Zsh. After changing CLI commands or options, regenerate and verify the
+committed completion files:
+
+```sh
+python3 scripts/generate-shell-completions.py
+python3 scripts/generate-shell-completions.py --check
+bash scripts/test-shell-completions.sh
+```
+
+Do not edit `completions/padctl.bash` or `completions/_padctl` directly.
+
 ### Build Flags
 
 | Flag | Default | Description |

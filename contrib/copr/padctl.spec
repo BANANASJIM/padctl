@@ -50,6 +50,8 @@ systemd socket activation and udev integration.
 %{_udevrulesdir}/61-padctl-driver-block.rules
 %{_udevrulesdir}/90-padctl.rules
 %{_modulesloaddir}/padctl.conf
+%{_datadir}/bash-completion/completions/padctl.bash
+%{_datadir}/zsh/site-functions/_padctl
 %{_datadir}/padctl/
 
 %post

@@ -48,6 +48,12 @@ sed -i "s/^Architecture:.*/Architecture: $ARCH/" "$DEST/DEBIAN/control"
 # Run padctl install into dest tree
 "$SRC/bin/padctl" install --destdir "$DEST" --prefix /usr
 
+# Debian and Ubuntu discover packaged Zsh functions via vendor-completions.
+mkdir -p "$DEST/usr/share/zsh/vendor-completions"
+mv "$DEST/usr/share/zsh/site-functions/_padctl" \
+    "$DEST/usr/share/zsh/vendor-completions/_padctl"
+rmdir "$DEST/usr/share/zsh/site-functions" 2>/dev/null || true
+
 # License (Debian policy §12.5)
 install -Dm644 "$SRC/LICENSE" "$DEST/usr/share/doc/padctl/copyright"
 

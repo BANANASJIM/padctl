@@ -1,0 +1,182 @@
+{
+  "global_options": [
+    {"flags": ["--config"], "description": "device config TOML", "value": "file"},
+    {"flags": ["--config-dir"], "description": "discover device configs in a directory", "value": "dir"},
+    {"flags": ["--mapping"], "description": "mapping config TOML", "value": "mapping_or_file"},
+    {"flags": ["--validate"], "description": "validate a config and exit", "value": "file", "repeatable": true},
+    {"flags": ["--pid-file"], "description": "write the daemon PID", "value": "file"},
+    {"flags": ["--doc-gen"], "description": "generate Markdown device reference"},
+    {"flags": ["--output"], "description": "documentation output directory", "value": "dir"},
+    {"flags": ["-h", "--help"], "description": "show help"},
+    {"flags": ["-V", "--version"], "description": "show version"}
+  ],
+  "commands": [
+    {
+      "name": "install",
+      "description": "install padctl and its system integration",
+      "options": [
+        {"flags": ["--prefix"], "description": "installation prefix", "value": "dir"},
+        {"flags": ["--destdir"], "description": "package staging root", "value": "dir"},
+        {"flags": ["--immutable"], "description": "use immutable OS placement"},
+        {"flags": ["--no-immutable"], "description": "force standard placement"},
+        {"flags": ["--mapping"], "description": "mapping profile name", "value": "mapping", "repeatable": true},
+        {"flags": ["--force-mapping"], "description": "overwrite existing mapping files"},
+        {"flags": ["--force-binding"], "description": "overwrite device bindings"},
+        {"flags": ["--user-service"], "description": "force user-scope service installation"},
+        {"flags": ["--no-user-service"], "description": "skip user service enable and start"},
+        {"flags": ["--no-enable"], "description": "skip systemctl enable"},
+        {"flags": ["--no-start"], "description": "skip systemctl start"},
+        {"flags": ["--scope"], "description": "installation scope", "value": "scope"}
+      ]
+    },
+    {
+      "name": "uninstall",
+      "description": "remove installed padctl files",
+      "options": [
+        {"flags": ["--prefix"], "description": "installation prefix", "value": "dir"},
+        {"flags": ["--destdir"], "description": "package staging root", "value": "dir"},
+        {"flags": ["--immutable"], "description": "also remove immutable-specific files"},
+        {"flags": ["--no-immutable"], "description": "force standard placement"},
+        {"flags": ["--mapping"], "description": "mapping profile name", "value": "mapping", "repeatable": true},
+        {"flags": ["--scope"], "description": "uninstallation scope", "value": "scope"}
+      ]
+    },
+    {
+      "name": "scan",
+      "description": "list connected HID devices and config matches",
+      "options": [
+        {"flags": ["--config-dir"], "description": "device config directory", "value": "dir"}
+      ]
+    },
+    {
+      "name": "list-mappings",
+      "description": "list discovered mapping profiles",
+      "options": [
+        {"flags": ["--config-dir"], "description": "device config directory", "value": "dir"},
+        {"flags": ["--names"], "description": "print mapping names only"}
+      ]
+    },
+    {
+      "name": "reload",
+      "description": "reload device configs",
+      "options": [
+        {"flags": ["--pid"], "description": "daemon process id", "value": "plain"}
+      ]
+    },
+    {
+      "name": "switch",
+      "description": "switch or re-apply a mapping",
+      "options": [
+        {"flags": ["--persist"], "description": "persist mapping and config"},
+        {"flags": ["--device"], "description": "limit to a device", "value": "plain"},
+        {"flags": ["--socket"], "description": "daemon socket", "value": "file"}
+      ],
+      "positionals": [
+        {"description": "mapping name", "value": "mapping"}
+      ]
+    },
+    {
+      "name": "output-profile",
+      "description": "list or persist a device output profile",
+      "subcommands": [
+        {
+          "name": "list",
+          "description": "show the final backend, protocol, and stick range",
+          "options": [
+            {"flags": ["--device"], "description": "device name", "value": "plain"}
+          ]
+        },
+        {
+          "name": "select",
+          "description": "select an exact profile for a device",
+          "options": [
+            {"flags": ["--device"], "description": "device name", "value": "plain"}
+          ],
+          "positionals": [
+            {"description": "profile name", "value": "plain"}
+          ]
+        },
+        {
+          "name": "reset",
+          "description": "clear the per-device selection",
+          "options": [
+            {"flags": ["--device"], "description": "device name", "value": "plain"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "status",
+      "description": "show daemon status",
+      "options": [
+        {"flags": ["--socket"], "description": "daemon socket", "value": "file"}
+      ]
+    },
+    {
+      "name": "devices",
+      "description": "list connected devices through the daemon",
+      "options": [
+        {"flags": ["--socket"], "description": "daemon socket", "value": "file"}
+      ]
+    },
+    {
+      "name": "doctor",
+      "description": "print a self-contained diagnostic",
+      "options": [
+        {"flags": ["--socket"], "description": "daemon socket", "value": "file"}
+      ]
+    },
+    {
+      "name": "dump",
+      "description": "manage diagnostic logging",
+      "subcommands": [
+        {"name": "enable", "description": "turn on diagnostic logging", "options": [{"flags": ["--socket"], "description": "daemon socket", "value": "file"}]},
+        {"name": "disable", "description": "turn off diagnostic logging", "options": [{"flags": ["--socket"], "description": "daemon socket", "value": "file"}]},
+        {"name": "status", "description": "show dump state and log information", "options": [{"flags": ["--socket"], "description": "daemon socket", "value": "file"}]},
+        {
+          "name": "export",
+          "description": "export filtered logs",
+          "options": [
+            {"flags": ["--period"], "description": "time window such as 30m, 2h, or 1d", "value": "plain"},
+            {"flags": ["--socket"], "description": "daemon socket", "value": "file"},
+            {"flags": ["-o"], "description": "write to a file", "value": "file"}
+          ]
+        },
+        {"name": "clear", "description": "delete all log files", "options": [{"flags": ["--socket"], "description": "daemon socket", "value": "file"}]}
+      ]
+    },
+    {
+      "name": "config",
+      "description": "manage device and mapping configs",
+      "subcommands": [
+        {"name": "list", "description": "list XDG-layer device and mapping configs"},
+        {
+          "name": "init",
+          "description": "interactively create a mapping",
+          "options": [
+            {"flags": ["--device"], "description": "skip the device prompt", "value": "plain"}
+          ]
+        },
+        {
+          "name": "edit",
+          "description": "open and validate a mapping",
+          "positionals": [
+            {"description": "mapping name", "value": "mapping"}
+          ]
+        },
+        {
+          "name": "test",
+          "description": "preview live decoded input",
+          "options": [
+            {"flags": ["--config"], "description": "device config", "value": "file"},
+            {"flags": ["--mapping"], "description": "mapping config", "value": "mapping_or_file"},
+            {"flags": ["--raw"], "description": "show raw report bytes"}
+          ],
+          "positionals": [
+            {"description": "mapping name or path", "value": "mapping_or_file"}
+          ]
+        }
+      ]
+    }
+  ]
+}

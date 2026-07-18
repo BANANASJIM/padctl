@@ -5,6 +5,7 @@ const services = @import("services.zig");
 const udev = @import("udev.zig");
 const migration = @import("migration.zig");
 const mappings = @import("mappings.zig");
+const completions = @import("completions.zig");
 const control_socket = @import("../../io/control_socket.zig");
 const socket_client = @import("../socket_client.zig");
 
@@ -59,7 +60,7 @@ fn unlinkRuntimePath(allocator: std.mem.Allocator, path: []const u8) !void {
 
 /// Remove `*.wants/padctl.service` symlinks whose target unit file no longer
 /// exists on disk — left dangling after the stop+unlink cycle on some installs.
-fn gcDanglingWantsLinks(allocator: std.mem.Allocator, destdir: []const u8) void {
+fn gcDanglingWantsLinks(allocator: std.mem.Allocator, destdir: []const u8, user_home: ?[]const u8) void {
     const candidates = [_][]const u8{
         "/etc/systemd/system/multi-user.target.wants/padctl.service",
         "/etc/systemd/user/default.target.wants/padctl.service",
@@ -69,7 +70,7 @@ fn gcDanglingWantsLinks(allocator: std.mem.Allocator, destdir: []const u8) void 
         defer allocator.free(path);
         migration.removeBrokenSymlink(path);
     }
-    if (std.posix.getenv("HOME")) |home| {
+    if (user_home) |home| {
         const user_path = std.fmt.allocPrint(
             allocator,
             "{s}/.config/systemd/user/default.target.wants/padctl.service",
@@ -89,6 +90,33 @@ const ensureDirAll = plan_mod.ensureDirAll;
 const userInGroup = plan_mod.userInGroup;
 const hostHasInputGroup = plan_mod.hostHasInputGroup;
 const runCmd = plan_mod.runCmd;
+
+pub fn shouldResolveTargetUserHome(opts: InstallOptions, env: EnvSnapshot) bool {
+    if (env.uid != 0) return false;
+    const sudo_user = env.sudo_user orelse return false;
+    if (sudo_user.len == 0) return false;
+    const scope = scope_mod.detect(.{
+        .destdir = opts.destdir,
+        .forced_scope = opts.scope,
+        .install_phase_env = env.install_phase,
+        .destdir_env = env.destdir_env,
+        .euid = @intCast(env.uid),
+        .sudo_user_env = env.sudo_user,
+        .prefix = opts.prefix,
+    }) catch return false;
+    return scope == .user;
+}
+
+pub fn targetUserXdgDataHome(target_home: ?[]const u8, process_xdg_data_home: ?[]const u8) ?[]const u8 {
+    return if (target_home != null) null else process_xdg_data_home;
+}
+
+pub fn retargetUserEnv(env: EnvSnapshot, target_home: []const u8) EnvSnapshot {
+    var target = env;
+    target.home = target_home;
+    target.xdg_data_home = targetUserXdgDataHome(target_home, env.xdg_data_home);
+    return target;
+}
 
 pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     if (opts.destdir.len == 0 and std.os.linux.getuid() != 0 and
@@ -118,7 +146,17 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         std.process.exit(1);
     }
 
-    const plan = try InstallPlan.compute(allocator, opts, EnvSnapshot.fromProcess());
+    var env = EnvSnapshot.fromProcess();
+    var target_home: ?[]const u8 = null;
+    defer if (target_home) |home| allocator.free(home);
+    if (shouldResolveTargetUserHome(opts, env)) {
+        target_home = try migration.resolveTargetHome(allocator);
+        // sudo does not preserve enough information to reconstruct the target
+        // user's custom XDG_DATA_HOME reliably. Use target_home/.local/share.
+        env = retargetUserEnv(env, target_home.?);
+    }
+
+    const plan = try InstallPlan.compute(allocator, opts, env);
     defer plan.deinit(allocator);
 
     try migration.runLegacySystemUnitMigration(&plan);
@@ -142,6 +180,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     try services.installBinaries(allocator, &plan, self_path, self_dir);
     try services.installServiceFiles(allocator, &plan);
     try services.installReconnectScript(allocator, &plan);
+    try completions.install(allocator, &plan);
     try udev.installDeviceConfigs(allocator, &plan, self_dir);
 
     var device_entries = try udev.collectAllDeviceEntries(allocator, &plan);
@@ -197,6 +236,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     }
 
     printCompletionHint(&plan);
+    completions.printActivationHint(&plan);
     printInputGroupHint();
 }
 
@@ -401,6 +441,15 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         .prefix = opts.prefix,
     });
 
+    var target_home: ?[]const u8 = null;
+    defer if (target_home) |home| allocator.free(home);
+    const sudo_user = std.posix.getenv("SUDO_USER");
+    if (is_root and scope == .user and sudo_user != null and sudo_user.?.len != 0) {
+        target_home = try migration.resolveTargetHome(allocator);
+    }
+    const user_home = target_home orelse std.posix.getenv("HOME");
+    const user_xdg_data_home = targetUserXdgDataHome(target_home, std.posix.getenv("XDG_DATA_HOME"));
+
     const effective_user_service = opts.user_service orelse (scope == .user);
     if (scope == .system and !is_root) {
         _ = std.posix.write(std.posix.STDERR_FILENO, "error: system-wide uninstall requires root — use: sudo padctl uninstall\n") catch {};
@@ -421,6 +470,18 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         "/usr/local"
     else
         opts.prefix;
+
+    const bash_completion_dir = try plan_mod.resolveBashCompletionDir(
+        allocator,
+        destdir,
+        prefix,
+        scope,
+        user_home,
+        user_xdg_data_home,
+    );
+    defer allocator.free(bash_completion_dir);
+    const zsh_completion_dir = try plan_mod.resolveZshCompletionDir(allocator, destdir, prefix);
+    defer allocator.free(zsh_completion_dir);
 
     if (scope != .package) {
         // System-scope stop is only meaningful when there's a system unit
@@ -475,6 +536,8 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
+    completions.uninstall(allocator, bash_completion_dir, zsh_completion_dir);
+
     // /etc udev rules and modules-load.d shadow the {prefix}/lib copies, so an
     // immutable-mode install can leave them behind even on a normal uninstall.
     // Remove them unconditionally (the systemd /etc entries stay immutable-gated).
@@ -519,7 +582,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     }
 
     if (effective_user_service) {
-        if (std.posix.getenv("HOME")) |home| {
+        if (user_home) |home| {
             const user_units = [_][]const u8{
                 "/.config/systemd/user/padctl.service",
                 "/.config/systemd/user/padctl-resume.service",
@@ -614,7 +677,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         defer allocator.free(pid_path);
         std.fs.deleteFileAbsolute(pid_path) catch {};
 
-        gcDanglingWantsLinks(allocator, root);
+        gcDanglingWantsLinks(allocator, root, user_home);
 
         const reload_plan = services.currentPlanFromEnv();
         if (reload_plan.mode == .skip) {

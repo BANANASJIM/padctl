@@ -7,6 +7,7 @@ on:
       - flake.lock
       - build.zig.zon
       - build.zig.zon2json-lock
+      - completions/**
       - .github/workflows/nix-flake.yml
   pull_request:
     paths:
@@ -14,6 +15,7 @@ on:
       - flake.lock
       - build.zig.zon
       - build.zig.zon2json-lock
+      - completions/**
       - .github/workflows/nix-flake.yml
 
 concurrency:
@@ -31,3 +33,7 @@ jobs:
         run: nix build .#default --print-build-logs
       - name: padctl --version
         run: ./result/bin/padctl --version
+      - name: Verify shell completions
+        run: |
+          test -f result/share/bash-completion/completions/padctl.bash
+          test -f result/share/zsh/site-functions/_padctl

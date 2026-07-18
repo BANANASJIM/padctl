@@ -27,6 +27,12 @@ pub const help_text =
     \\
 ;
 
+fn inlineOptionValue(arg: []const u8, option: []const u8) ?[]const u8 {
+    if (arg.len <= option.len or arg[option.len] != '=') return null;
+    if (!std.mem.eql(u8, arg[0..option.len], option)) return null;
+    return arg[option.len + 1 ..];
+}
+
 pub fn parseArgs(args: []const []const u8) ParseError!Action {
     if (args.len == 0) return error.MissingSubcommand;
     const sub = args[0];
@@ -34,11 +40,16 @@ pub fn parseArgs(args: []const []const u8) ParseError!Action {
         var device: ?[]const u8 = null;
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
-            if (!std.mem.eql(u8, args[i], "--device")) return error.UnexpectedArgument;
-            i += 1;
-            if (i >= args.len) return error.MissingArgument;
             if (device != null) return error.UnexpectedArgument;
-            device = args[i];
+            if (std.mem.eql(u8, args[i], "--device")) {
+                i += 1;
+                if (i >= args.len) return error.MissingArgument;
+                device = args[i];
+            } else if (inlineOptionValue(args[i], "--device")) |value| {
+                device = value;
+            } else {
+                return error.UnexpectedArgument;
+            }
         }
         return .{ .list = .{ .device = device } };
     }
@@ -52,6 +63,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!Action {
                 if (i >= args.len) return error.MissingArgument;
                 if (device != null) return error.UnexpectedArgument;
                 device = args[i];
+            } else if (inlineOptionValue(args[i], "--device")) |value| {
+                if (device != null) return error.UnexpectedArgument;
+                device = value;
             } else {
                 if (profile != null or args[i].len == 0 or args[i][0] == '-') return error.UnexpectedArgument;
                 profile = args[i];
@@ -66,11 +80,16 @@ pub fn parseArgs(args: []const []const u8) ParseError!Action {
         var device: ?[]const u8 = null;
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
-            if (!std.mem.eql(u8, args[i], "--device")) return error.UnexpectedArgument;
-            i += 1;
-            if (i >= args.len) return error.MissingArgument;
             if (device != null) return error.UnexpectedArgument;
-            device = args[i];
+            if (std.mem.eql(u8, args[i], "--device")) {
+                i += 1;
+                if (i >= args.len) return error.MissingArgument;
+                device = args[i];
+            } else if (inlineOptionValue(args[i], "--device")) |value| {
+                device = value;
+            } else {
+                return error.UnexpectedArgument;
+            }
         }
         return .{ .reset = .{ .device = device orelse return error.MissingDevice } };
     }
@@ -399,6 +418,21 @@ test "output-profile parser enforces select and reset device" {
     try std.testing.expectError(error.MissingDevice, parseArgs(&missing_device));
     const reset_missing = [_][]const u8{"reset"};
     try std.testing.expectError(error.MissingDevice, parseArgs(&reset_missing));
+}
+
+test "output-profile parser accepts inline device values" {
+    const list_args = [_][]const u8{ "list", "--device=Flydigi Vader 5 Pro" };
+    const listed = try parseArgs(&list_args);
+    try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", listed.list.device.?);
+
+    const select_args = [_][]const u8{ "select", "dualsense-edge-native", "--device=Flydigi Vader 5 Pro" };
+    const selected = try parseArgs(&select_args);
+    try std.testing.expectEqualStrings("dualsense-edge-native", selected.select.profile);
+    try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", selected.select.device);
+
+    const reset_args = [_][]const u8{ "reset", "--device=Flydigi Vader 5 Pro" };
+    const reset = try parseArgs(&reset_args);
+    try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", reset.reset.device);
 }
 
 test "output-profile list is sorted and shows resolved route" {
