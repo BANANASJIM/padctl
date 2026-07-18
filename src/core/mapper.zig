@@ -148,6 +148,12 @@ const GestureGamepadTapReleaseTokenTable = struct {
         return null;
     }
 
+    fn takeSource(self: *GestureGamepadTapReleaseTokenTable, src_idx: u6) ?GestureGamepadTapReleaseTokenEntry {
+        const prior = self.entries[src_idx];
+        self.entries[src_idx] = null;
+        return prior;
+    }
+
     fn activeMask(self: *const GestureGamepadTapReleaseTokenTable) u64 {
         var mask: u64 = 0;
         for (self.entries) |entry| {
@@ -649,6 +655,15 @@ pub const Mapper = struct {
                 .chord => {},
                 .gesture => |node| {
                     if (pressed != prev_pressed) {
+                        // A delayed virtual tap from this source may still be
+                        // active when a rapid second physical press arrives.
+                        // End it now so the next tap gets its own release/press
+                        // edges instead of merging both clicks into one hold.
+                        if (pressed) {
+                            if (self.gesture_gamepad_tap_release_tokens.takeSource(@intCast(i))) |prior| {
+                                self.timer_queue.cancel(prior.token, now_ns);
+                            }
+                        }
                         const out = self.gesture_engine.onButtonEdge(@intCast(i), node, pressed, now_ns);
                         self.applyGestureOutcome(@intCast(i), out, &aux, false, now_ns);
                     }

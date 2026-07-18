@@ -1010,6 +1010,45 @@ test "e2e gesture: timer-context gamepad tap stages full press one frame before 
     try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & btnMask(.B));
 }
 
+test "e2e gesture issue 492: rapid repeated stick-click taps keep distinct edges" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\LS = { tap = "LS", hold = "KEY_Z" }
+        \\RS = { tap = "RS", hold = "KEY_Z" }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    for ([_]ButtonId{ .LS, .RS }, 0..) |button, iteration| {
+        const t0: i128 = 1_000_000_000 + @as(i128, @intCast(iteration)) * 100 * std.time.ns_per_ms;
+        const mask = btnMask(button);
+
+        // First physical click resolves to a virtual stick-click press.
+        _ = try m.apply(.{ .buttons = mask }, 16, t0);
+        const first_tap = try m.apply(.{ .buttons = 0 }, 16, t0 + 10 * std.time.ns_per_ms);
+        try testing.expectEqual(mask, first_tap.gamepad.buttons & mask);
+
+        // A second physical click starts before the first tap's minimum pulse
+        // has elapsed. It must end the first virtual click so consumers observe
+        // a release edge before the second virtual press; otherwise both
+        // physical clicks collapse into one long virtual press.
+        const second_press = try m.apply(.{ .buttons = mask }, 16, t0 + 20 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(u64, 0), second_press.gamepad.buttons & mask);
+
+        const second_tap = try m.apply(.{ .buttons = 0 }, 16, t0 + 25 * std.time.ns_per_ms);
+        try testing.expectEqual(mask, second_tap.gamepad.buttons & mask);
+
+        // The cancelled first deadline must not release the second tap early.
+        const stale_release = m.onMacroTimerExpiredEvents(t0 + 41 * std.time.ns_per_ms);
+        try testing.expect(stale_release.gamepad == null);
+
+        const final_release = m.onMacroTimerExpiredEvents(t0 + 60 * std.time.ns_per_ms);
+        try testing.expect(final_release.gamepad != null);
+        try testing.expectEqual(@as(u64, 0), final_release.gamepad.?.buttons & mask);
+    }
+}
+
 test "e2e gesture back-compat: plain string remap A=KEY_F13 unchanged (immediate edge)" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(
