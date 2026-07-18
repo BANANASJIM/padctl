@@ -142,6 +142,9 @@ if [[ -r $bash_completion_file ]]; then
         bash --noprofile --norc -c '
             set -e
             source "$PADCTL_BASH_COMPLETION_FILE"
+            completion_major=${BASH_COMPLETION_VERSINFO[0]}
+            completion_minor=${BASH_COMPLETION_VERSINFO[1]}
+            (( completion_major > 2 || (completion_major == 2 && completion_minor >= 11) ))
             if [[ -n $PADCTL_BASH_COMPLETION_EXPECTED ]]; then
                 IFS=. read -r expected_major expected_minor <<< "$PADCTL_BASH_COMPLETION_EXPECTED"
                 [[ ${BASH_COMPLETION_VERSINFO[0]} -eq $expected_major ]]

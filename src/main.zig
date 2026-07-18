@@ -1178,7 +1178,7 @@ pub fn main() !void {
     // list-mappings subcommand
     if (parsed.list_mappings) {
         const result = if (parsed.list_mappings_names)
-            cli.list_mappings.runNames(allocator, stdout_writer)
+            cli.list_mappings.runNames(allocator, parsed.list_mappings_config_dir, stdout_writer)
         else
             cli.list_mappings.run(allocator, parsed.list_mappings_config_dir, stdout_writer);
         result catch |err| {

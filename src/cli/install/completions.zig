@@ -70,15 +70,13 @@ pub fn printActivationHint(plan: *const plan_mod.InstallPlan) void {
         const bash_share_root = std.fs.path.dirname(bash_parent) orelse bash_parent;
 
         plan_mod.writeAll(std.posix.STDOUT_FILENO, "\nCompletion files were installed under a custom prefix, which shells may not discover automatically.\n");
-        plan_mod.writeAll(std.posix.STDOUT_FILENO, "Bash: add the completion share root to XDG_DATA_DIRS before shell startup:\n  export XDG_DATA_DIRS=\"");
+        plan_mod.writeAll(std.posix.STDOUT_FILENO, "Bash: source the completion file directly (portable across supported bash-completion versions):\n  source \"");
+        plan_mod.writeAll(std.posix.STDOUT_FILENO, plan.bash_completion_dir);
+        plan_mod.writeAll(std.posix.STDOUT_FILENO, "/padctl.bash\"\nBash-completion 2.12+ can instead discover the custom prefix when XDG_DATA_DIRS includes:\n  export XDG_DATA_DIRS=\"");
         plan_mod.writeAll(std.posix.STDOUT_FILENO, bash_share_root);
         plan_mod.writeAll(std.posix.STDOUT_FILENO,
             \\:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-            \\  # or source the file directly:
         );
-        plan_mod.writeAll(std.posix.STDOUT_FILENO, "  source \"");
-        plan_mod.writeAll(std.posix.STDOUT_FILENO, plan.bash_completion_dir);
-        plan_mod.writeAll(std.posix.STDOUT_FILENO, "/padctl.bash\"\n");
     } else {
         plan_mod.writeAll(std.posix.STDOUT_FILENO, "\nZsh completion was installed in a user site-functions directory, which is not guaranteed to be in fpath.\n");
     }

@@ -249,8 +249,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&smoke_validate_inline.step);
 
     const smoke_mapping_names = b.addRunArtifact(exe);
-    smoke_mapping_names.addArgs(&.{ "list-mappings", "--names" });
+    smoke_mapping_names.addArgs(&.{ "list-mappings", "--config-dir=devices/sony", "--names" });
+    smoke_mapping_names.addFileInput(b.path("devices/sony/dualsense.toml"));
     smoke_mapping_names.expectExitCode(0);
+    smoke_mapping_names.addCheck(.{ .expect_stdout_match = "dualsense" });
     test_step.dependOn(&smoke_mapping_names.step);
 
     // test-integration: Layer 2 (UHID, requires privilege)

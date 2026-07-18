@@ -184,6 +184,8 @@ jobs:
   shell-completions:
     name: shell-completions / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -202,6 +204,8 @@ jobs:
             upstream: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install shell test dependencies
         run: |
           sudo apt-get update
@@ -227,6 +231,7 @@ jobs:
   check:
     name: check
     runs-on: ubuntu-22.04
+    permissions: {}
     needs: [lean-oracle, check-matrix, shell-completions]
     if: ${{ always() }}
     steps:
