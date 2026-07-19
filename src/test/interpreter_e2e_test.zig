@@ -148,6 +148,7 @@ fn makeVader5ButtonFrame(buttons: u32) [32]u8 {
 const StreamingDeviceIO = struct {
     read_fd: std.posix.fd_t,
     write_fd: std.posix.fd_t,
+    read_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
     fn init() !StreamingDeviceIO {
         var fds: [2]std.posix.fd_t = undefined;
@@ -175,6 +176,10 @@ const StreamingDeviceIO = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    fn framesRead(self: *const StreamingDeviceIO) usize {
+        return self.read_count.load(.acquire);
+    }
+
     const vtable = DeviceIO.VTable{
         .read = read,
         .write = write,
@@ -185,11 +190,13 @@ const StreamingDeviceIO = struct {
 
     fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
         const self: *StreamingDeviceIO = @ptrCast(@alignCast(ptr));
-        return std.posix.read(self.read_fd, buf) catch |err| switch (err) {
-            error.WouldBlock => DeviceIO.ReadError.Again,
-            error.ConnectionResetByPeer => DeviceIO.ReadError.Disconnected,
-            else => DeviceIO.ReadError.Io,
+        const n = std.posix.read(self.read_fd, buf) catch |err| switch (err) {
+            error.WouldBlock => return DeviceIO.ReadError.Again,
+            error.ConnectionResetByPeer => return DeviceIO.ReadError.Disconnected,
+            else => return DeviceIO.ReadError.Io,
         };
+        if (n != 0) _ = self.read_count.fetchAdd(1, .release);
+        return n;
     }
 
     fn write(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
@@ -200,6 +207,68 @@ const StreamingDeviceIO = struct {
     }
     fn close(_: *anyopaque) void {}
 };
+
+const GestureEdgeOutput = struct {
+    allocator: std.mem.Allocator,
+    emitted: std.ArrayList(GamepadState),
+    prev: GamepadState = .{},
+    rises: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    falls: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    fn init(allocator: std.mem.Allocator) GestureEdgeOutput {
+        return .{ .allocator = allocator, .emitted = .{} };
+    }
+
+    fn deinit(self: *GestureEdgeOutput) void {
+        self.emitted.deinit(self.allocator);
+    }
+
+    fn outputDevice(self: *GestureEdgeOutput) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn observed(self: *const GestureEdgeOutput, mask: u64) bool {
+        return self.rises.load(.acquire) & mask != 0 and
+            self.falls.load(.acquire) & mask != 0;
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = emit,
+        .poll_ff = pollFf,
+        .close = close,
+    };
+
+    fn emit(ptr: *anyopaque, current: GamepadState) uinput.EmitError!void {
+        const self: *GestureEdgeOutput = @ptrCast(@alignCast(ptr));
+        const previous_buttons = self.prev.buttons;
+        self.emitted.append(self.allocator, current) catch return error.WriteFailed;
+        self.prev = current;
+        _ = self.rises.fetchOr(~previous_buttons & current.buttons, .release);
+        _ = self.falls.fetchOr(previous_buttons & ~current.buttons, .release);
+    }
+
+    fn pollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        return null;
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+fn waitForFrames(stream: *const StreamingDeviceIO, expected: usize) !void {
+    for (0..1000) |_| {
+        if (stream.framesRead() >= expected) return;
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
+
+fn waitForGestureEdges(output: *const GestureEdgeOutput, mask: u64) !void {
+    for (0..1000) |_| {
+        if (output.observed(mask)) return;
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
 
 test "EventLoop pipeline: A press then release" {
     const allocator = testing.allocator;
@@ -277,14 +346,14 @@ test "EventLoop diagnostics issue 492: Vader5 LS and RS gesture taps keep full o
 
     const parsed_mapping = try mapping_mod.parseString(allocator,
         \\[remap]
-        \\LS = { tap = "LS", hold = "KEY_Z" }
-        \\RS = { tap = "RS", hold = "KEY_Z" }
+        \\LS = { tap = "LS", hold = "KEY_Z", hold_ms = 1000 }
+        \\RS = { tap = "RS", hold = "KEY_Z", hold_ms = 1000 }
     );
     defer parsed_mapping.deinit();
     var mapper = try Mapper.init(&parsed_mapping.value, loop.macro_timer_fd, allocator);
     defer mapper.deinit();
 
-    var out = MockOutput.init(allocator);
+    var out = GestureEdgeOutput.init(allocator);
     defer out.deinit();
 
     var devs = [_]DeviceIO{dev};
@@ -328,22 +397,24 @@ test "EventLoop diagnostics issue 492: Vader5 LS and RS gesture taps keep full o
     const idle = makeVader5ButtonFrame(0);
     const ls_down = makeVader5ButtonFrame(ls_raw_bit);
     const rs_down = makeVader5ButtonFrame(rs_raw_bit);
+    const ls_mask = @as(u64, 1) << @intFromEnum(ButtonId.LS);
+    const rs_mask = @as(u64, 1) << @intFromEnum(ButtonId.RS);
 
     try stream.send(&ls_down);
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try waitForFrames(&stream, 1);
     try stream.send(&idle);
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    try waitForFrames(&stream, 2);
+    try waitForGestureEdges(&out, ls_mask);
     try stream.send(&rs_down);
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try waitForFrames(&stream, 3);
     try stream.send(&idle);
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    try waitForFrames(&stream, 4);
+    try waitForGestureEdges(&out, rs_mask);
 
     loop.stop();
     thread.join();
     thread_joined = true;
 
-    const ls_mask = @as(u64, 1) << @intFromEnum(ButtonId.LS);
-    const rs_mask = @as(u64, 1) << @intFromEnum(ButtonId.RS);
     var ls_rises: usize = 0;
     var ls_falls: usize = 0;
     var rs_rises: usize = 0;
