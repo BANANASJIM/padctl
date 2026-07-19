@@ -25,7 +25,7 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Runtime mapping switch** — `padctl switch <name>` changes profiles without restart
 - **Persistent mapping** — `padctl install --mapping <name>` writes a device binding to `/etc/padctl/config.toml` that auto-applies on every boot
 - **User config** — `~/.config/padctl/config.toml` for per-device default mappings (system fallback: `/etc/padctl/config.toml`)
-- **Opt-in diagnostic logging** — `padctl dump enable` turns on a general-purpose, togglable file logger so users can produce a structured log for any class of bug report (force-feedback, input, mapping, hotplug, …). Today it is wired deepest into the rumble/HID path; more subsystems will be instrumented over time. Rotated, bounded on disk, and zero overhead when disabled (default)
+- **Opt-in diagnostic logging** — `padctl dump enable` turns on a general-purpose, togglable file logger so users can produce a structured log for any class of bug report (force-feedback, input, mapping, hotplug, …). It covers the rumble/HID path plus button input edges, gesture decisions, and virtual button output edges; more subsystems will be instrumented over time. Rotated, bounded on disk, and no hot-path formatting when disabled (default)
 - **CLI tools** — `padctl status`, `padctl devices`, `padctl list-mappings`, `padctl output-profile list/select/reset`, `padctl config init/edit/test`, `padctl dump enable/disable/status/export/clear`
 
 ## Architecture

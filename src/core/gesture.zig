@@ -70,6 +70,14 @@ pub const GestureEngine = struct {
         return null;
     }
 
+    /// Diagnostic-only timing lookup. The mapper samples this immediately
+    /// before a release edge so dump logs can show the physical press length
+    /// that selected tap versus hold.
+    pub fn pressStartedAt(self: *GestureEngine, src_idx: u6) ?i128 {
+        const slot = self.findSlot(src_idx) orelse return null;
+        return if (slot.phase == .idle) null else slot.press_ns;
+    }
+
     fn acquireSlot(self: *GestureEngine, src_idx: u6, gesture: *const ResolvedGesture) ?*Slot {
         if (self.findSlot(src_idx)) |s| return s;
         for (&self.slots) |*maybe| {
@@ -222,6 +230,23 @@ test "gesture: tap-only emits tap on release" {
     try testing.expectEqual(@as(usize, 1), o_rel.emit_len);
     try testing.expectEqual(EmitAction.tap, o_rel.slice()[0].action);
     try testing.expectEqual(key("KEY_X").key, o_rel.slice()[0].target.key);
+}
+
+test "gesture: diagnostic press start is present only while a gesture is active" {
+    var g = ResolvedGesture{
+        .tap = key("KEY_X"),
+        .hold = null,
+        .double = null,
+        .hold_ns = 300 * ns_ms,
+        .double_ns = 250 * ns_ms,
+        .has_double = false,
+    };
+    var e = GestureEngine{};
+    try testing.expectEqual(@as(?i128, null), e.pressStartedAt(0));
+    _ = e.onButtonEdge(0, &g, true, 123 * ns_ms);
+    try testing.expectEqual(@as(?i128, 123 * ns_ms), e.pressStartedAt(0));
+    _ = e.onButtonEdge(0, &g, false, 180 * ns_ms);
+    try testing.expectEqual(@as(?i128, null), e.pressStartedAt(0));
 }
 
 test "gesture: hold fires at deadline while still held, then release on button up" {

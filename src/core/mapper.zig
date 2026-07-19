@@ -20,6 +20,7 @@ const REL_HWHEEL: u16 = c.REL_HWHEEL;
 const remap_mod = @import("remap.zig");
 const gesture_mod = @import("gesture.zig");
 const chord_detector_mod = @import("chord_detector.zig");
+const input_trace = @import("../diagnostics/input_trace.zig");
 pub const RemapTargetResolved = remap_mod.RemapTargetResolved;
 pub const resolveTarget = remap_mod.resolveTarget;
 pub const AuxEvent = aux_event_mod.AuxEvent;
@@ -664,8 +665,26 @@ pub const Mapper = struct {
                                 self.timer_queue.cancel(prior.token, now_ns);
                             }
                         }
-                        const out = self.gesture_engine.onButtonEdge(@intCast(i), node, pressed, now_ns);
-                        self.applyGestureOutcome(@intCast(i), out, &aux, false, now_ns);
+                        const src_idx: u6 = @intCast(i);
+                        const trace_enabled = input_trace.enabled();
+                        const press_started_ns = if (trace_enabled and !pressed) self.gesture_engine.pressStartedAt(src_idx) else null;
+                        const out = self.gesture_engine.onButtonEdge(src_idx, node, pressed, now_ns);
+                        if (trace_enabled) {
+                            const arm_leg = if (out.arm) |a| @tagName(a.leg) else "none";
+                            const arm_deadline_ns = if (out.arm) |a| a.deadline_ns else @as(i128, 0);
+                            input_trace.logGestureEdge(
+                                buttonNameFromIndex(@intCast(i)),
+                                pressed,
+                                now_ns,
+                                if (press_started_ns) |start| @max(now_ns - start, 0) else 0,
+                                out.emit_len,
+                                arm_leg,
+                                arm_deadline_ns,
+                                out.cancel_hold,
+                                out.cancel_double,
+                            );
+                        }
+                        self.applyGestureOutcome(src_idx, out, &aux, false, now_ns);
                     }
                 },
             }
@@ -1059,6 +1078,16 @@ pub const Mapper = struct {
             }
         }
         for (out.slice()) |em| {
+            if (input_trace.enabled()) {
+                var target_buf: [64]u8 = undefined;
+                input_trace.logGestureEmit(
+                    buttonNameFromIndex(src_idx),
+                    @tagName(em.action),
+                    gestureTargetTraceLabel(em.target, &target_buf),
+                    from_timer,
+                    now_ns,
+                );
+            }
             switch (em.target) {
                 .gamepad_button => |dst| {
                     const mask = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(dst)));
@@ -1135,6 +1164,13 @@ pub const Mapper = struct {
                 const src_bit = @as(u64, 1) << ge.src_idx;
                 const held = (self.state.buttons & src_bit) != 0;
                 const out = self.gesture_engine.onTimerExpired(ge.src_idx, ge.leg, held, now_ns);
+                input_trace.logGestureTimer(
+                    buttonNameFromIndex(ge.src_idx),
+                    @tagName(ge.leg),
+                    held,
+                    out.emit_len,
+                    now_ns,
+                );
                 self.applyGestureOutcome(ge.src_idx, out, &events.aux, true, now_ns);
                 continue;
             }
@@ -1267,6 +1303,23 @@ fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {
         .deadzone = if (mc.deadzone) |v| @intCast(v) else if (std.mem.eql(u8, mode, "gamepad")) 0 else 128,
         .sensitivity = if (mc.sensitivity) |v| @floatCast(v) else 1.0,
         .suppress_gamepad = mc.suppress_gamepad orelse false,
+    };
+}
+
+fn buttonNameFromIndex(idx: u6) []const u8 {
+    const button: ButtonId = @enumFromInt(idx);
+    return @tagName(button);
+}
+
+fn gestureTargetTraceLabel(target: RemapTargetResolved, buf: *[64]u8) []const u8 {
+    return switch (target) {
+        .gamepad_button => |button| std.fmt.bufPrint(buf, "gamepad:{s}", .{@tagName(button)}) catch "gamepad:?",
+        .key => |code| std.fmt.bufPrint(buf, "key:{d}", .{code}) catch "key:?",
+        .mouse_button => |code| std.fmt.bufPrint(buf, "mouse:{d}", .{code}) catch "mouse:?",
+        .disabled => "disabled",
+        .macro => |name| std.fmt.bufPrint(buf, "macro:{s}", .{name}) catch "macro:?",
+        .chord => "chord",
+        .gesture => "gesture",
     };
 }
 
