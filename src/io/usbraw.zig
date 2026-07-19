@@ -27,6 +27,22 @@ const c = @cImport({
     @cInclude("libusb-1.0/libusb.h");
 });
 
+// A zero libusb return code does not guarantee that the entire interrupt OUT
+// payload was transferred. Treat anything other than an exact write as I/O
+// failure so the event loop can retry the complete rumble frame.
+fn checkInterruptWriteResult(rc: c_int, transferred: c_int, expected: usize) DeviceIO.WriteError!void {
+    if (rc == c.LIBUSB_ERROR_NO_DEVICE) return DeviceIO.WriteError.Disconnected;
+    if (rc != 0) return DeviceIO.WriteError.Io;
+    if (transferred < 0 or @as(usize, @intCast(transferred)) != expected) {
+        return DeviceIO.WriteError.Io;
+    }
+}
+
+fn checkedInterruptWriteLength(requested: usize, capacity: usize) DeviceIO.WriteError!usize {
+    if (requested > capacity) return DeviceIO.WriteError.Io;
+    return requested;
+}
+
 // Fixed-size ring buffer: 64 slots x 64 bytes each.
 // Overflow drops oldest report and logs a warning.
 pub const RingBuffer = struct {
@@ -230,7 +246,13 @@ pub const UsbrawDevice = struct {
         var transferred: c_int = 0;
         // libusb wants a mutable pointer even for writes
         var buf: [RingBuffer.SLOT_SIZE]u8 = undefined;
-        const n = @min(data.len, buf.len);
+        const n = checkedInterruptWriteLength(data.len, buf.len) catch {
+            if (!is_test) std.log.warn(
+                "usbraw: refusing oversized interrupt write: endpoint=0x{x} requested={d} max={d}",
+                .{ self.ep_out, data.len, buf.len },
+            );
+            return DeviceIO.WriteError.Io;
+        };
         @memcpy(buf[0..n], data[0..n]);
 
         const rc = c.libusb_interrupt_transfer(
@@ -241,8 +263,22 @@ pub const UsbrawDevice = struct {
             &transferred,
             100,
         );
-        if (rc == c.LIBUSB_ERROR_NO_DEVICE) return DeviceIO.WriteError.Disconnected;
-        if (rc != 0) return DeviceIO.WriteError.Io;
+        checkInterruptWriteResult(rc, transferred, n) catch |err| {
+            if (!is_test) {
+                if (rc == 0) {
+                    std.log.warn(
+                        "usbraw: incomplete interrupt write: endpoint=0x{x} expected={d} transferred={d}",
+                        .{ self.ep_out, n, transferred },
+                    );
+                } else if (rc != c.LIBUSB_ERROR_NO_DEVICE) {
+                    std.log.debug(
+                        "usbraw: interrupt write failed: endpoint=0x{x} rc={d} expected={d} transferred={d}",
+                        .{ self.ep_out, rc, n, transferred },
+                    );
+                }
+            }
+            return err;
+        };
     }
 
     fn pollfd(ptr: *anyopaque) std.posix.pollfd {
@@ -308,6 +344,48 @@ pub const UsbrawSuppress = struct {
 };
 
 // --- Tests ---
+
+test "usbraw: interrupt write result accepts exact transfer" {
+    try checkInterruptWriteResult(0, 32, 32);
+    try checkInterruptWriteResult(0, 0, 0);
+}
+
+test "usbraw: interrupt write result rejects incomplete transfer" {
+    try std.testing.expectError(
+        DeviceIO.WriteError.Io,
+        checkInterruptWriteResult(0, 31, 32),
+    );
+    try std.testing.expectError(
+        DeviceIO.WriteError.Io,
+        checkInterruptWriteResult(0, 33, 32),
+    );
+    try std.testing.expectError(
+        DeviceIO.WriteError.Io,
+        checkInterruptWriteResult(0, -1, 32),
+    );
+}
+
+test "usbraw: interrupt write result classifies libusb failures" {
+    try std.testing.expectError(
+        DeviceIO.WriteError.Disconnected,
+        checkInterruptWriteResult(c.LIBUSB_ERROR_NO_DEVICE, 0, 32),
+    );
+    try std.testing.expectError(
+        DeviceIO.WriteError.Io,
+        checkInterruptWriteResult(c.LIBUSB_ERROR_TIMEOUT, 0, 32),
+    );
+}
+
+test "usbraw: oversized interrupt write is rejected instead of truncated" {
+    try std.testing.expectEqual(
+        @as(usize, RingBuffer.SLOT_SIZE),
+        try checkedInterruptWriteLength(RingBuffer.SLOT_SIZE, RingBuffer.SLOT_SIZE),
+    );
+    try std.testing.expectError(
+        DeviceIO.WriteError.Io,
+        checkedInterruptWriteLength(RingBuffer.SLOT_SIZE + 1, RingBuffer.SLOT_SIZE),
+    );
+}
 
 test "usbraw: RingBuffer push/pop basic" {
     var rb: RingBuffer = .{};
