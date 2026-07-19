@@ -175,6 +175,16 @@ const GestureTokenEntry = struct {
     leg: gesture_mod.GestureLeg,
 };
 
+// Gyro joystick processing is stateful and runs only on physical input
+// frames. Timer-origin output frames reuse the last axes it produced instead
+// of recomputing motion or briefly exposing the underlying physical sticks.
+const GyroJoystickAxes = struct {
+    ax: ?i16 = null,
+    ay: ?i16 = null,
+    rx: ?i16 = null,
+    ry: ?i16 = null,
+};
+
 // Maps live timer tokens armed by the gesture engine back to (slot, leg) so
 // onMacroTimerExpired can route expiry. Bounded by concurrent gesture timers.
 const GestureTokenTable = struct {
@@ -212,6 +222,7 @@ pub const Mapper = struct {
     state: GamepadState,
     prev: GamepadState,
     gyro_proc: gyro.GyroProcessor,
+    last_gyro_joystick_axes: GyroJoystickAxes,
     stick_left: stick.StickProcessor,
     stick_right: stick.StickProcessor,
     suppressed_buttons: u64,
@@ -285,6 +296,7 @@ pub const Mapper = struct {
             .state = .{},
             .prev = .{},
             .gyro_proc = .{},
+            .last_gyro_joystick_axes = .{},
             .stick_left = .{},
             .stick_right = .{},
             .suppressed_buttons = 0,
@@ -334,6 +346,7 @@ pub const Mapper = struct {
         self.state = seeded;
         self.prev = seeded;
         self.seeded_buttons = seeded.buttons;
+        self.last_gyro_joystick_axes = .{};
     }
 
     pub fn resetRuntimeState(self: *Mapper) void {
@@ -342,6 +355,7 @@ pub const Mapper = struct {
         self.state = .{};
         self.prev = .{};
         self.gyro_proc.reset();
+        self.last_gyro_joystick_axes = .{};
         self.stick_left.reset();
         self.stick_right.reset();
         self.suppressed_buttons = 0;
@@ -603,6 +617,15 @@ pub const Mapper = struct {
             }
 
             const target = per_src_inject[i] orelse continue;
+            // A new press ends any timer-owned tap from this physical source
+            // before dispatching the source's current target. This must live at
+            // the common mapping entry because a layer may have changed the
+            // source from a gesture to any other target kind since the tap.
+            if (pressed and !prev_pressed) {
+                if (self.gesture_gamepad_tap_release_tokens.takeSource(@intCast(i))) |prior| {
+                    self.timer_queue.cancel(prior.token, now_ns);
+                }
+            }
             switch (target) {
                 .macro => |name| {
                     if (pressed and !prev_pressed) {
@@ -644,15 +667,6 @@ pub const Mapper = struct {
                 .chord => {},
                 .gesture => |node| {
                     if (pressed != prev_pressed) {
-                        // A delayed virtual tap from this source may still be
-                        // active when a rapid second physical press arrives.
-                        // End it now so the next tap gets its own release/press
-                        // edges instead of merging both clicks into one hold.
-                        if (pressed) {
-                            if (self.gesture_gamepad_tap_release_tokens.takeSource(@intCast(i))) |prior| {
-                                self.timer_queue.cancel(prior.token, now_ns);
-                            }
-                        }
                         const src_idx: u6 = @intCast(i);
                         const trace_enabled = input_trace.enabled();
                         const press_started_ns = if (trace_enabled and !pressed) self.gesture_engine.pressStartedAt(src_idx) else null;
@@ -774,6 +788,16 @@ pub const Mapper = struct {
                 jy;
         }
 
+        // Cache only axes actually controlled by gyro joystick mode. Physical
+        // input frames replace this snapshot atomically; timer frames can then
+        // reuse it without advancing the stateful gyro processor.
+        self.last_gyro_joystick_axes = .{
+            .ax = if (suppress_left_stick_gyro and gyro_joy_x != null) emit_state.ax else null,
+            .ay = if (suppress_left_stick_gyro and gyro_joy_y != null) emit_state.ay else null,
+            .rx = if (suppress_right_stick_gyro and gyro_joy_x != null) emit_state.rx else null,
+            .ry = if (suppress_right_stick_gyro and gyro_joy_y != null) emit_state.ry else null,
+        };
+
         // suppress stick axes when mode != gamepad
         if (!suppress_left_stick_gyro and (left_cfg.suppress_gamepad or !std.mem.eql(u8, left_cfg.mode, "gamepad"))) {
             emit_state.ax = 0;
@@ -820,6 +844,7 @@ pub const Mapper = struct {
             // Plain hold activation has no active_changed apply() chokepoint, so
             // perform the gesture/layer-hold cleanup here without touching the
             // macro queue; layer-timer expiry is not the macro timerfd.
+            self.last_gyro_joystick_axes = .{};
             self.prev.dpad_x = 0;
             self.prev.dpad_y = 0;
             self.cancelGestureStateForLayerChange(&events.aux, now_ns);
@@ -831,6 +856,7 @@ pub const Mapper = struct {
 
     fn handleLayerActiveChanged(self: *Mapper, aux: *AuxEventList, now_ns: i128) void {
         self.gyro_proc.reset();
+        self.last_gyro_joystick_axes = .{};
         self.stick_left.reset();
         self.stick_right.reset();
         // Reset dpad prev so edge detection fires on the next frame.
@@ -1018,6 +1044,10 @@ pub const Mapper = struct {
             emit_state.rx = 0;
             emit_state.ry = 0;
         }
+        if (self.last_gyro_joystick_axes.ax) |v| emit_state.ax = v;
+        if (self.last_gyro_joystick_axes.ay) |v| emit_state.ay = v;
+        if (self.last_gyro_joystick_axes.rx) |v| emit_state.rx = v;
+        if (self.last_gyro_joystick_axes.ry) |v| emit_state.ry = v;
         return emit_state;
     }
 
@@ -1529,6 +1559,7 @@ test "mapper: resetRuntimeState clears transient layer timer and input state" {
     m.pending_tap_release = buttonBit("B");
     m.macro_timer_tap_pending = buttonBit("X");
     m.gesture_held_gamepad = buttonBit("RB");
+    m.last_gyro_joystick_axes = .{ .rx = 1234, .ry = -2345 };
     m.aux_down_targets[@intFromEnum(ButtonId.A)] = .{ .key = 30 };
     try m.timer_queue.arm(2_000, 99, 1_000);
 
@@ -1542,6 +1573,8 @@ test "mapper: resetRuntimeState clears transient layer timer and input state" {
     try testing.expectEqual(@as(?u64, null), m.pending_tap_release);
     try testing.expectEqual(@as(u64, 0), m.macro_timer_tap_pending);
     try testing.expectEqual(@as(u64, 0), m.gesture_held_gamepad);
+    try testing.expect(m.last_gyro_joystick_axes.rx == null);
+    try testing.expect(m.last_gyro_joystick_axes.ry == null);
     try testing.expect(m.aux_down_targets[@intFromEnum(ButtonId.A)] == null);
     try testing.expectEqual(@as(usize, 0), m.timer_queue.heap.count());
 }
@@ -2201,9 +2234,11 @@ test "mapper: hold_toggle timer transition resets processors" {
     m.stick_right.scroll_accum = -0.5;
 
     _ = try m.apply(.{ .buttons = lt_mask }, 16, 0);
+    m.last_gyro_joystick_axes.rx = 1234;
     _ = m.onLayerTimerExpired();
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_x);
+    try testing.expect(m.last_gyro_joystick_axes.rx == null);
     try testing.expectEqual(@as(f32, 0), m.stick_left.mouse_accum_x);
     try testing.expectEqual(@as(f32, 0), m.stick_right.scroll_accum);
 }
@@ -3959,12 +3994,14 @@ test "mapper: toggle layer switch resets processors" {
 
     // Dirty processor state to simulate residual accumulation
     m.gyro_proc.ema_y = -200.0;
+    m.last_gyro_joystick_axes.ry = -2345;
     m.stick_right.mouse_accum_y = 0.8;
 
     // Frame 2: Select released → toggle fires → active_changed = true → reset
     _ = try m.apply(.{ .buttons = 0 }, 16, 0);
 
     try testing.expectEqual(@as(f32, 0), m.gyro_proc.ema_y);
+    try testing.expect(m.last_gyro_joystick_axes.ry == null);
     try testing.expectEqual(@as(f32, 0), m.stick_right.mouse_accum_y);
 }
 
