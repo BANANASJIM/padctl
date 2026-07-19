@@ -987,27 +987,98 @@ test "e2e gesture regression: tap+double KEY_J timeout release is delayed to tim
     try testing.expect(!auxListHasAnyKey(&aux_release, key_k));
 }
 
-test "e2e gesture: timer-context gamepad tap stages full press one frame before release" {
+test "e2e gesture issue 492: timer-origin tap is independent of physical report cadence" {
+    const allocator = testing.allocator;
+
+    for ([_]u32{ 2, 4, 8, 16 }) |cadence_ms| {
+        for ([_]bool{ false, true }) |with_followup| {
+            var ctx = try makeMapper(
+                \\[remap]
+                \\A = { tap = "B", double = "Y", double_ms = 250 }
+            , allocator);
+            defer ctx.deinit();
+            var m = &ctx.mapper;
+
+            const t0: i128 = 1_000_000_000;
+            _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+            _ = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+
+            // The double window timeout resolves the single tap. The virtual
+            // press must be emitted by this timer wakeup, even with no later
+            // physical input report.
+            const press_ns = t0 + 300 * std.time.ns_per_ms;
+            const press = m.onMacroTimerExpiredEvents(press_ns);
+            try testing.expect(press.gamepad != null);
+            try testing.expectEqual(btnMask(.B), press.gamepad.?.buttons & btnMask(.B));
+
+            if (with_followup) {
+                const followup = try m.apply(
+                    .{ .buttons = 0 },
+                    cadence_ms,
+                    press_ns + @as(i128, cadence_ms) * std.time.ns_per_ms,
+                );
+                try testing.expectEqual(btnMask(.B), followup.gamepad.buttons & btnMask(.B));
+            }
+
+            const before_release = m.onMacroTimerExpiredEvents(press_ns + 119 * std.time.ns_per_ms);
+            try testing.expect(before_release.gamepad == null);
+            const release = m.onMacroTimerExpiredEvents(press_ns + 120 * std.time.ns_per_ms);
+            try testing.expect(release.gamepad != null);
+            try testing.expectEqual(@as(u64, 0), release.gamepad.?.buttons & btnMask(.B));
+        }
+    }
+}
+
+fn periodicSamplerObservesPulse(
+    press_ms: u32,
+    release_ms: u32,
+    period_ms: u32,
+    phase_ms: u32,
+) bool {
+    var sample_ms = phase_ms;
+    while (sample_ms < release_ms) : (sample_ms += period_ms) {
+        if (sample_ms >= press_ms) return true;
+    }
+    return false;
+}
+
+test "e2e gesture issue 492: edge-origin gamepad tap remains pressed for 120ms" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(
         \\[remap]
-        \\A = { tap = "B", double = "Y", double_ms = 250 }
+        \\LS = { tap = "LS", hold = "KEY_Z", hold_ms = 1000 }
     , allocator);
     defer ctx.deinit();
     var m = &ctx.mapper;
 
+    const ls = btnMask(.LS);
     const t0: i128 = 1_000_000_000;
-    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
-    _ = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
-    // double window times out -> single tap of gamepad B, staged for next apply
-    _ = m.onMacroTimerExpired(t0 + 300 * std.time.ns_per_ms);
+    _ = try m.apply(.{ .buttons = ls }, 16, t0);
+    const press_ns = t0 + 333 * std.time.ns_per_ms;
+    const tap = try m.apply(.{ .buttons = 0 }, 16, press_ns);
+    try testing.expectEqual(ls, tap.gamepad.buttons & ls);
 
-    // frame N: B pressed (staged tap promoted)
-    const ev1 = try m.apply(.{ .buttons = 0 }, 16, t0 + 310 * std.time.ns_per_ms);
-    try testing.expect((ev1.gamepad.buttons & btnMask(.B)) != 0);
-    // frame N+1: B released (pending_tap_release)
-    const ev2 = try m.apply(.{ .buttons = 0 }, 16, t0 + 320 * std.time.ns_per_ms);
-    try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & btnMask(.B));
+    // The old 30 ms auxiliary-tap lifetime expires here. A gamepad tap needs a
+    // dedicated lifetime long enough to cross slower consumer polling phases.
+    const before_release = m.onMacroTimerExpiredEvents(press_ns + 119 * std.time.ns_per_ms);
+    try testing.expect(before_release.gamepad == null);
+
+    const release = m.onMacroTimerExpiredEvents(press_ns + 120 * std.time.ns_per_ms);
+    try testing.expect(release.gamepad != null);
+    try testing.expectEqual(@as(u64, 0), release.gamepad.?.buttons & ls);
+
+    // A 120 ms state lifetime crosses every phase of the consumer polling
+    // periods exercised here, including the 100 ms slow-poll boundary.
+    for ([_]u32{ 8, 16, 33, 50, 100 }) |period_ms| {
+        for (0..period_ms) |phase_ms| {
+            try testing.expect(periodicSamplerObservesPulse(
+                333,
+                453,
+                period_ms,
+                @intCast(phase_ms),
+            ));
+        }
+    }
 }
 
 test "e2e gesture issue 492: rapid repeated stick-click taps keep distinct edges" {
@@ -1021,7 +1092,7 @@ test "e2e gesture issue 492: rapid repeated stick-click taps keep distinct edges
     var m = &ctx.mapper;
 
     for ([_]ButtonId{ .LS, .RS }, 0..) |button, iteration| {
-        const t0: i128 = 1_000_000_000 + @as(i128, @intCast(iteration)) * 100 * std.time.ns_per_ms;
+        const t0: i128 = 1_000_000_000 + @as(i128, @intCast(iteration)) * 200 * std.time.ns_per_ms;
         const mask = btnMask(button);
 
         // First physical click resolves to a virtual stick-click press.
@@ -1040,13 +1111,99 @@ test "e2e gesture issue 492: rapid repeated stick-click taps keep distinct edges
         try testing.expectEqual(mask, second_tap.gamepad.buttons & mask);
 
         // The cancelled first deadline must not release the second tap early.
-        const stale_release = m.onMacroTimerExpiredEvents(t0 + 41 * std.time.ns_per_ms);
+        const stale_release = m.onMacroTimerExpiredEvents(t0 + 131 * std.time.ns_per_ms);
         try testing.expect(stale_release.gamepad == null);
 
-        const final_release = m.onMacroTimerExpiredEvents(t0 + 60 * std.time.ns_per_ms);
+        const final_release = m.onMacroTimerExpiredEvents(t0 + 145 * std.time.ns_per_ms);
         try testing.expect(final_release.gamepad != null);
         try testing.expectEqual(@as(u64, 0), final_release.gamepad.?.buttons & mask);
     }
+}
+
+test "e2e gesture issue 492: different sources sharing a target retain independent releases" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\LS = { tap = "A", hold = "KEY_Z" }
+        \\RS = { tap = "A", hold = "KEY_Z" }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = std.time.ns_per_s;
+    _ = try m.apply(.{ .buttons = btnMask(.LS) }, 16, t0);
+    const first = try m.apply(.{ .buttons = 0 }, 16, t0 + 10 * std.time.ns_per_ms);
+    try testing.expectEqual(btnMask(.A), first.gamepad.buttons & btnMask(.A));
+
+    _ = try m.apply(.{ .buttons = btnMask(.RS) }, 16, t0 + 20 * std.time.ns_per_ms);
+    const second = try m.apply(.{ .buttons = 0 }, 16, t0 + 30 * std.time.ns_per_ms);
+    try testing.expectEqual(btnMask(.A), second.gamepad.buttons & btnMask(.A));
+
+    // LS expires first, but RS still owns the same virtual A target.
+    const first_release = m.onMacroTimerExpiredEvents(t0 + 130 * std.time.ns_per_ms);
+    try testing.expect(first_release.gamepad != null);
+    try testing.expectEqual(btnMask(.A), first_release.gamepad.?.buttons & btnMask(.A));
+
+    const final_release = m.onMacroTimerExpiredEvents(t0 + 150 * std.time.ns_per_ms);
+    try testing.expect(final_release.gamepad != null);
+    try testing.expectEqual(@as(u64, 0), final_release.gamepad.?.buttons & btnMask(.A));
+}
+
+test "e2e gesture issue 492: timer-origin LT and RT taps include analog floors" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "LT", double = "X", double_ms = 250 }
+        \\B = { tap = "RT", double = "Y", double_ms = 250 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    for ([_]struct { src: ButtonId, dst: ButtonId, use_lt: bool }{
+        .{ .src = .A, .dst = .LT, .use_lt = true },
+        .{ .src = .B, .dst = .RT, .use_lt = false },
+    }, 0..) |case, index| {
+        const t0 = std.time.ns_per_s + @as(i128, @intCast(index)) * std.time.ns_per_s;
+        _ = try m.apply(.{ .buttons = btnMask(case.src) }, 16, t0);
+        _ = try m.apply(.{ .buttons = 0 }, 16, t0 + 40 * std.time.ns_per_ms);
+
+        const press = m.onMacroTimerExpiredEvents(t0 + 300 * std.time.ns_per_ms);
+        try testing.expect(press.gamepad != null);
+        try testing.expectEqual(btnMask(case.dst), press.gamepad.?.buttons & btnMask(case.dst));
+        if (case.use_lt) {
+            try testing.expectEqual(@as(u8, 255), press.gamepad.?.lt);
+        } else {
+            try testing.expectEqual(@as(u8, 255), press.gamepad.?.rt);
+        }
+
+        const release = m.onMacroTimerExpiredEvents(t0 + 420 * std.time.ns_per_ms);
+        try testing.expect(release.gamepad != null);
+        try testing.expectEqual(@as(u64, 0), release.gamepad.?.buttons & btnMask(case.dst));
+        if (case.use_lt) {
+            try testing.expectEqual(@as(u8, 0), release.gamepad.?.lt);
+        } else {
+            try testing.expectEqual(@as(u8, 0), release.gamepad.?.rt);
+        }
+    }
+}
+
+test "e2e gesture issue 492: timer-origin gamepad hold emits without a followup report" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\A = { tap = "X", hold = "RB", hold_ms = 100 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = std.time.ns_per_s;
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0);
+    const hold = m.onMacroTimerExpiredEvents(t0 + 100 * std.time.ns_per_ms);
+    try testing.expect(hold.gamepad != null);
+    try testing.expectEqual(btnMask(.RB), hold.gamepad.?.buttons & btnMask(.RB));
+
+    const release = try m.apply(.{ .buttons = 0 }, 16, t0 + 200 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), release.gamepad.buttons & btnMask(.RB));
 }
 
 test "e2e gesture issue 492: LS and RS duration sweep classifies every sub-threshold press as tap" {
@@ -1072,12 +1229,15 @@ test "e2e gesture issue 492: LS and RS duration sweep classifies every sub-thres
             try testing.expectEqual(mask, release.gamepad.buttons & mask);
             try testing.expect(!auxHasAnyKey(release, keyCode("KEY_Z")));
 
-            const timer = m.onMacroTimerExpiredEvents(release_ns + 31 * std.time.ns_per_ms);
+            const before_timer = m.onMacroTimerExpiredEvents(release_ns + 119 * std.time.ns_per_ms);
+            try testing.expect(before_timer.gamepad == null);
+
+            const timer = m.onMacroTimerExpiredEvents(release_ns + 120 * std.time.ns_per_ms);
             try testing.expect(timer.gamepad != null);
             try testing.expectEqual(@as(u64, 0), timer.gamepad.?.buttons & mask);
             try testing.expect(!auxListHasAnyKey(&timer.aux, keyCode("KEY_Z")));
 
-            now_ns = release_ns + 40 * std.time.ns_per_ms;
+            now_ns = release_ns + 130 * std.time.ns_per_ms;
         }
     }
 }
@@ -1146,10 +1306,9 @@ test "e2e gesture back-compat: chord array remap A=[KEY_LEFTMETA,KEY_1] unchange
     try testing.expectEqual(@as(usize, 0), ev.aux.len);
 }
 
-// --- F-2: a resolved gesture's timer-staged gamepad tap survives a same-frame
-// layer transition. The double-tap window expiring to a single tap stages the
-// tap bit; a layer active-state change on the next frame used to zero
-// gesture_timer_tap_pending before the apply() promotion block, dropping it.
+// --- F-2: a resolved timer-origin gamepad tap survives a same-frame layer
+// transition. Once emitted, its release token owns the lifetime independently
+// of the gesture engine state reset caused by the layer transition.
 
 test "gesture F-2: resolved single-tap gamepad bit survives same-frame layer toggle" {
     const allocator = testing.allocator;
@@ -1179,12 +1338,17 @@ test "gesture F-2: resolved single-tap gamepad bit survives same-frame layer tog
     // Frame 2: A release opens the double window; LB still held.
     _ = try m.apply(.{ .buttons = lb_mask }, 16, t0 + 40 * ns_per_ms);
 
-    // Double window expires with no second press -> single tap "B" staged.
-    _ = m.onMacroTimerExpired(t0 + 300 * ns_per_ms);
-    try testing.expectEqual(b_bit, m.gesture_timer_tap_pending);
+    // Double window expires with no second press -> single tap "B" emitted.
+    const tap = m.onMacroTimerExpiredEvents(t0 + 300 * ns_per_ms);
+    try testing.expect(tap.gamepad != null);
+    try testing.expectEqual(b_bit, tap.gamepad.?.buttons & b_bit);
 
     // Frame 3: LB released -> toggle flips -> layer active_changed. The resolved
-    // gesture's staged tap must survive to the promotion block.
+    // tap must remain active for the rest of its timer-owned lifetime.
     const ev = try m.apply(.{ .buttons = 0 }, 16, t0 + 301 * ns_per_ms);
     try testing.expectEqual(b_bit, ev.gamepad.buttons & b_bit);
+
+    const release = m.onMacroTimerExpiredEvents(t0 + 420 * ns_per_ms);
+    try testing.expect(release.gamepad != null);
+    try testing.expectEqual(@as(u64, 0), release.gamepad.?.buttons & b_bit);
 }

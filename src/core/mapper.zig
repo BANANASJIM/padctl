@@ -70,6 +70,7 @@ const AuxDownTarget = union(enum) {
 };
 
 const AUX_TAP_RELEASE_DELAY_NS: i128 = 30 * std.time.ns_per_ms;
+const GAMEPAD_GESTURE_TAP_RELEASE_DELAY_NS: i128 = 120 * std.time.ns_per_ms;
 const AUX_TAP_RELEASE_TOKEN_SLOTS = BUTTON_COUNT;
 const GESTURE_TOKEN_SLOTS = gesture_mod.GESTURE_SLOTS * 2;
 
@@ -228,9 +229,6 @@ pub const Mapper = struct {
     macro_timer_tap_pending: u64,
     gesture_engine: gesture_mod.GestureEngine,
     gesture_tokens: GestureTokenTable,
-    // Same staging discipline as macro_timer_tap_pending: gamepad taps emitted
-    // from gesture timer expiry need one apply() to reach output.
-    gesture_timer_tap_pending: u64,
     // Gamepad bits held by an active gesture hold leg; re-asserted each frame
     // until the hold leg emits its release.
     gesture_held_gamepad: u64,
@@ -300,7 +298,6 @@ pub const Mapper = struct {
             .macro_timer_tap_pending = 0,
             .gesture_engine = .{},
             .gesture_tokens = .{},
-            .gesture_timer_tap_pending = 0,
             .gesture_held_gamepad = 0,
             .layer_held_gamepad = 0,
             .layer_hold_aux_down = null,
@@ -358,7 +355,6 @@ pub const Mapper = struct {
         self.macro_timer_tap_pending = 0;
         self.gesture_engine.reset();
         self.gesture_tokens.clear();
-        self.gesture_timer_tap_pending = 0;
         self.gesture_held_gamepad = 0;
         // callers must releaseMapperAux first; this only clears state, no release edge.
         self.layer_held_gamepad = 0;
@@ -473,14 +469,6 @@ pub const Mapper = struct {
             self.pending_tap_release = existing | self.macro_timer_tap_pending;
             self.macro_timer_tap_pending = 0;
             for (self.active_macros.items) |*p| p.staged_timer_taps = 0;
-        }
-
-        // Promote gesture-timer tap bits staged at last expiry.
-        if (self.gesture_timer_tap_pending != 0) {
-            self.injected_buttons |= self.gesture_timer_tap_pending;
-            const existing = self.pending_tap_release orelse 0;
-            self.pending_tap_release = existing | self.gesture_timer_tap_pending;
-            self.gesture_timer_tap_pending = 0;
         }
 
         // Suppress layer trigger buttons so they don't leak to uinput output.
@@ -684,7 +672,7 @@ pub const Mapper = struct {
                                 out.cancel_double,
                             );
                         }
-                        self.applyGestureOutcome(src_idx, out, &aux, false, now_ns);
+                        _ = self.applyGestureOutcome(src_idx, out, &aux, false, now_ns);
                     }
                 },
             }
@@ -899,10 +887,6 @@ pub const Mapper = struct {
         self.gesture_tokens.clear();
         self.gesture_engine.reset();
         self.gesture_held_gamepad = 0;
-        for (self.gesture_gamepad_tap_release_tokens.entries) |maybe| {
-            if (maybe) |e| self.timer_queue.cancel(e.token, now_ns);
-        }
-        self.gesture_gamepad_tap_release_tokens.clear();
         for (&self.gesture_aux_down_targets) |*target| {
             if (target.*) |down| {
                 emitAuxDownRelease(down, aux);
@@ -1050,10 +1034,9 @@ pub const Mapper = struct {
         return suppress;
     }
 
-    // Translate one gesture-engine Outcome into output. `from_timer` selects
-    // the gamepad-tap staging path: timer-context taps stage into
-    // gesture_timer_tap_pending so a full press is visible one frame before the
-    // release; apply-context taps use pending_tap_release directly.
+    // Translate one gesture-engine Outcome into output. Returns whether it
+    // changed gamepad state so timer-origin outcomes can emit a frame without
+    // waiting for another physical input report.
     fn applyGestureOutcome(
         self: *Mapper,
         src_idx: u6,
@@ -1061,7 +1044,8 @@ pub const Mapper = struct {
         aux: *AuxEventList,
         from_timer: bool,
         now_ns: i128,
-    ) void {
+    ) bool {
+        var gamepad_changed = false;
         if (out.cancel_hold or out.cancel_double) {
             // Tokens are matched by value at expiry; cancel both the queue
             // entry and the routing record so a stale expiry is inert.
@@ -1095,18 +1079,26 @@ pub const Mapper = struct {
                         .press => {
                             self.injected_buttons |= mask;
                             self.gesture_held_gamepad |= mask;
+                            gamepad_changed = true;
                         },
                         .release => {
                             self.injected_buttons &= ~mask;
                             self.gesture_held_gamepad &= ~mask;
+                            gamepad_changed = true;
                         },
-                        .tap => if (from_timer) {
-                            self.gesture_timer_tap_pending |= mask;
-                        } else {
-                            if (!emitDelayedGestureGamepadTap(self, src_idx, mask, now_ns)) {
+                        .tap => {
+                            if (emitDelayedGestureGamepadTap(self, src_idx, mask, now_ns)) {
+                                gamepad_changed = true;
+                            } else if (!from_timer) {
+                                // Preserve the existing one-frame fallback for
+                                // edge-origin taps if the release timer cannot
+                                // be armed. Timer-origin taps cannot safely use
+                                // that fallback because no later report is
+                                // guaranteed to emit their release.
                                 self.injected_buttons |= mask;
                                 const existing = self.pending_tap_release orelse 0;
                                 self.pending_tap_release = existing | mask;
+                                gamepad_changed = true;
                             }
                         },
                     }
@@ -1132,10 +1124,11 @@ pub const Mapper = struct {
         if (out.arm) |a| {
             const token = self.next_token;
             self.next_token +%= 1;
-            self.timer_queue.arm(a.deadline_ns, token, now_ns) catch return;
+            self.timer_queue.arm(a.deadline_ns, token, now_ns) catch return gamepad_changed;
             self.gesture_tokens.put(token, src_idx, a.leg);
             self.gesture_engine.setArmToken(src_idx, a.leg, token);
         }
+        return gamepad_changed;
     }
 
     // Macro timerfd (slot 4) expiry only — must NOT call onLayerTimerExpired().
@@ -1171,7 +1164,9 @@ pub const Mapper = struct {
                     out.emit_len,
                     now_ns,
                 );
-                self.applyGestureOutcome(ge.src_idx, out, &events.aux, true, now_ns);
+                if (self.applyGestureOutcome(ge.src_idx, out, &events.aux, true, now_ns)) {
+                    events.gamepad = self.currentMappedGamepadFrame();
+                }
                 continue;
             }
             var idx: usize = 0;
@@ -1424,7 +1419,7 @@ fn emitDelayedGestureGamepadTap(self: *Mapper, src_idx: u6, mask: u64, now_ns: i
         .mask = mask,
     })) |prior| self.timer_queue.cancel(prior.token, now_ns);
 
-    self.timer_queue.arm(now_ns + AUX_TAP_RELEASE_DELAY_NS, token, now_ns) catch |err| {
+    self.timer_queue.arm(now_ns + GAMEPAD_GESTURE_TAP_RELEASE_DELAY_NS, token, now_ns) catch |err| {
         _ = self.gesture_gamepad_tap_release_tokens.take(token);
         std.log.warn("gamepad tap release timer arm failed: {}", .{err});
         return false;
@@ -1533,7 +1528,6 @@ test "mapper: resetRuntimeState clears transient layer timer and input state" {
     m.seeded_buttons = buttonBit("A");
     m.pending_tap_release = buttonBit("B");
     m.macro_timer_tap_pending = buttonBit("X");
-    m.gesture_timer_tap_pending = buttonBit("Y");
     m.gesture_held_gamepad = buttonBit("RB");
     m.aux_down_targets[@intFromEnum(ButtonId.A)] = .{ .key = 30 };
     try m.timer_queue.arm(2_000, 99, 1_000);
@@ -1547,7 +1541,6 @@ test "mapper: resetRuntimeState clears transient layer timer and input state" {
     try testing.expectEqual(@as(u64, 0), m.seeded_buttons);
     try testing.expectEqual(@as(?u64, null), m.pending_tap_release);
     try testing.expectEqual(@as(u64, 0), m.macro_timer_tap_pending);
-    try testing.expectEqual(@as(u64, 0), m.gesture_timer_tap_pending);
     try testing.expectEqual(@as(u64, 0), m.gesture_held_gamepad);
     try testing.expect(m.aux_down_targets[@intFromEnum(ButtonId.A)] == null);
     try testing.expectEqual(@as(usize, 0), m.timer_queue.heap.count());
@@ -1659,15 +1652,15 @@ test "mapper: issue 492 stick-click tap remains observable until release timer" 
     const tap = try m.apply(.{ .buttons = 0 }, 16, t0 + 10 * std.time.ns_per_ms);
     try testing.expectEqual(stick_clicks, tap.gamepad.buttons & stick_clicks);
 
-    // A high-poll-rate controller reports again almost immediately.  The virtual
-    // press must remain visible for the same 30 ms minimum used by key/mouse taps;
-    // a one-report pulse is too short for consumers to observe reliably.
+    // A high-poll-rate controller reports again almost immediately. The virtual
+    // press must remain visible for the dedicated gamepad tap lifetime; a
+    // one-report pulse is too short for consumers to observe reliably.
     const early = try m.apply(.{ .buttons = 0 }, 1, t0 + 11 * std.time.ns_per_ms);
     try testing.expectEqual(stick_clicks, early.gamepad.buttons & stick_clicks);
 
     // Release comes from the timer itself; it must not depend on another physical
     // controller report after the stick click.
-    const release = m.onMacroTimerExpiredEvents(t0 + 40 * std.time.ns_per_ms);
+    const release = m.onMacroTimerExpiredEvents(t0 + 130 * std.time.ns_per_ms);
     try testing.expect(release.gamepad != null);
     try testing.expectEqual(@as(u64, 0), release.gamepad.?.buttons & stick_clicks);
 }
@@ -1689,8 +1682,11 @@ test "mapper: gesture hold gamepad bit persists then clears on release" {
     // Press arms the hold timer.
     _ = try m.apply(.{ .buttons = a_mask }, 16, 0);
 
-    // Hold deadline fires while button still held -> gamepad press staged.
-    _ = m.onMacroTimerExpired(100 * std.time.ns_per_ms + 1);
+    // Hold deadline fires while button is still held -> gamepad press is
+    // returned immediately by the timer wakeup and remains asserted.
+    const hold = m.onMacroTimerExpiredEvents(100 * std.time.ns_per_ms + 1);
+    try testing.expect(hold.gamepad != null);
+    try testing.expect((hold.gamepad.?.buttons & rb_mask) != 0);
     try testing.expect((m.gesture_held_gamepad & rb_mask) != 0);
 
     // Next frame re-asserts the held bit into output.
