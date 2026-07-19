@@ -1183,6 +1183,42 @@ test "e2e gesture issue 492: rising edge cancels old tap after layer changes tar
     try testing.expect(stale_release.gamepad == null);
 }
 
+test "e2e gesture issue 492: unmapped rising edge cancels tap emitted by old layer" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[[layer]]
+        \\name = "fn"
+        \\trigger = "LB"
+        \\activation = "toggle"
+        \\
+        \\[layer.remap]
+        \\A = { tap = "B", hold = "KEY_Z", hold_ms = 1000 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    const t0: i128 = std.time.ns_per_s;
+
+    // Enable the layer, emit its A -> B gesture tap, then disable the layer
+    // while the timer-owned B pulse remains active.
+    _ = try m.apply(.{ .buttons = btnMask(.LB) }, 16, t0);
+    _ = try m.apply(.{ .buttons = 0 }, 16, t0 + 10 * std.time.ns_per_ms);
+    _ = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0 + 20 * std.time.ns_per_ms);
+    const tap = try m.apply(.{ .buttons = 0 }, 16, t0 + 30 * std.time.ns_per_ms);
+    try testing.expectEqual(btnMask(.B), tap.gamepad.buttons & btnMask(.B));
+    _ = try m.apply(.{ .buttons = btnMask(.LB) }, 16, t0 + 40 * std.time.ns_per_ms);
+    const layer_off = try m.apply(.{ .buttons = 0 }, 16, t0 + 50 * std.time.ns_per_ms);
+    try testing.expectEqual(btnMask(.B), layer_off.gamepad.buttons & btnMask(.B));
+
+    // Base has no A mapping. The physical rising edge still owns this source
+    // and must end its old layer-emitted pulse before target lookup returns null.
+    const unmapped_press = try m.apply(.{ .buttons = btnMask(.A) }, 16, t0 + 60 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u64, 0), unmapped_press.gamepad.buttons & btnMask(.B));
+
+    const stale_release = m.onMacroTimerExpiredEvents(t0 + 150 * std.time.ns_per_ms);
+    try testing.expect(stale_release.gamepad == null);
+}
+
 test "e2e gesture issue 492: different sources sharing a target retain independent releases" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(

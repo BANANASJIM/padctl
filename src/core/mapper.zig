@@ -616,16 +616,17 @@ pub const Mapper = struct {
                 }
             }
 
-            const target = per_src_inject[i] orelse continue;
             // A new press ends any timer-owned tap from this physical source
             // before dispatching the source's current target. This must live at
             // the common mapping entry because a layer may have changed the
-            // source from a gesture to any other target kind since the tap.
+            // source from a gesture to another target kind, or to no mapping,
+            // since the tap.
             if (pressed and !prev_pressed) {
                 if (self.gesture_gamepad_tap_release_tokens.takeSource(@intCast(i))) |prior| {
                     self.timer_queue.cancel(prior.token, now_ns);
                 }
             }
+            const target = per_src_inject[i] orelse continue;
             switch (target) {
                 .macro => |name| {
                     if (pressed and !prev_pressed) {
