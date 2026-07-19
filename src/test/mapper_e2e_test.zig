@@ -1049,6 +1049,67 @@ test "e2e gesture issue 492: rapid repeated stick-click taps keep distinct edges
     }
 }
 
+test "e2e gesture issue 492: LS and RS duration sweep classifies every sub-threshold press as tap" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\LS = { tap = "LS", hold = "KEY_Z", hold_ms = 300 }
+        \\RS = { tap = "RS", hold = "KEY_Z", hold_ms = 300 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    var now_ns: i128 = std.time.ns_per_s;
+    for ([_]ButtonId{ .LS, .RS }) |button| {
+        const mask = btnMask(button);
+        var duration_ms: u32 = 1;
+        while (duration_ms < 300) : (duration_ms += 1) {
+            const press = try m.apply(.{ .buttons = mask }, 16, now_ns);
+            try testing.expectEqual(@as(u64, 0), press.gamepad.buttons & mask);
+
+            const release_ns = now_ns + @as(i128, duration_ms) * std.time.ns_per_ms;
+            const release = try m.apply(.{ .buttons = 0 }, 16, release_ns);
+            try testing.expectEqual(mask, release.gamepad.buttons & mask);
+            try testing.expect(!auxHasAnyKey(release, keyCode("KEY_Z")));
+
+            const timer = m.onMacroTimerExpiredEvents(release_ns + 31 * std.time.ns_per_ms);
+            try testing.expect(timer.gamepad != null);
+            try testing.expectEqual(@as(u64, 0), timer.gamepad.?.buttons & mask);
+            try testing.expect(!auxListHasAnyKey(&timer.aux, keyCode("KEY_Z")));
+
+            now_ns = release_ns + 40 * std.time.ns_per_ms;
+        }
+    }
+}
+
+test "e2e gesture issue 492: LS and RS at hold deadline select KEY_Z and never tap" {
+    const allocator = testing.allocator;
+    var ctx = try makeMapper(
+        \\[remap]
+        \\LS = { tap = "LS", hold = "KEY_Z", hold_ms = 300 }
+        \\RS = { tap = "RS", hold = "KEY_Z", hold_ms = 300 }
+    , allocator);
+    defer ctx.deinit();
+    var m = &ctx.mapper;
+
+    var now_ns: i128 = std.time.ns_per_s;
+    for ([_]ButtonId{ .LS, .RS }) |button| {
+        const mask = btnMask(button);
+        _ = try m.apply(.{ .buttons = mask }, 16, now_ns);
+
+        const hold = m.onMacroTimerExpiredEvents(now_ns + 300 * std.time.ns_per_ms);
+        try testing.expect(hold.gamepad == null);
+        try testing.expect(auxListHasKey(&hold.aux, keyCode("KEY_Z"), true));
+
+        const release = try m.apply(.{ .buttons = 0 }, 16, now_ns + 301 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(u64, 0), release.gamepad.buttons & mask);
+        try testing.expect(auxHasKey(release, keyCode("KEY_Z"), false));
+        try testing.expect(!auxHasKey(release, keyCode("KEY_Z"), true));
+
+        now_ns += 500 * std.time.ns_per_ms;
+    }
+}
+
 test "e2e gesture back-compat: plain string remap A=KEY_F13 unchanged (immediate edge)" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(

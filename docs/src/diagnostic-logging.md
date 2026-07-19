@@ -2,7 +2,12 @@
 
 padctl ships with a general-purpose, togglable file logger. It is designed to be the single mechanism you reach for when diagnosing **any** class of bug — stuck rumble, input drops, mapping misses, hotplug oddities, daemon crashes — so that reports come with structured evidence instead of guesswork.
 
-It is **off by default** and has no hot-path cost when disabled. The current build already emits a very detailed trace of the force-feedback pipeline; other subsystems (input routing, layer/remap decisions, hotplug, config reload, …) will be instrumented behind the same switch over time. The user-facing contract — enable, reproduce, export, attach — stays the same as more coverage is added.
+It is **off by default** and has no hot-path formatting cost when disabled. The
+current build emits a detailed trace of the force-feedback pipeline plus button
+input edges, gesture decisions, and virtual button output edges; other
+subsystems (non-gesture layer/remap decisions, hotplug, config reload, …) will
+be instrumented behind the same switch over time. The user-facing contract —
+enable, reproduce, export, attach — stays the same as more coverage is added.
 
 ## Quick workflow
 
@@ -111,6 +116,15 @@ When `dump = false` (the default), only warnings and errors are written, and onl
 When `dump = true`, padctl adds verbose tracing on top. The coverage today is deepest in the force-feedback pipeline — that is the area where the logger was needed first — and is being expanded to other subsystems as issues surface. Current coverage:
 
 - **Session lifecycle** — daemon start, config loaded, devices attached/detached
+- **Button input edges** — the changed decoded button mask and the bounded raw
+  controller report that produced it (`INPUT_EDGE`); axis/IMU-only frames are
+  intentionally omitted so high-rate devices do not flood the dump
+- **Gesture decisions** — physical source edge and press duration, timer
+  arm/cancel, emitted action and target, and hold/double timer expiry
+  (`GESTURE_EDGE`, `GESTURE_EMIT`, `GESTURE_TIMER`)
+- **Virtual button output edges** — the changed mapped button mask and whether
+  it came from physical input, the layer timer, or the shared macro/gesture
+  timer (`OUTPUT_EDGE`)
 - **FF_UPLOAD / FF_ERASE** kernel requests with effect IDs, rumble magnitudes, and replay durations
 - **EV_FF PLAY / STOP** events with scheduler decisions (forwarded, throttled, auto-stop timer armed, etc.)
 - **HID rumble frames** written to the physical device, with the first 16 bytes hex-dumped so post-checksum data can be inspected
@@ -118,7 +132,9 @@ When `dump = true`, padctl adds verbose tracing on top. The coverage today is de
 - **Rumble write recovery** — retry attempts, retry-limit exhaustion, and whether the input loop stayed alive after a non-disconnect write failure
 - **Hotplug/rebind rumble quiesce** — detach, init, re-init, and neutral rumble frames emitted after a fresh physical fd is bound
 
-Planned areas (no promised order): input-report parsing, layer/remap resolution, hotplug/netlink events, config reload, IPC commands. You can track progress on these in the repo issue tracker.
+Planned areas (no promised order): axis/IMU input tracing, non-gesture layer/remap
+resolution, hotplug/netlink events, config reload, IPC commands. You can track
+progress on these in the repo issue tracker.
 
 ## Reporting issues
 
@@ -132,6 +148,11 @@ padctl dump disable
 ```
 
 Attach `issue.log`. Sensitive information in the logs is limited to device names, USB identifiers, and input report bytes — there is no keystroke capture or payload from other applications.
+
+For button or gesture reports, the most useful lines are `INPUT_EDGE`,
+`GESTURE_EDGE`, `GESTURE_EMIT`, `GESTURE_TIMER`, and `OUTPUT_EDGE`. Their
+monotonic timestamps let maintainers follow one physical edge through the
+gesture decision and into the virtual device.
 
 For stuck-rumble reports, also attach `padctl doctor` output and note the game
 action that produced the rumble. The most useful lines are `FF_PLAY`,

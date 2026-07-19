@@ -6,6 +6,7 @@ const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const interpreter_mod = @import("core/interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
+const OutputEmitError = @import("io/uinput.zig").EmitError;
 const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
 const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
 const generic = @import("core/generic.zig");
@@ -28,6 +29,7 @@ const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
 const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
+const input_trace = @import("diagnostics/input_trace.zig");
 const socket_client = @import("cli/socket_client.zig");
 const uhid_mod = @import("io/uhid.zig");
 pub const UhidDevice = uhid_mod.UhidDevice;
@@ -441,6 +443,9 @@ pub const EventLoop = struct {
     pending_rumble_deadline_ns: ?i128,
     pending_rumble_retry_count: u8,
     last_heartbeat_ns: i128 = 0,
+    /// Last successfully emitted virtual button mask. Diagnostic tracing uses
+    /// it to log output edges without flooding dumps with axis-only frames.
+    diagnostic_output_buttons: u64 = 0,
 
     pub fn init() !EventLoop {
         var mask = posix.sigemptyset();
@@ -528,6 +533,24 @@ pub const EventLoop = struct {
         self.pollfds[slot] = device.pollfd();
         self.device_count += 1;
         self.fd_count += 1;
+    }
+
+    fn emitGamepadOutput(
+        self: *EventLoop,
+        ctx: EventLoopContext,
+        gamepad: state.GamepadState,
+        now_ns: i128,
+        cause: []const u8,
+    ) OutputEmitError!void {
+        try ctx.output.emit(gamepad);
+        input_trace.logOutputEdge(
+            ctx.device_tag,
+            cause,
+            self.diagnostic_output_buttons,
+            gamepad.buttons,
+            now_ns,
+        );
+        self.diagnostic_output_buttons = gamepad.buttons;
     }
 
     /// Replace pollfd entries for device slots with fds from new DeviceIO
@@ -832,7 +855,16 @@ pub const EventLoop = struct {
                             break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
                         };
                         if (maybe_delta) |delta| {
+                            const input_buttons_before = self.gamepad_state.buttons;
                             self.gamepad_state.applyDelta(delta);
+                            input_trace.logInputEdge(
+                                ctx.device_tag,
+                                interface_id,
+                                input_buttons_before,
+                                self.gamepad_state.buttons,
+                                buf[0..n],
+                                now,
+                            );
 
                             if (ctx.mapper) |m| {
                                 const events = m.apply(delta, dt_ms, now) catch |err| {
@@ -844,7 +876,7 @@ pub const EventLoop = struct {
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
                                 if (events.chord_switch_request) |idx| dispatchChordSwitch(idx);
-                                ctx.output.emit(events.gamepad) catch |err| {
+                                self.emitGamepadOutput(ctx, events.gamepad, now, "input") catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;
                                 };
@@ -859,7 +891,7 @@ pub const EventLoop = struct {
                                 }
                             } else {
                                 self.gamepad_state.synthesizeDpadAxes();
-                                ctx.output.emit(self.gamepad_state) catch |err| {
+                                self.emitGamepadOutput(ctx, self.gamepad_state, now, "input") catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;
                                 };
@@ -1043,7 +1075,7 @@ pub const EventLoop = struct {
                 if (ctx.mapper) |m| {
                     const events = m.onLayerTimerExpiredAt(now);
                     if (events.gamepad) |gamepad| {
-                        ctx.output.emit(gamepad) catch |err| {
+                        self.emitGamepadOutput(ctx, gamepad, now, "layer_timer") catch |err| {
                             std.log.err("output.emit failed: {}", .{err});
                         };
                     }
@@ -1063,7 +1095,7 @@ pub const EventLoop = struct {
                 if (ctx.mapper) |m| {
                     const events = m.onMacroTimerExpiredEvents(now);
                     if (events.gamepad) |gamepad| {
-                        ctx.output.emit(gamepad) catch |err| {
+                        self.emitGamepadOutput(ctx, gamepad, now, "macro_timer") catch |err| {
                             std.log.err("output.emit failed: {}", .{err});
                         };
                     }
