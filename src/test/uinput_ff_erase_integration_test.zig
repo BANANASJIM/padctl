@@ -1,4 +1,4 @@
-//! Real-uinput integration test for the pollFf UI_FF_ERASE wiring.
+//! Real-uinput integration tests for the pollFf FF event wiring.
 //!
 //! The production stop-on-erase plumbing lives in `UinputDevice.pollFf`'s
 //! UI_FF_ERASE branch (`result = eraseStopEvent(...); break;`). That branch only
@@ -6,12 +6,10 @@
 //! the kernel — which the Layer-0 `event_loop_ff_erase_test.zig` can't reach
 //! because it feeds pollFf's output to the event loop via a canned FfEvent.
 //!
-//! This test drives the actual ioctl path: padctl creates an FF_RUMBLE uinput
-//! device, a client opens the matching evdev node, EVIOCSFF-uploads an infinite
-//! effect, then EVIOCRMFF-erases it WITHOUT writing EV_FF value=0. The kernel
-//! turns that into UI_FF_UPLOAD / UI_FF_ERASE requests on padctl's fd; we pump
-//! the real `pollFf()` and assert it surfaces a zero-magnitude stop FfEvent for
-//! the erased slot — the exact emulation that stops the motor on erase.
+//! These tests drive the actual ioctl path: padctl creates an FF_RUMBLE uinput
+//! device and a client opens the matching evdev node. One scenario uploads an
+//! effect and writes rapid EV_FF PLAY+STOP events; the other erases an effect
+//! without EV_FF=0. Both kernel handshakes are pumped through real `pollFf()`.
 //!
 //! ## Runtime behaviour (mirrors shadow_grab_integration_test.zig)
 //!
@@ -23,7 +21,7 @@
 //!       `error.UinputAccessRequired` — a hard failure, so an environment meant
 //!       to have /dev/uinput but lacking it surfaces the breakage. The
 //!       privileged `e2e` job sets it when /dev/uinput is accessible, which is
-//!       the only place this UI_FF_ERASE wiring runs against the real kernel.
+//!       where these FF wiring scenarios run against the real kernel.
 
 const std = @import("std");
 const posix = std.posix;
@@ -39,12 +37,21 @@ const c = @cImport({
     @cInclude("linux/input.h");
 });
 
+extern "c" fn pthread_kill(thread: std.c.pthread_t, signal: c_int) c_int;
+
 const gate = src.testing_support.uhid_gate;
 
 const FF_VID: u16 = 0xFAD7;
-const FF_PID: u16 = 0x2401;
+const FF_ERASE_PID: u16 = 0x2401;
+const FF_PLAY_STOP_PID: u16 = 0x2402;
+const FF_ERASE_NAME = "padctl-ff-erase-itest";
+const FF_PLAY_STOP_NAME = "padctl-ff-play-stop-itest";
+const EVIOCGNAME_256 = linux.IOCTL.IOR('E', 0x06, [256]u8);
+const CLIENT_TIMEOUT_NS = 5 * std.time.ns_per_s;
+const CLIENT_POLL_MS: i32 = 50;
+const CANCEL_TIMEOUT_MS: i32 = 500;
 
-const ff_toml =
+const ff_erase_toml =
     \\[device]
     \\name = "ff-erase-itest"
     \\vid = 1
@@ -67,7 +74,30 @@ const ff_toml =
     \\max_effects = 16
 ;
 
-fn findEventNode(vid: u16, pid: u16, name_buf: *[40]u8) ?[]const u8 {
+const ff_play_stop_toml =
+    \\[device]
+    \\name = "ff-play-stop-itest"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[output]
+    \\name = "padctl-ff-play-stop-itest"
+    \\vid = 0xFAD7
+    \\pid = 0x2402
+    \\[output.buttons]
+    \\A = "BTN_SOUTH"
+    \\[output.force_feedback]
+    \\type = "rumble"
+    \\max_effects = 16
+;
+
+fn findEventNode(vid: u16, pid: u16, expected_name: []const u8, path_buf_out: *[40]u8) ?[]const u8 {
     var attempt: usize = 0;
     while (attempt < 20) : (attempt += 1) {
         var i: u16 = 0;
@@ -79,26 +109,90 @@ fn findEventNode(vid: u16, pid: u16, name_buf: *[40]u8) ?[]const u8 {
             var id: ioctl.InputId = undefined;
             if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCGID, @intFromPtr(&id))) != .SUCCESS) continue;
             if (id.vendor != vid or id.product != pid) continue;
-            return std.fmt.bufPrint(name_buf, "/dev/input/event{d}", .{i}) catch null;
+            var actual_name: [256]u8 = @splat(0);
+            if (linux.E.init(linux.ioctl(fd, EVIOCGNAME_256, @intFromPtr(&actual_name))) != .SUCCESS) continue;
+            const name_len = std.mem.indexOfScalar(u8, &actual_name, 0) orelse actual_name.len;
+            if (!std.mem.eql(u8, expected_name, actual_name[0..name_len])) continue;
+            return std.fmt.bufPrint(path_buf_out, "/dev/input/event{d}", .{i}) catch null;
         }
         std.Thread.sleep(50 * std.time.ns_per_ms);
     }
     return null;
 }
 
-// Client side, run on its own thread: EVIOCSFF an infinite rumble effect, then
-// EVIOCRMFF-erase it without writing EV_FF=0. Both ioctls block until padctl's
-// pollFf services the matching kernel request, which is why this can't run
-// inline with the pump loop.
+const ClientAction = enum {
+    erase,
+    play_stop,
+};
+
+fn interruptHandler(_: i32) callconv(.c) void {}
+
+fn terminateTestProcess() noreturn {
+    // Returning while a worker still borrows stack state is unsafe. The build
+    // target also has a hard `timeout` watchdog, but terminate immediately if
+    // SIGUSR1 failed to interrupt the blocking evdev ioctl.
+    _ = linux.kill(linux.getpid(), posix.SIG.TERM);
+    unreachable;
+}
+
+fn cancelAndJoin(thread: std.Thread, done_fd: posix.fd_t, completed: *const std.atomic.Value(bool)) void {
+    if (completed.load(.acquire)) {
+        thread.join();
+        return;
+    }
+
+    // Even when pthread_kill reports that the target already exited, allow the
+    // same bounded completion window: the worker may be between returning from
+    // its body and publishing `completed`.
+    _ = pthread_kill(thread.getHandle(), posix.SIG.USR1);
+    var done_poll = [_]posix.pollfd{.{ .fd = done_fd, .events = posix.POLL.IN, .revents = 0 }};
+    _ = posix.poll(&done_poll, CANCEL_TIMEOUT_MS) catch terminateTestProcess();
+    if (!completed.load(.acquire)) terminateTestProcess();
+    thread.join();
+}
+
+fn finishAfterPumpError(
+    thread: std.Thread,
+    done_fd: posix.fd_t,
+    completed: *const std.atomic.Value(bool),
+    client_done: bool,
+) void {
+    if (client_done or completed.load(.acquire)) {
+        thread.join();
+    } else {
+        cancelAndJoin(thread, done_fd, completed);
+    }
+}
+
+fn writeFfEvent(fd: posix.fd_t, effect_id: i16, value: i32) !void {
+    if (effect_id < 0) return error.InvalidEffectId;
+    const event = c.input_event{
+        .type = c.EV_FF,
+        .code = @intCast(effect_id),
+        .value = value,
+        .time = std.mem.zeroes(c.timeval),
+    };
+    const bytes = std.mem.asBytes(&event);
+    const written = try posix.write(fd, bytes);
+    if (written != bytes.len) return error.ShortEventWrite;
+}
+
+// Client side, run on its own thread. EVIOCSFF and EVIOCRMFF block until
+// padctl's pollFf services the corresponding kernel requests, so the main
+// thread pumps /dev/uinput while this worker uses the evdev side.
 const Client = struct {
     node: []const u8,
+    action: ClientAction,
+    done_fd: posix.fd_t,
+    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: anyerror!void = {},
-    erased_id: i16 = -1,
-    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    effect_id: i16 = -1,
 
     fn run(self: *Client) void {
         self.result = self.body();
-        self.done.store(true, .release);
+        self.completed.store(true, .release);
+        var one: u64 = 1;
+        _ = posix.write(self.done_fd, std.mem.asBytes(&one)) catch {};
     }
 
     fn body(self: *Client) !void {
@@ -108,23 +202,45 @@ const Client = struct {
         var effect = std.mem.zeroes(c.ff_effect);
         effect.type = c.FF_RUMBLE;
         effect.id = -1; // kernel assigns the slot
-        effect.replay.length = 0; // infinite — only ever stopped by erase
-        effect.u.rumble.strong_magnitude = 0x8000;
-        effect.u.rumble.weak_magnitude = 0x4000;
+        effect.replay.length = if (self.action == .erase) 0 else 65535;
+        effect.u.rumble.strong_magnitude = 0xf000;
+        effect.u.rumble.weak_magnitude = 0x0f00;
         if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCSFF, @intFromPtr(&effect))) != .SUCCESS)
             return error.UploadFailed;
-        self.erased_id = effect.id;
+        self.effect_id = effect.id;
 
-        const id: c_int = effect.id;
-        if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCRMFF, @as(usize, @bitCast(@as(isize, id))))) != .SUCCESS)
-            return error.EraseFailed;
+        switch (self.action) {
+            .erase => {
+                const id: c_int = effect.id;
+                if (linux.E.init(linux.ioctl(fd, ioctl.EVIOCRMFF, @as(usize, @bitCast(@as(isize, id))))) != .SUCCESS)
+                    return error.EraseFailed;
+            },
+            .play_stop => {
+                // Deliberately no sleep: this is the real-kernel counterpart
+                // to the rapid same-slot PLAY+STOP FIFO regression test.
+                try writeFfEvent(fd, effect.id, 1);
+                try writeFfEvent(fd, effect.id, 0);
+            },
+        }
     }
 };
 
-test "uinput: pollFf turns a real UI_FF_ERASE into a zero-magnitude stop frame" {
+const ScenarioResult = struct {
+    events: [8]uinput.FfEvent = undefined,
+    event_count: usize = 0,
+    effect_id: i16,
+};
+
+fn runScenario(
+    toml: []const u8,
+    pid: u16,
+    expected_name: []const u8,
+    action: ClientAction,
+    expected_events: usize,
+) !ScenarioResult {
     const allocator = testing.allocator;
 
-    const parsed = device_cfg.parseString(allocator, ff_toml) catch return error.ConfigParseFailed;
+    const parsed = device_cfg.parseString(allocator, toml) catch return error.ConfigParseFailed;
     defer parsed.deinit();
     const out_cfg = parsed.value.output orelse return error.NoOutput;
 
@@ -136,35 +252,144 @@ test "uinput: pollFf turns a real UI_FF_ERASE into a zero-magnitude stop frame" 
     defer dev.close();
 
     var name_buf: [40]u8 = undefined;
-    const node = findEventNode(FF_VID, FF_PID, &name_buf) orelse
+    const node = findEventNode(FF_VID, pid, expected_name, &name_buf) orelse
         return gate.reportMissingUinput("created uinput node did not appear under /dev/input");
 
-    var client = Client{ .node = node };
-    const thread = try std.Thread.spawn(.{}, Client.run, .{&client});
+    var previous_usr1: posix.Sigaction = undefined;
+    posix.sigaction(posix.SIG.USR1, &.{
+        .handler = .{ .handler = interruptHandler },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    }, &previous_usr1);
+    defer posix.sigaction(posix.SIG.USR1, &previous_usr1, null);
 
-    // Pump the real pollFf to drive the upload + erase handshake. The client's
-    // EVIOCSFF/EVIOCRMFF block until pollFf services the matching UI_FF_UPLOAD /
-    // UI_FF_ERASE request, so we keep pumping until the client thread finishes
-    // (so its erase ioctl returns rather than timing out) while capturing the
-    // first zero-magnitude stop the erase surfaces. Deadline-bounded so a
-    // regression that drops the stop fails instead of hanging.
-    var stop: ?uinput.FfEvent = null;
-    const deadline = std.time.milliTimestamp() + 5000;
-    while (std.time.milliTimestamp() < deadline) {
-        if (try dev.pollFf()) |ev| {
-            if (stop == null and ev.strong == 0 and ev.weak == 0) stop = ev;
+    const done_fd = try posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK);
+    defer posix.close(done_fd);
+    var client = Client{ .node = node, .action = action, .done_fd = done_fd };
+    const thread = try std.Thread.spawn(.{}, Client.run, .{&client});
+    var joined = false;
+    defer if (!joined) cancelAndJoin(thread, done_fd, &client.completed);
+
+    var timer = try std.time.Timer.start();
+    var result = ScenarioResult{ .effect_id = -1 };
+    var client_done = false;
+    while (timer.read() < CLIENT_TIMEOUT_NS) {
+        var pollfds = [_]posix.pollfd{
+            .{ .fd = dev.pollFfFd(), .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = done_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+        const ready = posix.poll(&pollfds, CLIENT_POLL_MS) catch |err| {
+            finishAfterPumpError(thread, done_fd, &client.completed, client_done);
+            joined = true;
+            return err;
+        };
+        if (ready == 0) {
+            client_done = client.completed.load(.acquire);
+            if (client_done and result.event_count >= expected_events) break;
+            continue;
         }
-        if (client.done.load(.acquire) and stop != null) break;
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+
+        const fatal_poll_events = posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL;
+        if (pollfds[0].revents & fatal_poll_events != 0 or
+            pollfds[1].revents & fatal_poll_events != 0)
+        {
+            finishAfterPumpError(thread, done_fd, &client.completed, client_done);
+            joined = true;
+            return error.PollDescriptorFailed;
+        }
+
+        if (pollfds[0].revents & posix.POLL.IN != 0) {
+            const maybe_event = dev.pollFf() catch |err| {
+                finishAfterPumpError(thread, done_fd, &client.completed, client_done);
+                joined = true;
+                return err;
+            };
+            if (maybe_event) |event| {
+                if (result.event_count >= result.events.len) {
+                    finishAfterPumpError(thread, done_fd, &client.completed, client_done);
+                    joined = true;
+                    return error.TooManyFfEvents;
+                }
+                result.events[result.event_count] = event;
+                result.event_count += 1;
+            }
+        }
+        if (pollfds[1].revents & posix.POLL.IN != 0) {
+            var completed_count: u64 = 0;
+            const read_len = posix.read(done_fd, std.mem.asBytes(&completed_count)) catch |err| {
+                finishAfterPumpError(thread, done_fd, &client.completed, client_done);
+                joined = true;
+                return err;
+            };
+            if (read_len != @sizeOf(u64) or completed_count == 0) {
+                finishAfterPumpError(thread, done_fd, &client.completed, client_done);
+                joined = true;
+                return error.InvalidCompletionSignal;
+            }
+        }
+        client_done = client.completed.load(.acquire);
+        if (client_done and result.event_count >= expected_events) break;
     }
 
+    if (!client_done) {
+        cancelAndJoin(thread, done_fd, &client.completed);
+        joined = true;
+        return error.ClientTimeout;
+    }
     thread.join();
+    joined = true;
     try client.result;
 
-    const ev = stop orelse return error.NoStopFrameFromErase;
+    // The worker only marks completion after all evdev writes/ioctls return,
+    // so any additional FF event is already queued. Drain without waiting to
+    // make the event-count assertions exact rather than prefix-only.
+    var drain_attempts: usize = 0;
+    while (drain_attempts < result.events.len) : (drain_attempts += 1) {
+        var pollfds = [_]posix.pollfd{.{ .fd = dev.pollFfFd(), .events = posix.POLL.IN, .revents = 0 }};
+        const ready = try posix.poll(&pollfds, 0);
+        if (ready == 0) break;
+        if (pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0)
+            return error.PollDescriptorFailed;
+        if (pollfds[0].revents & posix.POLL.IN == 0) break;
+        if (try dev.pollFf()) |event| {
+            if (result.event_count >= result.events.len) return error.TooManyFfEvents;
+            result.events[result.event_count] = event;
+            result.event_count += 1;
+        }
+    }
+    if (drain_attempts == result.events.len) return error.FfQueueDidNotDrain;
+
+    result.effect_id = client.effect_id;
+    return result;
+}
+
+test "uinput: pollFf preserves real-kernel rapid PLAY then explicit STOP" {
+    const result = try runScenario(ff_play_stop_toml, FF_PLAY_STOP_PID, FF_PLAY_STOP_NAME, .play_stop, 2);
+
+    try testing.expect(result.effect_id >= 0);
+    try testing.expectEqual(@as(usize, 2), result.event_count);
+    const play = result.events[0];
+    const stop = result.events[1];
+    try testing.expectEqual(@as(u16, c.FF_RUMBLE), play.effect_type);
+    try testing.expectEqual(@as(u8, @intCast(result.effect_id)), play.effect_id);
+    try testing.expectEqual(@as(u16, 0xf000), play.strong);
+    try testing.expectEqual(@as(u16, 0x0f00), play.weak);
+    try testing.expectEqual(@as(u16, 65535), play.duration_ms);
+    try testing.expectEqual(@as(u16, c.FF_RUMBLE), stop.effect_type);
+    try testing.expectEqual(play.effect_id, stop.effect_id);
+    try testing.expectEqual(@as(u16, 0), stop.strong);
+    try testing.expectEqual(@as(u16, 0), stop.weak);
+    try testing.expectEqual(@as(u16, 0), stop.duration_ms);
+}
+
+test "uinput: pollFf turns a real UI_FF_ERASE into a zero-magnitude stop frame" {
+    const result = try runScenario(ff_erase_toml, FF_ERASE_PID, FF_ERASE_NAME, .erase, 1);
+
+    try testing.expectEqual(@as(usize, 1), result.event_count);
+    const ev = result.events[0];
     try testing.expectEqual(@as(u16, c.FF_RUMBLE), ev.effect_type);
     try testing.expectEqual(@as(u16, 0), ev.strong);
     try testing.expectEqual(@as(u16, 0), ev.weak);
-    try testing.expect(client.erased_id >= 0);
-    try testing.expectEqual(@as(u8, @intCast(client.erased_id)), ev.effect_id);
+    try testing.expect(result.effect_id >= 0);
+    try testing.expectEqual(@as(u8, @intCast(result.effect_id)), ev.effect_id);
 }

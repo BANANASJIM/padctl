@@ -333,9 +333,10 @@ pub fn build(b: *std.Build) void {
     shadow_int_tests.linkLibC();
     integration_step.dependOn(&b.addRunArtifact(shadow_int_tests).step);
 
-    // uinput_ff_erase_integration: real UI_FF_ERASE wiring validation.
-    // Creates an FF_RUMBLE uinput device, EVIOCSFF-uploads then EVIOCRMFF-erases
-    // an effect (no EV_FF=0), and asserts pollFf surfaces a zero-magnitude stop.
+    // uinput FF integration: real PLAY/STOP ordering and UI_FF_ERASE wiring.
+    // Creates FF_RUMBLE uinput devices and drives them through real evdev
+    // clients. A hard process watchdog backs up the harness's bounded ioctl
+    // cancellation so a kernel handshake regression cannot hang CI forever.
     // Own test artifact like shadow_grab; skips gracefully without /dev/uinput
     // unless PADCTL_TEST_REQUIRE_UINPUT=1 (set by the privileged e2e job).
     const ff_erase_int_mod = b.createModule(.{
@@ -349,6 +350,13 @@ pub fn build(b: *std.Build) void {
     const ff_erase_int_tests = b.addTest(.{ .root_module = ff_erase_int_mod, .filters = test_filters });
     applyLibusb(b, ff_erase_int_tests, use_libusb, vendored);
     ff_erase_int_tests.linkLibC();
+    ff_erase_int_tests.setExecCmd(&.{
+        "timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "20s",
+        null,
+    });
     integration_step.dependOn(&b.addRunArtifact(ff_erase_int_tests).step);
 
     // Phase 13 Wave 3 T5f: Layer 1 routing tests — pure pipe2 fixture, no
