@@ -354,7 +354,7 @@ pub fn build(b: *std.Build) void {
         "timeout",
         "--signal=TERM",
         "--kill-after=2s",
-        "20s",
+        "30s",
         null,
     });
     integration_step.dependOn(&b.addRunArtifact(ff_erase_int_tests).step);

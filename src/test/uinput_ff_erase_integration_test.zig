@@ -50,6 +50,8 @@ const EVIOCGNAME_256 = linux.IOCTL.IOR('E', 0x06, [256]u8);
 const CLIENT_TIMEOUT_NS = 5 * std.time.ns_per_s;
 const CLIENT_POLL_MS: i32 = 50;
 const CANCEL_TIMEOUT_MS: i32 = 500;
+const CLEANUP_DRAIN_MS: i32 = 50;
+const MAX_DRAIN_POLLS: usize = 32;
 
 const ff_erase_toml =
     \\[device]
@@ -187,6 +189,7 @@ const Client = struct {
     completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: anyerror!void = {},
     effect_id: i16 = -1,
+    fd: posix.fd_t = -1,
 
     fn run(self: *Client) void {
         self.result = self.body();
@@ -197,7 +200,10 @@ const Client = struct {
 
     fn body(self: *Client) !void {
         const fd = try posix.open(self.node, .{ .ACCMODE = .RDWR }, 0);
-        defer posix.close(fd);
+        // The harness closes this fd only after it verifies the explicit
+        // action. Keeping it open prevents kernel close-cleanup STOPs from
+        // masquerading as the PLAY/STOP or ERASE event under test.
+        self.fd = fd;
 
         var effect = std.mem.zeroes(c.ff_effect);
         effect.type = c.FF_RUMBLE;
@@ -228,8 +234,126 @@ const Client = struct {
 const ScenarioResult = struct {
     events: [8]uinput.FfEvent = undefined,
     event_count: usize = 0,
+    target_event_count: usize = 0,
     effect_id: i16,
 };
+
+fn drainQueuedEvents(dev: *uinput.UinputDevice, result: *ScenarioResult, initial_timeout_ms: i32) !void {
+    var timeout_ms = initial_timeout_ms;
+    var poll_count: usize = 0;
+    while (poll_count < MAX_DRAIN_POLLS) : (poll_count += 1) {
+        var pollfds = [_]posix.pollfd{.{ .fd = dev.pollFfFd(), .events = posix.POLL.IN, .revents = 0 }};
+        const ready = try posix.poll(&pollfds, timeout_ms);
+        timeout_ms = 0;
+        if (ready == 0) return;
+        if (pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0)
+            return error.PollDescriptorFailed;
+        if (pollfds[0].revents & posix.POLL.IN == 0) return error.UnexpectedPollEvent;
+        if (try dev.pollFf()) |event| {
+            if (result.event_count >= result.events.len) return error.TooManyFfEvents;
+            result.events[result.event_count] = event;
+            result.event_count += 1;
+        }
+    }
+    return error.FfQueueDidNotDrain;
+}
+
+const ClientCloser = struct {
+    fd: posix.fd_t,
+    done_fd: posix.fd_t,
+    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *ClientCloser) void {
+        posix.close(self.fd);
+        self.completed.store(true, .release);
+        var one: u64 = 1;
+        _ = posix.write(self.done_fd, std.mem.asBytes(&one)) catch {};
+    }
+};
+
+fn closeClientWithPump(dev: *uinput.UinputDevice, fd: posix.fd_t, result: *ScenarioResult) !void {
+    // Once ownership reaches this helper, failing to start the closer would
+    // leave an fd that may require a pumped UI_FF_ERASE handshake. Terminate
+    // instead of returning with an unsafe synchronous-close fallback.
+    const done_fd = posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK) catch terminateTestProcess();
+    defer posix.close(done_fd);
+
+    var closer = ClientCloser{ .fd = fd, .done_fd = done_fd };
+    const thread = std.Thread.spawn(.{}, ClientCloser.run, .{&closer}) catch terminateTestProcess();
+    var joined = false;
+    defer if (!joined) cancelAndJoin(thread, done_fd, &closer.completed);
+
+    var timer = try std.time.Timer.start();
+    var close_done = false;
+    while (timer.read() < CLIENT_TIMEOUT_NS) {
+        var pollfds = [_]posix.pollfd{
+            .{ .fd = dev.pollFfFd(), .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = done_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+        const ready = posix.poll(&pollfds, CLIENT_POLL_MS) catch |err| {
+            cancelAndJoin(thread, done_fd, &closer.completed);
+            joined = true;
+            return err;
+        };
+        if (ready == 0) {
+            close_done = closer.completed.load(.acquire);
+            if (close_done) break;
+            continue;
+        }
+
+        const fatal_poll_events = posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL;
+        if (pollfds[0].revents & fatal_poll_events != 0 or
+            pollfds[1].revents & fatal_poll_events != 0)
+        {
+            cancelAndJoin(thread, done_fd, &closer.completed);
+            joined = true;
+            return error.PollDescriptorFailed;
+        }
+
+        if (pollfds[0].revents & posix.POLL.IN != 0) {
+            const maybe_event = dev.pollFf() catch |err| {
+                cancelAndJoin(thread, done_fd, &closer.completed);
+                joined = true;
+                return err;
+            };
+            if (maybe_event) |event| {
+                if (result.event_count >= result.events.len) {
+                    cancelAndJoin(thread, done_fd, &closer.completed);
+                    joined = true;
+                    return error.TooManyFfEvents;
+                }
+                result.events[result.event_count] = event;
+                result.event_count += 1;
+            }
+        }
+        if (pollfds[1].revents & posix.POLL.IN != 0) {
+            var completed_count: u64 = 0;
+            const read_len = posix.read(done_fd, std.mem.asBytes(&completed_count)) catch |err| {
+                cancelAndJoin(thread, done_fd, &closer.completed);
+                joined = true;
+                return err;
+            };
+            if (read_len != @sizeOf(u64) or completed_count == 0) {
+                cancelAndJoin(thread, done_fd, &closer.completed);
+                joined = true;
+                return error.InvalidCompletionSignal;
+            }
+        }
+        close_done = closer.completed.load(.acquire);
+        if (close_done) break;
+    }
+
+    if (!close_done) {
+        cancelAndJoin(thread, done_fd, &closer.completed);
+        joined = true;
+        return error.ClientCloseTimeout;
+    }
+    thread.join();
+    joined = true;
+
+    // Catch any cleanup event queued immediately after close published done.
+    try drainQueuedEvents(dev, result, CLEANUP_DRAIN_MS);
+}
 
 fn runScenario(
     toml: []const u8,
@@ -266,12 +390,18 @@ fn runScenario(
     const done_fd = try posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK);
     defer posix.close(done_fd);
     var client = Client{ .node = node, .action = action, .done_fd = done_fd };
+    var result = ScenarioResult{ .effect_id = -1 };
     const thread = try std.Thread.spawn(.{}, Client.run, .{&client});
+    errdefer if (client.fd >= 0) {
+        const client_fd = client.fd;
+        client.fd = -1;
+        var discarded = ScenarioResult{ .effect_id = -1 };
+        closeClientWithPump(&dev, client_fd, &discarded) catch terminateTestProcess();
+    };
     var joined = false;
     defer if (!joined) cancelAndJoin(thread, done_fd, &client.completed);
 
     var timer = try std.time.Timer.start();
-    var result = ScenarioResult{ .effect_id = -1 };
     var client_done = false;
     while (timer.read() < CLIENT_TIMEOUT_NS) {
         var pollfds = [_]posix.pollfd{
@@ -285,7 +415,7 @@ fn runScenario(
         };
         if (ready == 0) {
             client_done = client.completed.load(.acquire);
-            if (client_done and result.event_count >= expected_events) break;
+            if (client_done) break;
             continue;
         }
 
@@ -328,7 +458,7 @@ fn runScenario(
             }
         }
         client_done = client.completed.load(.acquire);
-        if (client_done and result.event_count >= expected_events) break;
+        if (client_done) break;
     }
 
     if (!client_done) {
@@ -340,34 +470,40 @@ fn runScenario(
     joined = true;
     try client.result;
 
-    // The worker only marks completion after all evdev writes/ioctls return,
-    // so any additional FF event is already queued. Drain without waiting to
-    // make the event-count assertions exact rather than prefix-only.
-    var drain_attempts: usize = 0;
-    while (drain_attempts < result.events.len) : (drain_attempts += 1) {
-        var pollfds = [_]posix.pollfd{.{ .fd = dev.pollFfFd(), .events = posix.POLL.IN, .revents = 0 }};
-        const ready = try posix.poll(&pollfds, 0);
-        if (ready == 0) break;
-        if (pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0)
-            return error.PollDescriptorFailed;
-        if (pollfds[0].revents & posix.POLL.IN == 0) break;
-        if (try dev.pollFf()) |event| {
-            if (result.event_count >= result.events.len) return error.TooManyFfEvents;
-            result.events[result.event_count] = event;
-            result.event_count += 1;
-        }
-    }
-    if (drain_attempts == result.events.len) return error.FfQueueDidNotDrain;
+    // All explicit writes/ioctls have returned, but the evdev fd remains open.
+    // Drain now and pin the target event count before close-generated cleanup
+    // can enter the uinput queue.
+    try drainQueuedEvents(&dev, &result, 0);
+    if (result.event_count != expected_events) return error.UnexpectedTargetEventCount;
+    result.target_event_count = result.event_count;
+
+    if (client.fd < 0) return error.MissingClientFd;
+    const client_fd = client.fd;
+    client.fd = -1;
+
+    // Closing the FF client can legitimately append STOP/ERASE cleanup events.
+    // A dedicated closer owns the potentially blocking close while this thread
+    // continues pumping UI_FF_ERASE. Capture cleanup separately so callers can
+    // enforce that it stays zero without letting it substitute for the target.
+    try closeClientWithPump(&dev, client_fd, &result);
 
     result.effect_id = client.effect_id;
     return result;
+}
+
+fn expectStopEvent(event: uinput.FfEvent, effect_id: u8) !void {
+    try testing.expectEqual(@as(u16, c.FF_RUMBLE), event.effect_type);
+    try testing.expectEqual(effect_id, event.effect_id);
+    try testing.expectEqual(@as(u16, 0), event.strong);
+    try testing.expectEqual(@as(u16, 0), event.weak);
+    try testing.expectEqual(@as(u16, 0), event.duration_ms);
 }
 
 test "uinput: pollFf preserves real-kernel rapid PLAY then explicit STOP" {
     const result = try runScenario(ff_play_stop_toml, FF_PLAY_STOP_PID, FF_PLAY_STOP_NAME, .play_stop, 2);
 
     try testing.expect(result.effect_id >= 0);
-    try testing.expectEqual(@as(usize, 2), result.event_count);
+    try testing.expectEqual(@as(usize, 2), result.target_event_count);
     const play = result.events[0];
     const stop = result.events[1];
     try testing.expectEqual(@as(u16, c.FF_RUMBLE), play.effect_type);
@@ -375,21 +511,24 @@ test "uinput: pollFf preserves real-kernel rapid PLAY then explicit STOP" {
     try testing.expectEqual(@as(u16, 0xf000), play.strong);
     try testing.expectEqual(@as(u16, 0x0f00), play.weak);
     try testing.expectEqual(@as(u16, 65535), play.duration_ms);
-    try testing.expectEqual(@as(u16, c.FF_RUMBLE), stop.effect_type);
-    try testing.expectEqual(play.effect_id, stop.effect_id);
-    try testing.expectEqual(@as(u16, 0), stop.strong);
-    try testing.expectEqual(@as(u16, 0), stop.weak);
-    try testing.expectEqual(@as(u16, 0), stop.duration_ms);
+    try expectStopEvent(stop, play.effect_id);
+
+    // Closing an evdev FF client may emit additional kernel cleanup STOP/ERASE
+    // notifications. They are valid only if they remain zero for this slot;
+    // a late non-zero frame would re-arm rumble after the explicit STOP.
+    for (result.events[result.target_event_count..result.event_count]) |event|
+        try expectStopEvent(event, play.effect_id);
 }
 
 test "uinput: pollFf turns a real UI_FF_ERASE into a zero-magnitude stop frame" {
-    const result = try runScenario(ff_erase_toml, FF_ERASE_PID, FF_ERASE_NAME, .erase, 1);
+    // Linux ff-core stops the effect with EV_FF=0 before issuing UI_FF_ERASE.
+    // pollFf must preserve that kernel stop and surface its own erase stop, so
+    // the pre-close target phase contains exactly two zero events.
+    const result = try runScenario(ff_erase_toml, FF_ERASE_PID, FF_ERASE_NAME, .erase, 2);
 
-    try testing.expectEqual(@as(usize, 1), result.event_count);
-    const ev = result.events[0];
-    try testing.expectEqual(@as(u16, c.FF_RUMBLE), ev.effect_type);
-    try testing.expectEqual(@as(u16, 0), ev.strong);
-    try testing.expectEqual(@as(u16, 0), ev.weak);
+    try testing.expectEqual(@as(usize, 2), result.target_event_count);
     try testing.expect(result.effect_id >= 0);
-    try testing.expectEqual(@as(u8, @intCast(result.effect_id)), ev.effect_id);
+    const effect_id: u8 = @intCast(result.effect_id);
+    for (result.events[0..result.event_count]) |event|
+        try expectStopEvent(event, effect_id);
 }
