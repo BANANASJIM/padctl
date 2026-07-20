@@ -1,0 +1,8 @@
+[trace-derived] [MONO:0] debug(rumble): [Flydigi Vader 5 Pro] FF_EVENT: id=0 strong=65535 weak=0 dur=65535ms is_stop=false sched_on=true
+[trace-derived] [MONO:13115] debug(rumble): [Flydigi Vader 5 Pro] HID_WRITE: cmd=rumble strong=65535 weak=0 iface=0 len=32 frame=[5a a5 12 06 ff 00 00 00 17 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ]
+[trace-derived] [MONO:152473282] debug(rumble): [Flydigi Vader 5 Pro] FF_EVENT: id=0 strong=49194 weak=0 dur=65535ms is_stop=false sched_on=true
+[trace-derived] [MONO:152485876] debug(rumble): [Flydigi Vader 5 Pro] HID_WRITE: cmd=rumble strong=49194 weak=0 iface=0 len=32 frame=[5a a5 12 06 c0 00 00 00 d8 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ]
+[trace-derived] [MONO:168741864] debug(rumble): [Flydigi Vader 5 Pro] FF_EVENT: id=0 strong=13977 weak=0 dur=65535ms is_stop=false sched_on=true
+[trace-derived] [MONO:168753957] debug(rumble): [Flydigi Vader 5 Pro] HID_WRITE: cmd=rumble strong=13977 weak=0 iface=0 len=32 frame=[5a a5 12 06 36 00 00 00 4e 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ]
+[trace-derived] [MONO:184909735] debug(rumble): [Flydigi Vader 5 Pro] FF_EVENT: id=0 strong=0 weak=0 dur=65535ms is_stop=true sched_on=true
+[trace-derived] [MONO:184924433] debug(rumble): [Flydigi Vader 5 Pro] HID_WRITE: cmd=rumble strong=0 weak=0 iface=0 len=32 frame=[5a a5 12 06 00 00 00 00 18 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ]
