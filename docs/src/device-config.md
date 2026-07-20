@@ -27,13 +27,14 @@ Optional initialization sequence sent after device open.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `commands` | string[] | yes | Hex byte strings sent in order |
-| `response_prefix` | integer[] | yes | Expected response prefix bytes |
+| `commands` | string[] | no | Hex byte strings sent in order |
+| `response_prefix` | integer[] | no | Expected response prefix bytes. It may be omitted when command-prefix correlation alone identifies replies. |
+| `response_command_prefix_len` | integer | no | Also require the response to match the first N bytes of the command just sent. Before each correlated command, a bounded best-effort drain reduces stale-response risk; this is not a transport transaction barrier. Use this when unsolicited input reports share `response_prefix` with command replies. |
 | `enable` | string | no | Hex byte string sent to activate extended mode (e.g. BT mode switch) |
-| `disable` | string | no | Hex byte string sent on shutdown |
+| `disable` | string | no | Reserved shutdown hex command. It is parsed but the current runtime does not send it yet. |
 | `interface` | integer | no | Interface to send init commands on |
 | `report_size` | integer | no | Expected report size after init |
-| `require_response` | bool | no | When `true`, a missing `response_prefix` ACK fails init/re-init instead of continuing. Use for devices whose input reports are valid only after an acknowledged mode switch. |
+| `require_response` | bool | no | When `true`, `commands` or `enable` and at least one ACK criterion are required; failure to receive a response matching every configured criterion fails init/re-init instead of continuing. Use for devices whose input reports are valid only after an acknowledged mode switch. |
 | `feature_report` | integer[] | no | HID feature report sent via `HIDIOCSFEATURE` immediately after `commands`. Encoded as a list of byte values (0–255); `byte[0]` is the report ID. |
 
 ## `[[report]]`
