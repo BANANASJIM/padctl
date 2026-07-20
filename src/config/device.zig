@@ -15,6 +15,7 @@ pub const ButtonId = state.ButtonId;
 // every report with no diagnostic. Reject at validate time instead.
 pub const MAX_REPORT_SIZE: i64 = 512;
 pub const LIBUSB_SLOT_SIZE: i64 = 64;
+pub const MAX_INIT_COMMAND_SIZE: i64 = 64;
 
 pub const InterfaceConfig = struct {
     id: i64,
@@ -26,6 +27,10 @@ pub const InterfaceConfig = struct {
 pub const InitConfig = struct {
     commands: ?[]const []const u8 = null,
     response_prefix: ?[]const i64 = null,
+    /// When set, an init response must also begin with the first N bytes of
+    /// the command it acknowledges. This disambiguates command ACKs from
+    /// unsolicited input reports that share response_prefix.
+    response_command_prefix_len: ?i64 = null,
     enable: ?[]const u8 = null,
     disable: ?[]const u8 = null,
     require_response: bool = false,
@@ -362,6 +367,23 @@ fn fieldTypeSize(type_str: []const u8) ?i64 {
     return null;
 }
 
+fn initCommandByteLen(command: []const u8) !usize {
+    var i: usize = 0;
+    var byte_len: usize = 0;
+    while (i < command.len) {
+        if (command[i] == ' ') {
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= command.len) return error.InvalidConfig;
+        _ = std.fmt.charToDigit(command[i], 16) catch return error.InvalidConfig;
+        _ = std.fmt.charToDigit(command[i + 1], 16) catch return error.InvalidConfig;
+        byte_len += 1;
+        i += 2;
+    }
+    return byte_len;
+}
+
 pub fn isSuppressClass(class: []const u8) bool {
     return std.mem.eql(u8, class, "suppress");
 }
@@ -456,6 +478,37 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         if (init_cfg.interface) |iface_id| {
             if (!interfaceExists(cfg, iface_id)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, iface_id)) return error.InvalidConfig;
+        }
+        const has_response_prefix = if (init_cfg.response_prefix) |prefix|
+            prefix.len > 0
+        else
+            false;
+        const has_command_correlation = init_cfg.response_command_prefix_len != null;
+        const has_command = if (init_cfg.commands) |commands| commands.len > 0 else false;
+        const has_response_step = has_command or init_cfg.enable != null;
+        if (init_cfg.require_response and
+            (!has_response_step or (!has_response_prefix and !has_command_correlation)))
+        {
+            return error.InvalidConfig;
+        }
+        if (init_cfg.response_prefix) |prefix| {
+            if (prefix.len > MAX_INIT_COMMAND_SIZE) return error.InvalidConfig;
+        }
+        if (init_cfg.response_command_prefix_len) |raw_prefix_len| {
+            if (raw_prefix_len <= 0 or raw_prefix_len > MAX_INIT_COMMAND_SIZE)
+                return error.InvalidConfig;
+            if (!has_command and init_cfg.enable == null) return error.InvalidConfig;
+            const prefix_len: usize = @intCast(raw_prefix_len);
+            if (init_cfg.commands) |commands| {
+                for (commands) |command| {
+                    if (try initCommandByteLen(command) < prefix_len)
+                        return error.InvalidConfig;
+                }
+            }
+            if (init_cfg.enable) |enable| {
+                if (try initCommandByteLen(enable) < prefix_len)
+                    return error.InvalidConfig;
+            }
         }
     }
 
@@ -554,6 +607,9 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     if (cfg.device.init) |init_cfg| {
         if (init_cfg.feature_report) |fr| {
             for (fr) |b| if (b < 0 or b > 255) return error.InvalidConfig;
+        }
+        if (init_cfg.response_prefix) |prefix| {
+            for (prefix) |b| if (b < 0 or b > 255) return error.InvalidConfig;
         }
     }
 
@@ -972,6 +1028,10 @@ test "device: load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
     try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
     try std.testing.expectEqualStrings("extended", cfg.report[0].name);
+    try std.testing.expectEqual(
+        @as(?i64, 3),
+        cfg.device.init.?.response_command_prefix_len,
+    );
 }
 
 test "device: output profile overlays default output and preset identity" {
@@ -2529,6 +2589,241 @@ test "device: feature_report rejects byte < 0" {
         \\size = 4
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: response_command_prefix_len parses and validates" {
+    const allocator = std.testing.allocator;
+    const valid =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["5aa5 0102 03"]
+        \\response_prefix = [0x5a, 0xa5]
+        \\response_command_prefix_len = 3
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    const result = try parseString(allocator, valid);
+    defer result.deinit();
+    try std.testing.expectEqual(
+        @as(?i64, 3),
+        result.value.device.init.?.response_command_prefix_len,
+    );
+}
+
+test "device: response_command_prefix_len rejects zero and values above 64" {
+    const allocator = std.testing.allocator;
+    const zero =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["5aa5 01"]
+        \\response_command_prefix_len = 0
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, zero));
+
+    const too_large =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["5aa5 01"]
+        \\response_command_prefix_len = 65
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, too_large));
+}
+
+test "device: response_command_prefix_len cannot exceed command byte length" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["5aa5"]
+        \\response_command_prefix_len = 3
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: response_command_prefix_len cannot exceed enable byte length" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\enable = "5aa5"
+        \\response_command_prefix_len = 3
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: response_command_prefix_len requires a command or enable step" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\response_command_prefix_len = 3
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: response_prefix rejects values outside the byte range" {
+    const allocator = std.testing.allocator;
+    const too_large =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["01"]
+        \\response_prefix = [256]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, too_large));
+
+    const negative =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["01"]
+        \\response_prefix = [-1]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, negative));
+}
+
+test "device: required init response needs a bounded match criterion" {
+    const allocator = std.testing.allocator;
+    const missing =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["01"]
+        \\require_response = true
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, missing));
+
+    const empty =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\commands = ["01"]
+        \\response_prefix = []
+        \\require_response = true
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, empty));
+
+    const no_response_step =
+        \\[device]
+        \\name = "Test"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[device.init]
+        \\response_prefix = [0x5a]
+        \\require_response = true
+        \\feature_report = [1]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, no_response_step));
+
+    const prefix_values: [MAX_INIT_COMMAND_SIZE + 1]i64 = @splat(0x5a);
+    var result = try parseString(allocator, test_toml);
+    defer result.deinit();
+    result.value.device.init = .{
+        .commands = &.{"01"},
+        .response_prefix = &prefix_values,
+    };
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
 
 test "device: fuzz parseString: no panic on arbitrary input" {
