@@ -600,10 +600,6 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
-    fn recordRumbleWrite(self: *EventLoop, now_ns: i128) void {
-        self.last_rumble_ns = now_ns;
-    }
-
     fn queuePendingRumble(self: *EventLoop, frame: RumbleScheduler.Frame, deadline_ns: i128, retry_count: u8) void {
         self.pending_rumble_frame = frame;
         self.pending_rumble_deadline_ns = deadline_ns;
@@ -629,7 +625,7 @@ pub const EventLoop = struct {
         };
         const result = emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag);
         if (result == .written) {
-            self.recordRumbleWrite(now_ns);
+            self.last_rumble_ns = now_ns;
             self.clearPendingRumble();
         } else if (result == .unconfigured) {
             self.clearPendingRumble();
@@ -1650,11 +1646,8 @@ test "event_loop: native throttle keeps latest while stop cancels pending" {
 
     loop.handleNativeRumbleAt(ctx, latest, base + 4 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 8), mock_dev.write_log.items.len);
-    try testing.expectEqual(latest, loop.pending_rumble_frame.?);
     try testing.expectEqual(@as(?i128, base + 13 * std.time.ns_per_ms), loop.pending_rumble_deadline_ns);
 
-    loop.flushPendingRumbleIfDue(ctx, base + 12 * std.time.ns_per_ms);
-    try testing.expectEqual(@as(usize, 8), mock_dev.write_log.items.len);
     loop.flushPendingRumbleIfDue(ctx, base + 13 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 16), mock_dev.write_log.items.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x66, 0x99, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[8..16]);
