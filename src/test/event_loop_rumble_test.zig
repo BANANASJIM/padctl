@@ -2223,7 +2223,6 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
     try waitForAck(write_ack[0]);
     try sendFfAndWait(ff_pipe[1], logical_ack[0]);
     try waitForAck(write_ack[0]);
-    // Wait past the original deadline and prove no timer-generated STOP.
     try waitForNoAck(write_ack[0], 230);
     loop.stop();
     thread.join();
@@ -2495,8 +2494,6 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
 }
 
 test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
-    // A replay after explicit STOP is forwarded after the STOP cadence window
-    // and still arms the new auto-stop deadline.
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();

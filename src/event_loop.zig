@@ -373,7 +373,6 @@ pub const EventLoopContext = struct {
     /// Primary UHID device to drain for UHID_OUTPUT events.
     /// Set when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     uhid_primary: ?*UhidDevice = null,
-    /// Narrow startup-failure seam for lifecycle regression coverage.
     test_fail_rumble_writer_start: bool = false,
 };
 
@@ -469,7 +468,6 @@ pub const EventLoop = struct {
     /// EventLoop polls only this mailbox wake and performs the physical write.
     native_rumble_slot: ?usize,
     native_rumble_device: ?*UhidDevice,
-    /// Completion wake for the capacity-one physical rumble writer.
     rumble_writer_slot: ?usize,
     rumble_writer: RumbleWriter,
     disconnected: bool,
