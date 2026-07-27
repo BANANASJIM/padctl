@@ -819,6 +819,14 @@ const AsyncRumbleHarness = struct {
         _ = try posix.write(self.release[1], &[_]u8{1});
     }
 
+    fn waitForWriterShutdown(self: *AsyncRumbleHarness) !void {
+        const deadline = event_loop_mod.monotonicNs() + 500 * std.time.ns_per_ms;
+        while (!self.loop.rumble_writer.shutting_down.load(.acquire)) {
+            if (event_loop_mod.monotonicNs() >= deadline) return error.ShutdownTimeout;
+            std.Thread.sleep(std.time.ns_per_ms);
+        }
+    }
+
     fn join(self: *AsyncRumbleHarness) void {
         if (self.thread) |thread| {
             thread.join();
@@ -1226,8 +1234,35 @@ test "issue 503: play cadence starts at slow write completion" {
     try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
 }
 
-test "issue 503: shutdown drains an accepted stop completion" {
+test "issue 503: shutdown keeps completion cadence for queued play" {
     const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    harness.loop.stop();
+    try harness.waitForWriterShutdown();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.run_done[0]);
+    harness.join();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
+}
+
+test "issue 503: shutdown sends accepted stop without cadence delay" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
         null,
     };
@@ -1237,15 +1272,22 @@ test "issue 503: shutdown drains an accepted stop completion" {
 
     try harness.send();
     try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
     harness.loop.stop();
-    try waitForNoAck(harness.run_done[0], 20);
+    try harness.waitForWriterShutdown();
     try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.attempt_ack[0]);
     try waitForAck(harness.write_ack[0]);
     try waitForAck(harness.run_done[0]);
     harness.join();
 
-    try testing.expectEqual(@as(usize, 1), harness.write_dev.write_attempts);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, harness.write_dev.write_log.items);
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] < 8 * std.time.ns_per_ms);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    }, harness.write_dev.write_log.items);
 }
 
 test "issue 503: rumble writer startup failure clears running state" {

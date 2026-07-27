@@ -171,14 +171,14 @@ pub const RumbleWriter = struct {
                 .request => |request| request,
                 .wait => |wait_ns| {
                     if (!self.waitForWake(wait_ns)) {
-                        self.writeLatestPendingOnShutdown();
+                        self.writePendingOnShutdown(last_success_ns);
                         return;
                     }
                     continue;
                 },
                 .empty => {
                     if (!self.waitForWake(null)) {
-                        self.writeLatestPendingOnShutdown();
+                        self.writePendingOnShutdown(last_success_ns);
                         return;
                     }
                     continue;
@@ -189,7 +189,7 @@ pub const RumbleWriter = struct {
             if (result == .written) last_success_ns = completed_ns;
 
             if (self.shutting_down.load(.acquire)) {
-                self.writeLatestPendingOnShutdown();
+                self.writePendingOnShutdown(last_success_ns);
                 return;
             }
 
@@ -206,7 +206,7 @@ pub const RumbleWriter = struct {
             signal(self.completion_w);
 
             if (!self.waitForCompletionAck()) {
-                self.writeLatestPendingOnShutdown();
+                self.writePendingOnShutdown(last_success_ns);
                 return;
             }
         }
@@ -222,13 +222,21 @@ pub const RumbleWriter = struct {
         return .written;
     }
 
-    fn writeLatestPendingOnShutdown(self: *RumbleWriter) void {
-        self.mutex.lock();
-        const request = self.pending_stop orelse self.pending;
-        self.pending_stop = null;
-        self.pending = null;
-        self.mutex.unlock();
-        if (request) |pending| _ = writeRequest(pending);
+    fn writePendingOnShutdown(self: *RumbleWriter, last_success_ns: i128) void {
+        while (true) {
+            switch (self.takeReadyRequest(last_success_ns)) {
+                .request => |request| {
+                    self.mutex.lock();
+                    self.pending = null;
+                    self.pending_stop = null;
+                    self.mutex.unlock();
+                    _ = writeRequest(request);
+                    return;
+                },
+                .wait => |wait_ns| std.Thread.sleep(@intCast(@min(wait_ns, std.math.maxInt(u64)))),
+                .empty => return,
+            }
+        }
     }
 
     const Selection = union(enum) {
