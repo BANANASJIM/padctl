@@ -14,11 +14,13 @@ const Mutex = if (builtin.sanitize_thread) struct {
     m: std.c.pthread_mutex_t = .{},
 
     fn lock(self: *@This()) void {
-        std.debug.assert(std.c.pthread_mutex_lock(&self.m) == .SUCCESS);
+        const result = std.c.pthread_mutex_lock(&self.m);
+        std.debug.assert(result == .SUCCESS);
     }
 
     fn unlock(self: *@This()) void {
-        std.debug.assert(std.c.pthread_mutex_unlock(&self.m) == .SUCCESS);
+        const result = std.c.pthread_mutex_unlock(&self.m);
+        std.debug.assert(result == .SUCCESS);
     }
 } else std.Thread.Mutex;
 
@@ -66,60 +68,32 @@ pub const RumbleWriter = struct {
     pending: ?Request = null,
     pending_stop: ?Request = null,
     completion: ?Completion = null,
-    request_r: posix.fd_t = -1,
-    request_w: posix.fd_t = -1,
+    wake_r: posix.fd_t = -1,
+    wake_w: posix.fd_t = -1,
     completion_r: posix.fd_t = -1,
     completion_w: posix.fd_t = -1,
-    ack_r: posix.fd_t = -1,
-    ack_w: posix.fd_t = -1,
-    shutdown_r: posix.fd_t = -1,
-    shutdown_w: posix.fd_t = -1,
     thread: ?std.Thread = null,
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn start(self: *RumbleWriter) !void {
         if (self.thread != null) return;
 
-        const request = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-        errdefer {
-            posix.close(request[0]);
-            posix.close(request[1]);
-        }
-        const completion = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-        errdefer {
-            posix.close(completion[0]);
-            posix.close(completion[1]);
-        }
-        const ack = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-        errdefer {
-            posix.close(ack[0]);
-            posix.close(ack[1]);
-        }
-        const shutdown = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
-        errdefer {
-            posix.close(shutdown[0]);
-            posix.close(shutdown[1]);
-        }
+        const wake = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        self.wake_r = wake[0];
+        self.wake_w = wake[1];
+        errdefer self.closePipes();
 
-        self.request_r = request[0];
-        self.request_w = request[1];
+        const completion = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
         self.completion_r = completion[0];
         self.completion_w = completion[1];
-        self.ack_r = ack[0];
-        self.ack_w = ack[1];
-        self.shutdown_r = shutdown[0];
-        self.shutdown_w = shutdown[1];
         self.shutting_down.store(false, .release);
-        self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch |err| {
-            self.closePipes();
-            return err;
-        };
+        self.thread = try std.Thread.spawn(.{}, workerMain, .{self});
     }
 
     pub fn stop(self: *RumbleWriter) void {
         const thread = self.thread orelse return;
         self.shutting_down.store(true, .release);
-        signal(self.shutdown_w);
+        signal(self.wake_w);
         thread.join();
         self.thread = null;
 
@@ -176,7 +150,7 @@ pub const RumbleWriter = struct {
 
         // Always wake: the worker may currently be waiting for a non-STOP
         // cadence deadline, and a newly accepted STOP must bypass that wait.
-        signal(self.request_w);
+        signal(self.wake_w);
     }
 
     pub fn takeCompletion(self: *RumbleWriter) ?Completion {
@@ -185,7 +159,7 @@ pub const RumbleWriter = struct {
         const result = self.completion;
         self.completion = null;
         self.mutex.unlock();
-        if (result != null) signal(self.ack_w);
+        if (result != null) signal(self.wake_w);
         return result;
     }
 
@@ -196,14 +170,14 @@ pub const RumbleWriter = struct {
             const request = switch (selection) {
                 .request => |request| request,
                 .wait => |wait_ns| {
-                    if (!self.waitForRequest(wait_ns)) {
+                    if (!self.waitForWake(wait_ns)) {
                         self.writeLatestPendingOnShutdown();
                         return;
                     }
                     continue;
                 },
                 .empty => {
-                    if (!self.waitForRequest(null)) {
+                    if (!self.waitForWake(null)) {
                         self.writeLatestPendingOnShutdown();
                         return;
                     }
@@ -231,16 +205,10 @@ pub const RumbleWriter = struct {
             self.mutex.unlock();
             signal(self.completion_w);
 
-            var ack_poll = [_]posix.pollfd{
-                .{ .fd = self.ack_r, .events = posix.POLL.IN, .revents = 0 },
-                .{ .fd = self.shutdown_r, .events = posix.POLL.IN, .revents = 0 },
-            };
-            _ = posix.poll(&ack_poll, -1) catch return;
-            if (ack_poll[1].revents & posix.POLL.IN != 0 or self.shutting_down.load(.acquire)) {
+            if (!self.waitForCompletionAck()) {
                 self.writeLatestPendingOnShutdown();
                 return;
             }
-            if (ack_poll[0].revents & posix.POLL.IN != 0) drain(self.ack_r);
         }
     }
 
@@ -286,7 +254,7 @@ pub const RumbleWriter = struct {
         return .{ .request = request };
     }
 
-    fn waitForRequest(self: *RumbleWriter, wait_ns: ?i128) bool {
+    fn waitForWake(self: *RumbleWriter, wait_ns: ?i128) bool {
         const timeout_ms: i32 = if (wait_ns) |ns|
             @intCast(@min(
                 @as(i128, std.math.maxInt(i32)),
@@ -294,14 +262,24 @@ pub const RumbleWriter = struct {
             ))
         else
             -1;
-        var request_poll = [_]posix.pollfd{
-            .{ .fd = self.request_r, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.shutdown_r, .events = posix.POLL.IN, .revents = 0 },
-        };
-        _ = posix.poll(&request_poll, timeout_ms) catch return false;
-        if (request_poll[1].revents & posix.POLL.IN != 0 or self.shutting_down.load(.acquire)) return false;
-        if (request_poll[0].revents & posix.POLL.IN != 0) drain(self.request_r);
-        return true;
+        var wake_poll = [_]posix.pollfd{.{
+            .fd = self.wake_r,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        }};
+        _ = posix.poll(&wake_poll, timeout_ms) catch return false;
+        if (wake_poll[0].revents & posix.POLL.IN != 0) drain(self.wake_r);
+        return !self.shutting_down.load(.acquire);
+    }
+
+    fn waitForCompletionAck(self: *RumbleWriter) bool {
+        while (self.waitForWake(null)) {
+            self.mutex.lock();
+            const acknowledged = self.completion == null;
+            self.mutex.unlock();
+            if (acknowledged) return true;
+        }
+        return false;
     }
 
     fn monotonicNs() i128 {
@@ -323,14 +301,10 @@ pub const RumbleWriter = struct {
 
     fn closePipes(self: *RumbleWriter) void {
         const fds = [_]*posix.fd_t{
-            &self.request_r,
-            &self.request_w,
+            &self.wake_r,
+            &self.wake_w,
             &self.completion_r,
             &self.completion_w,
-            &self.ack_r,
-            &self.ack_w,
-            &self.shutdown_r,
-            &self.shutdown_w,
         };
         for (fds) |fd| {
             if (fd.* >= 0) posix.close(fd.*);

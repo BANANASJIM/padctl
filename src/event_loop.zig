@@ -49,7 +49,7 @@ pub const Slots = struct {
 };
 
 // signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces;
-// plus one output-side source and the asynchronous rumble-writer completion.
+// plus up to three output-side sources and the rumble-writer completion.
 pub const FIXED_SLOT_COUNT: usize = 5;
 pub const MAX_DEVICE_INTERFACES: usize = 6;
 pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 4;
@@ -136,13 +136,15 @@ fn autoStopEnabled(dcfg: ?*const DeviceConfig) bool {
     return ff.auto_stop;
 }
 
+fn ffTypeFor(dcfg: *const DeviceConfig) []const u8 {
+    const output = dcfg.output orelse return "rumble";
+    const ff = output.force_feedback orelse return "rumble";
+    return ff.type;
+}
+
 fn hasPhysicalRumbleCommand(dcfg: *const DeviceConfig) bool {
     const commands = dcfg.commands orelse return false;
-    const ff_type = if (dcfg.output) |out|
-        if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble"
-    else
-        "rumble";
-    return commands.map.contains(ff_type);
+    return commands.map.contains(ffTypeFor(dcfg));
 }
 
 /// Format scheduler slot state with relative deltas from now_ns.
@@ -225,10 +227,7 @@ fn emitRumbleFrame(
         rumble_log.debug("[{s}] HID_WRITE: rumble unconfigured strong={d} weak={d} reason=missing commands", .{ tag, strong, weak });
         return .unconfigured;
     };
-    const ff_type = if (dcfg.output) |out|
-        if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble"
-    else
-        "rumble";
+    const ff_type = ffTypeFor(dcfg);
     const cmd = cmds.map.get(ff_type) orelse {
         rumble_log.debug("[{s}] HID_WRITE: rumble unconfigured cmd={s} strong={d} weak={d} reason=missing command", .{ tag, ff_type, strong, weak });
         return .unconfigured;
@@ -328,9 +327,8 @@ fn quiesceTimersAndRumbleImpl(
     self.pending_rumble_deadline_ns = null;
     self.pending_rumble_retry_count = 0;
     self.pending_rumble_generation = 0;
-    self.shutdown_rumble_generation = null;
-    self.shutdown_stop_generation = null;
     if (dcfg) |cfg| {
+        std.debug.assert(!self.rumble_writer.isRunning());
         _ = emitRumbleFrame(devices, alloc, cfg, 0, 0, tag, null, 0, 0);
     }
 }
@@ -480,13 +478,10 @@ pub const EventLoop = struct {
     last_ts: i128,
     last_rumble_ns: i128,
     rumble_generation: u64,
-    last_completed_rumble_generation: u64,
     pending_rumble_frame: ?RumbleScheduler.Frame,
     pending_rumble_deadline_ns: ?i128,
     pending_rumble_retry_count: u8,
     pending_rumble_generation: u64,
-    shutdown_rumble_generation: ?u64,
-    shutdown_stop_generation: ?u64,
     last_heartbeat_ns: i128 = 0,
     /// Last successfully emitted virtual button mask. Diagnostic tracing uses
     /// it to log output edges without flooding dumps with axis-only frames.
@@ -555,13 +550,10 @@ pub const EventLoop = struct {
             .last_ts = monotonicNs(),
             .last_rumble_ns = 0,
             .rumble_generation = 0,
-            .last_completed_rumble_generation = 0,
             .pending_rumble_frame = null,
             .pending_rumble_deadline_ns = null,
             .pending_rumble_retry_count = 0,
             .pending_rumble_generation = 0,
-            .shutdown_rumble_generation = null,
-            .shutdown_stop_generation = null,
         };
 
         loop.pollfds[Slots.signal] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
@@ -719,12 +711,6 @@ pub const EventLoop = struct {
         if (result == .written or result == .queued) {
             if (result == .written) {
                 self.recordRumbleWrite(now_ns);
-                self.last_completed_rumble_generation = @max(self.last_completed_rumble_generation, generation);
-            } else {
-                self.shutdown_rumble_generation = generation;
-                if (frame.strong == 0 and frame.weak == 0) {
-                    self.shutdown_stop_generation = generation;
-                }
             }
             self.clearPendingRumble();
         } else if (result == .unconfigured) {
@@ -816,7 +802,6 @@ pub const EventLoop = struct {
             .strong = completion.frame.strong,
             .weak = completion.frame.weak,
         };
-        self.last_completed_rumble_generation = @max(self.last_completed_rumble_generation, completion.generation);
         switch (completion.result) {
             .written => self.recordRumbleWrite(completion.completed_ns),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
@@ -842,23 +827,6 @@ pub const EventLoop = struct {
         armRumbleStopFd(self.rumble_stop_fd, minDeadline(scheduler_deadline_ns, self.pending_rumble_deadline_ns));
     }
 
-    fn drainAcceptedRumble(self: *EventLoop, ctx: EventLoopContext) void {
-        // Preserve the pre-worker shutdown guarantee that the latest accepted
-        // physical state is attempted before DeviceIO teardown. In particular,
-        // an accepted STOP must publish its completion before run() returns.
-        const target = self.shutdown_rumble_generation orelse return;
-        while (self.last_completed_rumble_generation < target and self.rumble_writer.isRunning()) {
-            var completion_poll = [_]posix.pollfd{.{
-                .fd = self.rumble_writer.completionFd(),
-                .events = posix.POLL.IN,
-                .revents = 0,
-            }};
-            const ready = posix.poll(&completion_poll, -1) catch return;
-            if (ready == 0 or completion_poll[0].revents & posix.POLL.IN == 0) continue;
-            self.handleRumbleWriterCompletion(ctx);
-        }
-    }
-
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         if (ctx.devices.len != self.device_count) {
             self.running = false;
@@ -876,7 +844,6 @@ pub const EventLoop = struct {
             }
         }
         defer {
-            self.drainAcceptedRumble(ctx);
             self.rumble_writer.stop();
             self.running = false;
         }
