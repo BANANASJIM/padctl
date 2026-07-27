@@ -1767,7 +1767,6 @@ test "event_loop: stop is immediate and following play waits for physical interv
     defer write_dev.deinit();
     const dev = write_dev.deviceIO();
     try loop.addDevice(dev);
-    // STOP must bypass an existing throttle window.
     loop.last_rumble_ns = event_loop_mod.monotonicNs() + 50 * std.time.ns_per_ms;
 
     const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
@@ -1825,9 +1824,6 @@ test "event_loop: stop is immediate and following play waits for physical interv
         thread.join();
     }
 
-    // STOP is written immediately even though the old throttle clock is in
-    // the future. A PLAY delivered immediately afterwards must not be written
-    // during the new 10ms interval, then must flush intact at its deadline.
     try sendFfAndWait(ff_pipe[1], ack_pipe[0]);
     try waitForAck(write_ack_pipe[0]);
     try sendFfAndWait(ff_pipe[1], ack_pipe[0]);
