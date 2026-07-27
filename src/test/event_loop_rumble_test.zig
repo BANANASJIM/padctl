@@ -1757,39 +1757,51 @@ test "event_loop: rumble auto-stop emits stop frame after duration_ms elapses" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
 }
 
-test "event_loop: play after stop within throttle window is forwarded" {
+test "event_loop: stop is immediate and following play waits for physical interval" {
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    var mock_dev = try MockDeviceIO.init(allocator, &.{});
-    defer mock_dev.deinit();
-    const dev = mock_dev.deviceIO();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
     try loop.addDevice(dev);
+    // STOP must bypass an existing throttle window.
+    loop.last_rumble_ns = event_loop_mod.monotonicNs() + 50 * std.time.ns_per_ms;
 
     const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const ack_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ack_pipe[0]);
+    defer posix.close(ack_pipe[1]);
+    const write_ack_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack_pipe[0]);
+    defer posix.close(write_ack_pipe[1]);
+    write_dev.setWriteAck(write_ack_pipe[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
 
-    // stop at T=0, then play at T≈5ms (well within 10ms throttle window)
     const seq = [_]?uinput.FfEvent{
         .{ .effect_type = 0x50, .strong = 0, .weak = 0 }, // stop
         .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 }, // play
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{
+        .events = &seq,
+        .pipe_read = ff_pipe[0],
+        .ack_write = ack_pipe[1],
+    };
 
     const RunCtx2 = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -1808,22 +1820,27 @@ test "event_loop: play after stop within throttle window is forwarded" {
         }
     };
     const thread = try std.Thread.spawn(.{}, T2.run, .{&ctx});
+    defer {
+        loop.stop();
+        thread.join();
+    }
 
-    // First wakeup → stop
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(5 * std.time.ns_per_ms); // inside 10ms throttle window
-    // Second wakeup → play (must NOT be throttled because stop doesn't advance last_rumble_ns)
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
-    loop.stop();
-    thread.join();
+    // STOP is written immediately even though the old throttle clock is in
+    // the future. A PLAY delivered immediately afterwards must not be written
+    // during the new 10ms interval, then must flush intact at its deadline.
+    try sendFfAndWait(ff_pipe[1], ack_pipe[0]);
+    try waitForAck(write_ack_pipe[0]);
+    try sendFfAndWait(ff_pipe[1], ack_pipe[0]);
+    try waitForNoAck(write_ack_pipe[0], 5);
+    try waitForAck(write_ack_pipe[0]);
 
-    // Both frames must be written: stop then play
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
-    const stop_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqual(@as(usize, 2 * frame_size), write_dev.write_log.items.len);
+    try testing.expectEqual(@as(usize, 2), write_dev.write_times.items.len);
+    try testing.expect(write_dev.write_times.items[1] - write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
+    const stop_frame = write_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
-    const play_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    const play_frame = write_dev.write_log.items[frame_size .. 2 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
 }
 

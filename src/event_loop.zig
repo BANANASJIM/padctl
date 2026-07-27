@@ -600,12 +600,8 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
-    fn recordRumbleWrite(self: *EventLoop, frame: RumbleScheduler.Frame, now_ns: i128) void {
-        if (frame.strong == 0 and frame.weak == 0) {
-            self.last_rumble_ns = 0;
-        } else {
-            self.last_rumble_ns = now_ns;
-        }
+    fn recordRumbleWrite(self: *EventLoop, now_ns: i128) void {
+        self.last_rumble_ns = now_ns;
     }
 
     fn queuePendingRumble(self: *EventLoop, frame: RumbleScheduler.Frame, deadline_ns: i128, retry_count: u8) void {
@@ -633,7 +629,7 @@ pub const EventLoop = struct {
         };
         const result = emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag);
         if (result == .written) {
-            self.recordRumbleWrite(frame, now_ns);
+            self.recordRumbleWrite(now_ns);
             self.clearPendingRumble();
         } else if (result == .unconfigured) {
             self.clearPendingRumble();
@@ -1644,15 +1640,22 @@ test "event_loop: native throttle keeps latest while stop cancels pending" {
     try testing.expectEqual(latest, loop.pending_rumble_frame.?);
     try testing.expectEqual(@as(?i128, base + RUMBLE_MIN_INTERVAL_NS), loop.pending_rumble_deadline_ns);
 
-    // A zero frame is a safety command: it cancels the stale non-zero frame,
-    // writes immediately, and resets the throttle clock so replay is immediate.
+    // A zero frame is a safety command: it cancels the stale non-zero frame
+    // and writes immediately, while still advancing the physical-write clock.
     loop.handleNativeRumbleAt(ctx, .{ .strong = 0, .weak = 0 }, base + 3 * std.time.ns_per_ms);
     try testing.expectEqual(@as(?RumbleScheduler.Frame, null), loop.pending_rumble_frame);
     try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
-    try testing.expectEqual(@as(i128, 0), loop.last_rumble_ns);
+    try testing.expectEqual(base + 3 * std.time.ns_per_ms, loop.last_rumble_ns);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, mock_dev.write_log.items);
 
     loop.handleNativeRumbleAt(ctx, latest, base + 4 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 8), mock_dev.write_log.items.len);
+    try testing.expectEqual(latest, loop.pending_rumble_frame.?);
+    try testing.expectEqual(@as(?i128, base + 13 * std.time.ns_per_ms), loop.pending_rumble_deadline_ns);
+
+    loop.flushPendingRumbleIfDue(ctx, base + 12 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 8), mock_dev.write_log.items.len);
+    loop.flushPendingRumbleIfDue(ctx, base + 13 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 16), mock_dev.write_log.items.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x66, 0x99, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[8..16]);
 }
