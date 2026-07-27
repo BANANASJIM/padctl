@@ -777,6 +777,242 @@ test "event_loop: device input is handled before uinput FF when both are ready" 
     try testing.expect(!output.ff_before_device_read);
 }
 
+const GatedRumbleDeviceIO = struct {
+    input_r: posix.fd_t,
+    input_w: posix.fd_t,
+    write_started_r: posix.fd_t,
+    write_started_w: posix.fd_t,
+    write_release_r: posix.fd_t,
+    write_release_w: posix.fd_t,
+    write_done_r: posix.fd_t,
+    write_done_w: posix.fd_t,
+    input_reads: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+    fn init() !GatedRumbleDeviceIO {
+        var input: [2]posix.fd_t = undefined;
+        const rc = std.os.linux.socketpair(
+            std.os.linux.AF.UNIX,
+            std.os.linux.SOCK.SEQPACKET | std.os.linux.SOCK.NONBLOCK,
+            0,
+            &input,
+        );
+        if (rc != 0) return error.SocketPairFailed;
+        errdefer {
+            posix.close(input[0]);
+            posix.close(input[1]);
+        }
+
+        const started = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer {
+            posix.close(started[0]);
+            posix.close(started[1]);
+        }
+        const release = try posix.pipe2(.{});
+        errdefer {
+            posix.close(release[0]);
+            posix.close(release[1]);
+        }
+        const done = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer {
+            posix.close(done[0]);
+            posix.close(done[1]);
+        }
+
+        return .{
+            .input_r = input[0],
+            .input_w = input[1],
+            .write_started_r = started[0],
+            .write_started_w = started[1],
+            .write_release_r = release[0],
+            .write_release_w = release[1],
+            .write_done_r = done[0],
+            .write_done_w = done[1],
+        };
+    }
+
+    fn deinit(self: *GatedRumbleDeviceIO) void {
+        posix.close(self.input_r);
+        posix.close(self.input_w);
+        posix.close(self.write_started_r);
+        posix.close(self.write_started_w);
+        posix.close(self.write_release_r);
+        posix.close(self.write_release_w);
+        posix.close(self.write_done_r);
+        posix.close(self.write_done_w);
+    }
+
+    fn deviceIO(self: *GatedRumbleDeviceIO) DeviceIO {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn signalInput(self: *GatedRumbleDeviceIO, frame: []const u8) !void {
+        _ = try posix.write(self.input_w, frame);
+    }
+
+    fn releaseWrite(self: *GatedRumbleDeviceIO) void {
+        _ = posix.write(self.write_release_w, &[_]u8{1}) catch {};
+    }
+
+    const vtable = DeviceIO.VTable{
+        .read = read,
+        .write = write,
+        .feature_report = featureReport,
+        .pollfd = pollfd,
+        .close = close,
+    };
+
+    fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
+        const self: *GatedRumbleDeviceIO = @ptrCast(@alignCast(ptr));
+        const n = posix.read(self.input_r, buf) catch |err| switch (err) {
+            error.WouldBlock => return DeviceIO.ReadError.Again,
+            else => return DeviceIO.ReadError.Io,
+        };
+        if (n == 0) return DeviceIO.ReadError.Disconnected;
+        _ = self.input_reads.fetchAdd(1, .acq_rel);
+        return n;
+    }
+
+    fn write(ptr: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+        const self: *GatedRumbleDeviceIO = @ptrCast(@alignCast(ptr));
+        _ = posix.write(self.write_started_w, &[_]u8{1}) catch return DeviceIO.WriteError.Io;
+        var release: [1]u8 = undefined;
+        _ = posix.read(self.write_release_r, &release) catch return DeviceIO.WriteError.Io;
+        _ = posix.write(self.write_done_w, &[_]u8{1}) catch return DeviceIO.WriteError.Io;
+    }
+
+    fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
+
+    fn pollfd(ptr: *anyopaque) posix.pollfd {
+        const self: *GatedRumbleDeviceIO = @ptrCast(@alignCast(ptr));
+        return .{ .fd = self.input_r, .events = posix.POLL.IN, .revents = 0 };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+const InputEmissionProbe = struct {
+    notify_w: posix.fd_t,
+    ff_event: ?uinput.FfEvent,
+    ff_poll_count: usize = 0,
+
+    fn outputDevice(self: *InputEmissionProbe) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = emit,
+        .poll_ff = pollFf,
+        .close = close,
+    };
+
+    fn emit(ptr: *anyopaque, _: state.GamepadState) uinput.EmitError!void {
+        const self: *InputEmissionProbe = @ptrCast(@alignCast(ptr));
+        _ = posix.write(self.notify_w, &[_]u8{1}) catch return uinput.EmitError.WriteFailed;
+    }
+
+    fn pollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        const self: *InputEmissionProbe = @ptrCast(@alignCast(ptr));
+        if (self.ff_poll_count == 0) {
+            self.ff_poll_count += 1;
+            return self.ff_event;
+        }
+        return null;
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+fn expectReadable(fd: posix.fd_t, timeout_ms: i32) !void {
+    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = try posix.poll(&fds, timeout_ms);
+    try testing.expectEqual(@as(usize, 1), ready);
+    try testing.expect(fds[0].revents & posix.POLL.IN != 0);
+}
+
+test "issue 503: blocked rumble write does not starve physical input emission" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var gated = try GatedRumbleDeviceIO.init();
+    defer gated.deinit();
+    const dev = gated.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const emit_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(emit_pipe[0]);
+    defer posix.close(emit_pipe[1]);
+
+    const parsed = try device_mod.parseString(allocator, ff_report_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var output = InputEmissionProbe{
+        .notify_w = emit_pipe[1],
+        .ff_event = .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 },
+    };
+    var devs = [_]DeviceIO{dev};
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        output: *InputEmissionProbe,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .output = &output,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{
+                .devices = c.devs,
+                .interpreter = c.interp,
+                .output = c.output.outputDevice(),
+                .allocator = c.alloc,
+                .device_config = c.cfg,
+                .poll_timeout_ms = 100,
+            });
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    var joined = false;
+    defer {
+        gated.releaseWrite();
+        loop.stop();
+        if (!joined) thread.join();
+    }
+
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    try expectReadable(gated.write_started_r, 500);
+
+    // The transport worker is now deterministically blocked. Input arriving
+    // afterward must still cross the interpreter and virtual-output boundary.
+    try gated.signalInput(&[_]u8{ 0x01, 0x34, 0x12 });
+    try expectReadable(emit_pipe[0], 500);
+    try testing.expectEqual(@as(usize, 1), gated.input_reads.load(.acquire));
+
+    gated.releaseWrite();
+    try expectReadable(gated.write_done_r, 500);
+    loop.stop();
+    thread.join();
+    joined = true;
+}
+
 test "event_loop: device input is handled before rumble auto-stop write when both are ready" {
     const allocator = testing.allocator;
 
@@ -2001,17 +2237,24 @@ test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
     loop.stop();
     thread.join();
 
-    // Four frames: play, explicit stop, replay, and the auto-stop. The final
-    // stop only appears if the replay rearmed the deadline.
+    // The capacity-one physical writer may coalesce the explicit stop into
+    // the immediately following replay when transport is slower than this
+    // synthetic level-triggered FF burst. In either case replay must reach
+    // hardware and the final stop must appear, proving replay rearmed the
+    // auto-stop deadline.
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 4 * frame_size), mock_dev.write_log.items.len);
+    const frame_count = mock_dev.write_log.items.len / frame_size;
+    try testing.expect(frame_count == 3 or frame_count == 4);
     const play_frame = mock_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
-    const explicit_stop = mock_dev.write_log.items[frame_size .. 2 * frame_size];
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
-    const replay_frame = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    if (frame_count == 4) {
+        const explicit_stop = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+        try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
+    }
+    const replay_index: usize = frame_count - 2;
+    const replay_frame = mock_dev.write_log.items[replay_index * frame_size .. (replay_index + 1) * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, replay_frame);
-    const auto_stop = mock_dev.write_log.items[3 * frame_size .. 4 * frame_size];
+    const auto_stop = mock_dev.write_log.items[(frame_count - 1) * frame_size .. frame_count * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, auto_stop);
 }
 

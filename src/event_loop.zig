@@ -27,6 +27,8 @@ const wasm_runtime = @import("wasm/runtime.zig");
 pub const WasmPlugin = wasm_runtime.WasmPlugin;
 const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
 const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
+const rumble_writer_mod = @import("core/rumble_writer.zig");
+const RumbleWriter = rumble_writer_mod.RumbleWriter;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
 const input_trace = @import("diagnostics/input_trace.zig");
@@ -46,10 +48,10 @@ pub const Slots = struct {
 };
 
 // signal + stop + layer_timer + rumble_stop + macro_timer = 5 fixed; up to 6 device interfaces;
-// plus uinput FF, generic/PID UHID output, or native UHID mailbox wake slots.
+// plus one output-side source and the asynchronous rumble-writer completion.
 pub const FIXED_SLOT_COUNT: usize = 5;
 pub const MAX_DEVICE_INTERFACES: usize = 6;
-pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 3;
+pub const MAX_FDS: usize = FIXED_SLOT_COUNT + MAX_DEVICE_INTERFACES + 4;
 
 const signalfd_siginfo_size = 128;
 
@@ -133,6 +135,15 @@ fn autoStopEnabled(dcfg: ?*const DeviceConfig) bool {
     return ff.auto_stop;
 }
 
+fn hasPhysicalRumbleCommand(dcfg: *const DeviceConfig) bool {
+    const commands = dcfg.commands orelse return false;
+    const ff_type = if (dcfg.output) |out|
+        if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble"
+    else
+        "rumble";
+    return commands.map.contains(ff_type);
+}
+
 /// Format scheduler slot state with relative deltas from now_ns.
 /// Shows: slots=[0:INF, 1:+250ms, 3:+1200ms] or slots=[empty]
 fn fmtSchedulerSlots(slots: [rumble_scheduler_mod.MAX_EFFECTS]i128, now_ns: i128) [256]u8 {
@@ -179,6 +190,7 @@ const RUMBLE_MAX_RETRY_ATTEMPTS: u8 = 3;
 
 const RumbleEmitResult = enum {
     written,
+    queued,
     unconfigured,
     write_failed,
     disconnected,
@@ -204,6 +216,8 @@ fn emitRumbleFrame(
     strong: u16,
     weak: u16,
     tag: []const u8,
+    writer: ?*RumbleWriter,
+    retry_count: u8,
 ) RumbleEmitResult {
     const cmds = dcfg.commands orelse {
         rumble_log.debug("[{s}] HID_WRITE: rumble unconfigured strong={d} weak={d} reason=missing commands", .{ tag, strong, weak });
@@ -254,6 +268,21 @@ fn emitRumbleFrame(
         });
     }
 
+    if (writer) |w| {
+        w.publish(
+            devices[iface_idx],
+            bytes,
+            .{ .strong = strong, .weak = weak },
+            retry_count,
+        ) catch |err| {
+            rumble_log.debug("[{s}] HID_WRITE: enqueue FAILED cmd={s} strong={d} weak={d} err={}", .{
+                tag, ff_type, strong, weak, err,
+            });
+            return .write_failed;
+        };
+        return .queued;
+    }
+
     devices[iface_idx].write(bytes) catch |err| {
         rumble_log.debug("[{s}] HID_WRITE: FAILED cmd={s} strong={d} weak={d} err={}", .{ tag, ff_type, strong, weak, err });
         return switch (err) {
@@ -296,7 +325,7 @@ fn quiesceTimersAndRumbleImpl(
     self.pending_rumble_deadline_ns = null;
     self.pending_rumble_retry_count = 0;
     if (dcfg) |cfg| {
-        _ = emitRumbleFrame(devices, alloc, cfg, 0, 0, tag);
+        _ = emitRumbleFrame(devices, alloc, cfg, 0, 0, tag, null, 0);
     }
 }
 
@@ -434,6 +463,9 @@ pub const EventLoop = struct {
     /// EventLoop polls only this mailbox wake and performs the physical write.
     native_rumble_slot: ?usize,
     native_rumble_device: ?*UhidDevice,
+    /// Completion wake for the capacity-one physical rumble writer.
+    rumble_writer_slot: ?usize,
+    rumble_writer: RumbleWriter,
     disconnected: bool,
     running: bool,
     gamepad_state: state.GamepadState,
@@ -502,6 +534,8 @@ pub const EventLoop = struct {
             .uhid_output_slot = null,
             .native_rumble_slot = null,
             .native_rumble_device = null,
+            .rumble_writer_slot = null,
+            .rumble_writer = .{},
             .disconnected = false,
             .running = false,
             .gamepad_state = .{},
@@ -600,6 +634,23 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
+    fn startRumbleWriter(self: *EventLoop) !void {
+        try self.rumble_writer.start();
+        const fd = self.rumble_writer.completionFd();
+        if (self.rumble_writer_slot) |slot| {
+            self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+            return;
+        }
+        const slot = self.fd_count;
+        if (slot >= MAX_FDS) {
+            self.rumble_writer.stop();
+            return error.TooManyFds;
+        }
+        self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+        self.rumble_writer_slot = slot;
+        self.fd_count += 1;
+    }
+
     fn recordRumbleWrite(self: *EventLoop, frame: RumbleScheduler.Frame, now_ns: i128) void {
         if (frame.strong == 0 and frame.weak == 0) {
             self.last_rumble_ns = 0;
@@ -631,8 +682,18 @@ pub const EventLoop = struct {
             self.clearPendingRumble();
             return .unconfigured;
         };
-        const result = emitRumbleFrame(ctx.devices, alloc, dcfg, frame.strong, frame.weak, ctx.device_tag);
-        if (result == .written) {
+        const writer: ?*RumbleWriter = if (self.rumble_writer.isRunning()) &self.rumble_writer else null;
+        const result = emitRumbleFrame(
+            ctx.devices,
+            alloc,
+            dcfg,
+            frame.strong,
+            frame.weak,
+            ctx.device_tag,
+            writer,
+            self.pending_rumble_retry_count,
+        );
+        if (result == .written or result == .queued) {
             self.recordRumbleWrite(frame, now_ns);
             self.clearPendingRumble();
         } else if (result == .unconfigured) {
@@ -672,7 +733,7 @@ pub const EventLoop = struct {
 
     fn emitOrQueueRumble(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) void {
         switch (self.emitRumbleFrameForContext(ctx, frame, now_ns)) {
-            .written, .unconfigured => {},
+            .written, .queued, .unconfigured => {},
             .write_failed => self.queueRumbleRetry(ctx, frame, now_ns),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
         }
@@ -710,9 +771,36 @@ pub const EventLoop = struct {
             return;
         };
         switch (self.emitRumbleFrameForContext(ctx, frame, now_ns)) {
-            .written, .unconfigured => {},
+            .written, .queued, .unconfigured => {},
             .write_failed => self.queueRumbleRetry(ctx, frame, now_ns),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
+        }
+    }
+
+    fn handleRumbleWriterCompletion(self: *EventLoop, ctx: EventLoopContext) void {
+        const completion = self.rumble_writer.takeCompletion() orelse return;
+        const frame = RumbleScheduler.Frame{
+            .strong = completion.frame.strong,
+            .weak = completion.frame.weak,
+        };
+        switch (completion.result) {
+            .written => {},
+            .disconnected => self.handleRumbleDisconnect(ctx, frame),
+            .write_failed => {
+                // A newer logical frame already waiting for its throttle
+                // deadline wins over retrying this stale transport failure.
+                if (self.pending_rumble_frame == null) {
+                    const retry_count = completion.retry_count +| 1;
+                    if (retry_count > RUMBLE_MAX_RETRY_ATTEMPTS) {
+                        rumble_log.warn("[{s}] HID_WRITE: retry limit exceeded strong={d} weak={d}; dropping rumble frame and keeping input loop alive", .{
+                            ctx.device_tag, frame.strong, frame.weak,
+                        });
+                    } else {
+                        self.queuePendingRumble(frame, monotonicNs() + RUMBLE_RETRY_INTERVAL_NS, retry_count);
+                    }
+                }
+                self.armRumbleTimer(self.rumble_scheduler.nextDeadline());
+            },
         }
     }
 
@@ -727,6 +815,12 @@ pub const EventLoop = struct {
         }
 
         self.running = true;
+        if (ctx.allocator != null) {
+            if (ctx.device_config) |dcfg| {
+                if (hasPhysicalRumbleCommand(dcfg)) try self.startRumbleWriter();
+            }
+        }
+        defer self.rumble_writer.stop();
         var buf: [512]u8 = undefined;
 
         // Apply adaptive trigger config at startup (one-shot send)
@@ -904,6 +998,14 @@ pub const EventLoop = struct {
                             }
                         }
                     }
+                }
+            }
+
+            // Physical writes complete out of band. Consume their transport
+            // result only after this cycle's physical input has been drained.
+            if (self.rumble_writer_slot) |slot| {
+                if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.handleRumbleWriterCompletion(ctx);
                 }
             }
 
@@ -1124,6 +1226,7 @@ pub const EventLoop = struct {
     }
 
     pub fn deinit(self: *EventLoop) void {
+        self.rumble_writer.stop();
         posix.close(self.signal_fd);
         posix.close(self.stop_r);
         posix.close(self.stop_w);
@@ -1588,7 +1691,7 @@ test "event_loop: rumble template OOM queues retry as write failure" {
     var devs = [_]DeviceIO{mock_dev.deviceIO()};
 
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    const result = emitRumbleFrame(&devs, failing.allocator(), &parsed.value, 0x8000, 0x4000, "test");
+    const result = emitRumbleFrame(&devs, failing.allocator(), &parsed.value, 0x8000, 0x4000, "test", null, 0);
 
     try testing.expectEqual(RumbleEmitResult.write_failed, result);
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
