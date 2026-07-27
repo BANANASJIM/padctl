@@ -195,6 +195,7 @@ const RumbleEmitResult = enum {
     written,
     queued,
     unconfigured,
+    permanent_failure,
     write_failed,
     disconnected,
 };
@@ -277,6 +278,17 @@ fn emitRumbleFrame(
             retry_count,
             generation,
         ) catch |err| {
+            if (err == error.FrameTooLarge) {
+                rumble_log.warn("[{s}] HID_WRITE: frame too large cmd={s} strong={d} weak={d} len={d} max={d}; dropping without retry", .{
+                    tag,
+                    ff_type,
+                    strong,
+                    weak,
+                    bytes.len,
+                    rumble_writer_mod.MAX_FRAME_BYTES,
+                });
+                return .permanent_failure;
+            }
             rumble_log.debug("[{s}] HID_WRITE: enqueue FAILED cmd={s} strong={d} weak={d} err={}", .{
                 tag, ff_type, strong, weak, err,
             });
@@ -683,7 +695,14 @@ pub const EventLoop = struct {
         self.pending_rumble_generation = 0;
     }
 
-    fn emitRumbleFrameForContext(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128, generation: u64) RumbleEmitResult {
+    fn emitRumbleFrameForContext(
+        self: *EventLoop,
+        ctx: EventLoopContext,
+        frame: RumbleScheduler.Frame,
+        now_ns: i128,
+        generation: u64,
+        retry_count: u8,
+    ) RumbleEmitResult {
         const alloc = ctx.allocator orelse {
             rumble_log.debug("[{s}] HID_WRITE: rumble unconfigured strong={d} weak={d} reason=missing allocator", .{ ctx.device_tag, frame.strong, frame.weak });
             self.clearPendingRumble();
@@ -703,7 +722,7 @@ pub const EventLoop = struct {
             frame.weak,
             ctx.device_tag,
             writer,
-            self.pending_rumble_retry_count,
+            retry_count,
             generation,
         );
         if (result == .written or result == .queued) {
@@ -711,7 +730,7 @@ pub const EventLoop = struct {
                 self.recordRumbleWrite(now_ns);
             }
             self.clearPendingRumble();
-        } else if (result == .unconfigured) {
+        } else if (result == .unconfigured or result == .permanent_failure) {
             self.clearPendingRumble();
         }
         return result;
@@ -747,8 +766,8 @@ pub const EventLoop = struct {
     }
 
     fn emitOrQueueRumble(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128, generation: u64) void {
-        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns, generation)) {
-            .written, .queued, .unconfigured => {},
+        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns, generation, 0)) {
+            .written, .queued, .unconfigured, .permanent_failure => {},
             .write_failed => self.queueRumbleRetry(ctx, frame, now_ns, generation),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
         }
@@ -787,8 +806,9 @@ pub const EventLoop = struct {
             return;
         };
         const generation = self.pending_rumble_generation;
-        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns, generation)) {
-            .written, .queued, .unconfigured => {},
+        const retry_count = self.pending_rumble_retry_count;
+        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns, generation, retry_count)) {
+            .written, .queued, .unconfigured, .permanent_failure => {},
             .write_failed => self.queueRumbleRetry(ctx, frame, now_ns, generation),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
         }
@@ -843,6 +863,9 @@ pub const EventLoop = struct {
         }
         defer {
             self.rumble_writer.stop();
+            if (self.rumble_writer_slot) |slot| {
+                self.pollfds[slot] = .{ .fd = -1, .events = 0, .revents = 0 };
+            }
             self.running = false;
         }
         var buf: [512]u8 = undefined;
@@ -1723,6 +1746,60 @@ test "event_loop: rumble template OOM queues retry as write failure" {
     const result = emitRumbleFrame(&devs, failing.allocator(), &parsed.value, 0x8000, 0x4000, "test", null, 0, 0);
 
     try testing.expectEqual(RumbleEmitResult.write_failed, result);
+    try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
+}
+
+test "event_loop: oversized rumble frame is permanent and does not queue retry" {
+    const allocator = testing.allocator;
+
+    var template: std.ArrayList(u8) = .{};
+    defer template.deinit(allocator);
+    for (0..rumble_writer_mod.MAX_FRAME_BYTES + 1) |i| {
+        if (i != 0) try template.append(allocator, ' ');
+        try template.appendSlice(allocator, "00");
+    }
+    const rumble_toml = try std.fmt.allocPrint(allocator,
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 1
+        \\[commands.rumble]
+        \\interface = 0
+        \\template = "{s}"
+    , .{template.items});
+    defer allocator.free(rumble_toml);
+    const parsed = try device_mod.parseString(allocator, rumble_toml);
+    defer parsed.deinit();
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    try loop.rumble_writer.start();
+    defer loop.rumble_writer.stop();
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    var devices = [_]DeviceIO{mock_dev.deviceIO()};
+    const interpreter = Interpreter.init(&parsed.value);
+    var output = MockOutput.init(allocator);
+    defer output.deinit();
+    const ctx = EventLoopContext{
+        .devices = &devices,
+        .interpreter = &interpreter,
+        .output = output.outputDevice(),
+        .allocator = allocator,
+        .device_config = &parsed.value,
+    };
+
+    loop.emitOrQueueRumble(ctx, .{ .strong = 0x8000, .weak = 0x4000 }, monotonicNs(), loop.nextRumbleGeneration());
+
+    try testing.expectEqual(@as(?RumbleScheduler.Frame, null), loop.pending_rumble_frame);
+    try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
 }
 
