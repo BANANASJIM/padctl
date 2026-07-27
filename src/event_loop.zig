@@ -1126,10 +1126,6 @@ pub const EventLoop = struct {
                     };
                     if (ff_result) |ff_ev| {
                         const now_ns = monotonicNs();
-                        // Every accepted logical PLAY/STOP supersedes failures
-                        // and retries from older physical requests, even when
-                        // scheduler aggregation emits no frame for this event.
-                        const generation = self.nextRumbleGeneration();
                         const min_interval_ns = RUMBLE_MIN_INTERVAL_NS;
                         const is_stop = ff_ev.strong == 0 and ff_ev.weak == 0;
                         const scheduler_on = autoStopEnabled(ctx.device_config);
@@ -1154,6 +1150,7 @@ pub const EventLoop = struct {
                                 else
                                     null;
                                 if (frame_to_emit) |frame| {
+                                    const generation = self.nextRumbleGeneration();
                                     self.clearPendingRumble();
                                     self.emitOrQueueRumble(ctx, frame, now_ns, generation);
                                     if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] FF_STOP: frame FAILED to emit; queued retry", .{ctx.device_tag});
@@ -1161,6 +1158,7 @@ pub const EventLoop = struct {
                                 self.armRumbleTimer(result.next_deadline_ns);
                             } else {
                                 rumble_log.debug("[{s}] FF_STOP: auto_stop disabled, direct zero frame", .{ctx.device_tag});
+                                const generation = self.nextRumbleGeneration();
                                 self.clearPendingRumble();
                                 self.emitOrQueueRumble(ctx, .{ .strong = 0, .weak = 0 }, now_ns, generation);
                                 if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] FF_STOP: direct zero frame FAILED to emit; queued retry", .{ctx.device_tag});
@@ -1183,6 +1181,7 @@ pub const EventLoop = struct {
                                     });
                                 }
                                 if (result.frame) |frame| {
+                                    const generation = self.nextRumbleGeneration();
                                     const elapsed = now_ns - self.last_rumble_ns;
                                     if (elapsed >= min_interval_ns) {
                                         self.emitOrQueueRumble(ctx, frame, now_ns, generation);
@@ -1196,6 +1195,7 @@ pub const EventLoop = struct {
                                 }
                                 self.armRumbleTimer(result.next_deadline_ns);
                             } else {
+                                const generation = self.nextRumbleGeneration();
                                 const elapsed = now_ns - self.last_rumble_ns;
                                 if (elapsed >= min_interval_ns) {
                                     self.emitOrQueueRumble(ctx, .{ .strong = ff_ev.strong, .weak = ff_ev.weak }, now_ns, generation);

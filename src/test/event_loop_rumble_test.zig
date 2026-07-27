@@ -1130,6 +1130,96 @@ test "issue 503: newer stop supersedes an older failed play retry" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, write_dev.write_log.items);
 }
 
+test "issue 503: weaker no-frame play does not suppress aggregate retry" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var write_dev = try FailingWriteDeviceIO.init(allocator, 1);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const attempt_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(attempt_ack[0]);
+    defer posix.close(attempt_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    const release = try posix.pipe2(.{});
+    defer posix.close(release[0]);
+    defer posix.close(release[1]);
+    write_dev.setWriteAck(write_ack[1]);
+    write_dev.setWriteGate(attempt_ack[1], release[0], 1);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 0 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0x2000, .weak = 0x1000, .duration_ms = 0 },
+        null,
+    };
+    var output = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devices: []DeviceIO,
+        interpreter: *const Interpreter,
+        output: *MockFfOutputDrain,
+        config: *const device_mod.DeviceConfig,
+        allocator: std.mem.Allocator,
+    };
+    var run_ctx = RunCtx{
+        .loop = &loop,
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = &output,
+        .config = &parsed.value,
+        .allocator = allocator,
+    };
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(ctx: *RunCtx) !void {
+            try ctx.loop.run(.{
+                .devices = ctx.devices,
+                .interpreter = ctx.interpreter,
+                .output = ctx.output.outputDevice(),
+                .allocator = ctx.allocator,
+                .device_config = ctx.config,
+                .poll_timeout_ms = 100,
+            });
+        }
+    }.run, .{&run_ctx});
+    var joined = false;
+    defer {
+        _ = posix.write(release[1], &[_]u8{1}) catch {};
+        loop.stop();
+        if (!joined) thread.join();
+    }
+
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(attempt_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    _ = try posix.write(release[1], &[_]u8{1});
+
+    try waitForAck(attempt_ack[0]);
+    try waitForAck(write_ack[0]);
+    loop.stop();
+    thread.join();
+    joined = true;
+
+    try testing.expectEqual(@as(usize, 2), write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, write_dev.write_log.items);
+}
+
 test "issue 503: play cadence starts at slow write completion" {
     const allocator = testing.allocator;
 
