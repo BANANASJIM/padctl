@@ -433,6 +433,10 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    mock_dev.setWriteAck(write_ack[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -440,6 +444,9 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -450,13 +457,13 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 300 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -476,11 +483,15 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // The sequence mock does not drain the fd, so this one byte keeps the FF
-    // slot readable long enough for both PLAY events to arrive in one burst.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-
-    std.Thread.sleep(wait_ns);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    if (wait_ns < 300 * std.time.ns_per_ms) {
+        try waitForNoAck(write_ack[0], @intCast(wait_ns / std.time.ns_per_ms));
+    } else {
+        try waitForAck(write_ack[0]);
+    }
     loop.stop();
     thread.join();
 
@@ -633,6 +644,9 @@ const FailingWriteDeviceIO = struct {
     fail_write_count: usize,
     fail_error: DeviceIO.WriteError,
     write_ack: ?posix.fd_t = null,
+    attempt_ack: ?posix.fd_t = null,
+    write_release: ?posix.fd_t = null,
+    gated_attempts: usize = 0,
 
     fn init(allocator: std.mem.Allocator, fail_write_index: usize) !FailingWriteDeviceIO {
         return initRange(allocator, fail_write_index, 1, DeviceIO.WriteError.Io);
@@ -659,6 +673,12 @@ const FailingWriteDeviceIO = struct {
 
     fn setWriteAck(self: *FailingWriteDeviceIO, fd: posix.fd_t) void {
         self.write_ack = fd;
+    }
+
+    fn setWriteGate(self: *FailingWriteDeviceIO, attempt_ack: posix.fd_t, write_release: posix.fd_t, gated_attempts: usize) void {
+        self.attempt_ack = attempt_ack;
+        self.write_release = write_release;
+        self.gated_attempts = gated_attempts;
     }
 
     fn deinit(self: *FailingWriteDeviceIO) void {
@@ -689,6 +709,11 @@ const FailingWriteDeviceIO = struct {
         const self: *FailingWriteDeviceIO = @ptrCast(@alignCast(ptr));
         self.write_attempts += 1;
         self.attempt_times.append(self.allocator, event_loop_mod.monotonicNs()) catch return DeviceIO.WriteError.Io;
+        if (self.attempt_ack) |fd| _ = posix.write(fd, &[_]u8{1}) catch {};
+        if (self.write_attempts <= self.gated_attempts) {
+            var release: [1]u8 = undefined;
+            _ = posix.read(self.write_release.?, &release) catch return DeviceIO.WriteError.Io;
+        }
         if (self.fail_write_count > 0) {
             const fail_end = self.first_fail_index + self.fail_write_count;
             if (self.write_attempts >= self.first_fail_index and self.write_attempts < fail_end) return self.fail_error;
@@ -1013,6 +1038,314 @@ test "issue 503: blocked rumble write does not starve physical input emission" {
     joined = true;
 }
 
+test "issue 503: newer stop supersedes an older failed play retry" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var write_dev = try FailingWriteDeviceIO.init(allocator, 1);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const attempt_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(attempt_ack[0]);
+    defer posix.close(attempt_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    const release = try posix.pipe2(.{});
+    defer posix.close(release[0]);
+    defer posix.close(release[1]);
+    write_dev.setWriteAck(write_ack[1]);
+    write_dev.setWriteGate(attempt_ack[1], release[0], 1);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var output = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devices: []DeviceIO,
+        interpreter: *const Interpreter,
+        output: *MockFfOutputDrain,
+        config: *const device_mod.DeviceConfig,
+        allocator: std.mem.Allocator,
+    };
+    var run_ctx = RunCtx{
+        .loop = &loop,
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = &output,
+        .config = &parsed.value,
+        .allocator = allocator,
+    };
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(ctx: *RunCtx) !void {
+            try ctx.loop.run(.{
+                .devices = ctx.devices,
+                .interpreter = ctx.interpreter,
+                .output = ctx.output.outputDevice(),
+                .allocator = ctx.allocator,
+                .device_config = ctx.config,
+                .poll_timeout_ms = 100,
+            });
+        }
+    }.run, .{&run_ctx});
+    var joined = false;
+    defer {
+        _ = posix.write(release[1], &[_]u8{1}) catch {};
+        loop.stop();
+        if (!joined) thread.join();
+    }
+
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(attempt_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    _ = try posix.write(release[1], &[_]u8{1});
+
+    try waitForAck(attempt_ack[0]);
+    try waitForAck(write_ack[0]);
+    try waitForNoAck(attempt_ack[0], 40);
+
+    loop.stop();
+    thread.join();
+    joined = true;
+
+    try testing.expectEqual(@as(usize, 2), write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, write_dev.write_log.items);
+}
+
+test "issue 503: play cadence starts at slow write completion" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const attempt_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(attempt_ack[0]);
+    defer posix.close(attempt_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    const release = try posix.pipe2(.{});
+    defer posix.close(release[0]);
+    defer posix.close(release[1]);
+    write_dev.setWriteAck(write_ack[1]);
+    write_dev.setWriteGate(attempt_ack[1], release[0], 1);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        null,
+    };
+    var output = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devices: []DeviceIO,
+        interpreter: *const Interpreter,
+        output: *MockFfOutputDrain,
+        config: *const device_mod.DeviceConfig,
+        allocator: std.mem.Allocator,
+    };
+    var run_ctx = RunCtx{
+        .loop = &loop,
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = &output,
+        .config = &parsed.value,
+        .allocator = allocator,
+    };
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(ctx: *RunCtx) !void {
+            try ctx.loop.run(.{
+                .devices = ctx.devices,
+                .interpreter = ctx.interpreter,
+                .output = ctx.output.outputDevice(),
+                .allocator = ctx.allocator,
+                .device_config = ctx.config,
+                .poll_timeout_ms = 100,
+            });
+        }
+    }.run, .{&run_ctx});
+    var joined = false;
+    defer {
+        _ = posix.write(release[1], &[_]u8{1}) catch {};
+        loop.stop();
+        if (!joined) thread.join();
+    }
+
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(attempt_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForNoAck(attempt_ack[0], 15);
+    _ = try posix.write(release[1], &[_]u8{1});
+
+    try waitForAck(write_ack[0]);
+    try waitForNoAck(attempt_ack[0], 5);
+    try waitForAck(attempt_ack[0]);
+    try waitForAck(write_ack[0]);
+
+    loop.stop();
+    thread.join();
+    joined = true;
+
+    try testing.expectEqual(@as(usize, 2), write_dev.write_attempts);
+    try testing.expect(write_dev.attempt_times.items[1] - write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
+}
+
+test "issue 503: shutdown drains an accepted stop completion" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const attempt_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(attempt_ack[0]);
+    defer posix.close(attempt_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    const release = try posix.pipe2(.{});
+    defer posix.close(release[0]);
+    defer posix.close(release[1]);
+    const run_done = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(run_done[0]);
+    defer posix.close(run_done[1]);
+    write_dev.setWriteAck(write_ack[1]);
+    write_dev.setWriteGate(attempt_ack[1], release[0], 1);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var output = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devices: []DeviceIO,
+        interpreter: *const Interpreter,
+        output: *MockFfOutputDrain,
+        config: *const device_mod.DeviceConfig,
+        allocator: std.mem.Allocator,
+        run_done: posix.fd_t,
+    };
+    var run_ctx = RunCtx{
+        .loop = &loop,
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = &output,
+        .config = &parsed.value,
+        .allocator = allocator,
+        .run_done = run_done[1],
+    };
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(ctx: *RunCtx) void {
+            ctx.loop.run(.{
+                .devices = ctx.devices,
+                .interpreter = ctx.interpreter,
+                .output = ctx.output.outputDevice(),
+                .allocator = ctx.allocator,
+                .device_config = ctx.config,
+                .poll_timeout_ms = 100,
+            }) catch @panic("event loop failed");
+            _ = posix.write(ctx.run_done, &[_]u8{1}) catch {};
+        }
+    }.run, .{&run_ctx});
+    var joined = false;
+    defer {
+        _ = posix.write(release[1], &[_]u8{1}) catch {};
+        loop.stop();
+        if (!joined) thread.join();
+    }
+
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(attempt_ack[0]);
+    loop.stop();
+    try waitForNoAck(run_done[0], 20);
+    _ = try posix.write(release[1], &[_]u8{1});
+    try waitForAck(write_ack[0]);
+    try waitForAck(run_done[0]);
+    thread.join();
+    joined = true;
+
+    try testing.expectEqual(@as(usize, 1), write_dev.write_attempts);
+    try testing.expectEqual(loop.shutdown_stop_generation.?, loop.last_completed_rumble_generation);
+}
+
+test "issue 503: rumble writer startup failure clears running state" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var output = NoopOutput{};
+    var devs = [_]DeviceIO{dev};
+
+    try testing.expectError(error.TestRumbleWriterStartFailed, loop.run(.{
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = output.outputDevice(),
+        .allocator = allocator,
+        .device_config = &parsed.value,
+        .test_fail_rumble_writer_start = true,
+    }));
+    try testing.expect(!loop.running);
+    try testing.expect(!loop.rumble_writer.isRunning());
+}
+
 test "event_loop: device input is handled before rumble auto-stop write when both are ready" {
     const allocator = testing.allocator;
 
@@ -1084,6 +1417,10 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    mock_dev.setWriteAck(write_ack[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -1092,6 +1429,9 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -1103,13 +1443,13 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
         .{ .effect_type = 0x50, .strong = 0, .weak = 0 }, // stop
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -1130,12 +1470,10 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // First wakeup → play event
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(2 * std.time.ns_per_ms); // stay well inside 10ms throttle window
-    // Second wakeup → stop event (must bypass throttle)
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
     loop.stop();
     thread.join();
 
@@ -1854,6 +2192,10 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    mock_dev.setWriteAck(write_ack[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -1861,6 +2203,9 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -1875,13 +2220,13 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -1902,13 +2247,12 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // First wake: play event → scheduler arms at t+200ms.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(5 * std.time.ns_per_ms);
-    // Second wake: explicit stop → scheduler disarms.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    // Wait well past the original 200ms to prove the timer never fires.
-    std.Thread.sleep(260 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    // Wait past the original deadline and prove no timer-generated STOP.
+    try waitForNoAck(write_ack[0], 230);
     loop.stop();
     thread.join();
 
@@ -1999,15 +2343,22 @@ test "event_loop: play after stop within throttle window is forwarded" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    var mock_dev = try MockDeviceIO.init(allocator, &.{});
-    defer mock_dev.deinit();
-    const dev = mock_dev.deviceIO();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
     try loop.addDevice(dev);
 
     const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    write_dev.setWriteAck(write_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -2019,13 +2370,13 @@ test "event_loop: play after stop within throttle window is forwarded" {
         .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 }, // play
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx2 = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -2045,21 +2396,20 @@ test "event_loop: play after stop within throttle window is forwarded" {
     };
     const thread = try std.Thread.spawn(.{}, T2.run, .{&ctx});
 
-    // First wakeup → stop
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(5 * std.time.ns_per_ms); // inside 10ms throttle window
-    // Second wakeup → play (must NOT be throttled because stop doesn't advance last_rumble_ns)
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForNoAck(write_ack[0], 5);
+    try waitForAck(write_ack[0]);
     loop.stop();
     thread.join();
 
     // Both frames must be written: stop then play
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
-    const stop_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqual(@as(usize, 2 * frame_size), write_dev.write_log.items.len);
+    const stop_frame = write_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
-    const play_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    const play_frame = write_dev.write_log.items[frame_size .. 2 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
 }
 
@@ -2173,22 +2523,29 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
 }
 
 test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
-    // STOP clears the play throttle window, so a replay after explicit stop is
-    // forwarded immediately and still arms the new auto-stop deadline.
+    // A replay after explicit STOP is forwarded after the STOP cadence window
+    // and still arms the new auto-stop deadline.
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    var mock_dev = try MockDeviceIO.init(allocator, &.{});
-    defer mock_dev.deinit();
-    const dev = mock_dev.deviceIO();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
     try loop.addDevice(dev);
 
     const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    write_dev.setWriteAck(write_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -2201,13 +2558,13 @@ test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 100 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx3 = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -2227,34 +2584,25 @@ test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
     };
     const thread = try std.Thread.spawn(.{}, T3.run, .{&ctx});
 
-    // The pipe byte is never drained, so the FF slot stays level-triggered:
-    // each ppoll iteration consumes one event, delivering all three within
-    // microseconds — far inside the 10ms throttle window.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-
-    // Outlast the 100ms auto-stop deadline.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try waitForAck(write_ack[0]); // replay's 100ms auto-stop
     loop.stop();
     thread.join();
 
-    // The capacity-one physical writer may coalesce the explicit stop into
-    // the immediately following replay when transport is slower than this
-    // synthetic level-triggered FF burst. In either case replay must reach
-    // hardware and the final stop must appear, proving replay rearmed the
-    // auto-stop deadline.
     const frame_size = 8;
-    const frame_count = mock_dev.write_log.items.len / frame_size;
-    try testing.expect(frame_count == 3 or frame_count == 4);
-    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqual(@as(usize, 4 * frame_size), write_dev.write_log.items.len);
+    const play_frame = write_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
-    if (frame_count == 4) {
-        const explicit_stop = mock_dev.write_log.items[frame_size .. 2 * frame_size];
-        try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
-    }
-    const replay_index: usize = frame_count - 2;
-    const replay_frame = mock_dev.write_log.items[replay_index * frame_size .. (replay_index + 1) * frame_size];
+    const explicit_stop = write_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
+    const replay_frame = write_dev.write_log.items[2 * frame_size .. 3 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, replay_frame);
-    const auto_stop = mock_dev.write_log.items[(frame_count - 1) * frame_size .. frame_count * frame_size];
+    const auto_stop = write_dev.write_log.items[3 * frame_size .. 4 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, auto_stop);
 }
 

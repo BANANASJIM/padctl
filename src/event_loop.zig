@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -218,6 +219,7 @@ fn emitRumbleFrame(
     tag: []const u8,
     writer: ?*RumbleWriter,
     retry_count: u8,
+    generation: u64,
 ) RumbleEmitResult {
     const cmds = dcfg.commands orelse {
         rumble_log.debug("[{s}] HID_WRITE: rumble unconfigured strong={d} weak={d} reason=missing commands", .{ tag, strong, weak });
@@ -274,6 +276,7 @@ fn emitRumbleFrame(
             bytes,
             .{ .strong = strong, .weak = weak },
             retry_count,
+            generation,
         ) catch |err| {
             rumble_log.debug("[{s}] HID_WRITE: enqueue FAILED cmd={s} strong={d} weak={d} err={}", .{
                 tag, ff_type, strong, weak, err,
@@ -324,8 +327,11 @@ fn quiesceTimersAndRumbleImpl(
     self.pending_rumble_frame = null;
     self.pending_rumble_deadline_ns = null;
     self.pending_rumble_retry_count = 0;
+    self.pending_rumble_generation = 0;
+    self.shutdown_rumble_generation = null;
+    self.shutdown_stop_generation = null;
     if (dcfg) |cfg| {
-        _ = emitRumbleFrame(devices, alloc, cfg, 0, 0, tag, null, 0);
+        _ = emitRumbleFrame(devices, alloc, cfg, 0, 0, tag, null, 0, 0);
     }
 }
 
@@ -369,6 +375,8 @@ pub const EventLoopContext = struct {
     /// Primary UHID device to drain for UHID_OUTPUT events.
     /// Set when `[output.force_feedback].backend = "uhid"` and `kind = "pid"`.
     uhid_primary: ?*UhidDevice = null,
+    /// Narrow startup-failure seam for lifecycle regression coverage.
+    test_fail_rumble_writer_start: bool = false,
 };
 
 fn i64ToParamValue(v: ?i64) u16 {
@@ -471,9 +479,14 @@ pub const EventLoop = struct {
     gamepad_state: state.GamepadState,
     last_ts: i128,
     last_rumble_ns: i128,
+    rumble_generation: u64,
+    last_completed_rumble_generation: u64,
     pending_rumble_frame: ?RumbleScheduler.Frame,
     pending_rumble_deadline_ns: ?i128,
     pending_rumble_retry_count: u8,
+    pending_rumble_generation: u64,
+    shutdown_rumble_generation: ?u64,
+    shutdown_stop_generation: ?u64,
     last_heartbeat_ns: i128 = 0,
     /// Last successfully emitted virtual button mask. Diagnostic tracing uses
     /// it to log output edges without flooding dumps with axis-only frames.
@@ -541,9 +554,14 @@ pub const EventLoop = struct {
             .gamepad_state = .{},
             .last_ts = monotonicNs(),
             .last_rumble_ns = 0,
+            .rumble_generation = 0,
+            .last_completed_rumble_generation = 0,
             .pending_rumble_frame = null,
             .pending_rumble_deadline_ns = null,
             .pending_rumble_retry_count = 0,
+            .pending_rumble_generation = 0,
+            .shutdown_rumble_generation = null,
+            .shutdown_stop_generation = null,
         };
 
         loop.pollfds[Slots.signal] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
@@ -651,27 +669,31 @@ pub const EventLoop = struct {
         self.fd_count += 1;
     }
 
-    fn recordRumbleWrite(self: *EventLoop, frame: RumbleScheduler.Frame, now_ns: i128) void {
-        if (frame.strong == 0 and frame.weak == 0) {
-            self.last_rumble_ns = 0;
-        } else {
-            self.last_rumble_ns = now_ns;
-        }
+    fn nextRumbleGeneration(self: *EventLoop) u64 {
+        self.rumble_generation +%= 1;
+        if (self.rumble_generation == 0) self.rumble_generation = 1;
+        return self.rumble_generation;
     }
 
-    fn queuePendingRumble(self: *EventLoop, frame: RumbleScheduler.Frame, deadline_ns: i128, retry_count: u8) void {
+    fn recordRumbleWrite(self: *EventLoop, now_ns: i128) void {
+        self.last_rumble_ns = now_ns;
+    }
+
+    fn queuePendingRumble(self: *EventLoop, frame: RumbleScheduler.Frame, deadline_ns: i128, retry_count: u8, generation: u64) void {
         self.pending_rumble_frame = frame;
         self.pending_rumble_deadline_ns = deadline_ns;
         self.pending_rumble_retry_count = retry_count;
+        self.pending_rumble_generation = generation;
     }
 
     fn clearPendingRumble(self: *EventLoop) void {
         self.pending_rumble_frame = null;
         self.pending_rumble_deadline_ns = null;
         self.pending_rumble_retry_count = 0;
+        self.pending_rumble_generation = 0;
     }
 
-    fn emitRumbleFrameForContext(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) RumbleEmitResult {
+    fn emitRumbleFrameForContext(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128, generation: u64) RumbleEmitResult {
         const alloc = ctx.allocator orelse {
             rumble_log.debug("[{s}] HID_WRITE: rumble unconfigured strong={d} weak={d} reason=missing allocator", .{ ctx.device_tag, frame.strong, frame.weak });
             self.clearPendingRumble();
@@ -692,9 +714,18 @@ pub const EventLoop = struct {
             ctx.device_tag,
             writer,
             self.pending_rumble_retry_count,
+            generation,
         );
         if (result == .written or result == .queued) {
-            self.recordRumbleWrite(frame, now_ns);
+            if (result == .written) {
+                self.recordRumbleWrite(now_ns);
+                self.last_completed_rumble_generation = @max(self.last_completed_rumble_generation, generation);
+            } else {
+                self.shutdown_rumble_generation = generation;
+                if (frame.strong == 0 and frame.weak == 0) {
+                    self.shutdown_stop_generation = generation;
+                }
+            }
             self.clearPendingRumble();
         } else if (result == .unconfigured) {
             self.clearPendingRumble();
@@ -711,7 +742,7 @@ pub const EventLoop = struct {
         self.running = false;
     }
 
-    fn queueRumbleRetry(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) void {
+    fn queueRumbleRetry(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128, generation: u64) void {
         const retry_count: u8 = if (self.pending_rumble_frame) |pending|
             if (pending.strong == frame.strong and pending.weak == frame.weak)
                 self.pending_rumble_retry_count +| 1
@@ -728,33 +759,34 @@ pub const EventLoop = struct {
             return;
         }
 
-        self.queuePendingRumble(frame, now_ns + RUMBLE_RETRY_INTERVAL_NS, retry_count);
+        self.queuePendingRumble(frame, now_ns + RUMBLE_RETRY_INTERVAL_NS, retry_count, generation);
     }
 
-    fn emitOrQueueRumble(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) void {
-        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns)) {
+    fn emitOrQueueRumble(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128, generation: u64) void {
+        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns, generation)) {
             .written, .queued, .unconfigured => {},
-            .write_failed => self.queueRumbleRetry(ctx, frame, now_ns),
+            .write_failed => self.queueRumbleRetry(ctx, frame, now_ns, generation),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
         }
     }
 
     fn handleNativeRumbleAt(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) void {
+        const generation = self.nextRumbleGeneration();
         const is_stop = frame.strong == 0 and frame.weak == 0;
         if (is_stop) {
             // STOP must not wait behind a throttled non-zero frame: cancel the
             // stale frame and emit zero immediately so rumble cannot stick.
             self.clearPendingRumble();
-            self.emitOrQueueRumble(ctx, frame, now_ns);
+            self.emitOrQueueRumble(ctx, frame, now_ns, generation);
         } else {
             const elapsed = now_ns - self.last_rumble_ns;
             if (elapsed >= RUMBLE_MIN_INTERVAL_NS) {
-                self.emitOrQueueRumble(ctx, frame, now_ns);
+                self.emitOrQueueRumble(ctx, frame, now_ns, generation);
             } else {
                 // The mailbox and this pending slot are both capacity one.
                 // A newer native command replaces the older throttled frame
                 // without moving the original 10ms physical-write deadline.
-                self.queuePendingRumble(frame, self.last_rumble_ns + RUMBLE_MIN_INTERVAL_NS, 0);
+                self.queuePendingRumble(frame, self.last_rumble_ns + RUMBLE_MIN_INTERVAL_NS, 0, generation);
                 rumble_log.debug("[{s}] NATIVE_RUMBLE: THROTTLED elapsed={d}ns", .{
                     ctx.device_tag, elapsedNsForLog(elapsed),
                 });
@@ -770,9 +802,10 @@ pub const EventLoop = struct {
             self.pending_rumble_deadline_ns = null;
             return;
         };
-        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns)) {
+        const generation = self.pending_rumble_generation;
+        switch (self.emitRumbleFrameForContext(ctx, frame, now_ns, generation)) {
             .written, .queued, .unconfigured => {},
-            .write_failed => self.queueRumbleRetry(ctx, frame, now_ns),
+            .write_failed => self.queueRumbleRetry(ctx, frame, now_ns, generation),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
         }
     }
@@ -783,20 +816,21 @@ pub const EventLoop = struct {
             .strong = completion.frame.strong,
             .weak = completion.frame.weak,
         };
+        self.last_completed_rumble_generation = @max(self.last_completed_rumble_generation, completion.generation);
         switch (completion.result) {
-            .written => {},
+            .written => self.recordRumbleWrite(completion.completed_ns),
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
             .write_failed => {
                 // A newer logical frame already waiting for its throttle
                 // deadline wins over retrying this stale transport failure.
-                if (self.pending_rumble_frame == null) {
+                if (completion.generation == self.rumble_generation and self.pending_rumble_frame == null) {
                     const retry_count = completion.retry_count +| 1;
                     if (retry_count > RUMBLE_MAX_RETRY_ATTEMPTS) {
                         rumble_log.warn("[{s}] HID_WRITE: retry limit exceeded strong={d} weak={d}; dropping rumble frame and keeping input loop alive", .{
                             ctx.device_tag, frame.strong, frame.weak,
                         });
                     } else {
-                        self.queuePendingRumble(frame, monotonicNs() + RUMBLE_RETRY_INTERVAL_NS, retry_count);
+                        self.queuePendingRumble(frame, monotonicNs() + RUMBLE_RETRY_INTERVAL_NS, retry_count, completion.generation);
                     }
                 }
                 self.armRumbleTimer(self.rumble_scheduler.nextDeadline());
@@ -808,6 +842,23 @@ pub const EventLoop = struct {
         armRumbleStopFd(self.rumble_stop_fd, minDeadline(scheduler_deadline_ns, self.pending_rumble_deadline_ns));
     }
 
+    fn drainAcceptedRumble(self: *EventLoop, ctx: EventLoopContext) void {
+        // Preserve the pre-worker shutdown guarantee that the latest accepted
+        // physical state is attempted before DeviceIO teardown. In particular,
+        // an accepted STOP must publish its completion before run() returns.
+        const target = self.shutdown_rumble_generation orelse return;
+        while (self.last_completed_rumble_generation < target and self.rumble_writer.isRunning()) {
+            var completion_poll = [_]posix.pollfd{.{
+                .fd = self.rumble_writer.completionFd(),
+                .events = posix.POLL.IN,
+                .revents = 0,
+            }};
+            const ready = posix.poll(&completion_poll, -1) catch return;
+            if (ready == 0 or completion_poll[0].revents & posix.POLL.IN == 0) continue;
+            self.handleRumbleWriterCompletion(ctx);
+        }
+    }
+
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         if (ctx.devices.len != self.device_count) {
             self.running = false;
@@ -815,12 +866,20 @@ pub const EventLoop = struct {
         }
 
         self.running = true;
+        errdefer self.running = false;
         if (ctx.allocator != null) {
             if (ctx.device_config) |dcfg| {
-                if (hasPhysicalRumbleCommand(dcfg)) try self.startRumbleWriter();
+                if (hasPhysicalRumbleCommand(dcfg)) {
+                    if (builtin.is_test and ctx.test_fail_rumble_writer_start) return error.TestRumbleWriterStartFailed;
+                    try self.startRumbleWriter();
+                }
             }
         }
-        defer self.rumble_writer.stop();
+        defer {
+            self.drainAcceptedRumble(ctx);
+            self.rumble_writer.stop();
+            self.running = false;
+        }
         var buf: [512]u8 = undefined;
 
         // Apply adaptive trigger config at startup (one-shot send)
@@ -1047,8 +1106,9 @@ pub const EventLoop = struct {
                     });
                 }
                 if (result.frame) |frame| {
+                    const generation = self.nextRumbleGeneration();
                     self.clearPendingRumble();
-                    self.emitOrQueueRumble(ctx, frame, now_ns);
+                    self.emitOrQueueRumble(ctx, frame, now_ns, generation);
                     if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] TIMERFD: frame FAILED to emit; queued retry", .{ctx.device_tag});
                 }
                 self.flushPendingRumbleIfDue(ctx, now_ns);
@@ -1066,6 +1126,10 @@ pub const EventLoop = struct {
                     };
                     if (ff_result) |ff_ev| {
                         const now_ns = monotonicNs();
+                        // Every accepted logical PLAY/STOP supersedes failures
+                        // and retries from older physical requests, even when
+                        // scheduler aggregation emits no frame for this event.
+                        const generation = self.nextRumbleGeneration();
                         const min_interval_ns = RUMBLE_MIN_INTERVAL_NS;
                         const is_stop = ff_ev.strong == 0 and ff_ev.weak == 0;
                         const scheduler_on = autoStopEnabled(ctx.device_config);
@@ -1091,14 +1155,14 @@ pub const EventLoop = struct {
                                     null;
                                 if (frame_to_emit) |frame| {
                                     self.clearPendingRumble();
-                                    self.emitOrQueueRumble(ctx, frame, now_ns);
+                                    self.emitOrQueueRumble(ctx, frame, now_ns, generation);
                                     if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] FF_STOP: frame FAILED to emit; queued retry", .{ctx.device_tag});
                                 }
                                 self.armRumbleTimer(result.next_deadline_ns);
                             } else {
                                 rumble_log.debug("[{s}] FF_STOP: auto_stop disabled, direct zero frame", .{ctx.device_tag});
                                 self.clearPendingRumble();
-                                self.emitOrQueueRumble(ctx, .{ .strong = 0, .weak = 0 }, now_ns);
+                                self.emitOrQueueRumble(ctx, .{ .strong = 0, .weak = 0 }, now_ns, generation);
                                 if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] FF_STOP: direct zero frame FAILED to emit; queued retry", .{ctx.device_tag});
                                 self.armRumbleTimer(null);
                             }
@@ -1121,10 +1185,10 @@ pub const EventLoop = struct {
                                 if (result.frame) |frame| {
                                     const elapsed = now_ns - self.last_rumble_ns;
                                     if (elapsed >= min_interval_ns) {
-                                        self.emitOrQueueRumble(ctx, frame, now_ns);
+                                        self.emitOrQueueRumble(ctx, frame, now_ns, generation);
                                         if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] FF_PLAY: emitRumbleFrame FAILED id={d}; queued retry", .{ ctx.device_tag, ff_ev.effect_id });
                                     } else {
-                                        self.queuePendingRumble(frame, self.last_rumble_ns + min_interval_ns, 0);
+                                        self.queuePendingRumble(frame, self.last_rumble_ns + min_interval_ns, 0, generation);
                                         rumble_log.debug("[{s}] FF_PLAY: THROTTLED id={d} elapsed={d}ns", .{
                                             ctx.device_tag, ff_ev.effect_id, elapsedNsForLog(elapsed),
                                         });
@@ -1134,10 +1198,10 @@ pub const EventLoop = struct {
                             } else {
                                 const elapsed = now_ns - self.last_rumble_ns;
                                 if (elapsed >= min_interval_ns) {
-                                    self.emitOrQueueRumble(ctx, .{ .strong = ff_ev.strong, .weak = ff_ev.weak }, now_ns);
+                                    self.emitOrQueueRumble(ctx, .{ .strong = ff_ev.strong, .weak = ff_ev.weak }, now_ns, generation);
                                     if (self.pending_rumble_frame != null) rumble_log.debug("[{s}] FF_PLAY: emitRumbleFrame FAILED id={d}; queued retry", .{ ctx.device_tag, ff_ev.effect_id });
                                 } else {
-                                    self.queuePendingRumble(.{ .strong = ff_ev.strong, .weak = ff_ev.weak }, self.last_rumble_ns + min_interval_ns, 0);
+                                    self.queuePendingRumble(.{ .strong = ff_ev.strong, .weak = ff_ev.weak }, self.last_rumble_ns + min_interval_ns, 0, generation);
                                     rumble_log.debug("[{s}] FF_PLAY: THROTTLED id={d} elapsed={d}ns", .{
                                         ctx.device_tag, ff_ev.effect_id, elapsedNsForLog(elapsed),
                                     });
@@ -1691,7 +1755,7 @@ test "event_loop: rumble template OOM queues retry as write failure" {
     var devs = [_]DeviceIO{mock_dev.deviceIO()};
 
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    const result = emitRumbleFrame(&devs, failing.allocator(), &parsed.value, 0x8000, 0x4000, "test", null, 0);
+    const result = emitRumbleFrame(&devs, failing.allocator(), &parsed.value, 0x8000, 0x4000, "test", null, 0, 0);
 
     try testing.expectEqual(RumbleEmitResult.write_failed, result);
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
@@ -1747,15 +1811,18 @@ test "event_loop: native throttle keeps latest while stop cancels pending" {
     try testing.expectEqual(latest, loop.pending_rumble_frame.?);
     try testing.expectEqual(@as(?i128, base + RUMBLE_MIN_INTERVAL_NS), loop.pending_rumble_deadline_ns);
 
-    // A zero frame is a safety command: it cancels the stale non-zero frame,
-    // writes immediately, and resets the throttle clock so replay is immediate.
+    // A zero frame is a safety command: it cancels the stale non-zero frame
+    // and writes immediately. Its successful completion starts the next
+    // physical cadence window just like every other successful report.
     loop.handleNativeRumbleAt(ctx, .{ .strong = 0, .weak = 0 }, base + 3 * std.time.ns_per_ms);
     try testing.expectEqual(@as(?RumbleScheduler.Frame, null), loop.pending_rumble_frame);
     try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
-    try testing.expectEqual(@as(i128, 0), loop.last_rumble_ns);
+    try testing.expectEqual(base + 3 * std.time.ns_per_ms, loop.last_rumble_ns);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, mock_dev.write_log.items);
 
     loop.handleNativeRumbleAt(ctx, latest, base + 4 * std.time.ns_per_ms);
+    try testing.expectEqual(latest, loop.pending_rumble_frame.?);
+    loop.flushPendingRumbleIfDue(ctx, base + 13 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 16), mock_dev.write_log.items.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x66, 0x99, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[8..16]);
 }

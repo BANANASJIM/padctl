@@ -16,6 +16,7 @@ pub const MockDeviceIO = struct {
     pipe_r: posix.fd_t,
     pipe_w: posix.fd_t,
     disconnected: bool,
+    write_ack_fd: ?posix.fd_t,
 
     pub fn init(allocator: std.mem.Allocator, frames: []const []const u8) !MockDeviceIO {
         var fds: [2]posix.fd_t = undefined;
@@ -36,6 +37,7 @@ pub const MockDeviceIO = struct {
             .pipe_r = fds[0],
             .pipe_w = fds[1],
             .disconnected = false,
+            .write_ack_fd = null,
         };
     }
 
@@ -73,6 +75,10 @@ pub const MockDeviceIO = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    pub fn setWriteAck(self: *MockDeviceIO, fd: posix.fd_t) void {
+        self.write_ack_fd = fd;
+    }
+
     const vtable = DeviceIO.VTable{
         .read = read,
         .write = write,
@@ -102,6 +108,7 @@ pub const MockDeviceIO = struct {
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *MockDeviceIO = @ptrCast(@alignCast(ptr));
         self.write_log.appendSlice(self.allocator, data) catch return DeviceIO.WriteError.Io;
+        if (self.write_ack_fd) |fd| _ = posix.write(fd, &[_]u8{1}) catch {};
     }
 
     fn featureReport(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {

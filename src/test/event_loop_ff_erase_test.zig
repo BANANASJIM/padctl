@@ -100,6 +100,10 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack_pipe[0]);
+    defer posix.close(write_ack_pipe[1]);
+    mock_dev.setWriteAck(write_ack_pipe[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -161,10 +165,8 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // Ack-based sync: write one byte to ff_pipe[1], then block until the event
-    // loop confirms it consumed the event by reading one ack byte. This removes
-    // the race where loop.stop() fires before the 4th event is processed.
-    // A 15ms gap before each play write still clears the 10ms throttle window.
+    // Synchronize both logical consumption and the physical completion for
+    // every frame. This preserves exact PLAY/STOP order without timing sleeps.
     const waitAck = struct {
         fn call(ack_read: posix.fd_t) error{AckTimeout}!void {
             var pfd = [1]posix.pollfd{.{ .fd = ack_read, .events = posix.POLL.IN, .revents = 0 }};
@@ -175,17 +177,18 @@ test "event_loop: erasing an infinite effect emits a stop frame and frees the sl
         }
     }.call;
 
-    std.Thread.sleep(15 * std.time.ns_per_ms);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // play 0
     try waitAck(ack_pipe[0]);
-    std.Thread.sleep(15 * std.time.ns_per_ms);
+    try waitAck(write_ack_pipe[0]);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // erase 0 → stop
     try waitAck(ack_pipe[0]);
-    std.Thread.sleep(15 * std.time.ns_per_ms);
+    try waitAck(write_ack_pipe[0]);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // play 1
     try waitAck(ack_pipe[0]);
+    try waitAck(write_ack_pipe[0]);
     _ = try posix.write(ff_pipe[1], &[_]u8{1}); // explicit stop 1
     try waitAck(ack_pipe[0]);
+    try waitAck(write_ack_pipe[0]);
     loop.stop();
     thread.join();
 
