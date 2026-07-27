@@ -433,6 +433,10 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    mock_dev.setWriteAck(write_ack[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -440,6 +444,9 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -450,13 +457,13 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 300 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -476,11 +483,15 @@ fn runThrottledPlayScenario(allocator: std.mem.Allocator, wait_ns: u64) ![]u8 {
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // The sequence mock does not drain the fd, so this one byte keeps the FF
-    // slot readable long enough for both PLAY events to arrive in one burst.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-
-    std.Thread.sleep(wait_ns);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    if (wait_ns < 300 * std.time.ns_per_ms) {
+        try waitForNoAck(write_ack[0], @intCast(wait_ns / std.time.ns_per_ms));
+    } else {
+        try waitForAck(write_ack[0]);
+    }
     loop.stop();
     thread.join();
 
@@ -633,6 +644,9 @@ const FailingWriteDeviceIO = struct {
     fail_write_count: usize,
     fail_error: DeviceIO.WriteError,
     write_ack: ?posix.fd_t = null,
+    attempt_ack: ?posix.fd_t = null,
+    write_release: ?posix.fd_t = null,
+    gated_attempts: usize = 0,
 
     fn init(allocator: std.mem.Allocator, fail_write_index: usize) !FailingWriteDeviceIO {
         return initRange(allocator, fail_write_index, 1, DeviceIO.WriteError.Io);
@@ -659,6 +673,12 @@ const FailingWriteDeviceIO = struct {
 
     fn setWriteAck(self: *FailingWriteDeviceIO, fd: posix.fd_t) void {
         self.write_ack = fd;
+    }
+
+    fn setWriteGate(self: *FailingWriteDeviceIO, attempt_ack: posix.fd_t, write_release: posix.fd_t, gated_attempts: usize) void {
+        self.attempt_ack = attempt_ack;
+        self.write_release = write_release;
+        self.gated_attempts = gated_attempts;
     }
 
     fn deinit(self: *FailingWriteDeviceIO) void {
@@ -689,6 +709,11 @@ const FailingWriteDeviceIO = struct {
         const self: *FailingWriteDeviceIO = @ptrCast(@alignCast(ptr));
         self.write_attempts += 1;
         self.attempt_times.append(self.allocator, event_loop_mod.monotonicNs()) catch return DeviceIO.WriteError.Io;
+        if (self.attempt_ack) |fd| _ = posix.write(fd, &[_]u8{1}) catch {};
+        if (self.write_attempts <= self.gated_attempts) {
+            var release: [1]u8 = undefined;
+            _ = posix.read(self.write_release.?, &release) catch return DeviceIO.WriteError.Io;
+        }
         if (self.fail_write_count > 0) {
             const fail_end = self.first_fail_index + self.fail_write_count;
             if (self.write_attempts >= self.first_fail_index and self.write_attempts < fail_end) return self.fail_error;
@@ -706,6 +731,132 @@ const FailingWriteDeviceIO = struct {
     }
 
     fn close(_: *anyopaque) void {}
+};
+
+const AsyncRumbleHarness = struct {
+    allocator: std.mem.Allocator,
+    loop: EventLoop,
+    write_dev: FailingWriteDeviceIO,
+    ff_pipe: [2]posix.fd_t,
+    logical_ack: [2]posix.fd_t,
+    attempt_ack: [2]posix.fd_t,
+    write_ack: [2]posix.fd_t,
+    release: [2]posix.fd_t,
+    run_done: [2]posix.fd_t,
+    parsed: device_mod.ParseResult,
+    interpreter: Interpreter = undefined,
+    output: MockFfOutputDrain = undefined,
+    devices: [1]DeviceIO = undefined,
+    thread: ?std.Thread = null,
+
+    fn init(allocator: std.mem.Allocator, first_fail: usize, fail_count: usize) !AsyncRumbleHarness {
+        var loop = try EventLoop.initManaged();
+        errdefer loop.deinit();
+        var write_dev = try FailingWriteDeviceIO.initRange(allocator, first_fail, fail_count, DeviceIO.WriteError.Io);
+        errdefer write_dev.deinit();
+
+        const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer closePipe(ff_pipe);
+        const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer closePipe(logical_ack);
+        const attempt_ack = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer closePipe(attempt_ack);
+        const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer closePipe(write_ack);
+        const release = try posix.pipe2(.{});
+        errdefer closePipe(release);
+        const run_done = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer closePipe(run_done);
+        var parsed = try device_mod.parseString(allocator, ff_toml);
+        errdefer parsed.deinit();
+
+        return .{
+            .allocator = allocator,
+            .loop = loop,
+            .write_dev = write_dev,
+            .ff_pipe = ff_pipe,
+            .logical_ack = logical_ack,
+            .attempt_ack = attempt_ack,
+            .write_ack = write_ack,
+            .release = release,
+            .run_done = run_done,
+            .parsed = parsed,
+        };
+    }
+
+    fn start(self: *AsyncRumbleHarness, events: []const ?uinput.FfEvent) !void {
+        self.interpreter = Interpreter.init(&self.parsed.value);
+        self.output = .{
+            .events = events,
+            .pipe_read = self.ff_pipe[0],
+            .ack_write = self.logical_ack[1],
+        };
+        self.devices = .{self.write_dev.deviceIO()};
+        try self.loop.addDevice(self.devices[0]);
+        try self.loop.addUinputFf(self.ff_pipe[0]);
+        self.write_dev.setWriteAck(self.write_ack[1]);
+        self.write_dev.setWriteGate(self.attempt_ack[1], self.release[0], 1);
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *AsyncRumbleHarness) void {
+        defer _ = posix.write(self.run_done[1], &[_]u8{1}) catch {};
+        self.loop.run(.{
+            .devices = &self.devices,
+            .interpreter = &self.interpreter,
+            .output = self.output.outputDevice(),
+            .allocator = self.allocator,
+            .device_config = &self.parsed.value,
+            .poll_timeout_ms = 100,
+        }) catch @panic("event loop failed");
+    }
+
+    fn send(self: *AsyncRumbleHarness) !void {
+        try sendFfAndWait(self.ff_pipe[1], self.logical_ack[0]);
+    }
+
+    fn releaseWrite(self: *AsyncRumbleHarness) !void {
+        _ = try posix.write(self.release[1], &[_]u8{1});
+    }
+
+    fn waitForWriterShutdown(self: *AsyncRumbleHarness) !void {
+        const deadline = event_loop_mod.monotonicNs() + 500 * std.time.ns_per_ms;
+        while (!self.loop.rumble_writer.shutting_down.load(.acquire)) {
+            if (event_loop_mod.monotonicNs() >= deadline) return error.ShutdownTimeout;
+            std.Thread.sleep(std.time.ns_per_ms);
+        }
+    }
+
+    fn join(self: *AsyncRumbleHarness) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+    }
+
+    fn finish(self: *AsyncRumbleHarness) void {
+        self.loop.stop();
+        self.join();
+    }
+
+    fn deinit(self: *AsyncRumbleHarness) void {
+        _ = posix.write(self.release[1], &[_]u8{1}) catch {};
+        self.finish();
+        self.parsed.deinit();
+        closePipe(self.run_done);
+        closePipe(self.release);
+        closePipe(self.write_ack);
+        closePipe(self.attempt_ack);
+        closePipe(self.logical_ack);
+        closePipe(self.ff_pipe);
+        self.write_dev.deinit();
+        self.loop.deinit();
+    }
+
+    fn closePipe(pipe: [2]posix.fd_t) void {
+        posix.close(pipe[0]);
+        posix.close(pipe[1]);
+    }
 };
 
 test "event_loop: device input is handled before uinput FF when both are ready" {
@@ -775,6 +926,456 @@ test "event_loop: device input is handled before uinput FF when both are ready" 
 
     try testing.expectEqual(@as(usize, 1), mock_dev.frame_idx);
     try testing.expect(!output.ff_before_device_read);
+}
+
+const GatedRumbleDeviceIO = struct {
+    input_r: posix.fd_t,
+    input_w: posix.fd_t,
+    write_started_r: posix.fd_t,
+    write_started_w: posix.fd_t,
+    write_release_r: posix.fd_t,
+    write_release_w: posix.fd_t,
+    write_done_r: posix.fd_t,
+    write_done_w: posix.fd_t,
+    input_reads: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+    fn init() !GatedRumbleDeviceIO {
+        var input: [2]posix.fd_t = undefined;
+        const rc = std.os.linux.socketpair(
+            std.os.linux.AF.UNIX,
+            std.os.linux.SOCK.SEQPACKET | std.os.linux.SOCK.NONBLOCK,
+            0,
+            &input,
+        );
+        if (rc != 0) return error.SocketPairFailed;
+        errdefer {
+            posix.close(input[0]);
+            posix.close(input[1]);
+        }
+
+        const started = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer {
+            posix.close(started[0]);
+            posix.close(started[1]);
+        }
+        const release = try posix.pipe2(.{});
+        errdefer {
+            posix.close(release[0]);
+            posix.close(release[1]);
+        }
+        const done = try posix.pipe2(.{ .NONBLOCK = true });
+        errdefer {
+            posix.close(done[0]);
+            posix.close(done[1]);
+        }
+
+        return .{
+            .input_r = input[0],
+            .input_w = input[1],
+            .write_started_r = started[0],
+            .write_started_w = started[1],
+            .write_release_r = release[0],
+            .write_release_w = release[1],
+            .write_done_r = done[0],
+            .write_done_w = done[1],
+        };
+    }
+
+    fn deinit(self: *GatedRumbleDeviceIO) void {
+        posix.close(self.input_r);
+        posix.close(self.input_w);
+        posix.close(self.write_started_r);
+        posix.close(self.write_started_w);
+        posix.close(self.write_release_r);
+        posix.close(self.write_release_w);
+        posix.close(self.write_done_r);
+        posix.close(self.write_done_w);
+    }
+
+    fn deviceIO(self: *GatedRumbleDeviceIO) DeviceIO {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn signalInput(self: *GatedRumbleDeviceIO, frame: []const u8) !void {
+        _ = try posix.write(self.input_w, frame);
+    }
+
+    fn releaseWrite(self: *GatedRumbleDeviceIO) void {
+        _ = posix.write(self.write_release_w, &[_]u8{1}) catch {};
+    }
+
+    const vtable = DeviceIO.VTable{
+        .read = read,
+        .write = write,
+        .feature_report = featureReport,
+        .pollfd = pollfd,
+        .close = close,
+    };
+
+    fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
+        const self: *GatedRumbleDeviceIO = @ptrCast(@alignCast(ptr));
+        const n = posix.read(self.input_r, buf) catch |err| switch (err) {
+            error.WouldBlock => return DeviceIO.ReadError.Again,
+            else => return DeviceIO.ReadError.Io,
+        };
+        if (n == 0) return DeviceIO.ReadError.Disconnected;
+        _ = self.input_reads.fetchAdd(1, .acq_rel);
+        return n;
+    }
+
+    fn write(ptr: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
+        const self: *GatedRumbleDeviceIO = @ptrCast(@alignCast(ptr));
+        _ = posix.write(self.write_started_w, &[_]u8{1}) catch return DeviceIO.WriteError.Io;
+        var release: [1]u8 = undefined;
+        _ = posix.read(self.write_release_r, &release) catch return DeviceIO.WriteError.Io;
+        _ = posix.write(self.write_done_w, &[_]u8{1}) catch return DeviceIO.WriteError.Io;
+    }
+
+    fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
+
+    fn pollfd(ptr: *anyopaque) posix.pollfd {
+        const self: *GatedRumbleDeviceIO = @ptrCast(@alignCast(ptr));
+        return .{ .fd = self.input_r, .events = posix.POLL.IN, .revents = 0 };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+const InputEmissionProbe = struct {
+    notify_w: posix.fd_t,
+    ff_event: ?uinput.FfEvent,
+    ff_poll_count: usize = 0,
+
+    fn outputDevice(self: *InputEmissionProbe) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = emit,
+        .poll_ff = pollFf,
+        .close = close,
+    };
+
+    fn emit(ptr: *anyopaque, _: state.GamepadState) uinput.EmitError!void {
+        const self: *InputEmissionProbe = @ptrCast(@alignCast(ptr));
+        _ = posix.write(self.notify_w, &[_]u8{1}) catch return uinput.EmitError.WriteFailed;
+    }
+
+    fn pollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        const self: *InputEmissionProbe = @ptrCast(@alignCast(ptr));
+        if (self.ff_poll_count == 0) {
+            self.ff_poll_count += 1;
+            return self.ff_event;
+        }
+        return null;
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+fn expectReadable(fd: posix.fd_t, timeout_ms: i32) !void {
+    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = try posix.poll(&fds, timeout_ms);
+    try testing.expectEqual(@as(usize, 1), ready);
+    try testing.expect(fds[0].revents & posix.POLL.IN != 0);
+}
+
+test "issue 503: blocked rumble write does not starve physical input emission" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var gated = try GatedRumbleDeviceIO.init();
+    defer gated.deinit();
+    const dev = gated.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const emit_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(emit_pipe[0]);
+    defer posix.close(emit_pipe[1]);
+
+    const parsed = try device_mod.parseString(allocator, ff_report_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var output = InputEmissionProbe{
+        .notify_w = emit_pipe[1],
+        .ff_event = .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 },
+    };
+    var devs = [_]DeviceIO{dev};
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        output: *InputEmissionProbe,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .output = &output,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{
+                .devices = c.devs,
+                .interpreter = c.interp,
+                .output = c.output.outputDevice(),
+                .allocator = c.alloc,
+                .device_config = c.cfg,
+                .poll_timeout_ms = 100,
+            });
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    var joined = false;
+    defer {
+        gated.releaseWrite();
+        loop.stop();
+        if (!joined) thread.join();
+    }
+
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    try expectReadable(gated.write_started_r, 500);
+
+    // The transport worker is now deterministically blocked. Input arriving
+    // afterward must still cross the interpreter and virtual-output boundary.
+    try gated.signalInput(&[_]u8{ 0x01, 0x34, 0x12 });
+    try expectReadable(emit_pipe[0], 500);
+    try testing.expectEqual(@as(usize, 1), gated.input_reads.load(.acquire));
+
+    gated.releaseWrite();
+    try expectReadable(gated.write_done_r, 500);
+    loop.stop();
+    thread.join();
+    joined = true;
+}
+
+test "issue 503: newer stop supersedes an older failed play retry" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 1);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try harness.releaseWrite();
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    try waitForNoAck(harness.attempt_ack[0], 40);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, harness.write_dev.write_log.items);
+}
+
+test "issue 503: weaker no-frame play does not suppress aggregate retry" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 0 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0x2000, .weak = 0x1000, .duration_ms = 0 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 1);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try harness.releaseWrite();
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, harness.write_dev.write_log.items);
+}
+
+test "issue 503: fresh frame does not inherit unrelated pending retry count" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 0 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 1);
+    defer harness.deinit();
+    harness.loop.pending_rumble_frame = .{ .strong = 0x1000, .weak = 0x0800 };
+    harness.loop.pending_rumble_deadline_ns = event_loop_mod.monotonicNs() + std.time.ns_per_s;
+    harness.loop.pending_rumble_retry_count = 3;
+    harness.loop.pending_rumble_generation = 77;
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.releaseWrite();
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, harness.write_dev.write_log.items);
+}
+
+test "issue 503: play cadence starts at slow write completion" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try waitForNoAck(harness.attempt_ack[0], 15);
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForNoAck(harness.attempt_ack[0], 5);
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
+}
+
+test "issue 503: shutdown keeps completion cadence for queued play" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    harness.loop.stop();
+    try harness.waitForWriterShutdown();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.run_done[0]);
+    harness.join();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
+}
+
+test "issue 503: shutdown sends accepted stop without cadence delay" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    harness.loop.stop();
+    try harness.waitForWriterShutdown();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.run_done[0]);
+    harness.join();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] < 8 * std.time.ns_per_ms);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    }, harness.write_dev.write_log.items);
+}
+
+test "issue 503: rumble writer startup failure clears running state" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var output = NoopOutput{};
+    var devs = [_]DeviceIO{dev};
+
+    try testing.expectError(error.TestRumbleWriterStartFailed, loop.run(.{
+        .devices = &devs,
+        .interpreter = &interp,
+        .output = output.outputDevice(),
+        .allocator = allocator,
+        .device_config = &parsed.value,
+        .test_fail_rumble_writer_start = true,
+    }));
+    try testing.expect(!loop.running);
+    try testing.expect(!loop.rumble_writer.isRunning());
+}
+
+test "issue 503: EventLoop restart reuses a disabled rumble writer poll slot" {
+    const allocator = testing.allocator;
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    var devices = [_]DeviceIO{write_dev.deviceIO()};
+    try loop.addDevice(devices[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interpreter = Interpreter.init(&parsed.value);
+    var output = NoopOutput{};
+    const ctx = event_loop_mod.EventLoopContext{
+        .devices = &devices,
+        .interpreter = &interpreter,
+        .output = output.outputDevice(),
+        .allocator = allocator,
+        .device_config = &parsed.value,
+    };
+
+    loop.stop();
+    try loop.run(ctx);
+    const slot = loop.rumble_writer_slot.?;
+    const fd_count = loop.fd_count;
+    try testing.expectEqual(@as(posix.fd_t, -1), loop.pollfds[slot].fd);
+    try testing.expectEqual(@as(i16, 0), loop.pollfds[slot].events);
+    try testing.expectEqual(@as(i16, 0), loop.pollfds[slot].revents);
+
+    loop.stop();
+    try loop.run(ctx);
+    try testing.expectEqual(slot, loop.rumble_writer_slot.?);
+    try testing.expectEqual(fd_count, loop.fd_count);
+    try testing.expectEqual(@as(posix.fd_t, -1), loop.pollfds[slot].fd);
 }
 
 test "event_loop: device input is handled before rumble auto-stop write when both are ready" {
@@ -848,6 +1449,10 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    mock_dev.setWriteAck(write_ack[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -856,6 +1461,9 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -867,13 +1475,13 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
         .{ .effect_type = 0x50, .strong = 0, .weak = 0 }, // stop
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -894,12 +1502,10 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // First wakeup → play event
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(2 * std.time.ns_per_ms); // stay well inside 10ms throttle window
-    // Second wakeup → stop event (must bypass throttle)
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
     loop.stop();
     thread.join();
 
@@ -1618,6 +2224,10 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
 
     var mock_dev = try MockDeviceIO.init(allocator, &.{});
     defer mock_dev.deinit();
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    mock_dev.setWriteAck(write_ack[1]);
     const dev = mock_dev.deviceIO();
     try loop.addDevice(dev);
 
@@ -1625,6 +2235,9 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -1639,13 +2252,13 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -1666,13 +2279,11 @@ test "event_loop: explicit stop before duration_ms disarms auto-stop (no double 
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // First wake: play event → scheduler arms at t+200ms.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(5 * std.time.ns_per_ms);
-    // Second wake: explicit stop → scheduler disarms.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    // Wait well past the original 200ms to prove the timer never fires.
-    std.Thread.sleep(260 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try waitForNoAck(write_ack[0], 230);
     loop.stop();
     thread.join();
 
@@ -1760,70 +2371,33 @@ test "event_loop: rumble auto-stop emits stop frame after duration_ms elapses" {
 test "event_loop: play after stop within throttle window is forwarded" {
     const allocator = testing.allocator;
 
-    var loop = try EventLoop.initManaged();
-    defer loop.deinit();
-
-    var mock_dev = try MockDeviceIO.init(allocator, &.{});
-    defer mock_dev.deinit();
-    const dev = mock_dev.deviceIO();
-    try loop.addDevice(dev);
-
-    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
-    defer posix.close(ff_pipe[0]);
-    defer posix.close(ff_pipe[1]);
-    try loop.addUinputFf(ff_pipe[0]);
-
-    const parsed = try device_mod.parseString(allocator, ff_toml);
-    defer parsed.deinit();
-    const interp = Interpreter.init(&parsed.value);
-
-    // stop at T=0, then play at T≈5ms (well within 10ms throttle window)
     const seq = [_]?uinput.FfEvent{
-        .{ .effect_type = 0x50, .strong = 0, .weak = 0 }, // stop
-        .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 }, // play
+        .{ .effect_type = 0x50, .strong = 0, .weak = 0 },
+        .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var harness = try AsyncRumbleHarness.init(allocator, 0, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
 
-    const RunCtx2 = struct {
-        loop: *EventLoop,
-        devs: []DeviceIO,
-        interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
-        cfg: *const device_mod.DeviceConfig,
-        alloc: std.mem.Allocator,
-    };
-    var devs = [_]DeviceIO{dev};
-    var ctx = RunCtx2{
-        .loop = &loop,
-        .devs = &devs,
-        .interp = &interp,
-        .ff_out = &ff_out,
-        .cfg = &parsed.value,
-        .alloc = allocator,
-    };
-    const T2 = struct {
-        fn run(c: *RunCtx2) !void {
-            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
-        }
-    };
-    const thread = try std.Thread.spawn(.{}, T2.run, .{&ctx});
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    harness.finish();
 
-    // First wakeup → stop
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(5 * std.time.ns_per_ms); // inside 10ms throttle window
-    // Second wakeup → play (must NOT be throttled because stop doesn't advance last_rumble_ns)
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
-    loop.stop();
-    thread.join();
-
-    // Both frames must be written: stop then play
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
-    const stop_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.attempt_times.items.len);
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_times.items.len);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] >= 8 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 2 * frame_size), harness.write_dev.write_log.items.len);
+    const stop_frame = harness.write_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
-    const play_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    const play_frame = harness.write_dev.write_log.items[frame_size .. 2 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
 }
 
@@ -1937,22 +2511,27 @@ test "event_loop: FF scheduler state identical with dump on vs off" {
 }
 
 test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
-    // STOP clears the play throttle window, so a replay after explicit stop is
-    // forwarded immediately and still arms the new auto-stop deadline.
     const allocator = testing.allocator;
 
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    var mock_dev = try MockDeviceIO.init(allocator, &.{});
-    defer mock_dev.deinit();
-    const dev = mock_dev.deviceIO();
+    var write_dev = try FailingWriteDeviceIO.initNoFail(allocator);
+    defer write_dev.deinit();
+    const dev = write_dev.deviceIO();
     try loop.addDevice(dev);
 
     const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
     defer posix.close(ff_pipe[0]);
     defer posix.close(ff_pipe[1]);
     try loop.addUinputFf(ff_pipe[0]);
+    const logical_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(logical_ack[0]);
+    defer posix.close(logical_ack[1]);
+    const write_ack = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(write_ack[0]);
+    defer posix.close(write_ack[1]);
+    write_dev.setWriteAck(write_ack[1]);
 
     const parsed = try device_mod.parseString(allocator, ff_toml);
     defer parsed.deinit();
@@ -1965,13 +2544,13 @@ test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 100 },
         null,
     };
-    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0], .ack_write = logical_ack[1] };
 
     const RunCtx3 = struct {
         loop: *EventLoop,
         devs: []DeviceIO,
         interp: *const Interpreter,
-        ff_out: *MockFfOutputSeq,
+        ff_out: *MockFfOutputDrain,
         cfg: *const device_mod.DeviceConfig,
         alloc: std.mem.Allocator,
     };
@@ -1991,27 +2570,25 @@ test "event_loop: replay after stop is forwarded and arms auto-stop deadline" {
     };
     const thread = try std.Thread.spawn(.{}, T3.run, .{&ctx});
 
-    // The pipe byte is never drained, so the FF slot stays level-triggered:
-    // each ppoll iteration consumes one event, delivering all three within
-    // microseconds — far inside the 10ms throttle window.
-    _ = try posix.write(ff_pipe[1], &[_]u8{1});
-
-    // Outlast the 100ms auto-stop deadline.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try sendFfAndWait(ff_pipe[1], logical_ack[0]);
+    try waitForAck(write_ack[0]);
+    try waitForAck(write_ack[0]); // replay's 100ms auto-stop
     loop.stop();
     thread.join();
 
-    // Four frames: play, explicit stop, replay, and the auto-stop. The final
-    // stop only appears if the replay rearmed the deadline.
     const frame_size = 8;
-    try testing.expectEqual(@as(usize, 4 * frame_size), mock_dev.write_log.items.len);
-    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqual(@as(usize, 4 * frame_size), write_dev.write_log.items.len);
+    const play_frame = write_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
-    const explicit_stop = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    const explicit_stop = write_dev.write_log.items[frame_size .. 2 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, explicit_stop);
-    const replay_frame = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    const replay_frame = write_dev.write_log.items[2 * frame_size .. 3 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, replay_frame);
-    const auto_stop = mock_dev.write_log.items[3 * frame_size .. 4 * frame_size];
+    const auto_stop = write_dev.write_log.items[3 * frame_size .. 4 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, auto_stop);
 }
 
