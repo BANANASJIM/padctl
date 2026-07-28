@@ -187,9 +187,23 @@ fn slotStr(buf: *const [256]u8) []const u8 {
 /// Returns whether a rumble frame was written, skipped as permanently
 /// unconfigured, or failed on the HID write path. Callers only retry write
 /// failures; scheduler accounting advances independently of emit.
-const RUMBLE_MIN_INTERVAL_NS: i128 = 10_000_000; // 10ms
+const RUMBLE_MIN_INTERVAL_NS: i128 = rumble_writer_mod.DEFAULT_MIN_WRITE_INTERVAL_NS;
 const RUMBLE_RETRY_INTERVAL_NS: i128 = 10_000_000; // 10ms
 const RUMBLE_MAX_RETRY_ATTEMPTS: u8 = 3;
+
+fn commandMinIntervalNs(cmd: *const device_cfg.CommandConfig) u64 {
+    return if (cmd.min_interval_ms) |interval_ms|
+        @intCast(interval_ms * std.time.ns_per_ms)
+    else
+        rumble_writer_mod.DEFAULT_MIN_WRITE_INTERVAL_NS;
+}
+
+fn rumbleMinIntervalNs(dcfg: ?*const DeviceConfig) i128 {
+    const cfg = dcfg orelse return RUMBLE_MIN_INTERVAL_NS;
+    const commands = cfg.commands orelse return RUMBLE_MIN_INTERVAL_NS;
+    const cmd = commands.map.get(ffTypeFor(cfg)) orelse return RUMBLE_MIN_INTERVAL_NS;
+    return @intCast(commandMinIntervalNs(&cmd));
+}
 
 const RumbleEmitResult = enum {
     written,
@@ -277,10 +291,7 @@ fn emitRumbleFrame(
             .{ .strong = strong, .weak = weak },
             retry_count,
             generation,
-            if (cmd.min_interval_ms) |interval_ms|
-                @intCast(interval_ms * std.time.ns_per_ms)
-            else
-                rumble_writer_mod.DEFAULT_MIN_WRITE_INTERVAL_NS,
+            commandMinIntervalNs(&cmd),
         ) catch |err| {
             if (err == error.FrameTooLarge) {
                 rumble_log.warn("[{s}] HID_WRITE: frame too large cmd={s} strong={d} weak={d} len={d} max={d}; dropping without retry", .{
@@ -780,6 +791,7 @@ pub const EventLoop = struct {
     fn handleNativeRumbleAt(self: *EventLoop, ctx: EventLoopContext, frame: RumbleScheduler.Frame, now_ns: i128) void {
         const generation = self.nextRumbleGeneration();
         const is_stop = frame.strong == 0 and frame.weak == 0;
+        const min_interval_ns = rumbleMinIntervalNs(ctx.device_config);
         if (is_stop) {
             // STOP must not wait behind a throttled non-zero frame: cancel the
             // stale frame and emit zero immediately so rumble cannot stick.
@@ -787,13 +799,13 @@ pub const EventLoop = struct {
             self.emitOrQueueRumble(ctx, frame, now_ns, generation);
         } else {
             const elapsed = now_ns - self.last_rumble_ns;
-            if (elapsed >= RUMBLE_MIN_INTERVAL_NS) {
+            if (elapsed >= min_interval_ns) {
                 self.emitOrQueueRumble(ctx, frame, now_ns, generation);
             } else {
                 // The mailbox and this pending slot are both capacity one.
                 // A newer native command replaces the older throttled frame
-                // without moving the original 10ms physical-write deadline.
-                self.queuePendingRumble(frame, self.last_rumble_ns + RUMBLE_MIN_INTERVAL_NS, 0, generation);
+                // without moving the configured physical-write deadline.
+                self.queuePendingRumble(frame, self.last_rumble_ns + min_interval_ns, 0, generation);
                 rumble_log.debug("[{s}] NATIVE_RUMBLE: THROTTLED elapsed={d}ns", .{
                     ctx.device_tag, elapsedNsForLog(elapsed),
                 });
@@ -1118,7 +1130,7 @@ pub const EventLoop = struct {
                     };
                     if (ff_result) |ff_ev| {
                         const now_ns = monotonicNs();
-                        const min_interval_ns = RUMBLE_MIN_INTERVAL_NS;
+                        const min_interval_ns = rumbleMinIntervalNs(ctx.device_config);
                         const is_stop = ff_ev.strong == 0 and ff_ev.weak == 0;
                         const scheduler_on = autoStopEnabled(ctx.device_config);
 
@@ -1807,7 +1819,7 @@ test "event_loop: oversized rumble frame is permanent and does not queue retry" 
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
 }
 
-test "event_loop: native throttle keeps latest while stop cancels pending" {
+test "event_loop: native throttle honors command cadence while stop cancels pending" {
     const allocator = testing.allocator;
     const rumble_toml =
         \\[device]
@@ -1824,6 +1836,7 @@ test "event_loop: native throttle keeps latest while stop cancels pending" {
         \\[commands.rumble]
         \\interface = 0
         \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+        \\min_interval_ms = 100
     ;
     const parsed = try device_mod.parseString(allocator, rumble_toml);
     defer parsed.deinit();
@@ -1855,7 +1868,7 @@ test "event_loop: native throttle keeps latest while stop cancels pending" {
 
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
     try testing.expectEqual(latest, loop.pending_rumble_frame.?);
-    try testing.expectEqual(@as(?i128, base + RUMBLE_MIN_INTERVAL_NS), loop.pending_rumble_deadline_ns);
+    try testing.expectEqual(@as(?i128, base + 100 * std.time.ns_per_ms), loop.pending_rumble_deadline_ns);
 
     // A zero frame is a safety command: it cancels the stale non-zero frame
     // and writes immediately. Its successful completion starts the next
@@ -1869,6 +1882,8 @@ test "event_loop: native throttle keeps latest while stop cancels pending" {
     loop.handleNativeRumbleAt(ctx, latest, base + 4 * std.time.ns_per_ms);
     try testing.expectEqual(latest, loop.pending_rumble_frame.?);
     loop.flushPendingRumbleIfDue(ctx, base + 13 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(usize, 8), mock_dev.write_log.items.len);
+    loop.flushPendingRumbleIfDue(ctx, base + 103 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 16), mock_dev.write_log.items.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x66, 0x99, 0x00, 0x00, 0x00 }, mock_dev.write_log.items[8..16]);
 }
