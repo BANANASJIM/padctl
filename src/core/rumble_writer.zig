@@ -190,10 +190,7 @@ pub const RumbleWriter = struct {
             const result = writeRequest(request);
             const completed_ns = monotonicNs();
             if (result == .written) {
-                last_success = .{
-                    .frame = request.frame,
-                    .completed_ns = completed_ns,
-                };
+                last_success = successfulWrite(request, completed_ns);
             }
 
             if (self.shutting_down.load(.acquire)) {
@@ -254,12 +251,28 @@ pub const RumbleWriter = struct {
     };
 
     const SuccessfulWrite = struct {
-        frame: Frame,
+        device: DeviceIO,
         completed_ns: i128,
+        len: usize,
+        bytes: [MAX_FRAME_BYTES]u8,
     };
 
-    fn framesEqual(a: Frame, b: Frame) bool {
-        return a.strong == b.strong and a.weak == b.weak;
+    fn successfulWrite(request: Request, completed_ns: i128) SuccessfulWrite {
+        var success = SuccessfulWrite{
+            .device = request.device,
+            .completed_ns = completed_ns,
+            .len = request.len,
+            .bytes = undefined,
+        };
+        @memcpy(success.bytes[0..request.len], request.bytes[0..request.len]);
+        return success;
+    }
+
+    fn payloadsEqual(request: Request, success: SuccessfulWrite) bool {
+        return request.device.ptr == success.device.ptr and
+            request.device.vtable == success.device.vtable and
+            request.len == success.len and
+            std.mem.eql(u8, request.bytes[0..request.len], success.bytes[0..success.len]);
     }
 
     fn takeReadyRequest(self: *RumbleWriter, last_success: ?SuccessfulWrite) Selection {
@@ -269,13 +282,13 @@ pub const RumbleWriter = struct {
         while (self.pending_stop) |request| {
             self.pending_stop = null;
             if (last_success) |success| {
-                if (framesEqual(request.frame, success.frame)) continue;
+                if (payloadsEqual(request, success)) continue;
             }
             return .{ .request = request };
         }
         while (self.pending) |request| {
             if (last_success) |success| {
-                if (framesEqual(request.frame, success.frame)) {
+                if (payloadsEqual(request, success)) {
                     self.pending = null;
                     continue;
                 }
