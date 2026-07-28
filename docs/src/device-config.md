@@ -138,6 +138,16 @@ interface = 3
 template = "02 01 00 {weak:u8} {strong:u8} 00 ..."
 ```
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `interface` | integer | required | Physical interface used for the command |
+| `template` | string | required | Output bytes with typed placeholders |
+| `min_interval_ms` | integer | `10` | Minimum interval between physical PLAY writes (`1`–`1000` ms); newer queued states replace older ones |
+
+STOP commands remain immediate so a throttled PLAY cannot leave a motor
+running. Once the last successful physical state is already identical,
+including zero, padctl suppresses the redundant write.
+
 ### Adaptive Trigger Commands
 
 DualSense-style adaptive triggers use a naming convention of `adaptive_trigger_<mode>`:

@@ -277,6 +277,10 @@ fn emitRumbleFrame(
             .{ .strong = strong, .weak = weak },
             retry_count,
             generation,
+            if (cmd.min_interval_ms) |interval_ms|
+                @intCast(interval_ms * std.time.ns_per_ms)
+            else
+                rumble_writer_mod.DEFAULT_MIN_WRITE_INTERVAL_NS,
         ) catch |err| {
             if (err == error.FrameTooLarge) {
                 rumble_log.warn("[{s}] HID_WRITE: frame too large cmd={s} strong={d} weak={d} len={d} max={d}; dropping without retry", .{

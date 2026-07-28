@@ -105,6 +105,7 @@ pub const CommandChecksumConfig = struct {
 pub const CommandConfig = struct {
     interface: i64,
     template: []const u8,
+    min_interval_ms: ?i64 = null,
     checksum: ?CommandChecksumConfig = null,
 };
 
@@ -472,6 +473,9 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         while (it.next()) |entry| {
             if (!interfaceExists(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
+            if (entry.value_ptr.min_interval_ms) |interval_ms| {
+                if (interval_ms <= 0 or interval_ms > 1000) return error.InvalidConfig;
+            }
         }
     }
     if (cfg.device.init) |init_cfg| {
@@ -1031,6 +1035,10 @@ test "device: load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqual(
         @as(?i64, 3),
         cfg.device.init.?.response_command_prefix_len,
+    );
+    try std.testing.expectEqual(
+        @as(?i64, 100),
+        cfg.commands.?.map.get("rumble").?.min_interval_ms,
     );
 }
 
@@ -3247,6 +3255,32 @@ test "device: command referencing nonexistent interface id is rejected" {
         \\template = "00 {strong} {weak}"
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_cmd_toml));
+}
+
+test "device: command min_interval_ms outside 1 to 1000 is rejected" {
+    const allocator = std.testing.allocator;
+    const prefix =
+        \\[device]
+        \\name = "Bad Command Cadence"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 1
+        \\[commands.rumble]
+        \\interface = 0
+        \\template = "00 {strong:u8} {weak:u8}"
+        \\min_interval_ms =
+    ;
+    inline for (.{ 0, -1, 1001 }) |interval_ms| {
+        const input = try std.fmt.allocPrint(allocator, "{s} {d}", .{ prefix, interval_ms });
+        defer allocator.free(input);
+        try std.testing.expectError(error.InvalidConfig, parseString(allocator, input));
+    }
 }
 
 test "device: init referencing nonexistent interface id is rejected" {
