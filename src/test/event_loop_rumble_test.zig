@@ -1187,6 +1187,85 @@ test "issue 503: newer stop supersedes an older failed play retry" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, harness.write_dev.write_log.items);
 }
 
+test "issue 503: command cadence bounds physical writes while keeping latest play" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x6000, .weak = 0x3000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 500 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    harness.parsed.value.commands.?.map.getPtr("rumble").?.min_interval_ms = 100;
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try harness.send();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForNoAck(harness.attempt_ack[0], 50);
+    try waitForAck(harness.attempt_ack[0]);
+    try waitForAck(harness.write_ack[0]);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 2), harness.write_dev.write_attempts);
+    try testing.expect(harness.write_dev.attempt_times.items[1] - harness.write_dev.write_times.items[0] >= 90 * std.time.ns_per_ms);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00,
+    }, harness.write_dev.write_log.items);
+}
+
+test "issue 503: repeated physical stop is suppressed after hardware is zero" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForNoAck(harness.attempt_ack[0], 50);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 1), harness.write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    }, harness.write_dev.write_log.items);
+}
+
+test "issue 503: logically different frames with identical payload are suppressed" {
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x4000, .weak = 0x2000, .duration_ms = 500 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x40ff, .weak = 0x20ff, .duration_ms = 500 },
+        null,
+    };
+    var harness = try AsyncRumbleHarness.init(testing.allocator, 1, 0);
+    defer harness.deinit();
+    try harness.start(&seq);
+
+    try harness.send();
+    try waitForAck(harness.attempt_ack[0]);
+    try harness.send();
+    try harness.releaseWrite();
+    try waitForAck(harness.write_ack[0]);
+    try waitForNoAck(harness.attempt_ack[0], 50);
+    harness.finish();
+
+    try testing.expectEqual(@as(usize, 1), harness.write_dev.write_attempts);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00,
+    }, harness.write_dev.write_log.items);
+}
+
 test "issue 503: weaker no-frame play does not suppress aggregate retry" {
     const seq = [_]?uinput.FfEvent{
         .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 0 },

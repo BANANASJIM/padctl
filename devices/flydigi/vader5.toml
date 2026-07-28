@@ -81,6 +81,9 @@ map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Sel
 [commands.rumble]
 interface = 1
 template = "5a a5 12 06 {strong:u8} {weak:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+# Each command makes the receiver pause every input endpoint for about 16ms.
+# Coalesce at 10Hz to keep input responsive while retaining the latest strength.
+min_interval_ms = 100
 
 [commands.rumble.checksum]
 algo = "sum8"

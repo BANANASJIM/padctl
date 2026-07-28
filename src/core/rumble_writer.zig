@@ -8,7 +8,7 @@ const DeviceIO = @import("../io/device_io.zig").DeviceIO;
 // configured input reports. Keeping the mailbox inline avoids allocator use
 // across the EventLoop and writer threads.
 pub const MAX_FRAME_BYTES: usize = 512;
-const MIN_WRITE_INTERVAL_NS: i128 = 10 * std.time.ns_per_ms;
+pub const DEFAULT_MIN_WRITE_INTERVAL_NS: u64 = 10 * std.time.ns_per_ms;
 
 const Mutex = if (builtin.sanitize_thread) struct {
     m: std.c.pthread_mutex_t = .{},
@@ -48,6 +48,7 @@ const Request = struct {
     frame: Frame,
     retry_count: u8,
     generation: u64,
+    min_interval_ns: u64,
     len: usize,
     bytes: [MAX_FRAME_BYTES]u8,
 
@@ -122,6 +123,7 @@ pub const RumbleWriter = struct {
         frame: Frame,
         retry_count: u8,
         generation: u64,
+        min_interval_ns: u64,
     ) error{ NotRunning, FrameTooLarge }!void {
         if (self.thread == null) return error.NotRunning;
         if (bytes.len > MAX_FRAME_BYTES) return error.FrameTooLarge;
@@ -131,6 +133,7 @@ pub const RumbleWriter = struct {
             .frame = frame,
             .retry_count = retry_count,
             .generation = generation,
+            .min_interval_ns = min_interval_ns,
             .len = bytes.len,
             .bytes = undefined,
         };
@@ -164,21 +167,21 @@ pub const RumbleWriter = struct {
     }
 
     fn workerMain(self: *RumbleWriter) void {
-        var last_success_ns: i128 = 0;
+        var last_success: ?SuccessfulWrite = null;
         while (true) {
-            const selection = self.takeReadyRequest(last_success_ns);
+            const selection = self.takeReadyRequest(last_success);
             const request = switch (selection) {
                 .request => |request| request,
                 .wait => |wait_ns| {
                     if (!self.waitForWake(wait_ns)) {
-                        self.writePendingOnShutdown(last_success_ns);
+                        self.writePendingOnShutdown(last_success);
                         return;
                     }
                     continue;
                 },
                 .empty => {
                     if (!self.waitForWake(null)) {
-                        self.writePendingOnShutdown(last_success_ns);
+                        self.writePendingOnShutdown(last_success);
                         return;
                     }
                     continue;
@@ -186,10 +189,12 @@ pub const RumbleWriter = struct {
             };
             const result = writeRequest(request);
             const completed_ns = monotonicNs();
-            if (result == .written) last_success_ns = completed_ns;
+            if (result == .written) {
+                last_success = successfulWrite(request, completed_ns);
+            }
 
             if (self.shutting_down.load(.acquire)) {
-                self.writePendingOnShutdown(last_success_ns);
+                self.writePendingOnShutdown(last_success);
                 return;
             }
 
@@ -206,7 +211,7 @@ pub const RumbleWriter = struct {
             signal(self.completion_w);
 
             if (!self.waitForCompletionAck()) {
-                self.writePendingOnShutdown(last_success_ns);
+                self.writePendingOnShutdown(last_success);
                 return;
             }
         }
@@ -222,9 +227,9 @@ pub const RumbleWriter = struct {
         return .written;
     }
 
-    fn writePendingOnShutdown(self: *RumbleWriter, last_success_ns: i128) void {
+    fn writePendingOnShutdown(self: *RumbleWriter, last_success: ?SuccessfulWrite) void {
         while (true) {
-            switch (self.takeReadyRequest(last_success_ns)) {
+            switch (self.takeReadyRequest(last_success)) {
                 .request => |request| {
                     self.mutex.lock();
                     self.pending = null;
@@ -245,21 +250,56 @@ pub const RumbleWriter = struct {
         empty,
     };
 
-    fn takeReadyRequest(self: *RumbleWriter, last_success_ns: i128) Selection {
+    const SuccessfulWrite = struct {
+        device: DeviceIO,
+        completed_ns: i128,
+        len: usize,
+        bytes: [MAX_FRAME_BYTES]u8,
+    };
+
+    fn successfulWrite(request: Request, completed_ns: i128) SuccessfulWrite {
+        var success = SuccessfulWrite{
+            .device = request.device,
+            .completed_ns = completed_ns,
+            .len = request.len,
+            .bytes = undefined,
+        };
+        @memcpy(success.bytes[0..request.len], request.bytes[0..request.len]);
+        return success;
+    }
+
+    fn payloadsEqual(request: Request, success: SuccessfulWrite) bool {
+        return request.device.ptr == success.device.ptr and
+            request.device.vtable == success.device.vtable and
+            request.len == success.len and
+            std.mem.eql(u8, request.bytes[0..request.len], success.bytes[0..success.len]);
+    }
+
+    fn takeReadyRequest(self: *RumbleWriter, last_success: ?SuccessfulWrite) Selection {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.pending_stop) |request| {
+        while (self.pending_stop) |request| {
             self.pending_stop = null;
+            if (last_success) |success| {
+                if (payloadsEqual(request, success)) continue;
+            }
             return .{ .request = request };
         }
-        const request = self.pending orelse return .empty;
-        if (last_success_ns != 0) {
-            const remaining = last_success_ns + MIN_WRITE_INTERVAL_NS - monotonicNs();
-            if (remaining > 0) return .{ .wait = remaining };
+        while (self.pending) |request| {
+            if (last_success) |success| {
+                if (payloadsEqual(request, success)) {
+                    self.pending = null;
+                    continue;
+                }
+                const interval_ns: i128 = @intCast(request.min_interval_ns);
+                const remaining = success.completed_ns + interval_ns - monotonicNs();
+                if (remaining > 0) return .{ .wait = remaining };
+            }
+            self.pending = null;
+            return .{ .request = request };
         }
-        self.pending = null;
-        return .{ .request = request };
+        return .empty;
     }
 
     fn waitForWake(self: *RumbleWriter, wait_ns: ?i128) bool {
