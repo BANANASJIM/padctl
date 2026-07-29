@@ -122,7 +122,10 @@ fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
 pub const UsbrawDevice = struct {
     handle: *c.libusb_device_handle,
     ctx: *c.libusb_context,
-    ep_in: u8,
+    // null for a write-only interface: no IN endpoint is polled and no reader
+    // thread exists, so the device never produces input and never signals
+    // disconnect from the read side. Disconnect still surfaces from write().
+    ep_in: ?u8,
     ep_out: u8,
     interface_id: i32,
     pipe_r: std.posix.fd_t,
@@ -130,7 +133,7 @@ pub const UsbrawDevice = struct {
     ring: RingBuffer,
     disconnected: std.atomic.Value(bool),
     should_stop: std.atomic.Value(bool),
-    thread: std.Thread,
+    thread: ?std.Thread,
     allocator: std.mem.Allocator,
 
     pub fn open(
@@ -138,7 +141,7 @@ pub const UsbrawDevice = struct {
         vid: u16,
         pid: u16,
         interface_id: u8,
-        ep_in: u8,
+        ep_in: ?u8,
         ep_out: u8,
     ) !*UsbrawDevice {
         const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
@@ -171,10 +174,10 @@ pub const UsbrawDevice = struct {
             .ring = .{},
             .disconnected = std.atomic.Value(bool).init(false),
             .should_stop = std.atomic.Value(bool).init(false),
-            .thread = undefined,
+            .thread = null,
             .allocator = alloc,
         };
-        self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
+        if (ep_in != null) self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;
     }
 
@@ -191,11 +194,12 @@ pub const UsbrawDevice = struct {
     fn readLoop(self: *UsbrawDevice) void {
         var buf: [RingBuffer.SLOT_SIZE]u8 = undefined;
         var transferred: c_int = 0;
+        const ep_in = self.ep_in.?;
 
         while (!self.should_stop.load(.acquire)) {
             const rc = c.libusb_interrupt_transfer(
                 self.handle,
-                self.ep_in,
+                ep_in,
                 &buf,
                 buf.len,
                 &transferred,
@@ -289,7 +293,7 @@ pub const UsbrawDevice = struct {
     fn close(ptr: *anyopaque) void {
         const self: *UsbrawDevice = @ptrCast(@alignCast(ptr));
         self.should_stop.store(true, .release);
-        self.thread.join();
+        if (self.thread) |t| t.join();
         self.closeWriteEnd();
         std.posix.close(self.pipe_r);
         _ = c.libusb_release_interface(self.handle, self.interface_id);

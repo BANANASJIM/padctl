@@ -70,6 +70,14 @@ fn closedPollfd(_: *anyopaque) posix.pollfd {
 
 fn closedClose(_: *anyopaque) void {}
 
+/// Which interface the init sequence runs on. Without an explicit id it runs on
+/// every vendor interface, but it reads acknowledgements back, so a write-only
+/// one can never satisfy it.
+fn initTargetsInterface(init_cfg: device_cfg.InitConfig, iface: InterfaceConfig) bool {
+    if (init_cfg.interface) |init_iface| return iface.id == init_iface;
+    return std.mem.eql(u8, iface.class, "vendor") and iface.ep_in != null;
+}
+
 fn createDeviceIO(
     allocator: std.mem.Allocator,
     iface: InterfaceConfig,
@@ -87,7 +95,9 @@ fn createDeviceIO(
         };
         return dev.deviceIO();
     } else if (std.mem.eql(u8, iface.class, "vendor")) {
-        const ep_in: u8 = @intCast(iface.ep_in orelse return error.MissingEndpoint);
+        // ep_in may be absent: a write-only interface carries output commands
+        // (e.g. rumble) without contributing input reports.
+        const ep_in: ?u8 = if (iface.ep_in) |e| @intCast(e) else null;
         const ep_out: u8 = @intCast(iface.ep_out orelse return error.MissingEndpoint);
         const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
         return dev.deviceIO();
@@ -305,11 +315,7 @@ pub const DeviceInstance = struct {
             for (cfg.device.interface) |iface| {
                 if (device_cfg.isSuppressClass(iface.class)) continue;
                 const dev_idx = device_cfg.deviceIndexForInterface(cfg, iface.id) orelse continue;
-                const match = if (init_cfg.interface) |init_iface|
-                    iface.id == init_iface
-                else
-                    std.mem.eql(u8, iface.class, "vendor");
-                if (!match) continue;
+                if (!initTargetsInterface(init_cfg, iface)) continue;
                 init_seq.runInitSequence(allocator, devices[dev_idx], init_cfg) catch |err| {
                     std.log.debug("init on interface {d}: {}", .{ iface.id, err });
                     return err;
@@ -866,11 +872,7 @@ pub const DeviceInstance = struct {
             for (self.device_cfg.device.interface) |iface| {
                 if (device_cfg.isSuppressClass(iface.class)) continue;
                 const dev_idx = device_cfg.deviceIndexForInterface(self.device_cfg, iface.id) orelse continue;
-                const match = if (init_cfg.interface) |init_iface|
-                    iface.id == init_iface
-                else
-                    std.mem.eql(u8, iface.class, "vendor");
-                if (!match) continue;
+                if (!initTargetsInterface(init_cfg, iface)) continue;
                 init_seq.runInitSequence(self.allocator, self.devices[dev_idx], init_cfg) catch |err| {
                     std.log.debug("re-init on interface {d}: {}", .{ iface.id, err });
                     return err;
@@ -1107,6 +1109,34 @@ const FailWriteDeviceIO = struct {
 
     fn close(_: *anyopaque) void {}
 };
+
+// issue #503: rumble moved to the Vader 5's write-only XInput interface, which
+// declares ep_out but no ep_in. Requiring ep_in for every vendor interface
+// would reject that config before any USB access is attempted.
+test "openDeviceWithRetry: a vendor interface without ep_in is not rejected as a config error" {
+    const write_only = InterfaceConfig{
+        .id = 0,
+        .class = "vendor",
+        .ep_in = null,
+        .ep_out = 0x05,
+    };
+    // Nothing is plugged in at 0xffff:0xffff, so the open must fail somewhere in
+    // the USB layer. Which error that is depends on the environment; what must
+    // never happen is a rejection on endpoint validation.
+    if (openDeviceWithRetry(testing.allocator, write_only, 0xffff, 0xffff)) |dev| {
+        dev.close();
+        return error.UnexpectedOpenSuccess;
+    } else |err| {
+        try testing.expect(err != error.MissingEndpoint);
+    }
+
+    var missing_out = write_only;
+    missing_out.ep_out = null;
+    try testing.expectError(
+        error.MissingEndpoint,
+        openDeviceWithRetry(testing.allocator, missing_out, 0xffff, 0xffff),
+    );
+}
 
 test "DeviceInstance.init propagates init write errors" {
     const allocator = testing.allocator;

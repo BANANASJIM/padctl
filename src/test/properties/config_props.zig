@@ -22,19 +22,8 @@ test "property: config self-consistency — field bounds within report size" {
 
         const cfg = &parsed.value;
 
-        // Vendor class interfaces must have ep_in and ep_out
-        for (cfg.device.interface) |iface| {
-            if (std.mem.eql(u8, iface.class, "vendor")) {
-                if (iface.ep_in == null) {
-                    std.debug.print("FAIL: {s} vendor interface {d} missing ep_in\n", .{ path, iface.id });
-                    return error.TestUnexpectedResult;
-                }
-                if (iface.ep_out == null) {
-                    std.debug.print("FAIL: {s} vendor interface {d} missing ep_out\n", .{ path, iface.id });
-                    return error.TestUnexpectedResult;
-                }
-            }
-        }
+        // Vendor endpoint constraints are enforced by device.validate(), which
+        // parseFile already ran above, so every shipped config is covered.
 
         for (cfg.report) |report| {
             const size: usize = @intCast(report.size);
