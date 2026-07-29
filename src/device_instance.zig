@@ -87,7 +87,9 @@ fn createDeviceIO(
         };
         return dev.deviceIO();
     } else if (std.mem.eql(u8, iface.class, "vendor")) {
-        const ep_in: u8 = @intCast(iface.ep_in orelse return error.MissingEndpoint);
+        // ep_in may be absent: a write-only interface carries output commands
+        // (e.g. rumble) without contributing input reports.
+        const ep_in: ?u8 = if (iface.ep_in) |e| @intCast(e) else null;
         const ep_out: u8 = @intCast(iface.ep_out orelse return error.MissingEndpoint);
         const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
         return dev.deviceIO();
@@ -1107,6 +1109,34 @@ const FailWriteDeviceIO = struct {
 
     fn close(_: *anyopaque) void {}
 };
+
+// issue #503: rumble moved to the Vader 5's write-only XInput interface, which
+// declares ep_out but no ep_in. Requiring ep_in for every vendor interface
+// would reject that config before any USB access is attempted.
+test "openDeviceWithRetry: a vendor interface without ep_in is not rejected as a config error" {
+    const write_only = InterfaceConfig{
+        .id = 0,
+        .class = "vendor",
+        .ep_in = null,
+        .ep_out = 0x05,
+    };
+    // Nothing is plugged in at 0xffff:0xffff, so the open must fail somewhere in
+    // the USB layer. Which error that is depends on the environment; what must
+    // never happen is a rejection on endpoint validation.
+    if (openDeviceWithRetry(testing.allocator, write_only, 0xffff, 0xffff)) |dev| {
+        dev.close();
+        return error.UnexpectedOpenSuccess;
+    } else |err| {
+        try testing.expect(err != error.MissingEndpoint);
+    }
+
+    var missing_out = write_only;
+    missing_out.ep_out = null;
+    try testing.expectError(
+        error.MissingEndpoint,
+        openDeviceWithRetry(testing.allocator, missing_out, 0xffff, 0xffff),
+    );
+}
 
 test "DeviceInstance.init propagates init write errors" {
     const allocator = testing.allocator;

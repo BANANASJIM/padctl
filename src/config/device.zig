@@ -1036,10 +1036,12 @@ test "device: load flydigi/vader5.toml succeeds" {
         @as(?i64, 3),
         cfg.device.init.?.response_command_prefix_len,
     );
-    try std.testing.expectEqual(
-        @as(?i64, 100),
-        cfg.commands.?.map.get("rumble").?.min_interval_ms,
-    );
+    // Rumble goes to the IF0 XInput endpoint, which costs no input time, so
+    // it needs neither the vendor checksum nor coalescing.
+    const rumble = cfg.commands.?.map.get("rumble").?;
+    try std.testing.expectEqual(@as(i64, 0), rumble.interface);
+    try std.testing.expectEqual(@as(?i64, null), rumble.min_interval_ms);
+    try std.testing.expect(rumble.checksum == null);
 }
 
 test "device: output profile overlays default output and preset identity" {
@@ -1633,20 +1635,30 @@ test "device: vader5 IF1 is claimed via libusb (vendor transport)" {
     defer result.deinit();
 
     const cfg = result.value;
-    // IF1 read transport + IF2/IF3 suppress-only claims.
-    try std.testing.expectEqual(@as(usize, 3), cfg.device.interface.len);
-    try std.testing.expectEqual(@as(usize, 1), openedInterfaceCount(&cfg));
+    // IF1 read transport + IF0 write-only rumble + IF2/IF3 suppress-only claims.
+    try std.testing.expectEqual(@as(usize, 4), cfg.device.interface.len);
+    try std.testing.expectEqual(@as(usize, 2), openedInterfaceCount(&cfg));
     const if1 = cfg.device.interface[0];
     try std.testing.expectEqual(@as(i64, 1), if1.id);
     try std.testing.expectEqualStrings("vendor", if1.class);
     try std.testing.expectEqual(@as(i64, 0x82), if1.ep_in orelse return error.MissingEpIn);
     try std.testing.expectEqual(@as(i64, 0x06), if1.ep_out orelse return error.MissingEpOut);
 
-    try std.testing.expectEqualStrings("suppress", cfg.device.interface[1].class);
-    try std.testing.expectEqual(@as(i64, 2), cfg.device.interface[1].id);
-    try std.testing.expect(cfg.device.interface[1].ep_in == null);
+    // IF0 is the XInput rumble endpoint: write-only, and declared after IF1 so
+    // IF1 keeps devices[] index 0.
+    const if0 = cfg.device.interface[1];
+    try std.testing.expectEqual(@as(i64, 0), if0.id);
+    try std.testing.expectEqualStrings("vendor", if0.class);
+    try std.testing.expect(if0.ep_in == null);
+    try std.testing.expectEqual(@as(i64, 0x05), if0.ep_out orelse return error.MissingEpOut);
+    try std.testing.expectEqual(@as(?usize, 0), deviceIndexForInterface(&cfg, 1));
+    try std.testing.expectEqual(@as(?usize, 1), deviceIndexForInterface(&cfg, 0));
+
     try std.testing.expectEqualStrings("suppress", cfg.device.interface[2].class);
-    try std.testing.expectEqual(@as(i64, 3), cfg.device.interface[2].id);
+    try std.testing.expectEqual(@as(i64, 2), cfg.device.interface[2].id);
+    try std.testing.expect(cfg.device.interface[2].ep_in == null);
+    try std.testing.expectEqualStrings("suppress", cfg.device.interface[3].class);
+    try std.testing.expectEqual(@as(i64, 3), cfg.device.interface[3].id);
 
     const init_cfg = cfg.device.init orelse return error.MissingInit;
     try std.testing.expectEqual(@as(i64, 1), init_cfg.interface orelse return error.MissingInterface);

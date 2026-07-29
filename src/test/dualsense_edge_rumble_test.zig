@@ -58,15 +58,17 @@ const NATIVE_RUMBLE_TOML =
     \\click = true
 ;
 
-test "T9 shipped Vader native profile formats the physical 32-byte rumble frame" {
+test "T9 shipped Vader native profile formats the physical XInput rumble frame" {
     const allocator = testing.allocator;
     var parsed = try device_config.parseFile(allocator, "devices/flydigi/vader5.toml");
     defer parsed.deinit();
     try testing.expect(device_config.selectOutputProfile(&parsed.value, "dualsense-edge-native"));
 
+    // Selecting a native output profile must not change the physical rumble
+    // encoding: it stays the IF0 XInput frame, not a DualSense one.
     const commands = parsed.value.commands orelse return error.MissingCommands;
     const rumble = commands.map.get("rumble") orelse return error.MissingRumbleCommand;
-    try testing.expectEqual(@as(i64, 1), rumble.interface);
+    try testing.expectEqual(@as(i64, 0), rumble.interface);
     const frame = try command.fillTemplate(allocator, rumble.template, &.{
         .{ .name = "strong", .value = 0xA5A5 },
         .{ .name = "weak", .value = 0x3C3C },
@@ -74,9 +76,7 @@ test "T9 shipped Vader native profile formats the physical 32-byte rumble frame"
     defer allocator.free(frame);
     if (rumble.checksum) |*checksum| command.applyChecksum(frame, checksum);
 
-    var expected = [_]u8{0} ** 32;
-    const expected_header = [_]u8{ 0x5A, 0xA5, 0x12, 0x06, 0xA5, 0x3C, 0, 0, 0xF9 };
-    @memcpy(expected[0..expected_header.len], &expected_header);
+    const expected = [_]u8{ 0x00, 0x08, 0x00, 0xA5, 0x3C, 0x00, 0x00, 0x00 };
     try testing.expectEqualSlices(u8, &expected, frame);
 }
 

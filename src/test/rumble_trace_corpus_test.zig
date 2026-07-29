@@ -263,6 +263,11 @@ fn expectShippedVaderEncoder(records: []const Record) !void {
 
     const commands = parsed.value.commands orelse return error.MissingCommands;
     const rumble = commands.map.get("rumble") orelse return error.MissingRumbleCommand;
+    // The corpus was captured while rumble went out the IF1 vendor channel, so
+    // its 32-byte frames no longer match the shipped template byte-for-byte.
+    // What must still hold is that the shipped encoder places the same
+    // magnitudes the trace recorded, now in the 8-byte XInput frame.
+    // validateHidFrame still pins the legacy frame layout the corpus carries.
     for (records) |record| switch (record) {
         .ff => {},
         .hid => |hid| {
@@ -272,7 +277,8 @@ fn expectShippedVaderEncoder(records: []const Record) !void {
             });
             defer allocator.free(encoded);
             if (rumble.checksum) |*checksum| command.applyChecksum(encoded, checksum);
-            try testing.expectEqualSlices(u8, &hid.frame, encoded);
+            const want = [_]u8{ 0x00, 0x08, 0x00, hid.frame[4], hid.frame[5], 0x00, 0x00, 0x00 };
+            try testing.expectEqualSlices(u8, &want, encoded);
         },
     };
 }
