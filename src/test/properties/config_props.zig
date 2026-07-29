@@ -22,37 +22,8 @@ test "property: config self-consistency — field bounds within report size" {
 
         const cfg = &parsed.value;
 
-        // Vendor class interfaces must have ep_out. ep_in is optional: a
-        // write-only interface carries output commands and is never polled,
-        // so nothing may expect input reports from it.
-        for (cfg.device.interface) |iface| {
-            if (!std.mem.eql(u8, iface.class, "vendor")) continue;
-            if (iface.ep_out == null) {
-                std.debug.print("FAIL: {s} vendor interface {d} missing ep_out\n", .{ path, iface.id });
-                return error.TestUnexpectedResult;
-            }
-            if (iface.ep_in != null) continue;
-
-            for (cfg.report) |report| {
-                if (report.interface != iface.id) continue;
-                std.debug.print(
-                    "FAIL: {s} report '{s}' reads interface {d}, which has no ep_in\n",
-                    .{ path, report.name, iface.id },
-                );
-                return error.TestUnexpectedResult;
-            }
-            if (cfg.device.init) |init_cfg| {
-                if (init_cfg.interface) |init_iface| {
-                    if (init_iface == iface.id) {
-                        std.debug.print(
-                            "FAIL: {s} init runs on interface {d}, which has no ep_in to read acks from\n",
-                            .{ path, iface.id },
-                        );
-                        return error.TestUnexpectedResult;
-                    }
-                }
-            }
-        }
+        // Vendor endpoint constraints are enforced by device.validate(), which
+        // parseFile already ran above, so every shipped config is covered.
 
         for (cfg.report) |report| {
             const size: usize = @intCast(report.size);

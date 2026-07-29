@@ -405,6 +405,30 @@ fn isSuppressInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
     return false;
 }
 
+/// True for a vendor interface that declares an OUT endpoint and no IN
+/// endpoint. It is claimed and written but never polled, so nothing may expect
+/// input reports from it.
+fn isWriteOnlyInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
+    for (cfg.device.interface) |iface| {
+        if (iface.id != iface_id) continue;
+        return std.mem.eql(u8, iface.class, "vendor") and
+            iface.ep_in == null and iface.ep_out != null;
+    }
+    return false;
+}
+
+/// Interfaces that produce input: everything opened into devices[] except
+/// write-only vendor interfaces. A hid interface always reads from its node.
+fn readableInterfaceCount(cfg: *const DeviceConfig) usize {
+    var n: usize = 0;
+    for (cfg.device.interface) |iface| {
+        if (isSuppressClass(iface.class)) continue;
+        if (isWriteOnlyInterface(cfg, iface.id)) continue;
+        n += 1;
+    }
+    return n;
+}
+
 fn interfaceExists(cfg: *const DeviceConfig, iface_id: i64) bool {
     for (cfg.device.interface) |iface| {
         if (iface.id == iface_id) return true;
@@ -457,9 +481,9 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             return error.InvalidConfig;
     }
 
-    // An all-suppress config opens no read fd, so it can never be observed
-    // for liveness; require at least one readable (hid/vendor) interface.
-    if (openedInterfaceCount(cfg) == 0) return error.InvalidConfig;
+    // A config that opens no readable fd can never be observed for liveness.
+    // A write-only vendor interface does not count: it is never polled.
+    if (readableInterfaceCount(cfg) == 0) return error.InvalidConfig;
 
     // A suppress interface is claimed only to evict the kernel driver; it is
     // never read or written, so no report/command/init may reference it. Every
@@ -467,6 +491,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     for (cfg.report) |report| {
         if (!interfaceExists(cfg, report.interface)) return error.InvalidConfig;
         if (isSuppressInterface(cfg, report.interface)) return error.InvalidConfig;
+        if (isWriteOnlyInterface(cfg, report.interface)) return error.InvalidConfig;
     }
     if (cfg.commands) |cmds| {
         var it = cmds.map.iterator();
@@ -482,6 +507,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         if (init_cfg.interface) |iface_id| {
             if (!interfaceExists(cfg, iface_id)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, iface_id)) return error.InvalidConfig;
+            // The init sequence reads acknowledgements back.
+            if (isWriteOnlyInterface(cfg, iface_id)) return error.InvalidConfig;
         }
         const has_response_prefix = if (init_cfg.response_prefix) |prefix|
             prefix.len > 0
@@ -1773,6 +1800,133 @@ test "device: suppress interface excluded from devices[] index regardless of ord
         try std.testing.expectEqual(@as(i64, 5), iface0.id);
         try std.testing.expectEqual(@as(?*const InterfaceConfig, null), interfaceForDeviceIndex(&cfg, 1));
     }
+}
+
+// issue #503: a vendor interface may omit ep_in to become write-only. Nothing
+// that reads may then target it, and it cannot be the only opened interface.
+test "device: validate rejects a report reading a write-only vendor interface" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Bad"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 1
+        \\class = "vendor"
+        \\ep_in = 0x81
+        \\ep_out = 0x01
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_out = 0x05
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: validate rejects init running on a write-only vendor interface" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Bad"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 1
+        \\class = "vendor"
+        \\ep_in = 0x81
+        \\ep_out = 0x01
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_out = 0x05
+        \\
+        \\[device.init]
+        \\interface = 0
+        \\report_size = 8
+        \\commands = ["0102"]
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 1
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: validate rejects a config whose only opened interface is write-only" {
+    const ifaces = [_]InterfaceConfig{
+        .{ .id = 0, .class = "vendor", .ep_out = 0x05 },
+        .{ .id = 2, .class = "suppress" },
+    };
+    const cfg = DeviceConfig{
+        .device = .{
+            .name = "WriteOnlyOnly",
+            .vid = 0x1234,
+            .pid = 0x5678,
+            .interface = &ifaces,
+        },
+        .report = &.{},
+    };
+    // openedInterfaceCount is 1, but nothing is polled, so liveness is
+    // unobservable exactly as in the all-suppress case.
+    try std.testing.expectEqual(@as(usize, 1), openedInterfaceCount(&cfg));
+    try std.testing.expectError(error.InvalidConfig, validate(&cfg));
+}
+
+test "device: validate accepts a write-only vendor interface used only by a command" {
+    const allocator = std.testing.allocator;
+    const good =
+        \\[device]
+        \\name = "Good"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 1
+        \\class = "vendor"
+        \\ep_in = 0x82
+        \\ep_out = 0x06
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_out = 0x05
+        \\
+        \\[commands.rumble]
+        \\interface = 0
+        \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 1
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    const result = try parseString(allocator, good);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), openedInterfaceCount(&result.value));
+    try std.testing.expectEqual(@as(usize, 1), readableInterfaceCount(&result.value));
 }
 
 test "device: validate rejects suppress interface with endpoints" {
