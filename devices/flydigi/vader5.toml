@@ -90,9 +90,9 @@ map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Sel
 # --- Commands ---
 # Rumble goes to the XInput endpoint on IF0, not the IF1 vendor channel. The
 # receiver handles a vendor command synchronously and pauses every input
-# endpoint for ~18ms per command; the XInput endpoint has no such cost, so no
-# coalescing is needed. The packet is the standard 8-byte XInput frame, which
-# carries no checksum.
+# endpoint for ~18ms per command; the XInput endpoint has no such cost, so this
+# device needs no extra coalescing on top of the writer's default 10ms cadence.
+# The packet is the standard 8-byte XInput frame, which carries no checksum.
 [commands.rumble]
 interface = 0
 template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"

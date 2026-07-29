@@ -70,6 +70,14 @@ fn closedPollfd(_: *anyopaque) posix.pollfd {
 
 fn closedClose(_: *anyopaque) void {}
 
+/// Which interface the init sequence runs on. Without an explicit id it runs on
+/// every vendor interface, but it reads acknowledgements back, so a write-only
+/// one can never satisfy it.
+fn initTargetsInterface(init_cfg: device_cfg.InitConfig, iface: InterfaceConfig) bool {
+    if (init_cfg.interface) |init_iface| return iface.id == init_iface;
+    return std.mem.eql(u8, iface.class, "vendor") and iface.ep_in != null;
+}
+
 fn createDeviceIO(
     allocator: std.mem.Allocator,
     iface: InterfaceConfig,
@@ -307,11 +315,7 @@ pub const DeviceInstance = struct {
             for (cfg.device.interface) |iface| {
                 if (device_cfg.isSuppressClass(iface.class)) continue;
                 const dev_idx = device_cfg.deviceIndexForInterface(cfg, iface.id) orelse continue;
-                const match = if (init_cfg.interface) |init_iface|
-                    iface.id == init_iface
-                else
-                    std.mem.eql(u8, iface.class, "vendor");
-                if (!match) continue;
+                if (!initTargetsInterface(init_cfg, iface)) continue;
                 init_seq.runInitSequence(allocator, devices[dev_idx], init_cfg) catch |err| {
                     std.log.debug("init on interface {d}: {}", .{ iface.id, err });
                     return err;
@@ -868,11 +872,7 @@ pub const DeviceInstance = struct {
             for (self.device_cfg.device.interface) |iface| {
                 if (device_cfg.isSuppressClass(iface.class)) continue;
                 const dev_idx = device_cfg.deviceIndexForInterface(self.device_cfg, iface.id) orelse continue;
-                const match = if (init_cfg.interface) |init_iface|
-                    iface.id == init_iface
-                else
-                    std.mem.eql(u8, iface.class, "vendor");
-                if (!match) continue;
+                if (!initTargetsInterface(init_cfg, iface)) continue;
                 init_seq.runInitSequence(self.allocator, self.devices[dev_idx], init_cfg) catch |err| {
                     std.log.debug("re-init on interface {d}: {}", .{ iface.id, err });
                     return err;

@@ -485,6 +485,15 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     // A write-only vendor interface does not count: it is never polled.
     if (readableInterfaceCount(cfg) == 0) return error.InvalidConfig;
 
+    // The supervisor's liveness probe polls devices[0] for HUP, and a
+    // write-only interface's pipe never HUPs, so the first opened interface
+    // must be readable or a dead instance would look alive forever.
+    for (cfg.device.interface) |iface| {
+        if (isSuppressClass(iface.class)) continue;
+        if (isWriteOnlyInterface(cfg, iface.id)) return error.InvalidConfig;
+        break;
+    }
+
     // A suppress interface is claimed only to evict the kernel driver; it is
     // never read or written, so no report/command/init may reference it. Every
     // referenced interface id must also exist in [[device.interface]].
@@ -1804,6 +1813,37 @@ test "device: suppress interface excluded from devices[] index regardless of ord
 
 // issue #503: a vendor interface may omit ep_in to become write-only. Nothing
 // that reads may then target it, and it cannot be the only opened interface.
+test "device: validate rejects a write-only interface in the first opened slot" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "Bad"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_out = 0x05
+        \\
+        \\[[device.interface]]
+        \\id = 1
+        \\class = "vendor"
+        \\ep_in = 0x82
+        \\ep_out = 0x06
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 1
+        \\size = 8
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
 test "device: validate rejects a report reading a write-only vendor interface" {
     const allocator = std.testing.allocator;
     const bad =
