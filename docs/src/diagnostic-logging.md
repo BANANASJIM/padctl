@@ -2,7 +2,9 @@
 
 padctl ships with a general-purpose, togglable file logger. It is designed to be the single mechanism you reach for when diagnosing **any** class of bug — stuck rumble, input drops, mapping misses, hotplug oddities, daemon crashes — so that reports come with structured evidence instead of guesswork.
 
-It is **off by default** and has no hot-path formatting cost when disabled. The
+It is **off by default**. With dump off the verbose trace lines never reach the
+journal or disk — they are held only in the in-memory flight recorder described
+below, which persists them when something goes wrong. The
 current build emits a detailed trace of the force-feedback pipeline plus button
 input edges, gesture decisions, and virtual button output edges; other
 subsystems (non-gesture layer/remap decisions, hotplug, config reload, …) will
@@ -26,8 +28,8 @@ Attach `bug.log` to your issue report.
 |---------|-------------|
 | `padctl dump enable` | Turn diagnostic logging on. Persists across restarts by writing `[diagnostics].dump = true` to the user config (and `/etc/padctl/config.toml` via `sudo` when available). Also sends a live IPC to any running daemon so the change takes effect immediately. |
 | `padctl dump disable` | Turn diagnostic logging off (default state). Same persistence semantics as `enable`. |
-| `padctl dump status` | Print current state (`enabled` / `disabled`), the active log path, log file size, oldest/newest entry timestamps, and the rotated backup size if present. |
-| `padctl dump export --period <N>m\|<N>h\|<N>d [-o path]` | Export the window of log lines newer than the given duration. `-o` writes to a file; omit it to print to stdout. Default window: `1d`. |
+| `padctl dump status` | Print current state (`enabled` / `disabled`), the flight recorder's buffered line count and last flush, the active log path, log file size, oldest/newest entry timestamps, and the rotated backup size if present. |
+| `padctl dump export --period <N>m\|<N>h\|<N>d [-o path]` | Export the window of log lines newer than the given duration. Asks a running daemon to flush its flight recorder first, so the export includes the in-memory window. `-o` writes to a file; omit it to print to stdout. Default window: `1d`. |
 | `padctl dump clear` | Delete the live log and any rotated backups. Asks for confirmation. Falls back to `sudo rm` for root-owned logs when the CLI user can't unlink them directly. |
 
 ### Period syntax
@@ -109,9 +111,56 @@ On every daemon startup and on every fresh file-open, padctl stats the existing 
 
 This keeps disk usage bounded to roughly `2 * max_log_size_mb` without needing `logrotate` or any external tooling.
 
+## Flight recorder
+
+Sporadic faults — rumble that will not stop, a dropped rumble write, a
+disconnect — tend to happen when nobody had `padctl dump enable` running. The
+flight recorder closes that gap: the daemon always keeps the most recent **1024
+trace lines** (256 KiB, oldest overwritten first) in memory, even with dump off,
+and appends them to `padctl.log` when something goes wrong. Nothing reaches
+disk until a trigger fires, so the ring costs no I/O and no disk space during
+normal play.
+
+### Triggers
+
+| Reason | Fires when |
+|--------|-----------|
+| `rumble-stuck` | The newest rumble frame written to the device was non-zero and 10 s passed with no newer frame. Reported once per episode; re-arms after a zero frame is written. |
+| `rumble-write-dropped` | A rumble frame exhausted its write retries and was dropped. |
+| `disconnect` | The device went away — POLLHUP, a read error, or a write that reported a disconnect. |
+| `signal` | `kill -USR1 <daemon pid>` |
+| `export` | `padctl dump export` sends this to the running daemon automatically. |
+| `shutdown` | The daemon is stopping. |
+
+The three automatic triggers flush at most once every 30 seconds so a repeating
+fault cannot fill the disk. `signal`, `export` and `shutdown` always flush.
+
+### Reading the output
+
+A flushed window appears in `padctl.log` between markers:
+
+```
+FLIGHT_RECORDER begin reason=rumble-stuck lines=1024
+[2026-09-07T04:53:03.384] [MONO:859498771067408] debug(rumble): [Vader 5 Pro] FF_PLAY: id=0 ...
+...
+FLIGHT_RECORDER end
+```
+
+The buffered lines keep their original timestamps, so they are usually older
+than the surrounding log. `padctl dump status` reports how many lines are
+buffered and when the last flush happened. To capture the current window by
+hand, without waiting for a trigger:
+
+```sh
+kill -USR1 $(pidof padctl)
+```
+
+If the log file cannot be written (for example a root-owned state directory),
+the daemon warns once and keeps the ring in memory rather than dropping it.
+
 ## What gets logged
 
-When `dump = false` (the default), only warnings and errors are written, and only lazily on the first occurrence.
+When `dump = false` (the default), only warnings and errors are written to the log file, and only lazily on the first occurrence. Verbose trace lines still flow into the flight recorder and reach the file when a trigger fires.
 
 When `dump = true`, padctl adds verbose tracing on top. The coverage today is deepest in the force-feedback pipeline — that is the area where the logger was needed first — and is being expanded to other subsystems as issues surface. Current coverage:
 

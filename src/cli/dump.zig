@@ -3,6 +3,8 @@ const paths = @import("../config/paths.zig");
 const user_config_mod = @import("../config/user_config.zig");
 const socket_client = @import("socket_client.zig");
 
+const DAEMON_FLUSH_TIMEOUT_MS = 500;
+
 pub const WriteError = error{
     MalformedConfig,
     NoSpaceLeft,
@@ -73,17 +75,20 @@ pub fn runStatus(
 ) void {
     // Query daemon for live dump state.
     var daemon_state: []const u8 = "unknown (daemon not running)";
+    var recorder_line: ?[]const u8 = null;
+    var recorder_buf: [128]u8 = undefined;
     if (socket_client.connectToSocket(socket_path)) |sock_fd| {
         defer std.posix.close(sock_fd);
-        var resp_buf: [64]u8 = undefined;
+        var resp_buf: [256]u8 = undefined;
         if (socket_client.sendCommand(sock_fd, "DUMP STATUS\n", &resp_buf)) |resp| {
-            // Parse "OK dump=on\n" or "OK dump=off\n"
+            // Parse "OK dump=on recorder_lines=N last_flush=<reason|never> ..."
             const trimmed = std.mem.trimRight(u8, resp, "\r\n");
             if (std.mem.indexOf(u8, trimmed, "dump=on") != null) {
                 daemon_state = "enabled";
             } else if (std.mem.indexOf(u8, trimmed, "dump=off") != null) {
                 daemon_state = "disabled";
             }
+            recorder_line = formatRecorderStatus(&recorder_buf, trimmed);
         } else |_| {}
     } else |_| {
         // Daemon not running — fall back to config.
@@ -95,6 +100,7 @@ pub fn runStatus(
     }
 
     stdout.print("Dump: {s}\n", .{daemon_state}) catch {};
+    if (recorder_line) |line| stdout.print("Flight recorder: {s}\n", .{line}) catch {};
 
     // Log file stats. Check both user state dir and systemd /var/log/padctl,
     // pick whichever has the newest last_timestamp (the active one).
@@ -323,9 +329,43 @@ fn formatSize(buf: *[32]u8, bytes: u64) []const u8 {
     }
 }
 
+/// Extract the value of `key=` from a whitespace-separated response line.
+pub fn responseField(line: []const u8, key: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeScalar(u8, line, ' ');
+    while (it.next()) |tok| {
+        if (tok.len > key.len and std.mem.startsWith(u8, tok, key) and tok[key.len] == '=') {
+            return tok[key.len + 1 ..];
+        }
+    }
+    return null;
+}
+
+/// Render the flight-recorder half of a DUMP STATUS response as one human
+/// line. Returns null when the daemon predates the recorder fields.
+pub fn formatRecorderStatus(buf: []u8, response: []const u8) ?[]const u8 {
+    const lines = responseField(response, "recorder_lines") orelse return null;
+    const last = responseField(response, "last_flush") orelse return null;
+    if (std.mem.eql(u8, last, "never")) {
+        return std.fmt.bufPrint(buf, "{s} lines buffered, last flush: never", .{lines}) catch null;
+    }
+    const ms_ago = responseField(response, "last_flush_ms_ago") orelse "?";
+    return std.fmt.bufPrint(buf, "{s} lines buffered, last flush: {s} {s}ms ago", .{ lines, last, ms_ago }) catch null;
+}
+
+/// Ask a running daemon to append its flight-recorder ring to the log file so
+/// an export includes the in-memory window. Best effort: no daemon, an old
+/// daemon, or a slow reply all fall through to exporting the file as-is.
+fn requestFlush(socket_path: []const u8) void {
+    const fd = socket_client.connectToSocket(socket_path) catch return;
+    defer std.posix.close(fd);
+    var resp_buf: [64]u8 = undefined;
+    _ = socket_client.sendCommandTimeout(fd, "DUMP FLUSH\n", &resp_buf, DAEMON_FLUSH_TIMEOUT_MS) catch return;
+}
+
 /// Run `padctl dump export`: filter logs by period, output to stdout or file.
 pub fn runExport(
     allocator: std.mem.Allocator,
+    socket_path: []const u8,
     period_str: []const u8,
     output_path: ?[]const u8,
     stdout: anytype,
@@ -335,6 +375,8 @@ pub fn runExport(
         stderr.print("error: invalid period '{s}' — use Nm, Nh, or Nd (e.g., 10m, 1h, 1d)\n", .{period_str}) catch {};
         std.process.exit(1);
     };
+
+    requestFlush(socket_path);
 
     const now_secs = @as(u64, @intCast(std.time.timestamp()));
     const cutoff_secs = if (now_secs > period_secs) now_secs - period_secs else 0;
@@ -1055,4 +1097,30 @@ test "dump: isSafePadctlLogPath rejects arbitrary paths" {
     try testing.expect(!isSafePadctlLogPath("padctl.log"));
     // Parent directory traversal attempt.
     try testing.expect(!isSafePadctlLogPath("/var/log/padctl/../etc/padctl.log"));
+}
+
+test "dump: responseField extracts values and ignores prefixes" {
+    const line = "OK dump=off recorder_lines=42 last_flush=never";
+    try testing.expectEqualStrings("off", responseField(line, "dump").?);
+    try testing.expectEqualStrings("42", responseField(line, "recorder_lines").?);
+    try testing.expectEqualStrings("never", responseField(line, "last_flush").?);
+    try testing.expectEqual(@as(?[]const u8, null), responseField(line, "last_flush_ms_ago"));
+    try testing.expectEqual(@as(?[]const u8, null), responseField(line, "recorder"));
+}
+
+test "dump: formatRecorderStatus renders never and flushed states" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "42 lines buffered, last flush: never",
+        formatRecorderStatus(&buf, "OK dump=off recorder_lines=42 last_flush=never").?,
+    );
+    try testing.expectEqualStrings(
+        "7 lines buffered, last flush: rumble-stuck 1234ms ago",
+        formatRecorderStatus(&buf, "OK dump=on recorder_lines=7 last_flush=rumble-stuck last_flush_ms_ago=1234").?,
+    );
+}
+
+test "dump: formatRecorderStatus returns null for a daemon without recorder fields" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqual(@as(?[]const u8, null), formatRecorderStatus(&buf, "OK dump=on"));
 }

@@ -13,8 +13,42 @@ const state = @import("../core/state.zig");
 const uinput = @import("../io/uinput.zig");
 const device_mod = @import("../config/device.zig");
 const padctl_log = @import("../log.zig");
+const flight_recorder = @import("../diagnostics/flight_recorder.zig");
 const rumble_scheduler_mod = @import("../core/rumble_scheduler.zig");
 const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
+
+/// A line pushed into the ring before the loop starts. The daemon fills the
+/// ring through `padctl_log.logFn`, which the test runner does not install as
+/// `std.options.logFn`, so these tests seed it directly and assert on what the
+/// trigger persisted.
+const recorder_seed_line = "seeded-trace-line";
+
+/// Point the log writer at `tmp` with dump off, clear the flight recorder and
+/// seed one line.
+fn attachRecorderLog(tmp: *std.testing.TmpDir) !void {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    padctl_log.setEnabled(false);
+    padctl_log.setLogPathForTest(try std.fmt.bufPrint(&path_buf, "{s}/padctl.log", .{dir}));
+    flight_recorder.resetForTest();
+    flight_recorder.record(recorder_seed_line);
+}
+
+fn detachRecorderLog() void {
+    padctl_log.setLogPathForTest("");
+    flight_recorder.resetForTest();
+}
+
+fn expectFlushReason(tmp: *std.testing.TmpDir, reason: []const u8) !void {
+    const content = try tmp.dir.readFileAlloc(testing.allocator, "padctl.log", 4 * 1024 * 1024);
+    defer testing.allocator.free(content);
+    var marker_buf: [64]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&marker_buf, "FLIGHT_RECORDER begin reason={s} lines=", .{reason});
+    const begin = std.mem.indexOf(u8, content, marker) orelse return error.FlushMarkerMissing;
+    const end = std.mem.indexOfPos(u8, content, begin, "FLIGHT_RECORDER end\n") orelse return error.FlushEndMissing;
+    try testing.expect(std.mem.indexOfPos(u8, content[0..end], begin, recorder_seed_line) != null);
+}
 
 // intentionally minimal; not a vader5 fixture
 const minimal_toml =
@@ -2008,6 +2042,11 @@ test "event_loop: failed stop frame is retried from pending rumble queue" {
 test "event_loop: disconnected rumble write exits without retry queue" {
     const allocator = testing.allocator;
 
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try attachRecorderLog(&tmp);
+    defer detachRecorderLog();
+
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
@@ -2074,6 +2113,7 @@ test "event_loop: disconnected rumble write exits without retry queue" {
 
     try testing.expectEqual(@as(usize, 2), fail_dev.write_attempts);
     try testing.expect(loop.disconnected);
+    try expectFlushReason(&tmp, "disconnect");
     try testing.expectEqual(@as(?rumble_scheduler_mod.RumbleScheduler.Frame, null), loop.pending_rumble_frame);
     try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
     try testing.expectEqual(@as(usize, frame_size), fail_dev.write_log.items.len);
@@ -2082,6 +2122,11 @@ test "event_loop: disconnected rumble write exits without retry queue" {
 
 test "event_loop: repeated rumble write failures stop retrying without disconnecting input loop" {
     const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try attachRecorderLog(&tmp);
+    defer detachRecorderLog();
 
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
@@ -2150,6 +2195,7 @@ test "event_loop: repeated rumble write failures stop retrying without disconnec
 
     try testing.expectEqual(@as(usize, 5), fail_dev.write_attempts);
     try testing.expect(!loop.disconnected);
+    try expectFlushReason(&tmp, "rumble-write-dropped");
     try testing.expectEqual(@as(?rumble_scheduler_mod.RumbleScheduler.Frame, null), loop.pending_rumble_frame);
     try testing.expectEqual(@as(?i128, null), loop.pending_rumble_deadline_ns);
     try testing.expectEqual(@as(usize, frame_size), fail_dev.write_log.items.len);

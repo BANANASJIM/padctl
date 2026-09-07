@@ -854,7 +854,7 @@ pub const help_text =
     \\    --socket <path>     Socket path (default: $XDG_RUNTIME_DIR/padctl.sock or /run/padctl/padctl.sock)
     \\  dump enable           Turn on diagnostic logging (persists across reboots)
     \\  dump disable          Turn off diagnostic logging (default)
-    \\  dump status           Show dump state, log path, size, and time span
+    \\  dump status           Show dump state, flight recorder buffer, log path, size, and time span
     \\  dump export           Export filtered logs to stdout or file
     \\    --period <duration> Time window: Nm, Nh, or Nd (default: 1d)
     \\    -o <path>           Write to file instead of stdout
@@ -1214,7 +1214,7 @@ pub fn main() !void {
 
         // dump export: filter and output logs, exit.
         if (dump_action == .@"export") {
-            cli.dump.runExport(allocator, parsed.dump_period, parsed.dump_output_path, stdout_writer, stderr_writer);
+            cli.dump.runExport(allocator, parsed.socket_path, parsed.dump_period, parsed.dump_output_path, stdout_writer, stderr_writer);
             std.process.exit(0);
         }
 
