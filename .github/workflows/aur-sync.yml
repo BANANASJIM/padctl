@@ -89,5 +89,9 @@ jobs:
           git config --global user.name "bananasjim"
           git config --global user.email "bananasjim1@gmail.com"
           git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "::notice::AUR padctl-bin already at ${VERSION}, nothing to push"
+            exit 0
+          fi
           git commit -m "update to ${VERSION}"
           retry git push
