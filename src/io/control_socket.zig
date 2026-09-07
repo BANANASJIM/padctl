@@ -178,6 +178,7 @@ pub const CommandTag = enum {
     dump_on,
     dump_off,
     dump_status,
+    dump_flush,
     unknown,
 };
 
@@ -228,6 +229,7 @@ pub fn parseCommand(raw: []const u8) Command {
         if (std.ascii.eqlIgnoreCase(mode, "ON")) return .{ .tag = .dump_on };
         if (std.ascii.eqlIgnoreCase(mode, "OFF")) return .{ .tag = .dump_off };
         if (std.ascii.eqlIgnoreCase(mode, "STATUS")) return .{ .tag = .dump_status };
+        if (std.ascii.eqlIgnoreCase(mode, "FLUSH")) return .{ .tag = .dump_flush };
         return .{ .tag = .unknown };
     }
     return .{ .tag = .unknown };
@@ -295,6 +297,15 @@ test "control_socket: parseCommand: DEVICES" {
 test "control_socket: parseCommand: RELOAD" {
     try testing.expectEqual(CommandTag.reload, parseCommand("RELOAD\n").tag);
     try testing.expectEqual(CommandTag.reload, parseCommand("reload\n").tag);
+}
+
+test "control_socket: parseCommand: DUMP FLUSH" {
+    try testing.expectEqual(CommandTag.dump_flush, parseCommand("DUMP FLUSH\n").tag);
+    try testing.expectEqual(CommandTag.dump_flush, parseCommand("dump flush\n").tag);
+}
+
+test "control_socket: parseCommand: DUMP with unknown mode rejected" {
+    try testing.expectEqual(CommandTag.unknown, parseCommand("DUMP FLUSHX\n").tag);
 }
 
 test "control_socket: parseCommand: CHORD_SWITCH valid index" {

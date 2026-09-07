@@ -1,8 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const paths = @import("config/paths.zig");
+const flight_recorder = @import("diagnostics/flight_recorder.zig");
 
 /// File descriptor for the log file. -1 when file logging is inactive.
 var log_fd: std.atomic.Value(posix.fd_t) = std.atomic.Value(posix.fd_t).init(-1);
@@ -236,14 +238,7 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    // Early exit: .debug lines are verbose scheduler / HID traces that
-    // should be silent unless dump is enabled. Without this short-circuit
-    // every std.log.debug call would format into a 4 KiB stack buffer,
-    // hit stderr, and pollute journalctl with per-frame lines on every
-    // install — contradicting the documented "no hot-path cost when
-    // disabled" contract. .info / .warn / .err always flow as normal.
     const is_debug = comptime (message_level == .debug);
-    if (is_debug and !dump_enabled.load(.acquire)) return;
 
     const level_txt = comptime message_level.asText();
     const scope_prefix = comptime if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
@@ -266,40 +261,69 @@ pub fn logFn(
     const msg = fbs.getWritten();
     if (msg.len == 0) return;
 
+    if (is_debug and !dump_enabled.load(.acquire)) {
+        flight_recorder.record(msg);
+        return;
+    }
+
     // Write to stderr (for systemd journal / terminal).
     _ = posix.write(posix.STDERR_FILENO, msg) catch {};
 
     // Write to log file: err/warn always persist; debug/info only when dump enabled.
     const always_write = comptime (message_level == .err or message_level == .warn);
-    const write_to_file = shouldWriteToFile(message_level);
-    if (write_to_file) {
-        log_mutex.lock();
-        defer log_mutex.unlock();
-
-        var fd = log_fd.load(.acquire);
-        if (fd == -1 and always_write) {
-            // Lazy open: first err/warn creates the file even with dump off.
-            fd = ensureFileOpen();
-        }
-        if (fd != -1) {
-            fd = reopenIfDeleted(fd);
-            _ = posix.write(fd, msg) catch {};
-            // Post-write rotation. openLogFile only rotates at fresh
-            // open (startup / lazy open), so without this check a long
-            // dump session grows past max_log_size_mb until the daemon
-            // restarts — at ~100 FF frames/s a default 100 MiB cap is
-            // blown through in under two hours. Stat the live fd; when
-            // it crosses the threshold, close + reopen, which walks
-            // through openLogFile's rotate-rename path.
-            if (posix.fstat(fd)) |st| {
-                if (st.size > max_log_size) {
-                    const old_fd = log_fd.swap(-1, .acq_rel);
-                    if (old_fd != -1) posix.close(old_fd);
-                    openLogFile();
-                }
-            } else |_| {}
-        }
+    if (shouldWriteToFile(message_level)) {
+        // Lazy open: only err/warn create the file when dump is off.
+        _ = writeToLogFile(msg, always_write);
     }
+}
+
+/// Append `bytes` under log_mutex, opening the file on demand when `lazy_open`.
+fn writeToLogFile(bytes: []const u8, lazy_open: bool) bool {
+    log_mutex.lock();
+    defer log_mutex.unlock();
+
+    var fd = log_fd.load(.acquire);
+    if (fd == -1) {
+        if (!lazy_open) return false;
+        fd = ensureFileOpen();
+    }
+    if (fd == -1) return false;
+    fd = reopenIfDeleted(fd);
+    if (fd == -1) return false;
+    _ = posix.write(fd, bytes) catch return false;
+    rotateIfOversize(fd);
+    return true;
+}
+
+/// Persist `bytes` to the log file, opening it on demand. Used by the flight recorder.
+pub fn appendToLogFile(bytes: []const u8) bool {
+    return writeToLogFile(bytes, true);
+}
+
+/// openLogFile only rotates on open; check the live fd after each write. Under log_mutex.
+fn rotateIfOversize(fd: posix.fd_t) void {
+    const st = posix.fstat(fd) catch return;
+    if (st.size <= max_log_size) return;
+    const old_fd = log_fd.swap(-1, .acq_rel);
+    if (old_fd != -1) posix.close(old_fd);
+    openLogFile();
+}
+
+/// Test hook: point the file writer at `path`; an empty path detaches it.
+pub fn setLogPathForTest(path: []const u8) void {
+    if (!builtin.is_test) return;
+    log_mutex.lock();
+    defer log_mutex.unlock();
+    const fd = log_fd.swap(-1, .acq_rel);
+    if (fd != -1) posix.close(fd);
+    if (path.len == 0 or path.len > log_path_buf.len) {
+        log_path_len = 0;
+        initialized = false;
+        return;
+    }
+    @memcpy(log_path_buf[0..path.len], path);
+    log_path_len = path.len;
+    initialized = true;
 }
 
 /// Format a wall-clock timestamp as "YYYY-MM-DDTHH:MM:SS.mmm".
@@ -330,7 +354,7 @@ fn wallClockTimestamp(buf: *[32]u8) []const u8 {
 }
 
 /// Returns the current CLOCK_MONOTONIC time in nanoseconds.
-fn monotonicNs() i128 {
+pub fn monotonicNs() i128 {
     var ts: linux.timespec = undefined;
     const rc = linux.clock_gettime(.MONOTONIC, &ts);
     if (rc != 0) return 0;

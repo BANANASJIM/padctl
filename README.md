@@ -187,8 +187,8 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 | `padctl config test <mapping>` | Live input preview against the mapping (no apply) |
 | `padctl scan` | Re-scan for connected devices |
 | `padctl dump enable\|disable` | Toggle opt-in diagnostic logging (persists across reboots) |
-| `padctl dump status` | Show logging state, log path, size, and time span |
-| `padctl dump export --period <N>m\|<N>h\|<N>d [-o file]` | Export recent log window for bug reports |
+| `padctl dump status` | Show logging state, flight recorder buffer, log path, size, and time span |
+| `padctl dump export --period <N>m\|<N>h\|<N>d [-o file]` | Export recent log window (including the always-on flight recorder buffer) for bug reports |
 | `padctl dump clear` | Delete all log files |
 
 ## Build

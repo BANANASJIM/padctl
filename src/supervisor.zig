@@ -25,6 +25,7 @@ const chord_detector_mod = @import("core/chord_detector.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
+const flight_recorder = @import("diagnostics/flight_recorder.zig");
 const socket_client = @import("cli/socket_client.zig");
 const event_loop = @import("event_loop.zig");
 
@@ -204,8 +205,8 @@ const PendingKind = enum { hidraw, input_grab };
 // not yet settled and a single ADD uevent must not be dropped permanently.
 const HOTPLUG_RETRY_BACKOFF_MS = [_]u32{ 300, 300, 500, 800, 1200, 1500, 1500, 1500 };
 
-// 8 fixed (stop, hup, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
-pub const SUPERVISOR_MAX_FDS: usize = 8 + 1 + 4;
+// 9 fixed (stop, hup, usr1, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
+pub const SUPERVISOR_MAX_FDS: usize = 9 + 1 + 4;
 
 /// Type-erased binding to the active dispatch's reload strategy. `ctx` points at
 /// the dispatch value living on `serveLoop`'s stack for the loop's duration.
@@ -219,6 +220,8 @@ pub const Supervisor = struct {
     managed: std.ArrayList(ManagedInstance),
     stop_fd: posix.fd_t,
     hup_fd: posix.fd_t,
+    /// SIGUSR1 signalfd, -1 when unavailable (test supervisors). Flushes the recorder.
+    usr1_fd: posix.fd_t = -1,
     netlink_fd: posix.fd_t,
     inotify_fd: posix.fd_t,
     debounce_fd: posix.fd_t,
@@ -341,6 +344,12 @@ pub const Supervisor = struct {
         const hup_fd = try posix.signalfd(-1, &hup_mask, 0);
         errdefer posix.close(hup_fd);
 
+        var usr1_mask = posix.sigemptyset();
+        posix.sigaddset(&usr1_mask, linux.SIG.USR1);
+        posix.sigprocmask(linux.SIG.BLOCK, &usr1_mask, null);
+        const usr1_fd = try posix.signalfd(-1, &usr1_mask, 0);
+        errdefer posix.close(usr1_fd);
+
         const nl_fd = netlink.openNetlinkUevent() catch |err| blk: {
             std.log.warn("netlink unavailable: {}", .{err});
             break :blk -1;
@@ -391,6 +400,7 @@ pub const Supervisor = struct {
             .managed = .{},
             .stop_fd = stop_fd,
             .hup_fd = hup_fd,
+            .usr1_fd = usr1_fd,
             .netlink_fd = nl_fd,
             .inotify_fd = inotify_result.inotify_fd,
             .debounce_fd = inotify_result.debounce_fd,
@@ -466,6 +476,7 @@ pub const Supervisor = struct {
         if (self.test_default_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
+        if (self.usr1_fd >= 0) posix.close(self.usr1_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
         if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
@@ -1648,10 +1659,11 @@ pub const Supervisor = struct {
     /// Slot indices into the pollfd array. `null` means the corresponding fd
     /// is unavailable (e.g. `initForTest` skips netlink/inotify/grace_timer).
     /// Stop and hup always occupy slots 0/1; the rest are assigned in the
-    /// fixed order netlink → inotify → debounce → hotplug_retry → grace_timer
-    /// → liveness_timer → listen, packed contiguously starting at slot 2.
+    /// fixed order usr1 -> netlink -> inotify -> debounce -> hotplug_retry ->
+    /// grace_timer -> liveness_timer -> listen, packed contiguously from slot 2.
     const SupervisorPollSet = struct {
         base_nfds: usize,
+        usr1_slot: ?usize,
         netlink_slot: ?usize,
         inotify_slot: ?usize,
         debounce_slot: ?usize,
@@ -1664,6 +1676,12 @@ pub const Supervisor = struct {
             pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
             pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
             var base_nfds: usize = 2;
+            const usr1_slot: ?usize = if (self.usr1_fd >= 0) blk: {
+                pollfds[base_nfds] = .{ .fd = self.usr1_fd, .events = posix.POLL.IN, .revents = 0 };
+                const s = base_nfds;
+                base_nfds += 1;
+                break :blk s;
+            } else null;
             const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
                 pollfds[base_nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
                 const s = base_nfds;
@@ -1709,6 +1727,7 @@ pub const Supervisor = struct {
 
             return .{
                 .base_nfds = base_nfds,
+                .usr1_slot = usr1_slot,
                 .netlink_slot = netlink_slot,
                 .inotify_slot = inotify_slot,
                 .debounce_slot = debounce_slot,
@@ -1731,6 +1750,8 @@ pub const Supervisor = struct {
         dispatch: anytype,
         comptime ppoll_propagate_err: bool,
     ) !void {
+        // Registered first so it runs last, after stopAll's teardown traces.
+        defer _ = flight_recorder.flush(.shutdown);
         defer self.stopAll();
 
         const Dispatch = @TypeOf(dispatch);
@@ -1772,6 +1793,15 @@ pub const Supervisor = struct {
                 _ = posix.read(self.hup_fd, &buf) catch {};
                 dispatch.reload(self);
                 pollfds[1].revents = 0;
+            }
+
+            if (set.usr1_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    var buf: [128]u8 = undefined;
+                    _ = posix.read(self.usr1_fd, &buf) catch {};
+                    _ = flight_recorder.flush(.signal);
+                    pollfds[slot].revents = 0;
+                }
             }
 
             if (set.netlink_slot) |slot| {
@@ -1881,6 +1911,7 @@ pub const Supervisor = struct {
             .dump_on => self.handleDump(fd, true),
             .dump_off => self.handleDump(fd, false),
             .dump_status => self.handleDumpStatus(fd),
+            .dump_flush => self.handleDumpFlush(fd),
             .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
         }
     }
@@ -2304,12 +2335,42 @@ pub const Supervisor = struct {
         cs.sendResponse(fd, resp_buf[0..pos]);
     }
 
+    /// Render the DUMP STATUS reply. Pure so the wire format is testable.
+    pub fn formatDumpStatus(
+        buf: []u8,
+        dump_on: bool,
+        recorder_lines: usize,
+        last: ?flight_recorder.LastFlush,
+    ) std.fmt.BufPrintError![]const u8 {
+        const state_str: []const u8 = if (dump_on) "on" else "off";
+        if (last) |l| {
+            return std.fmt.bufPrint(buf, "OK dump={s} recorder_lines={d} last_flush={s} last_flush_ms_ago={d}\n", .{
+                state_str, recorder_lines, l.reason.text(), l.ms_ago,
+            });
+        }
+        return std.fmt.bufPrint(buf, "OK dump={s} recorder_lines={d} last_flush=never\n", .{
+            state_str, recorder_lines,
+        });
+    }
+
     fn handleDumpStatus(self: *Supervisor, fd: posix.fd_t) void {
         const padctl_log = @import("log.zig");
         var cs = &self.ctrl_sock.?;
+        var resp_buf: [160]u8 = undefined;
+        const resp = formatDumpStatus(
+            &resp_buf,
+            padctl_log.isEnabled(),
+            flight_recorder.buffered(),
+            flight_recorder.lastFlush(),
+        ) catch return;
+        cs.sendResponse(fd, resp);
+    }
+
+    fn handleDumpFlush(self: *Supervisor, fd: posix.fd_t) void {
+        var cs = &self.ctrl_sock.?;
+        const lines = flight_recorder.flush(.export_request);
         var resp_buf: [64]u8 = undefined;
-        const state_str: []const u8 = if (padctl_log.isEnabled()) "on" else "off";
-        const resp = std.fmt.bufPrint(&resp_buf, "OK dump={s}\n", .{state_str}) catch return;
+        const resp = std.fmt.bufPrint(&resp_buf, "OK flushed={d}\n", .{lines}) catch return;
         cs.sendResponse(fd, resp);
     }
 
@@ -6309,4 +6370,20 @@ test "supervisor: SWITCH rejects absolute path outside mapping dirs" {
     var resp_buf: [64]u8 = undefined;
     const n = try posix.read(resp_fds[1], &resp_buf);
     try testing.expectEqualStrings("ERR mapping-not-allowed\n", resp_buf[0..n]);
+}
+
+test "supervisor: DUMP STATUS reply carries flight recorder fields" {
+    var buf: [160]u8 = undefined;
+    const never = try Supervisor.formatDumpStatus(&buf, false, 42, null);
+    try testing.expectEqualStrings("OK dump=off recorder_lines=42 last_flush=never\n", never);
+
+    var buf2: [160]u8 = undefined;
+    const flushed = try Supervisor.formatDumpStatus(&buf2, true, 7, .{
+        .reason = .rumble_stuck,
+        .ms_ago = 1234,
+    });
+    try testing.expectEqualStrings(
+        "OK dump=on recorder_lines=7 last_flush=rumble-stuck last_flush_ms_ago=1234\n",
+        flushed,
+    );
 }
