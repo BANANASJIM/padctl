@@ -190,8 +190,7 @@ fn slotStr(buf: *const [256]u8) []const u8 {
 const RUMBLE_MIN_INTERVAL_NS: i128 = rumble_writer_mod.DEFAULT_MIN_WRITE_INTERVAL_NS;
 const RUMBLE_RETRY_INTERVAL_NS: i128 = 10_000_000; // 10ms
 const RUMBLE_MAX_RETRY_ATTEMPTS: u8 = 3;
-/// A non-zero frame that is still the newest physical write after this long
-/// is treated as stuck and flushes the flight recorder once.
+/// Idle time after a non-zero frame before the rumble is treated as stuck.
 const STUCK_RUMBLE_NS: i128 = 10 * std.time.ns_per_s;
 
 fn commandMinIntervalNs(cmd: *const device_cfg.CommandConfig) u64 {
@@ -272,8 +271,6 @@ fn emitRumbleFrame(
     defer alloc.free(bytes);
     if (cmd.checksum) |*cs| applyChecksum(bytes, cs);
 
-    // Log the full post-checksum HID frame. The flight recorder buffers
-    // debug lines even with dump off, so this runs on every rumble frame.
     var hex_buf: [512]u8 = undefined;
     var hex_fbs = std.io.fixedBufferStream(&hex_buf);
     const hw = hex_fbs.writer();
@@ -510,14 +507,11 @@ pub const EventLoop = struct {
     pending_rumble_retry_count: u8,
     pending_rumble_generation: u64,
     last_heartbeat_ns: i128 = 0,
-    /// Monotonic time of the last non-zero physical rumble frame, or null when
-    /// the newest physical frame was a stop. Drives the stuck-rumble trigger.
+    /// Monotonic time of the last non-zero physical rumble frame; null after a stop.
     nonzero_rumble_since_ns: ?i128 = null,
-    /// True once the current non-zero episode has been reported. Cleared when
-    /// a zero frame reaches the device.
+    /// True once the current episode was reported; cleared by a zero frame.
     stuck_rumble_reported: bool = false,
-    /// Idle time after a non-zero frame before the flight recorder is flushed.
-    /// Only tests change it; the daemon always uses STUCK_RUMBLE_NS.
+    /// Stuck threshold; only tests change it.
     stuck_rumble_ns: i128 = STUCK_RUMBLE_NS,
     /// Last successfully emitted virtual button mask. Diagnostic tracing uses
     /// it to log output edges without flooding dumps with axis-only frames.
@@ -713,16 +707,14 @@ pub const EventLoop = struct {
         }
     }
 
-    /// Deadline at which an unrelieved non-zero rumble becomes reportable,
-    /// or null when nothing is outstanding or the episode was already logged.
+    /// Deadline at which an unrelieved non-zero rumble becomes reportable.
     fn stuckRumbleDeadline(self: *const EventLoop) ?i128 {
         if (self.stuck_rumble_reported) return null;
         const since = self.nonzero_rumble_since_ns orelse return null;
         return since + self.stuck_rumble_ns;
     }
 
-    /// Persist the trace window once a non-zero frame has been the newest
-    /// physical write for longer than `stuck_rumble_ns`.
+    /// Flush once per episode once a non-zero frame has been newest for `stuck_rumble_ns`.
     fn checkStuckRumble(self: *EventLoop, now_ns: i128) void {
         const deadline = self.stuckRumbleDeadline() orelse return;
         if (now_ns < deadline) return;
@@ -730,8 +722,7 @@ pub const EventLoop = struct {
         _ = flight_recorder.flush(.rumble_stuck);
     }
 
-    /// Mark the device gone, stop the loop, and persist the trace window that
-    /// preceded the disconnect.
+    /// Mark the device gone, stop the loop, and persist the trace window.
     fn markDisconnected(self: *EventLoop) void {
         self.disconnected = true;
         self.running = false;
@@ -881,8 +872,6 @@ pub const EventLoop = struct {
         switch (completion.result) {
             .written => {
                 self.recordRumbleWrite(completion.completed_ns, frame);
-                // Re-arm so the stuck-rumble deadline this write just moved is
-                // reflected in the timerfd; the scheduler deadline is unchanged.
                 self.armRumbleTimer(self.rumble_scheduler.nextDeadline());
             },
             .disconnected => self.handleRumbleDisconnect(ctx, frame),
@@ -906,9 +895,7 @@ pub const EventLoop = struct {
     }
 
     fn armRumbleTimer(self: *EventLoop, scheduler_deadline_ns: ?i128) void {
-        // The stuck deadline joins the scheduler and retry deadlines so the
-        // loop still wakes to report a stuck rumble on an otherwise idle
-        // device, where ppoll would block indefinitely.
+        // Include the stuck deadline so an idle device still wakes to report it.
         const pending = minDeadline(scheduler_deadline_ns, self.pending_rumble_deadline_ns);
         armRumbleStopFd(self.rumble_stop_fd, minDeadline(pending, self.stuckRumbleDeadline()));
     }
@@ -2185,7 +2172,6 @@ test "event_loop: stuck rumble flushes the flight recorder once per episode" {
     loop.recordRumbleWrite(0, .{ .strong = 0x8000, .weak = 0 });
     flight_recorder.record("trace-1");
 
-    // Before the threshold nothing is persisted.
     loop.checkStuckRumble(loop.stuck_rumble_ns - 1);
     try testing.expectEqual(@as(usize, 1), flight_recorder.buffered());
 
@@ -2218,7 +2204,6 @@ test "event_loop: stuck rumble deadline arms the rumble timerfd on an idle devic
     var armed = [1]posix.pollfd{.{ .fd = loop.rumble_stop_fd, .events = posix.POLL.IN, .revents = 0 }};
     try testing.expectEqual(@as(usize, 1), try posix.poll(&armed, 500));
 
-    // A zero frame closes the episode, so nothing keeps the timer armed.
     var expiry: [8]u8 = undefined;
     _ = posix.read(loop.rumble_stop_fd, &expiry) catch {};
     loop.recordRumbleWrite(monotonicNs(), .{ .strong = 0, .weak = 0 });

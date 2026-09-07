@@ -340,8 +340,7 @@ pub fn responseField(line: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Render the flight-recorder half of a DUMP STATUS response as one human
-/// line. Returns null when the daemon predates the recorder fields.
+/// Render the flight-recorder half of a DUMP STATUS reply; null on an old daemon.
 pub fn formatRecorderStatus(buf: []u8, response: []const u8) ?[]const u8 {
     const lines = responseField(response, "recorder_lines") orelse return null;
     const last = responseField(response, "last_flush") orelse return null;
@@ -352,9 +351,7 @@ pub fn formatRecorderStatus(buf: []u8, response: []const u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s} lines buffered, last flush: {s} {s}ms ago", .{ lines, last, ms_ago }) catch null;
 }
 
-/// Ask a running daemon to append its flight-recorder ring to the log file so
-/// an export includes the in-memory window. Best effort: no daemon, an old
-/// daemon, or a slow reply all fall through to exporting the file as-is.
+/// Best effort: ask a running daemon to flush its ring so the export includes it.
 fn requestFlush(socket_path: []const u8) void {
     const fd = socket_client.connectToSocket(socket_path) catch return;
     defer std.posix.close(fd);

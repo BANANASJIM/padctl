@@ -17,14 +17,11 @@ const flight_recorder = @import("../diagnostics/flight_recorder.zig");
 const rumble_scheduler_mod = @import("../core/rumble_scheduler.zig");
 const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
 
-/// A line pushed into the ring before the loop starts. The daemon fills the
-/// ring through `padctl_log.logFn`, which the test runner does not install as
-/// `std.options.logFn`, so these tests seed it directly and assert on what the
-/// trigger persisted.
+/// Seeded directly because the test runner does not install `padctl_log.logFn`
+/// as `std.options.logFn`, so daemon debug lines never reach the ring here.
 const recorder_seed_line = "seeded-trace-line";
 
-/// Point the log writer at `tmp` with dump off, clear the flight recorder and
-/// seed one line.
+/// Point the log writer at `tmp` with dump off, reset the ring and seed a line.
 fn attachRecorderLog(tmp: *std.testing.TmpDir) !void {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;

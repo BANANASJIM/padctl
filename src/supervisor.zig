@@ -205,8 +205,7 @@ const PendingKind = enum { hidraw, input_grab };
 // not yet settled and a single ADD uevent must not be dropped permanently.
 const HOTPLUG_RETRY_BACKOFF_MS = [_]u32{ 300, 300, 500, 800, 1200, 1500, 1500, 1500 };
 
-// 9 fixed (stop, hup, usr1, netlink, inotify, debounce, hotplug_retry, grace,
-// liveness) + 1 listen + 4 clients.
+// 9 fixed (stop, hup, usr1, netlink, inotify, debounce, hotplug_retry, grace, liveness) + 1 listen + 4 clients.
 pub const SUPERVISOR_MAX_FDS: usize = 9 + 1 + 4;
 
 /// Type-erased binding to the active dispatch's reload strategy. `ctx` points at
@@ -221,8 +220,7 @@ pub const Supervisor = struct {
     managed: std.ArrayList(ManagedInstance),
     stop_fd: posix.fd_t,
     hup_fd: posix.fd_t,
-    /// SIGUSR1 signalfd: flushes the flight recorder to the log file.
-    /// -1 when unavailable (test supervisors).
+    /// SIGUSR1 signalfd, -1 when unavailable (test supervisors). Flushes the recorder.
     usr1_fd: posix.fd_t = -1,
     netlink_fd: posix.fd_t,
     inotify_fd: posix.fd_t,
@@ -1661,8 +1659,8 @@ pub const Supervisor = struct {
     /// Slot indices into the pollfd array. `null` means the corresponding fd
     /// is unavailable (e.g. `initForTest` skips netlink/inotify/grace_timer).
     /// Stop and hup always occupy slots 0/1; the rest are assigned in the
-    /// fixed order usr1 → netlink → inotify → debounce → hotplug_retry →
-    /// grace_timer → liveness_timer → listen, packed contiguously from slot 2.
+    /// fixed order usr1 -> netlink -> inotify -> debounce -> hotplug_retry ->
+    /// grace_timer -> liveness_timer -> listen, packed contiguously from slot 2.
     const SupervisorPollSet = struct {
         base_nfds: usize,
         usr1_slot: ?usize,
@@ -1752,8 +1750,7 @@ pub const Supervisor = struct {
         dispatch: anytype,
         comptime ppoll_propagate_err: bool,
     ) !void {
-        // Registered first so it runs last: the shutdown window then includes
-        // the teardown traces stopAll produces.
+        // Registered first so it runs last, after stopAll's teardown traces.
         defer _ = flight_recorder.flush(.shutdown);
         defer self.stopAll();
 
@@ -2338,8 +2335,7 @@ pub const Supervisor = struct {
         cs.sendResponse(fd, resp_buf[0..pos]);
     }
 
-    /// Render the DUMP STATUS reply. Pure so the wire format is testable
-    /// without a control socket.
+    /// Render the DUMP STATUS reply. Pure so the wire format is testable.
     pub fn formatDumpStatus(
         buf: []u8,
         dump_on: bool,

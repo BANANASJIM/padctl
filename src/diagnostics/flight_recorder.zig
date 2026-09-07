@@ -4,7 +4,7 @@ const padctl_log = @import("../log.zig");
 
 /// Lines held in the ring before the oldest is overwritten.
 pub const RING_LINES: usize = 1024;
-/// Bytes stored per line (`conventions/logging.md` §5).
+/// Bytes stored per line (`conventions/logging.md` section 5).
 pub const LINE_MAX: usize = 256;
 /// Minimum spacing between two automatic flushes.
 pub const MIN_FLUSH_INTERVAL_NS: i128 = 30 * std.time.ns_per_s;
@@ -28,8 +28,7 @@ pub const Reason = enum {
         };
     }
 
-    /// Automatic triggers fire from fault paths that can repeat quickly, so
-    /// they are rate limited. Operator-initiated flushes never are.
+    /// Automatic triggers repeat quickly so they are rate limited; explicit ones are not.
     fn automatic(self: Reason) bool {
         return switch (self) {
             .rumble_stuck, .rumble_write_dropped, .disconnect => true,
@@ -43,9 +42,8 @@ pub const LastFlush = struct {
     ms_ago: u64,
 };
 
-/// Serializes the ring across device threads, the rumble writer worker and
-/// the supervisor thread. Lock order is `mutex` then the log file mutex;
-/// never the reverse, so `flush` may log a warning while holding it.
+/// Serializes the ring. Lock order is `mutex` then the log file mutex, never the
+/// reverse, so `flush` may log a warning while holding it.
 var mutex: std.Thread.Mutex = .{};
 var ring: [RING_LINES][LINE_MAX]u8 = undefined;
 var lens: [RING_LINES]u16 = .{0} ** RING_LINES;
@@ -63,8 +61,7 @@ fn nowNs() i128 {
     return padctl_log.monotonicNs();
 }
 
-/// Store one formatted log line. The trailing newline is dropped and the
-/// content truncated to `LINE_MAX`; `flush` re-adds the separator.
+/// Store one formatted log line, minus its newline, truncated to `LINE_MAX`.
 pub fn record(line: []const u8) void {
     const trimmed = std.mem.trimRight(u8, line, "\r\n");
     if (trimmed.len == 0) return;
@@ -99,10 +96,8 @@ pub fn lastFlush() ?LastFlush {
     };
 }
 
-/// Append the buffered lines to the padctl log file, framed by
-/// `FLIGHT_RECORDER begin`/`end`, then clear the ring. Returns the number of
-/// lines written — zero when the ring is empty, the automatic trigger was
-/// rate limited, or the log file could not be written.
+/// Append the buffered lines to the padctl log file between FLIGHT_RECORDER
+/// markers and clear the ring. Returns lines written; 0 when nothing was.
 pub fn flush(reason: Reason) usize {
     mutex.lock();
     defer mutex.unlock();
@@ -144,8 +139,7 @@ pub fn flush(reason: Reason) usize {
     return written;
 }
 
-/// Buffer `data`, spilling to the log file whenever the staging buffer fills
-/// so a full ring costs tens of writes rather than one per line.
+/// Buffer `data`, spilling to the log file whenever the staging buffer fills.
 fn append(out: *[4096]u8, used: *usize, data: []const u8) bool {
     var rest = data;
     while (rest.len > 0) {
@@ -161,8 +155,7 @@ fn append(out: *[4096]u8, used: *usize, data: []const u8) bool {
     return true;
 }
 
-/// Report an unwritable log file once per process and keep the ring intact so
-/// a later flush (e.g. after `padctl dump enable`) can still persist it.
+/// Warn once per process and keep the ring so a later flush can still persist it.
 fn warnUnwritable() usize {
     if (unwritable_warns == 0) {
         std.log.warn("flight recorder: log file unwritable, flush dropped ({d} lines buffered)", .{count});
@@ -200,8 +193,7 @@ pub fn setClockForTest(ns: ?i128) void {
 
 const testing = std.testing;
 
-/// Redirect the log writer into `tmp` and reset recorder state. The returned
-/// path stays valid for the lifetime of `buf`.
+/// Redirect the log writer into `tmp` and reset recorder state.
 fn attachTestLog(tmp: *std.testing.TmpDir, buf: []u8) ![]const u8 {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try tmp.dir.realpath(".", &dir_buf);
@@ -258,7 +250,6 @@ test "flight_recorder: ring overwrites the oldest line at capacity" {
 
     const content = try readTestLog(&tmp);
     defer testing.allocator.free(content);
-    // The three oldest lines were overwritten; the newest survived.
     try testing.expect(std.mem.indexOf(u8, content, "\nline-0\n") == null);
     try testing.expect(std.mem.indexOf(u8, content, "\nline-2\n") == null);
     try testing.expect(std.mem.indexOf(u8, content, "\nline-3\n") != null);
@@ -335,7 +326,6 @@ test "flight_recorder: automatic flush is rate limited, explicit flush is not" {
     // Explicit triggers ignore the window.
     try testing.expectEqual(@as(usize, 1), flush(.export_request));
 
-    // Past the window an automatic trigger fires again.
     setClockForTest(2 * MIN_FLUSH_INTERVAL_NS);
     record("c");
     try testing.expectEqual(@as(usize, 1), flush(.rumble_write_dropped));

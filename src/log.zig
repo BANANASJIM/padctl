@@ -261,11 +261,6 @@ pub fn logFn(
     const msg = fbs.getWritten();
     if (msg.len == 0) return;
 
-    // .debug lines are verbose scheduler / HID traces. With dump off they
-    // reach neither the journal nor the log file; the flight recorder keeps
-    // the most recent ones in memory so a later trigger can persist the
-    // window that preceded a fault. .info / .warn / .err always flow as
-    // normal.
     if (is_debug and !dump_enabled.load(.acquire)) {
         flight_recorder.record(msg);
         return;
@@ -282,8 +277,7 @@ pub fn logFn(
     }
 }
 
-/// Append `bytes` to the log file, opening it on demand when `lazy_open` is
-/// set. Returns true when the bytes reached the file. Takes log_mutex.
+/// Append `bytes` under log_mutex, opening the file on demand when `lazy_open`.
 fn writeToLogFile(bytes: []const u8, lazy_open: bool) bool {
     log_mutex.lock();
     defer log_mutex.unlock();
@@ -301,18 +295,12 @@ fn writeToLogFile(bytes: []const u8, lazy_open: bool) bool {
     return true;
 }
 
-/// Persist `bytes` to the log file, opening it on demand. Used by the flight
-/// recorder, whose output must reach disk regardless of the dump toggle.
+/// Persist `bytes` to the log file, opening it on demand. Used by the flight recorder.
 pub fn appendToLogFile(bytes: []const u8) bool {
     return writeToLogFile(bytes, true);
 }
 
-/// Post-write rotation. openLogFile only rotates at fresh open (startup /
-/// lazy open), so without this check a long dump session grows past
-/// max_log_size_mb until the daemon restarts — at ~100 FF frames/s a
-/// default 100 MiB cap is blown through in under two hours. Stat the live
-/// fd; when it crosses the threshold, close + reopen, which walks through
-/// openLogFile's rotate-rename path. Must be called under log_mutex.
+/// openLogFile only rotates on open; check the live fd after each write. Under log_mutex.
 fn rotateIfOversize(fd: posix.fd_t) void {
     const st = posix.fstat(fd) catch return;
     if (st.size <= max_log_size) return;
@@ -321,9 +309,7 @@ fn rotateIfOversize(fd: posix.fd_t) void {
     openLogFile();
 }
 
-/// Test hook: point the file writer at `path` without touching the
-/// environment, so tests never write to the real state directory. An empty
-/// path detaches the writer entirely.
+/// Test hook: point the file writer at `path`; an empty path detaches it.
 pub fn setLogPathForTest(path: []const u8) void {
     if (!builtin.is_test) return;
     log_mutex.lock();
