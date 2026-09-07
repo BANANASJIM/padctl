@@ -1,0 +1,99 @@
+name: AUR Sync
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to sync to AUR (e.g. v0.1.26)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to sync to AUR (e.g. v0.1.26)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update-aur:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(inputs.tag, '-rc') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SHA256SUMS from release
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${TAG}" --pattern SHA256SUMS.txt --repo "${{ github.repository }}"
+
+      - name: Setup SSH
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${AUR_SSH_KEY}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          echo "Host aur.archlinux.org" >> ~/.ssh/config
+          echo "  IdentityFile ~/.ssh/aur" >> ~/.ssh/config
+          echo "  User aur" >> ~/.ssh/config
+          echo "  StrictHostKeyChecking yes" >> ~/.ssh/config
+          # pinned AUR host key, no runtime ssh-keyscan (avoids TOFU/MITM)
+          echo 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' >> ~/.ssh/known_hosts
+
+      - name: Update padctl-bin PKGBUILD
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          X86_HASH=$(grep "x86_64-linux-musl" SHA256SUMS.txt | awk '{print $1}')
+          ARM_HASH=$(grep "aarch64-linux-musl" SHA256SUMS.txt | awk '{print $1}')
+
+          # AUR has occasional maintenance windows that reject SSH connections;
+          # retry the AUR-facing git operations instead of failing the release.
+          retry() {
+            local n=1 max=6 delay=300
+            until "$@"; do
+              if [ "$n" -ge "$max" ]; then
+                echo "::error::command failed after ${max} attempts: $*"
+                return 1
+              fi
+              echo "attempt ${n}/${max} failed, retrying in $((delay / 60))m: $*"
+              n=$((n + 1))
+              sleep "${delay}"
+            done
+          }
+
+          clone_aur_repo() {
+            rm -rf /tmp/padctl-bin
+            git clone ssh://aur@aur.archlinux.org/padctl-bin.git /tmp/padctl-bin
+          }
+
+          retry clone_aur_repo
+          cd /tmp/padctl-bin
+
+          cp "${GITHUB_WORKSPACE}/contrib/aur/padctl-bin/PKGBUILD" PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${X86_HASH}')/" PKGBUILD
+          sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${ARM_HASH}')/" PKGBUILD
+
+          HOST_UID=$(id -u)
+          docker run --rm -v "$PWD:/pkg" archlinux:latest bash -c \
+            "pacman -Sy --noconfirm pacman-contrib fakeroot binutils namcap && useradd -m -u ${HOST_UID} builder && su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO && namcap PKGBUILD'"
+          sudo chown -R "$(id -u):$(id -g)" /tmp/padctl-bin || true
+
+          # --global writes to ~/.gitconfig (runner home), not .git/config which may be owned by builder uid
+          git config --global user.name "bananasjim"
+          git config --global user.email "bananasjim1@gmail.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "::notice::AUR padctl-bin already at ${VERSION}, nothing to push"
+            exit 0
+          fi
+          git commit -m "update to ${VERSION}"
+          retry git push
