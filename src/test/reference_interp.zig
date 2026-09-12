@@ -78,22 +78,10 @@ fn applyTransform(val: i64, op: TransformOp, a: i64, b: i64, t_max: i64) i64 {
     };
 }
 
-// type_max for a FieldType — mirrors production's typeMaxByTag.
-fn typeMax(t: FieldType) i64 {
-    return switch (t) {
-        .u8 => 255,
-        .i8 => 127,
-        .u16le, .u16be => 65535,
-        .i16le, .i16be => 32767,
-        .u32le, .u32be => 4294967295,
-        .i32le, .i32be => 2147483647,
-    };
-}
-
 pub fn runChain(initial: i64, cf: *const CompiledField) i64 {
     if (!cf.has_transform) return initial;
     var val = initial;
-    const t_max = typeMax(cf.transforms.type_tag);
+    const t_max = cf.transforms.t_max;
     for (cf.transforms.items[0..cf.transforms.len]) |tr| {
         val = applyTransform(val, tr.op, tr.a, tr.b, t_max);
     }

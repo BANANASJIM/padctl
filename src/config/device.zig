@@ -572,9 +572,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                 }
 
                 if (field.bits) |bits| {
-                    // bits mode: mutual exclusivity
+                    // bits mode: bits[0] is the byte offset, so `offset` is redundant
                     if (field.offset != null) return error.InvalidConfig;
-                    if (field.transform != null) return error.InvalidConfig;
                     if (bits.len != 3) return error.InvalidConfig;
                     if (bits[1] < 0 or bits[1] > 7) return error.InvalidConfig;
                     if (bits[2] < 1 or bits[2] > 32) return error.InvalidConfig;

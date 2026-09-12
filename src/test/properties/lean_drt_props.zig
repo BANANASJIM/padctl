@@ -95,7 +95,7 @@ test "lean_drt: transform negate vectors" {
         const t_max_raw = try parseUint(f[2]);
         const expected = try parseInt(f[3]);
         const op: interp.TransformOp = if (std.mem.eql(u8, f[0], "negate")) .negate else .abs;
-        var chain = interp.CompiledTransformChain{ .type_tag = try tMaxToFieldType(t_max_raw) };
+        var chain = interp.CompiledTransformChain{ .t_max = @intCast(t_max_raw) };
         chain.items[0] = .{ .op = op };
         chain.len = 1;
         const actual = interp.runTransformChain(input, &chain);
@@ -117,7 +117,7 @@ test "lean_drt: transform clamp vectors" {
         const lo = try parseInt(f[2]);
         const hi = try parseInt(f[3]);
         const expected = try parseInt(f[4]);
-        var chain = interp.CompiledTransformChain{ .type_tag = .u8 };
+        var chain = interp.CompiledTransformChain{ .t_max = interp.typeMaxByTag(.u8) };
         chain.items[0] = .{ .op = .clamp, .a = lo, .b = hi };
         chain.len = 1;
         const actual = interp.runTransformChain(input, &chain);
@@ -138,7 +138,7 @@ test "lean_drt: transform deadzone vectors" {
         const input = try parseInt(f[1]);
         const threshold = try parseInt(f[2]);
         const expected = try parseInt(f[3]);
-        var chain = interp.CompiledTransformChain{ .type_tag = .u8 };
+        var chain = interp.CompiledTransformChain{ .t_max = interp.typeMaxByTag(.u8) };
         chain.items[0] = .{ .op = .deadzone, .a = threshold };
         chain.len = 1;
         const actual = interp.runTransformChain(input, &chain);
@@ -162,7 +162,7 @@ test "lean_drt: transform scale vectors" {
         const a = try parseInt(f[3]);
         const b = try parseInt(f[4]);
         const expected = try parseInt(f[5]);
-        var chain = interp.CompiledTransformChain{ .type_tag = try tMaxToFieldType(t_max_raw) };
+        var chain = interp.CompiledTransformChain{ .t_max = @intCast(t_max_raw) };
         chain.items[0] = .{ .op = .scale, .a = a, .b = b };
         chain.len = 1;
         const actual = interp.runTransformChain(input, &chain);
@@ -187,7 +187,7 @@ test "lean_drt: transform chain vectors" {
         while (expected_idx > 2 and f[expected_idx].len == 0) : (expected_idx -= 1) {}
         const expected = try parseInt(f[expected_idx]);
 
-        var chain = interp.CompiledTransformChain{ .type_tag = try tMaxToFieldType(t_max_raw) };
+        var chain = interp.CompiledTransformChain{ .t_max = @intCast(t_max_raw) };
         chain.len = 0;
         for (2..expected_idx) |i| {
             if (f[i].len == 0) continue; // empty chain slot
@@ -496,16 +496,6 @@ fn buttonNameFromIndex(idx: u64) ![]const u8 {
 }
 
 // --- Helpers ---
-
-fn tMaxToFieldType(t_max: u64) !interp.FieldType {
-    return switch (t_max) {
-        255 => .u8,
-        127 => .i8,
-        65535 => .u16le,
-        32767 => .i16le,
-        else => error.UnknownFieldType,
-    };
-}
 
 fn parseLeanFieldType(s: []const u8) !interp.FieldType {
     if (std.mem.eql(u8, s, "FieldType.u8")) return .u8;

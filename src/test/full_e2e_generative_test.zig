@@ -436,27 +436,34 @@ fn writeFieldValue(buf: []u8, offset: usize, t: FieldType, value: i64) void {
 }
 
 const FieldTag = interp_mod.FieldTag;
-const CompiledTransformChain = interp_mod.CompiledTransformChain;
+const CompiledField = interp_mod.CompiledField;
 const TransformOp = interp_mod.TransformOp;
 
 // Compute the max round-trip error for a compiled field's transform chain.
 // Returns maxInt for non-invertible transforms or cases where the inverse
 // cannot faithfully round-trip (abs, deadzone, negate on unsigned, scale
 // with range smaller than GamepadState).
+fn fieldIsSigned(cf: *const CompiledField) bool {
+    return switch (cf.mode) {
+        .bits => cf.is_signed,
+        .standard => switch (cf.type_tag) {
+            .i8, .i16le, .i16be, .i32le, .i32be => true,
+            else => false,
+        },
+    };
+}
+
 fn scaleToleranceForTag(cr: *const CompiledReport, tag: FieldTag) i32 {
     for (cr.fields[0..cr.field_count]) |*cf| {
         if (cf.tag != tag) continue;
         if (!cf.has_transform) return 1;
-        const is_unsigned = switch (cf.transforms.type_tag) {
-            .u8, .u16le, .u16be, .u32le, .u32be => true,
-            else => false,
-        };
+        const is_unsigned = !fieldIsSigned(cf);
         for (cf.transforms.items[0..cf.transforms.len]) |tr| {
             if (tr.op == .abs or tr.op == .deadzone) return std.math.maxInt(i32);
             if (tr.op == .negate and is_unsigned) return std.math.maxInt(i32);
             if (tr.op == .scale) {
-                const t_max = interp_mod.typeMaxByTag(cf.transforms.type_tag);
-                if (t_max == 0) return std.math.maxInt(i32);
+                const t_max = cf.transforms.t_max;
+                if (t_max <= 0) return std.math.maxInt(i32);
                 const span: i64 = tr.b - tr.a;
                 if (span == 0) return std.math.maxInt(i32);
                 // If scale output range is narrower than GamepadState i32,
@@ -474,7 +481,8 @@ fn scaleToleranceForTag(cr: *const CompiledReport, tag: FieldTag) i32 {
 
 // Apply inverse of the transform chain so that production forward-transform yields val.
 // Processes transforms in reverse order; skips abs/clamp/deadzone (not invertible).
-fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
+fn applyInverseTransforms(val: i64, cf: *const CompiledField) i64 {
+    const chain = &cf.transforms;
     var v = val;
     var i: usize = chain.len;
     while (i > 0) {
@@ -487,19 +495,9 @@ fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
                 if (span == 0) break :blk v;
                 // Forward transform: raw_val * (b - a) / t_max + a
                 // Inverse: (v - a) * t_max / (b - a)
-                // For signed types, use the full range [-t_max-1, t_max] for negative values.
-                const is_signed = switch (chain.type_tag) {
-                    .i8, .i16le, .i16be, .i32le, .i32be => true,
-                    else => false,
-                };
-                const t_max: i128 = switch (chain.type_tag) {
-                    .u8 => 255,
-                    .i8 => 127,
-                    .u16le, .u16be => 65535,
-                    .i16le, .i16be => 32767,
-                    .u32le, .u32be => 4294967295,
-                    .i32le, .i32be => 2147483647,
-                };
+                // For signed fields, use the full range [-t_max-1, t_max] for negative values.
+                const is_signed = fieldIsSigned(cf);
+                const t_max: i128 = chain.t_max;
                 const shifted: i128 = @as(i128, v) - tr.a;
                 if (is_signed and shifted < 0) {
                     // Negative range uses t_max+1 denominator for symmetric inversion
@@ -521,7 +519,7 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
         const val = getDeltaFieldForTag(delta, cf.tag) orelse continue;
         if (cf.mode == .standard) {
             // Apply inverse transforms so production forward-transform yields val.
-            const raw_val = if (cf.has_transform) applyInverseTransforms(val, &cf.transforms) else val;
+            const raw_val = if (cf.has_transform) applyInverseTransforms(val, cf) else val;
             writeFieldValue(buf, cf.offset, cf.type_tag, raw_val);
         } else {
             // bits mode

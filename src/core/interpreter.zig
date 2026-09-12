@@ -64,6 +64,16 @@ pub fn signExtend(val: u32, bit_count: u6) i32 {
     return @as(i32, @bitCast(val << shift)) >> shift;
 }
 
+// Full scale of a bit field: the largest value it can carry.  Unsigned fields
+// span 0..2^len-1, signed fields -2^(len-1)..2^(len-1)-1, so the positive
+// maximum is 2^len-1 and 2^(len-1)-1 respectively.
+pub fn bitsFullScale(bit_count: u6, is_signed: bool) i64 {
+    const width: u32 = @min(@as(u32, bit_count), 32);
+    const effective = if (is_signed) (if (width == 0) 0 else width - 1) else width;
+    if (effective == 0) return 0;
+    return (@as(i64, 1) << @intCast(effective)) - 1;
+}
+
 // --- compile-time field name catalogue ---
 
 pub const FieldTag = enum {
@@ -187,11 +197,14 @@ pub const MAX_TRANSFORMS = state.MAX_TRANSFORMS;
 pub const CompiledTransformChain = struct {
     items: [MAX_TRANSFORMS]CompiledTransform = undefined,
     len: u8 = 0,
-    type_tag: FieldType,
+    // Full scale of the source field: the `scale` denominator and the point at
+    // which `negate`/`abs` saturate.  Standard fields take it from their type,
+    // bit fields from their declared width (see `bitsFullScale`).
+    t_max: i64,
 };
 
-pub fn compileTransformChain(chain: []const u8, type_tag: FieldType) CompiledTransformChain {
-    var result = CompiledTransformChain{ .type_tag = type_tag };
+pub fn compileTransformChain(chain: []const u8, t_max: i64) CompiledTransformChain {
+    var result = CompiledTransformChain{ .t_max = t_max };
     var pos: usize = 0;
     var depth: usize = 0;
     var seg_start: usize = 0;
@@ -242,7 +255,7 @@ fn compileTransformSeg(seg: []const u8) CompiledTransform {
 
 pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64 {
     var val = initial;
-    const t_max = typeMaxByTag(chain.type_tag);
+    const t_max = chain.t_max;
     for (chain.items[0..chain.len]) |tr| {
         // Lean oracle (formal/lean/Padctl/Transform.lean): negate/abs saturate
         // at the single type-min point `val == Int.negSucc tMax` (= -(t_max+1))
@@ -259,9 +272,9 @@ pub fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64
             },
             .scale => blk: {
                 if (t_max == 0) break :blk val;
-                // Denominator is t_max (positive half of the type range).
-                // For unsigned types this is exact: input range [0, t_max].
-                // For signed types input range is [-t_max-1, t_max]; values
+                // Denominator is t_max (positive half of the source range).
+                // For unsigned sources this is exact: input range [0, t_max].
+                // For signed sources input range is [-t_max-1, t_max]; values
                 // below -t_max produce out-of-range output that saturateCast
                 // clamps.  In practice, signed types are rarely scaled; the
                 // common case is u8 → i16 via scale(-32768, 32767).
@@ -381,7 +394,7 @@ fn compileReport(report: *const ReportConfig) CompiledReport {
                     .has_transform = false,
                 };
                 if (fc.transform) |tr| {
-                    cf.transforms = compileTransformChain(tr, .u8);
+                    cf.transforms = compileTransformChain(tr, bitsFullScale(cf.bit_count, is_signed));
                     cf.has_transform = true;
                 }
                 cr.fields[cr.field_count] = cf;
@@ -404,7 +417,7 @@ fn compileReport(report: *const ReportConfig) CompiledReport {
                     .has_transform = false,
                 };
                 if (fc.transform) |tr| {
-                    cf.transforms = compileTransformChain(tr, type_tag);
+                    cf.transforms = compileTransformChain(tr, typeMaxByTag(type_tag));
                     cf.has_transform = true;
                 }
                 cr.fields[cr.field_count] = cf;
@@ -1897,19 +1910,19 @@ test "mutation audit: readFieldByTag offset boundary" {
 // Mutation 2a: negate(-32768) — without the minInt guard, -(-32768) overflows i64
 // The guard returns maxInt(i64) instead of crashing/wrapping.
 test "mutation audit: negate minInt guard" {
-    // chain type_tag doesn't matter for negate; use i16le (type_max=32767)
-    var chain = compileTransformChain("negate", .i16le);
+    // the full scale only moves the guard point; use i16le's 32767
+    var chain = compileTransformChain("negate", typeMaxByTag(.i16le));
     const result = runTransformChain(std.math.minInt(i64), &chain);
     // A naive -val without guard would overflow or wrap to minInt(i64) again
     try testing.expectEqual(@as(i64, std.math.maxInt(i64)), result);
 }
 
 // Mutation 2b: scale boundary correctness — verify scale math at boundary values.
-// Note: the t_max==0 guard in runTransformChain is defensive code; typeMaxByTag never
-// returns 0 for any valid FieldType, so that branch is unreachable with current types.
+// Note: the t_max==0 guard in runTransformChain only fires for a 1-bit signed
+// field, whose full scale is 0; every FieldType yields a positive denominator.
 test "mutation audit: scale boundary correctness" {
     // scale(0, 100) on u8 type_max=255: scaled(v) = v * 100 / 255
-    var chain = compileTransformChain("scale(0, 100)", .u8);
+    var chain = compileTransformChain("scale(0, 100)", typeMaxByTag(.u8));
     // val = type_max (255): 255 * 100 / 255 = 100 (upper boundary maps to b)
     const result = runTransformChain(255, &chain);
     try testing.expectEqual(@as(i64, 100), result);
@@ -1922,7 +1935,7 @@ test "mutation audit: scale boundary correctness" {
 // out-of-range intermediate that saturateCast clamps to minInt.  Document current behavior.
 test "interpreter: scale signed type minInt edge case" {
     // scale(-32768, 32767) on i16le type_max=32767
-    var chain = compileTransformChain("scale(-32768, 32767)", .i16le);
+    var chain = compileTransformChain("scale(-32768, 32767)", typeMaxByTag(.i16le));
     // val = -32768: (-32768 * 65535) / 32767 + (-32768) = out-of-range, saturated by caller
     // runTransformChain itself returns the raw i64 before saturation; document that value.
     const result = runTransformChain(-32768, &chain);
