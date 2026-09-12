@@ -1661,6 +1661,156 @@ test "interpreter: bits field unsigned default" {
     try testing.expectEqual(@as(?u8, 255), delta.lt);
 }
 
+// --- bits + transform composition ---
+
+const ten_bit_trigger_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 8
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\rt = { bits = [4, 6, 10], transform = "scale(0, 255)" }
+;
+
+const ten_bit_trigger_raw_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 8
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\rt = { bits = [4, 6, 10] }
+;
+
+// Packs `value` into the 10 bits starting at bit 6 of bytes [4..6] and returns rt.
+fn processTenBitTrigger(toml_str: []const u8, value: u16) !?u8 {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 8;
+    raw[0] = 0x01;
+    std.mem.writeInt(u16, raw[4..6], value << 6, .little);
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    return delta.rt;
+}
+
+test "interpreter: 10-bit trigger with scale covers the full u8 range" {
+    try testing.expectEqual(@as(?u8, 0), try processTenBitTrigger(ten_bit_trigger_toml, 0));
+    try testing.expectEqual(@as(?u8, 127), try processTenBitTrigger(ten_bit_trigger_toml, 511));
+    try testing.expectEqual(@as(?u8, 127), try processTenBitTrigger(ten_bit_trigger_toml, 512));
+    try testing.expectEqual(@as(?u8, 255), try processTenBitTrigger(ten_bit_trigger_toml, 1023));
+}
+
+// 255/1023 is ~25% of travel. A u8 denominator would map it to full 255 and
+// saturate everything above it; the declared 10-bit full scale gives 63.
+test "interpreter: 10-bit trigger scale uses the declared bit width as full scale" {
+    try testing.expectEqual(@as(?u8, 63), try processTenBitTrigger(ten_bit_trigger_toml, 255));
+    try testing.expectEqual(@as(?u8, 191), try processTenBitTrigger(ten_bit_trigger_toml, 767));
+}
+
+// Without a transform a wide bits field keeps saturating at the u8 field range.
+test "interpreter: 10-bit trigger without transform saturates at 255" {
+    try testing.expectEqual(@as(?u8, 255), try processTenBitTrigger(ten_bit_trigger_raw_toml, 1023));
+    try testing.expectEqual(@as(?u8, 200), try processTenBitTrigger(ten_bit_trigger_raw_toml, 200));
+}
+
+test "interpreter: 4-bit unsigned bits field scales from its own full scale" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 4
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.fields]
+        \\battery_level = { bits = [2, 0, 4], transform = "scale(0, 100)" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 4;
+    raw[0] = 0x01;
+    raw[2] = 0x0A; // 10 of 15 → 10 * 100 / 15 = 66
+    const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 66), delta.battery_level);
+    raw[2] = 0x0F; // full scale → 100
+    const full = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?u8, 100), full.battery_level);
+}
+
+const signed_bits_transform_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 8
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0x01]
+    \\[report.fields]
+    \\left_x = { bits = [1, 0, 10], type = "signed", transform = "negate" }
+    \\right_x = { bits = [3, 0, 10], type = "signed", transform = "abs" }
+;
+
+// negate/abs saturate at the single minimum of the declared width: a 10-bit
+// signed field spans -512..511, so -512 maps to 511 instead of overflowing.
+test "interpreter: signed bits negate and abs guard at the declared width minimum" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, signed_bits_transform_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var raw = [_]u8{0} ** 8;
+    raw[0] = 0x01;
+    std.mem.writeInt(u16, raw[1..3], 0x0200, .little); // -512
+    std.mem.writeInt(u16, raw[3..5], 0x0200, .little); // -512
+    const guarded = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, 511), guarded.ax);
+    try testing.expectEqual(@as(?i16, 511), guarded.rx);
+
+    // The guard is a single point, not a range clamp.
+    std.mem.writeInt(u16, raw[1..3], 0x039C, .little); // -100
+    std.mem.writeInt(u16, raw[3..5], 0x039C, .little); // -100
+    const ordinary = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, 100), ordinary.ax);
+    try testing.expectEqual(@as(?i16, 100), ordinary.rx);
+}
+
 test "interpreter: extractBits: start_bit=7 single bit" {
     try testing.expectEqual(@as(u32, 1), extractBits(&[_]u8{0x80}, 0, 7, 1));
     try testing.expectEqual(@as(u32, 0), extractBits(&[_]u8{0x7F}, 0, 7, 1));

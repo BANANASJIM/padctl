@@ -141,6 +141,29 @@ private def emitChainVectors : IO Unit := do
   -- empty chain
   let v5 := runTransformChain 42 [] 255
   println s!"42,255,,{intToString v5}"
+  -- declared-width denominators: 10-bit unsigned field, full scale 1023
+  let v6 := runTransformChain 1023 [.scale 0 255] 1023
+  println s!"1023,1023,scale:0:255,{intToString v6}"
+  if v6 != 255 then
+    throw (IO.userError s!"SELF-CHECK FAILED: chain scale(0,255) of 1023 at tMax=1023 = {intToString v6}, expected 255")
+  let v7 := runTransformChain 255 [.scale 0 255] 1023
+  println s!"255,1023,scale:0:255,{intToString v7}"
+  if v7 != 63 then
+    throw (IO.userError s!"SELF-CHECK FAILED: chain scale(0,255) of 255 at tMax=1023 = {intToString v7}, expected 63")
+  -- declared-width denominators: 10-bit signed field, full scale 511,
+  -- negate/abs guard at the single minimum -512
+  let v8 := runTransformChain (-512) [.negate] 511
+  println s!"-512,511,negate,{intToString v8}"
+  if v8 != 511 then
+    throw (IO.userError s!"SELF-CHECK FAILED: chain negate of -512 at tMax=511 = {intToString v8}, expected 511")
+  let v9 := runTransformChain (-512) [.abs] 511
+  println s!"-512,511,abs,{intToString v9}"
+  if v9 != 511 then
+    throw (IO.userError s!"SELF-CHECK FAILED: chain abs of -512 at tMax=511 = {intToString v9}, expected 511")
+  let v10 := runTransformChain (-100) [.negate] 511
+  println s!"-100,511,negate,{intToString v10}"
+  if v10 != 100 then
+    throw (IO.userError s!"SELF-CHECK FAILED: chain negate of -100 at tMax=511 = {intToString v10}, expected 100")
 
 /-! ## Field read vectors -/
 
