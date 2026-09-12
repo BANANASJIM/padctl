@@ -49,8 +49,8 @@ rt      = { code = "ABS_RZ", min = 0, max = 255 }
 [output.buttons]
 A      = "BTN_SOUTH"
 B      = "BTN_EAST"
-X      = "BTN_WEST"
-Y      = "BTN_NORTH"
+X      = "BTN_NORTH"
+Y      = "BTN_WEST"
 LB     = "BTN_TL"
 RB     = "BTN_TR"
 Select = "BTN_SELECT"

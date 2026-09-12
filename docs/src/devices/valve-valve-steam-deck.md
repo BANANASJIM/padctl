@@ -95,12 +95,12 @@ uinput device name: **Valve Steam Deck** | VID `0x28de` | PID `0x1205`
 | `B` | `BTN_EAST` |
 | `LS` | `BTN_THUMBL` |
 | `RS` | `BTN_THUMBR` |
-| `X` | `BTN_WEST` |
+| `X` | `BTN_NORTH` |
 | `A` | `BTN_SOUTH` |
 | `Select` | `BTN_SELECT` |
 | `Home` | `BTN_MODE` |
 | `Start` | `BTN_START` |
-| `Y` | `BTN_NORTH` |
+| `Y` | `BTN_WEST` |
 | `M3` | `BTN_TRIGGER_HAPPY3` |
 | `M4` | `BTN_TRIGGER_HAPPY4` |
 

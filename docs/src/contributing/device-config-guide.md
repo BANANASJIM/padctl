@@ -55,8 +55,8 @@ rt      = { code = "ABS_RZ", min = 0, max = 255 }
 [output.buttons]
 A      = "BTN_SOUTH"
 B      = "BTN_EAST"
-X      = "BTN_WEST"
-Y      = "BTN_NORTH"
+X      = "BTN_NORTH"
+Y      = "BTN_WEST"
 LB     = "BTN_TL"
 RB     = "BTN_TR"
 Select = "BTN_SELECT"
@@ -81,6 +81,8 @@ type = "hat"
 | `i8` centered at 0 | `scale(-32768, 32767)` |
 | `i16le` centered at 0 | none (already full range) |
 | `u8` trigger (0-255) | none |
+
+**Face button codes:** `X` and `Y` are SDL's `x`/`y` semantics (Xbox layout: `x` on the west face, `y` on the north face), not the printed label. SDL's evdev auto-mapping reads the `[output]` vendor id alone, so a non-Sony identity needs `X = "BTN_NORTH"` and `Y = "BTN_WEST"`, and a Sony identity (`vid = 0x054c`) needs the reverse. Declaring the other pairing still loads — padctl only warns.
 
 **Output emulation:** For maximum game compatibility, emulate a well-supported controller profile. `emulate = "xbox-elite2"` gives an Xbox Elite Series 2 identity, while `emulate = "dualsense-edge"` gives a DualSense Edge identity with `M1`-`M4` on the Edge extra-button slots. If the device is well-known and you are publishing its real protocol, use its real VID/PID.
 

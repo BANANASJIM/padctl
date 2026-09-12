@@ -1695,8 +1695,8 @@ test "descriptor: xbox-360 preset-shaped config produces byte-valid descriptor" 
     const buttons = try makeButtonsMap(a, &.{
         .{ .name = "A", .code = "BTN_SOUTH" },
         .{ .name = "B", .code = "BTN_EAST" },
-        .{ .name = "X", .code = "BTN_WEST" },
-        .{ .name = "Y", .code = "BTN_NORTH" },
+        .{ .name = "X", .code = "BTN_NORTH" },
+        .{ .name = "Y", .code = "BTN_WEST" },
         .{ .name = "LB", .code = "BTN_TL" },
         .{ .name = "RB", .code = "BTN_TR" },
         .{ .name = "Select", .code = "BTN_SELECT" },
@@ -1726,6 +1726,16 @@ test "descriptor: xbox-360 preset-shaped config produces byte-valid descriptor" 
     try testing.expectEqual(@as(u8, 0x01), desc[1]);
     // Last byte: End Collection.
     try testing.expectEqual(@as(u8, 0xC0), desc[desc.len - 1]);
+
+    // Button Usages follow Usage Page (Button) in ButtonId order (A, B, X, Y,
+    // ...), one 0x09 item each, numbered BTN_* code - BTN_GAMEPAD + 1.
+    const button_page = std.mem.indexOf(u8, desc, &[_]u8{ 0x05, 0x09 }) orelse
+        return error.MissingButtonUsagePage;
+    const usages = desc[button_page + 2 ..];
+    try testing.expectEqual(@as(u8, 0x01), usages[1]); // A -> BTN_SOUTH (0x130)
+    try testing.expectEqual(@as(u8, 0x02), usages[3]); // B -> BTN_EAST  (0x131)
+    try testing.expectEqual(@as(u8, 0x04), usages[5]); // X -> BTN_NORTH (0x133)
+    try testing.expectEqual(@as(u8, 0x05), usages[7]); // Y -> BTN_WEST  (0x134)
 }
 
 test "descriptor: reject > UHID_DATA_MAX via excessive button count is capped to 64" {
