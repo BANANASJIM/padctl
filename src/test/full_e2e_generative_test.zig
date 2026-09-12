@@ -522,8 +522,10 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
             const raw_val = if (cf.has_transform) applyInverseTransforms(val, cf) else val;
             writeFieldValue(buf, cf.offset, cf.type_tag, raw_val);
         } else {
-            // bits mode
-            const raw: u32 = @intCast(@as(u64, @bitCast(@as(i64, val))) & ((@as(u64, 1) << @intCast(cf.bit_count)) - 1));
+            // bits mode — a bit field may carry a transform chain whose
+            // denominator is the declared bit width, so invert it here too.
+            const raw_val = if (cf.has_transform) applyInverseTransforms(val, cf) else val;
+            const raw: u32 = @intCast(@as(u64, @bitCast(raw_val)) & ((@as(u64, 1) << @intCast(cf.bit_count)) - 1));
             const shifted = @as(u64, raw) << @intCast(cf.start_bit);
             const needed: u8 = (@as(u8, cf.start_bit) + @as(u8, cf.bit_count) + 7) / 8;
             for (0..needed) |i| {
@@ -579,6 +581,59 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
                 crc.update(buf[cs.range_start..cs.range_end]);
                 std.mem.writeInt(u32, buf[cs.expect_off..][0..4], crc.final(), .little);
             },
+        }
+    }
+}
+
+// Harness self-test: a bit field that carries a transform chain must survive
+// buildPacketFromDelta -> production extraction within the same tolerance the
+// generative DRT applies. Touches no kernel device.
+test "l3_e2e: packet builder inverts transform chains on bit fields" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "bits-transform"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "input"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\left_x = { bits = [0, 0, 12], type = "signed", transform = "scale(-32768, 32767)" }
+        \\rt = { bits = [4, 6, 10], transform = "scale(0, 255)" }
+    ;
+    const parsed = try device_mod.parseString(allocator, toml_str);
+    defer parsed.deinit();
+
+    const interp = Interpreter.init(&parsed.value);
+    try testing.expectEqual(@as(usize, 1), interp.report_count);
+    const cr = &interp.compiled[0];
+
+    // A scale spanning the full i16 range yields a finite tolerance, so the DRT
+    // really asserts on this field.
+    const tol_ax = scaleToleranceForTag(cr, .ax);
+    try testing.expect(tol_ax < std.math.maxInt(i32));
+
+    const ax_targets = [_]i16{ -32768, -12345, 0, 9876, 32767 };
+    const rt_targets = [_]u8{ 0, 37, 128, 200, 255 };
+    for (ax_targets, rt_targets) |ax, rt| {
+        var packet = [_]u8{0} ** 8;
+        buildPacketFromDelta(cr, .{ .ax = ax, .rt = rt }, &packet);
+        const delta = (try interp.processReport(0, &packet)) orelse return error.TestUnexpectedResult;
+        const got_ax = delta.ax orelse return error.TestUnexpectedResult;
+        const got_rt = delta.rt orelse return error.TestUnexpectedResult;
+        const err_ax = @abs(@as(i32, got_ax) - @as(i32, ax));
+        const err_rt = @abs(@as(i32, got_rt) - @as(i32, rt));
+        if (err_ax > tol_ax or err_rt > 1) {
+            std.debug.print(
+                "BITS ROUND-TRIP FAIL: ax want={d} got={d} err={d} tol={d} | rt want={d} got={d} err={d}\n",
+                .{ ax, got_ax, err_ax, tol_ax, rt, got_rt, err_rt },
+            );
+            return error.TestUnexpectedResult;
         }
     }
 }

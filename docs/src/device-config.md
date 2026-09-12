@@ -97,6 +97,9 @@ Rules:
 
 - `bits` and `offset` are mutually exclusive — `bits[0]` already is the byte offset.
 - `bit_offset` is 0–7, `bit_count` is 1–32, and the field must span at most 4 bytes.
+  The two bounds interact: `bit_offset + bit_count` must fit in those 4 bytes
+  (that is, be at most 32), so `bits = [b, 7, 32]` is rejected even though each
+  bound alone is satisfied.
 - `type` must be omitted, `"unsigned"` (default), or `"signed"` — standard type
   strings like `"u8"` or `"i16le"` are not valid here. `"signed"` sign-extends
   the value from its top bit.
