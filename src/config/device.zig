@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const toml = @import("toml");
 const toml_lint = @import("toml_lint.zig");
 const state = @import("../core/state.zig");
@@ -980,19 +981,31 @@ fn warnLintFindings(findings: []const LintFinding) void {
 // SDL's evdev auto-mapping keys the face buttons on the output vendor alone, so
 // a non-Sony identity that keeps Sony's codes presents X and Y swapped in SDL
 // and Steam. Warn without rejecting: an explicit declaration stays authoritative.
-pub const FaceButtonFinding = struct {
-    profile: ?[]const u8 = null, // null for the root [output]; borrowed from the config
+const FaceButtonFinding = struct {
+    // Profile whose overlaid identity was judged; null for the root [output].
+    profile: ?[]const u8 = null, // borrowed from the config
+    // Profile that declares the offending [.buttons] table; null when the codes
+    // are inherited from the root [output.buttons].
+    buttons_profile: ?[]const u8 = null,
     vid: ?i64 = null,
     x_code: ?[]const u8 = null, // declared X value, set only when it resolves to BTN_WEST
     y_code: ?[]const u8 = null, // declared Y value, set only when it resolves to BTN_NORTH
 };
 
-fn faceButtonFinding(profile: ?[]const u8, out: *const OutputConfig) ?FaceButtonFinding {
+fn faceButtonFinding(
+    profile: ?[]const u8,
+    buttons_profile: ?[]const u8,
+    out: *const OutputConfig,
+) ?FaceButtonFinding {
     if (out.vid) |vid| {
         if (vid == SONY_OUTPUT_VID) return null;
     }
     const buttons = out.buttons orelse return null;
-    var finding = FaceButtonFinding{ .profile = profile, .vid = out.vid };
+    var finding = FaceButtonFinding{
+        .profile = profile,
+        .buttons_profile = buttons_profile,
+        .vid = out.vid,
+    };
     if (buttons.map.get("X")) |name| {
         if (input_codes.resolveBtnCode(name)) |code| {
             if (code == btn_west_code) finding.x_code = name;
@@ -1007,26 +1020,40 @@ fn faceButtonFinding(profile: ?[]const u8, out: *const OutputConfig) ?FaceButton
     return finding;
 }
 
+// A profile without its own [.buttons] restates the root table, so it is only
+// worth a second warning when it overlays a different identity onto it.
+fn inheritedFindingReported(reported: []const FaceButtonFinding, candidate: FaceButtonFinding) bool {
+    for (reported) |finding| {
+        if (finding.buttons_profile != null) continue;
+        if (std.meta.eql(finding.vid, candidate.vid)) return true;
+    }
+    return false;
+}
+
 // Runs on the root [output] and on every [output.profiles.*] overlaid onto it,
 // because the profile a user selects is only known well after load time.
-pub fn lintFaceButtons(allocator: std.mem.Allocator, out: *const OutputConfig) !std.ArrayList(FaceButtonFinding) {
+fn lintFaceButtons(allocator: std.mem.Allocator, out: *const OutputConfig) !std.ArrayList(FaceButtonFinding) {
     var findings = std.ArrayList(FaceButtonFinding){};
     errdefer findings.deinit(allocator);
-    if (faceButtonFinding(null, out)) |finding| try findings.append(allocator, finding);
+    if (faceButtonFinding(null, null, out)) |finding| try findings.append(allocator, finding);
     if (out.profiles) |profiles| {
         var it = profiles.map.iterator();
         while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const buttons_profile: ?[]const u8 = if (entry.value_ptr.buttons != null) name else null;
             const profile_out = overlayOutputProfile(out.*, entry.value_ptr.*);
-            if (faceButtonFinding(entry.key_ptr.*, &profile_out)) |finding|
-                try findings.append(allocator, finding);
+            const finding = faceButtonFinding(name, buttons_profile, &profile_out) orelse continue;
+            if (buttons_profile == null and inheritedFindingReported(findings.items, finding)) continue;
+            try findings.append(allocator, finding);
         }
     }
     return findings;
 }
 
-/// Renders the warning for one key ("X" or "Y") of `finding`. Exposed so tests
-/// assert on the text the load path logs.
-pub fn formatFaceButtonWarning(
+/// Renders the warning for one key ("X" or "Y") of `finding`. The table named is
+/// the one that declares the codes, so a profile that only overlays an identity
+/// onto inherited codes still points at the root [output.buttons].
+fn formatFaceButtonWarning(
     buf: []u8,
     source: []const u8,
     finding: FaceButtonFinding,
@@ -1034,15 +1061,25 @@ pub fn formatFaceButtonWarning(
     code: []const u8,
 ) ![]const u8 {
     var table_buf: [128]u8 = undefined;
-    const table = if (finding.profile) |name|
+    const table = if (finding.buttons_profile) |name|
         std.fmt.bufPrint(&table_buf, "output.profiles.{s}.buttons", .{name}) catch "output.profiles.buttons"
     else
         "output.buttons";
-    var identity_buf: [32]u8 = undefined;
-    const identity = if (finding.vid) |vid|
-        std.fmt.bufPrint(&identity_buf, "vid 0x{x}", .{vid}) catch "an unprintable vid"
+    var vid_buf: [32]u8 = undefined;
+    const vid_text = if (finding.vid) |vid|
+        std.fmt.bufPrint(&vid_buf, "vid 0x{x}", .{vid}) catch "an unprintable vid"
     else
         "no declared vid";
+    var identity_buf: [192]u8 = undefined;
+    var identity = vid_text;
+    if (finding.buttons_profile == null) {
+        if (finding.profile) |name|
+            identity = std.fmt.bufPrint(
+                &identity_buf,
+                "{s} from [output.profiles.{s}]",
+                .{ vid_text, name },
+            ) catch vid_text;
+    }
     return std.fmt.bufPrint(
         buf,
         "config: {s}: [{s}] {s} = \"{s}\" with non-Sony output identity ({s}); " ++
@@ -1052,6 +1089,33 @@ pub fn formatFaceButtonWarning(
         .{ source, table, key, code, identity },
     );
 }
+
+// The unit test root installs no logFn, so std.log output is unobservable from
+// a test. Record what the load path emitted here instead.
+const FaceButtonWarnLog = struct {
+    count: usize = 0,
+    last: [512]u8 = undefined,
+    last_len: usize = 0,
+
+    fn record(self: *FaceButtonWarnLog, msg: []const u8) void {
+        self.count += 1;
+        const n = @min(msg.len, self.last.len);
+        @memcpy(self.last[0..n], msg[0..n]);
+        self.last_len = n;
+    }
+
+    fn reset(self: *FaceButtonWarnLog) void {
+        self.count = 0;
+        self.last_len = 0;
+    }
+
+    fn lastMessage(self: *const FaceButtonWarnLog) []const u8 {
+        return self.last[0..self.last_len];
+    }
+};
+
+var face_button_warn_log: if (builtin.is_test) FaceButtonWarnLog else void =
+    if (builtin.is_test) .{} else {};
 
 fn warnFaceButtonFindings(findings: []const FaceButtonFinding, source: []const u8) void {
     var buf: [1024]u8 = undefined;
@@ -1064,6 +1128,7 @@ fn warnFaceButtonFindings(findings: []const FaceButtonFinding, source: []const u
             const code = entry.code orelse continue;
             const msg = formatFaceButtonWarning(&buf, source, finding, entry.key, code) catch continue;
             std.log.warn("{s}", .{msg});
+            if (builtin.is_test) face_button_warn_log.record(msg);
         }
     }
 }
@@ -1140,7 +1205,7 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
     return parseStringSource(allocator, content, null);
 }
 
-pub fn parseStringSource(
+fn parseStringSource(
     allocator: std.mem.Allocator,
     content: []const u8,
     source: ?[]const u8,
@@ -4112,6 +4177,120 @@ test "device: lintFaceButtons resolves BTN_X/BTN_Y aliases to the same codes" {
     try std.testing.expectEqual(@as(usize, 1), findings.items.len);
     try std.testing.expectEqualStrings("BTN_Y", findings.items[0].x_code.?);
     try std.testing.expectEqualStrings("BTN_X", findings.items[0].y_code.?);
+}
+
+test "device: lintFaceButtons reports an inherited buttons table once, as [output.buttons]" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_WEST"
+        \\Y = "BTN_NORTH"
+        \\
+        \\[output.profiles.alt]
+        \\name = "Alt"
+        \\
+        \\[output.profiles.other]
+        \\name = "Other"
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    const finding = findings.items[0];
+    try std.testing.expect(finding.profile == null);
+    try std.testing.expect(finding.buttons_profile == null);
+
+    var buf: [1024]u8 = undefined;
+    const msg = try formatFaceButtonWarning(&buf, "devices/vendor/pad.toml", finding, "X", finding.x_code.?);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.buttons] X = \"BTN_WEST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "output.profiles") == null);
+}
+
+test "device: lintFaceButtons flags inherited buttons under a profile that overrides the vid" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x054c
+        \\pid = 0x0ce6
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_WEST"
+        \\Y = "BTN_NORTH"
+        \\
+        \\[output.profiles.xbox]
+        \\vid = 0x045e
+        \\pid = 0x028e
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    const finding = findings.items[0];
+    try std.testing.expectEqualStrings("xbox", finding.profile.?);
+    try std.testing.expect(finding.buttons_profile == null);
+    try std.testing.expectEqual(@as(?i64, 0x045e), finding.vid);
+
+    var buf: [1024]u8 = undefined;
+    const msg = try formatFaceButtonWarning(&buf, "devices/vendor/pad.toml", finding, "X", finding.x_code.?);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.buttons] X = \"BTN_WEST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "vid 0x45e from [output.profiles.xbox]") != null);
+}
+
+test "device: the load path warns about the face-button codes it parsed" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_WEST"
+        \\Y = "BTN_NORTH"
+    ;
+    face_button_warn_log.reset();
+    var parsed = try parseStringRawSource(allocator, toml_str, "devices/vendor/pad.toml");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), face_button_warn_log.count); // X and Y
+    const msg = face_button_warn_log.lastMessage();
+    try std.testing.expect(std.mem.indexOf(u8, msg, "devices/vendor/pad.toml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.buttons] Y = \"BTN_NORTH\"") != null);
+
+    // A null source falls back to the configured device name.
+    face_button_warn_log.reset();
+    var unlabelled = try parseStringRaw(allocator, toml_str);
+    defer unlabelled.deinit();
+    try std.testing.expectEqual(@as(usize, 2), face_button_warn_log.count);
+    try std.testing.expect(std.mem.indexOf(u8, face_button_warn_log.lastMessage(), "Face Button Pad") != null);
+}
+
+test "device: the load path stays quiet on a config that follows the convention" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_NORTH"
+        \\Y = "BTN_WEST"
+    ;
+    face_button_warn_log.reset();
+    var parsed = try parseStringRawSource(allocator, toml_str, "devices/vendor/pad.toml");
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), face_button_warn_log.count);
 }
 
 test "device: lintFaceButtons checks every output profile against the overlaid vid" {
