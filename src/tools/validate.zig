@@ -181,7 +181,7 @@ pub fn validateFile(
             // diagnostics (e.g. "interface 99 not declared") that validate()'s
             // fail-closed error.InvalidConfig would otherwise mask. Then run
             // validate() to surface any remaining fail-closed checks.
-            const parsed = device.parseStringRaw(allocator, content) catch |err| {
+            const parsed = device.parseStringRawSource(allocator, content, path) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "parse/schema error: {}", .{err});
                 const file_copy = try allocator.dupe(u8, path);
                 try errors.append(allocator, .{ .file = file_copy, .message = msg });

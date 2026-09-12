@@ -977,6 +977,97 @@ fn warnLintFindings(findings: []const LintFinding) void {
     toml_lint.warnFindings(findings);
 }
 
+// SDL's evdev auto-mapping keys the face buttons on the output vendor alone, so
+// a non-Sony identity that keeps Sony's codes presents X and Y swapped in SDL
+// and Steam. Warn without rejecting: an explicit declaration stays authoritative.
+pub const FaceButtonFinding = struct {
+    profile: ?[]const u8 = null, // null for the root [output]; borrowed from the config
+    vid: ?i64 = null,
+    x_code: ?[]const u8 = null, // declared X value, set only when it resolves to BTN_WEST
+    y_code: ?[]const u8 = null, // declared Y value, set only when it resolves to BTN_NORTH
+};
+
+fn faceButtonFinding(profile: ?[]const u8, out: *const OutputConfig) ?FaceButtonFinding {
+    if (out.vid) |vid| {
+        if (vid == SONY_OUTPUT_VID) return null;
+    }
+    const buttons = out.buttons orelse return null;
+    var finding = FaceButtonFinding{ .profile = profile, .vid = out.vid };
+    if (buttons.map.get("X")) |name| {
+        if (input_codes.resolveBtnCode(name)) |code| {
+            if (code == btn_west_code) finding.x_code = name;
+        } else |_| {}
+    }
+    if (buttons.map.get("Y")) |name| {
+        if (input_codes.resolveBtnCode(name)) |code| {
+            if (code == btn_north_code) finding.y_code = name;
+        } else |_| {}
+    }
+    if (finding.x_code == null and finding.y_code == null) return null;
+    return finding;
+}
+
+// Runs on the root [output] and on every [output.profiles.*] overlaid onto it,
+// because the profile a user selects is only known well after load time.
+pub fn lintFaceButtons(allocator: std.mem.Allocator, out: *const OutputConfig) !std.ArrayList(FaceButtonFinding) {
+    var findings = std.ArrayList(FaceButtonFinding){};
+    errdefer findings.deinit(allocator);
+    if (faceButtonFinding(null, out)) |finding| try findings.append(allocator, finding);
+    if (out.profiles) |profiles| {
+        var it = profiles.map.iterator();
+        while (it.next()) |entry| {
+            const profile_out = overlayOutputProfile(out.*, entry.value_ptr.*);
+            if (faceButtonFinding(entry.key_ptr.*, &profile_out)) |finding|
+                try findings.append(allocator, finding);
+        }
+    }
+    return findings;
+}
+
+/// Renders the warning for one key ("X" or "Y") of `finding`. Exposed so tests
+/// assert on the text the load path logs.
+pub fn formatFaceButtonWarning(
+    buf: []u8,
+    source: []const u8,
+    finding: FaceButtonFinding,
+    key: []const u8,
+    code: []const u8,
+) ![]const u8 {
+    var table_buf: [128]u8 = undefined;
+    const table = if (finding.profile) |name|
+        std.fmt.bufPrint(&table_buf, "output.profiles.{s}.buttons", .{name}) catch "output.profiles.buttons"
+    else
+        "output.buttons";
+    var identity_buf: [32]u8 = undefined;
+    const identity = if (finding.vid) |vid|
+        std.fmt.bufPrint(&identity_buf, "vid 0x{x}", .{vid}) catch "an unprintable vid"
+    else
+        "no declared vid";
+    return std.fmt.bufPrint(
+        buf,
+        "config: {s}: [{s}] {s} = \"{s}\" with non-Sony output identity ({s}); " ++
+            "SDL and xpad expect X = \"BTN_NORTH\" (0x133) and Y = \"BTN_WEST\" (0x134). " ++
+            "X/Y follow SDL x/y semantics (Xbox layout), not the printed label. " ++
+            "Explicit declaration is kept as-is.",
+        .{ source, table, key, code, identity },
+    );
+}
+
+fn warnFaceButtonFindings(findings: []const FaceButtonFinding, source: []const u8) void {
+    var buf: [1024]u8 = undefined;
+    for (findings) |finding| {
+        const keys = [_]struct { key: []const u8, code: ?[]const u8 }{
+            .{ .key = "X", .code = finding.x_code },
+            .{ .key = "Y", .code = finding.y_code },
+        };
+        for (keys) |entry| {
+            const code = entry.code orelse continue;
+            const msg = formatFaceButtonWarning(&buf, source, finding, entry.key, code) catch continue;
+            std.log.warn("{s}", .{msg});
+        }
+    }
+}
+
 pub const ParseResult = toml.Parsed(DeviceConfig);
 
 // Parse + apply presets without running validate(). The CLI lint tool needs the
@@ -984,6 +1075,16 @@ pub const ParseResult = toml.Parsed(DeviceConfig);
 // before validate()'s fail-closed error.InvalidConfig masks them. Daemon/CLI
 // load paths must use parseString/parseFile, which stay fail-closed.
 pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
+    return parseStringRawSource(allocator, content, null);
+}
+
+/// `source` labels diagnostics; callers that read from disk pass the file path,
+/// and a null source falls back to the configured device name.
+pub fn parseStringRawSource(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    source: ?[]const u8,
+) !ParseResult {
     var parser = toml.Parser(DeviceConfig).init(allocator);
     defer parser.deinit();
     var result = try parser.parseString(content);
@@ -1016,6 +1117,15 @@ pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseR
             }
         }
     }
+    if (result.value.output) |out| {
+        if (lintFaceButtons(allocator, &out)) |findings| {
+            defer {
+                var f = findings;
+                f.deinit(allocator);
+            }
+            warnFaceButtonFindings(findings.items, source orelse result.value.device.name);
+        } else |_| {} // lint failure (OOM) must not break parsing
+    }
     if (lintUnknownFields(allocator, content)) |findings| {
         defer {
             var f = findings;
@@ -1027,7 +1137,15 @@ pub fn parseStringRaw(allocator: std.mem.Allocator, content: []const u8) !ParseR
 }
 
 pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
-    var result = try parseStringRaw(allocator, content);
+    return parseStringSource(allocator, content, null);
+}
+
+pub fn parseStringSource(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    source: ?[]const u8,
+) !ParseResult {
+    var result = try parseStringRawSource(allocator, content, source);
     validate(&result.value) catch |err| {
         result.deinit();
         return err;
@@ -1038,7 +1156,7 @@ pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResu
 pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     const content = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
     defer allocator.free(content);
-    return parseString(allocator, content);
+    return parseStringSource(allocator, content, path);
 }
 
 // --- tests ---
@@ -3881,4 +3999,149 @@ test "device: shipped devices/*.toml follow the SDL face-button convention" {
         checked += 1;
     }
     try std.testing.expect(checked >= 1);
+}
+
+const face_button_toml_head =
+    \\[device]
+    \\name = "Face Button Pad"
+    \\vid = 0x1234
+    \\pid = 0x5678
+    \\
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\
+    \\[[report]]
+    \\name = "input"
+    \\interface = 0
+    \\size = 8
+    \\
+    \\[report.fields]
+    \\left_x = { offset = 0, type = "u8" }
+    \\
+;
+
+test "device: lintFaceButtons flags the Sony codes on a non-Sony identity" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_WEST"
+        \\Y = "BTN_NORTH"
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    const finding = findings.items[0];
+    try std.testing.expect(finding.profile == null);
+    try std.testing.expectEqualStrings("BTN_WEST", finding.x_code.?);
+    try std.testing.expectEqualStrings("BTN_NORTH", finding.y_code.?);
+
+    var buf: [1024]u8 = undefined;
+    const msg = try formatFaceButtonWarning(&buf, "devices/vendor/pad.toml", finding, "X", finding.x_code.?);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "devices/vendor/pad.toml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.buttons] X = \"BTN_WEST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "vid 0x2dc8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "X = \"BTN_NORTH\" (0x133)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Y = \"BTN_WEST\" (0x134)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "X/Y follow SDL x/y semantics (Xbox layout), not the printed label.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Explicit declaration is kept as-is.") != null);
+}
+
+test "device: lintFaceButtons leaves a Sony identity alone" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x054c
+        \\pid = 0x0ce6
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_WEST"
+        \\Y = "BTN_NORTH"
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "device: lintFaceButtons leaves a non-Sony identity with the SDL codes alone" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_NORTH"
+        \\Y = "BTN_WEST"
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), findings.items.len);
+}
+
+test "device: lintFaceButtons resolves BTN_X/BTN_Y aliases to the same codes" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_Y"
+        \\Y = "BTN_X"
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    try std.testing.expectEqualStrings("BTN_Y", findings.items[0].x_code.?);
+    try std.testing.expectEqualStrings("BTN_X", findings.items[0].y_code.?);
+}
+
+test "device: lintFaceButtons checks every output profile against the overlaid vid" {
+    const allocator = std.testing.allocator;
+    const toml_str = face_button_toml_head ++
+        \\[output]
+        \\vid = 0x2dc8
+        \\pid = 0x3106
+        \\
+        \\[output.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_NORTH"
+        \\Y = "BTN_WEST"
+        \\
+        \\[output.profiles.alt.buttons]
+        \\A = "BTN_SOUTH"
+        \\X = "BTN_WEST"
+        \\Y = "BTN_NORTH"
+    ;
+    var parsed = try parseStringRaw(allocator, toml_str);
+    defer parsed.deinit();
+    var findings = try lintFaceButtons(allocator, &parsed.value.output.?);
+    defer findings.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), findings.items.len);
+    const finding = findings.items[0];
+    try std.testing.expectEqualStrings("alt", finding.profile.?);
+    try std.testing.expectEqual(@as(?i64, 0x2dc8), finding.vid);
+
+    var buf: [1024]u8 = undefined;
+    const msg = try formatFaceButtonWarning(&buf, "devices/vendor/pad.toml", finding, "Y", finding.y_code.?);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.profiles.alt.buttons] Y = \"BTN_NORTH\"") != null);
 }
