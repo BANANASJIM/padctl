@@ -17,6 +17,13 @@ pub const MAX_REPORT_SIZE: i64 = 512;
 pub const LIBUSB_SLOT_SIZE: i64 = 64;
 pub const MAX_INIT_COMMAND_SIZE: i64 = 64;
 
+// SDL's evdev auto-mapping keys the face buttons on the output vendor id alone:
+// Sony (0x054c) binds x to BTN_WEST, every other vendor binds x to BTN_X
+// (== BTN_NORTH, 0x133) and y to BTN_Y (== BTN_WEST, 0x134).
+pub const SONY_OUTPUT_VID: i64 = 0x054c;
+const btn_north_code: u16 = 0x133;
+const btn_west_code: u16 = 0x134;
+
 pub const InterfaceConfig = struct {
     id: i64,
     class: []const u8,
@@ -3826,4 +3833,52 @@ test "device: dpad hat beside its button_group in one report is not a split" {
     defer parsed.deinit();
 
     try std.testing.expect(dpadSplitAcrossReports(&parsed.value) == null);
+}
+
+fn expectFaceButtonConvention(path: []const u8, out: *const OutputConfig) !void {
+    const buttons = out.buttons orelse return;
+    const sony = if (out.vid) |vid| vid == SONY_OUTPUT_VID else false;
+    const want_x: u16 = if (sony) btn_west_code else btn_north_code;
+    const want_y: u16 = if (sony) btn_north_code else btn_west_code;
+    if (buttons.map.get("X")) |name| {
+        const code = try input_codes.resolveBtnCode(name);
+        if (code != want_x) {
+            std.debug.print("  {s}: X = \"{s}\" (0x{x}), expected 0x{x}\n", .{ path, name, code, want_x });
+            return error.FaceButtonConventionViolated;
+        }
+    }
+    if (buttons.map.get("Y")) |name| {
+        const code = try input_codes.resolveBtnCode(name);
+        if (code != want_y) {
+            std.debug.print("  {s}: Y = \"{s}\" (0x{x}), expected 0x{x}\n", .{ path, name, code, want_y });
+            return error.FaceButtonConventionViolated;
+        }
+    }
+}
+
+test "device: shipped devices/*.toml follow the SDL face-button convention" {
+    const allocator = std.testing.allocator;
+    var dir = try std.fs.cwd().openDir("devices", .{ .iterate = true });
+    defer dir.close();
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var checked: usize = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".toml")) continue;
+        const content = try dir.readFileAlloc(allocator, entry.path, 1024 * 1024);
+        defer allocator.free(content);
+        var parsed = try parseStringRaw(allocator, content);
+        defer parsed.deinit();
+        const out = parsed.value.output orelse continue;
+        try expectFaceButtonConvention(entry.path, &out);
+        if (out.profiles) |profiles| {
+            var it = profiles.map.iterator();
+            while (it.next()) |profile| {
+                const profile_out = overlayOutputProfile(out, profile.value_ptr.*);
+                try expectFaceButtonConvention(entry.path, &profile_out);
+            }
+        }
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
 }

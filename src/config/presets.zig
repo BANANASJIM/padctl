@@ -1,6 +1,7 @@
 const std = @import("std");
 const toml = @import("toml");
 const device = @import("device.zig");
+const input_codes = @import("input_codes.zig");
 
 const AxisEntry = struct { name: []const u8, cfg: device.AxisConfig };
 const ButtonEntry = struct { name: []const u8, code: []const u8 };
@@ -261,4 +262,23 @@ test "applyPreset: unknown preset returns error" {
     defer arena.deinit();
     var out = device.OutputConfig{};
     try std.testing.expectError(error.UnknownPreset, applyPreset(arena.allocator(), &out, "unknown-device"));
+}
+
+test "applyPreset: face buttons follow the SDL convention for the preset vendor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for (presets) |entry| {
+        var out = device.OutputConfig{};
+        try applyPreset(arena.allocator(), &out, entry.name);
+        const sony = out.vid.? == device.SONY_OUTPUT_VID;
+        const want_x: u16 = if (sony) 0x134 else 0x133;
+        const want_y: u16 = if (sony) 0x133 else 0x134;
+        const buttons = out.buttons.?;
+        const x = try input_codes.resolveBtnCode(buttons.map.get("X").?);
+        const y = try input_codes.resolveBtnCode(buttons.map.get("Y").?);
+        if (x != want_x or y != want_y)
+            std.debug.print("  preset {s}: X 0x{x} Y 0x{x}, expected X 0x{x} Y 0x{x}\n", .{ entry.name, x, y, want_x, want_y });
+        try std.testing.expectEqual(want_x, x);
+        try std.testing.expectEqual(want_y, y);
+    }
 }
