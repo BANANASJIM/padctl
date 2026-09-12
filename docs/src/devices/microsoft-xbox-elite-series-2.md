@@ -77,14 +77,14 @@ uinput device name: **Xbox Elite Series 2** | VID `0x045e` | PID `0x0b00`
 | `B` | `BTN_EAST` |
 | `LS` | `BTN_THUMBL` |
 | `RS` | `BTN_THUMBR` |
-| `X` | `BTN_WEST` |
+| `X` | `BTN_NORTH` |
 | `LB` | `BTN_TL` |
 | `RB` | `BTN_TR` |
 | `A` | `BTN_SOUTH` |
 | `Select` | `BTN_SELECT` |
 | `Home` | `BTN_MODE` |
 | `Start` | `BTN_START` |
-| `Y` | `BTN_NORTH` |
+| `Y` | `BTN_WEST` |
 | `M3` | `BTN_TRIGGER_HAPPY3` |
 | `M4` | `BTN_TRIGGER_HAPPY4` |
 

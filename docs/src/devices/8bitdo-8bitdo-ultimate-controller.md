@@ -64,13 +64,13 @@ uinput device name: **8BitDo Ultimate Controller** | VID `0x2dc8` | PID `0x6003`
 |--------|------------|
 | `LS` | `BTN_THUMBL` |
 | `RS` | `BTN_THUMBR` |
-| `X` | `BTN_WEST` |
+| `X` | `BTN_NORTH` |
 | `LB` | `BTN_TL` |
 | `RB` | `BTN_TR` |
 | `A` | `BTN_SOUTH` |
 | `Select` | `BTN_SELECT` |
 | `Home` | `BTN_MODE` |
 | `Start` | `BTN_START` |
-| `Y` | `BTN_NORTH` |
+| `Y` | `BTN_WEST` |
 | `B` | `BTN_EAST` |
 

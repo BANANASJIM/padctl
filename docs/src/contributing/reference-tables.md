@@ -30,8 +30,8 @@ Quick reference for writing padctl device configs.
 |---------------|-----------|-------|
 | A | `BTN_SOUTH` | Cross on PlayStation |
 | B | `BTN_EAST` | Circle on PlayStation |
-| X | `BTN_WEST` | Square on PlayStation |
-| Y | `BTN_NORTH` | Triangle on PlayStation |
+| X | `BTN_NORTH` | `BTN_WEST` when the `[output]` vendor is Sony (`0x054c`) |
+| Y | `BTN_WEST` | `BTN_NORTH` when the `[output]` vendor is Sony (`0x054c`) |
 | LB | `BTN_TL` | L1 |
 | RB | `BTN_TR` | R1 |
 | Select | `BTN_SELECT` | Share/Create/View |
@@ -40,6 +40,14 @@ Quick reference for writing padctl device configs.
 | LS | `BTN_THUMBL` | L3 (stick click) |
 | RS | `BTN_THUMBR` | R3 (stick click) |
 | M1-M4 | `BTN_TRIGGER_HAPPY1-4` | Back paddles / extra buttons |
+
+`X` and `Y` name SDL's `x`/`y` semantics — the Xbox layout, where `x` sits on
+the west face and `y` on the north face — not the label printed on the button.
+The kernel aliases `BTN_X` to `BTN_NORTH` (0x133) and `BTN_Y` to `BTN_WEST`
+(0x134), and SDL's evdev auto-mapping picks the pair from the `[output]` vendor
+id alone: Sony (`0x054c`) binds `x` to `BTN_WEST` and `y` to `BTN_NORTH`, every
+other vendor binds `x` to `BTN_NORTH` and `y` to `BTN_WEST`. A config that
+declares the other pairing loads as written; padctl only logs a warning.
 
 ## MSB0 to LSB0 Bit Conversion
 
