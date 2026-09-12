@@ -74,9 +74,35 @@ battery_level = { bits = [53, 0, 4] }
 | `bits` | integer[3] | Sub-byte extraction: `[byte_offset, bit_offset, bit_count]` |
 | `transform` | string | Comma-separated transform chain |
 
-Use `offset` + `type` for whole-byte fields. Use `bits` for sub-byte bit extraction (e.g. a 4-bit battery level packed within a byte).
+Use `offset` + `type` for whole-byte fields. Use `bits` for sub-byte and cross-byte bit extraction.
 
-> **Note:** When using `bits`, the `type` field must be `null`, `"unsigned"`, or `"signed"` — standard type strings like `"u8"` or `"i16le"` are not valid.
+#### Bit Fields
+
+`bits = [byte_offset, bit_offset, bit_count]` reads `bit_count` bits starting at
+`bit_offset` of the byte at `byte_offset`. Bits are numbered from the least
+significant bit of each byte, and the extraction assembles up to 4 consecutive
+bytes little-endian, so a field may cross byte boundaries:
+
+```toml
+[report.fields]
+# 4-bit battery level packed in the low nibble of byte 53
+battery_level = { bits = [53, 0, 4] }
+# 10-bit trigger spanning bytes 4-5: bits 6..15 of the little-endian pair
+rt = { bits = [4, 6, 10], transform = "scale(0, 255)" }
+# 12-bit signed axis, sign-extended from bit 11
+left_x = { bits = [2, 0, 12], type = "signed" }
+```
+
+Rules:
+
+- `bits` and `offset` are mutually exclusive — `bits[0]` already is the byte offset.
+- `bit_offset` is 0–7, `bit_count` is 1–32, and the field must span at most 4 bytes.
+  The two bounds interact: `bit_offset + bit_count` must fit in those 4 bytes
+  (that is, be at most 32), so `bits = [b, 7, 32]` is rejected even though each
+  bound alone is satisfied.
+- `type` must be omitted, `"unsigned"` (default), or `"signed"` — standard type
+  strings like `"u8"` or `"i16le"` are not valid here. `"signed"` sign-extends
+  the value from its top bit.
 
 #### Field names
 
@@ -141,6 +167,26 @@ Transforms are applied left-to-right as a comma-separated chain:
 | `deadzone` | Apply deadzone filtering |
 
 Example: `transform = "scale(-32768, 32767), negate"` — scales a u8 (0–255) to -32768..32767, then negates the result.
+
+`scale` maps the source field's full scale onto the target range. For `negate`
+and `abs`, an input equal to the source minimum saturates to the positive full
+scale. The full scale comes from the declared field:
+
+| Declaration | Full scale |
+|-------------|------------|
+| `type = "u8"` | 255 |
+| `type = "i16le"` | 32767 |
+| `bits = [b, o, n]` (unsigned) | `2^n - 1` |
+| `bits = [b, o, n]`, `type = "signed"` | `2^(n-1) - 1` |
+
+A `bits` field may carry a `transform`; the bits are extracted first (with sign
+extension when `type = "signed"`), then the chain runs on the extracted integer.
+So `rt = { bits = [4, 6, 10], transform = "scale(0, 255)" }` maps the raw 0–1023
+range onto the full 0–255 trigger range.
+
+> **Note:** `lt` and `rt` are 8-bit. A bit field wider than 8 bits with no
+> `scale` saturates at 255, so a 10-bit trigger reaches full travel after only a
+> quarter of its range — add `scale(0, 255)` to use the whole travel.
 
 ### `[report.button_group]`
 

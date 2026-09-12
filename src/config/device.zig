@@ -572,9 +572,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                 }
 
                 if (field.bits) |bits| {
-                    // bits mode: mutual exclusivity
+                    // bits mode: bits[0] is the byte offset, so `offset` is redundant
                     if (field.offset != null) return error.InvalidConfig;
-                    if (field.transform != null) return error.InvalidConfig;
                     if (bits.len != 3) return error.InvalidConfig;
                     if (bits[1] < 0 or bits[1] > 7) return error.InvalidConfig;
                     if (bits[2] < 1 or bits[2] > 32) return error.InvalidConfig;
@@ -2674,7 +2673,7 @@ test "device: missing both offset and bits returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }
 
-test "device: bits with transform returns error" {
+test "device: bits with transform is accepted" {
     const allocator = std.testing.allocator;
     const toml_str =
         \\[device]
@@ -2690,6 +2689,32 @@ test "device: bits with transform returns error" {
         \\size = 16
         \\[report.fields]
         \\left_x = { bits = [2, 0, 12], transform = "negate" }
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const fields = result.value.report[0].fields orelse return error.NoFields;
+    const fc = fields.map.get("left_x") orelse return error.NoField;
+    try std.testing.expect(fc.bits != null);
+    try std.testing.expect(fc.transform != null);
+    try std.testing.expect(fc.offset == null);
+}
+
+test "device: bits with malformed transform returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 16
+        \\[report.fields]
+        \\left_x = { bits = [2, 0, 12], transform = "lookup(0)" }
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, toml_str));
 }

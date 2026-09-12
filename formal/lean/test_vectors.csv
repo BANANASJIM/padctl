@@ -40,6 +40,11 @@ scale,-128,127,0,100,-100
 -80,255,abs,clamp:0:50,50
 7,127,negate,scale:0:100,-5
 42,255,,42
+1023,1023,scale:0:255,255
+255,1023,scale:0:255,63
+-512,511,negate,511
+-512,511,abs,511
+-100,511,negate,100
 # READFIELD
 # field_type,offset,hex_bytes,expected
 FieldType.u8,0,0

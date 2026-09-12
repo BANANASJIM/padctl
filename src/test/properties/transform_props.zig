@@ -7,7 +7,7 @@ const CompiledTransformChain = interpreter.CompiledTransformChain;
 const runTransformChain = interpreter.runTransformChain;
 
 fn makeChain(op: interpreter.TransformOp, a: i64, b: i64) CompiledTransformChain {
-    var chain = CompiledTransformChain{ .type_tag = .i16le };
+    var chain = CompiledTransformChain{ .t_max = interpreter.typeMaxByTag(.i16le) };
     chain.items[0] = .{ .op = op, .a = a, .b = b };
     chain.len = 1;
     return chain;
@@ -40,7 +40,7 @@ test "property: negate self-inverse" {
     var prng = std.Random.DefaultPrng.init(0xB1B1);
     const rng = prng.random();
 
-    var chain = CompiledTransformChain{ .type_tag = .i16le };
+    var chain = CompiledTransformChain{ .t_max = interpreter.typeMaxByTag(.i16le) };
     chain.items[0] = .{ .op = .negate };
     chain.items[1] = .{ .op = .negate };
     chain.len = 2;

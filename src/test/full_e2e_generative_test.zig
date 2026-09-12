@@ -436,27 +436,34 @@ fn writeFieldValue(buf: []u8, offset: usize, t: FieldType, value: i64) void {
 }
 
 const FieldTag = interp_mod.FieldTag;
-const CompiledTransformChain = interp_mod.CompiledTransformChain;
+const CompiledField = interp_mod.CompiledField;
 const TransformOp = interp_mod.TransformOp;
 
 // Compute the max round-trip error for a compiled field's transform chain.
 // Returns maxInt for non-invertible transforms or cases where the inverse
 // cannot faithfully round-trip (abs, deadzone, negate on unsigned, scale
 // with range smaller than GamepadState).
+fn fieldIsSigned(cf: *const CompiledField) bool {
+    return switch (cf.mode) {
+        .bits => cf.is_signed,
+        .standard => switch (cf.type_tag) {
+            .i8, .i16le, .i16be, .i32le, .i32be => true,
+            else => false,
+        },
+    };
+}
+
 fn scaleToleranceForTag(cr: *const CompiledReport, tag: FieldTag) i32 {
     for (cr.fields[0..cr.field_count]) |*cf| {
         if (cf.tag != tag) continue;
         if (!cf.has_transform) return 1;
-        const is_unsigned = switch (cf.transforms.type_tag) {
-            .u8, .u16le, .u16be, .u32le, .u32be => true,
-            else => false,
-        };
+        const is_unsigned = !fieldIsSigned(cf);
         for (cf.transforms.items[0..cf.transforms.len]) |tr| {
             if (tr.op == .abs or tr.op == .deadzone) return std.math.maxInt(i32);
             if (tr.op == .negate and is_unsigned) return std.math.maxInt(i32);
             if (tr.op == .scale) {
-                const t_max = interp_mod.typeMaxByTag(cf.transforms.type_tag);
-                if (t_max == 0) return std.math.maxInt(i32);
+                const t_max = cf.transforms.t_max;
+                if (t_max <= 0) return std.math.maxInt(i32);
                 const span: i64 = tr.b - tr.a;
                 if (span == 0) return std.math.maxInt(i32);
                 // If scale output range is narrower than GamepadState i32,
@@ -474,7 +481,8 @@ fn scaleToleranceForTag(cr: *const CompiledReport, tag: FieldTag) i32 {
 
 // Apply inverse of the transform chain so that production forward-transform yields val.
 // Processes transforms in reverse order; skips abs/clamp/deadzone (not invertible).
-fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
+fn applyInverseTransforms(val: i64, cf: *const CompiledField) i64 {
+    const chain = &cf.transforms;
     var v = val;
     var i: usize = chain.len;
     while (i > 0) {
@@ -487,19 +495,9 @@ fn applyInverseTransforms(val: i64, chain: *const CompiledTransformChain) i64 {
                 if (span == 0) break :blk v;
                 // Forward transform: raw_val * (b - a) / t_max + a
                 // Inverse: (v - a) * t_max / (b - a)
-                // For signed types, use the full range [-t_max-1, t_max] for negative values.
-                const is_signed = switch (chain.type_tag) {
-                    .i8, .i16le, .i16be, .i32le, .i32be => true,
-                    else => false,
-                };
-                const t_max: i128 = switch (chain.type_tag) {
-                    .u8 => 255,
-                    .i8 => 127,
-                    .u16le, .u16be => 65535,
-                    .i16le, .i16be => 32767,
-                    .u32le, .u32be => 4294967295,
-                    .i32le, .i32be => 2147483647,
-                };
+                // For signed fields, use the full range [-t_max-1, t_max] for negative values.
+                const is_signed = fieldIsSigned(cf);
+                const t_max: i128 = chain.t_max;
                 const shifted: i128 = @as(i128, v) - tr.a;
                 if (is_signed and shifted < 0) {
                     // Negative range uses t_max+1 denominator for symmetric inversion
@@ -521,15 +519,24 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
         const val = getDeltaFieldForTag(delta, cf.tag) orelse continue;
         if (cf.mode == .standard) {
             // Apply inverse transforms so production forward-transform yields val.
-            const raw_val = if (cf.has_transform) applyInverseTransforms(val, &cf.transforms) else val;
+            const raw_val = if (cf.has_transform) applyInverseTransforms(val, cf) else val;
             writeFieldValue(buf, cf.offset, cf.type_tag, raw_val);
         } else {
-            // bits mode
-            const raw: u32 = @intCast(@as(u64, @bitCast(@as(i64, val))) & ((@as(u64, 1) << @intCast(cf.bit_count)) - 1));
+            // bits mode — a bit field may carry a transform chain whose
+            // denominator is the declared bit width, so invert it here too.
+            const raw_val = if (cf.has_transform) applyInverseTransforms(val, cf) else val;
+            const field_mask = (@as(u64, 1) << @intCast(cf.bit_count)) - 1;
+            const raw: u32 = @intCast(@as(u64, @bitCast(raw_val)) & field_mask);
             const shifted = @as(u64, raw) << @intCast(cf.start_bit);
+            const shifted_mask = field_mask << @intCast(cf.start_bit);
             const needed: u8 = (@as(u8, cf.start_bit) + @as(u8, cf.bit_count) + 7) / 8;
+            // Clear the declared range first so a repeated write can lower
+            // bits; neighbouring fields sharing these bytes stay untouched.
             for (0..needed) |i| {
-                buf[cf.byte_offset + i] |= @intCast((shifted >> @intCast(i * 8)) & 0xFF);
+                const shift: u6 = @intCast(i * 8);
+                const keep: u8 = ~@as(u8, @intCast((shifted_mask >> shift) & 0xFF));
+                const value: u8 = @intCast((shifted >> shift) & 0xFF);
+                buf[cf.byte_offset + i] = (buf[cf.byte_offset + i] & keep) | value;
             }
         }
     }
@@ -583,6 +590,98 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
             },
         }
     }
+}
+
+fn compiledFieldForTag(cr: *const CompiledReport, tag: FieldTag) ?*const CompiledField {
+    for (cr.fields[0..cr.field_count]) |*cf| {
+        if (cf.tag == tag) return cf;
+    }
+    return null;
+}
+
+// Harness self-test: a bit field that carries a transform chain must survive
+// buildPacketFromDelta -> production extraction. ax and rx round-trip within
+// the same scale-derived tolerance the generative DRT applies
+// (scaleToleranceForTag); rt is checked against a fixed +/-1 bound instead,
+// because its 255 max output makes that same tolerance non-asserting
+// (scaleToleranceForTag returns maxInt there). Touches no kernel device.
+test "l3_e2e: packet builder inverts transform chains on bit fields" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "bits-transform"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "input"
+        \\interface = 0
+        \\size = 8
+        \\[report.fields]
+        \\left_x = { bits = [0, 0, 12], type = "signed", transform = "scale(-32768, 32767)" }
+        \\rt = { bits = [4, 6, 10], transform = "scale(0, 255)" }
+        \\right_x = { bits = [2, 0, 12], type = "signed", transform = "scale(0, 32767)" }
+    ;
+    const parsed = try device_mod.parseString(allocator, toml_str);
+    defer parsed.deinit();
+
+    const interp = Interpreter.init(&parsed.value);
+    try testing.expectEqual(@as(usize, 1), interp.report_count);
+    const cr = &interp.compiled[0];
+
+    // A scale spanning the full i16 range yields a finite tolerance, so the DRT
+    // really asserts on this field.
+    const tol_ax = scaleToleranceForTag(cr, .ax);
+    try testing.expect(tol_ax < std.math.maxInt(i32));
+
+    // right_x anchors its scale at 0 instead of -32768 like left_x, so a
+    // negative target inverts to a negative raw -- the only field here that
+    // exercises sign extension and two's-complement repacking in the bits
+    // branch of buildPacketFromDelta. It spans the same full i16 width as
+    // ax, so it gets the same kind of finite, asserting DRT tolerance.
+    const tol_rx = scaleToleranceForTag(cr, .rx);
+    try testing.expect(tol_rx < std.math.maxInt(i32));
+    const rx_field = compiledFieldForTag(cr, .rx) orelse return error.TestUnexpectedResult;
+
+    const ax_targets = [_]i16{ -32768, -12345, 0, 9876, 32767 };
+    const rt_targets = [_]u8{ 0, 37, 128, 200, 255 };
+    const rx_targets = [_]i16{ -20000, -8000, 500, 12000, 30000 };
+    var saw_negative_rx_raw = false;
+    // One packet reused across targets: each write must replace the previous
+    // value rather than OR into it, or a lower raw could never follow a higher.
+    var packet = [_]u8{0} ** 8;
+    for (ax_targets, rt_targets, rx_targets) |ax, rt, rx| {
+        buildPacketFromDelta(cr, .{ .ax = ax, .rt = rt, .rx = rx }, &packet);
+
+        // Read the packed bits back with the same primitives the production
+        // decoder uses, independent of the round-trip below, to confirm the
+        // field actually landed as a negative raw rather than being clamped
+        // or truncated to an unsigned pattern.
+        const rx_raw_bits = interp_mod.extractBits(&packet, rx_field.byte_offset, rx_field.start_bit, rx_field.bit_count);
+        const rx_raw = interp_mod.signExtend(rx_raw_bits, rx_field.bit_count);
+        if (rx_raw < 0) saw_negative_rx_raw = true;
+
+        const delta = (try interp.processReport(0, &packet)) orelse return error.TestUnexpectedResult;
+        const got_ax = delta.ax orelse return error.TestUnexpectedResult;
+        const got_rt = delta.rt orelse return error.TestUnexpectedResult;
+        const got_rx = delta.rx orelse return error.TestUnexpectedResult;
+        const err_ax = @abs(@as(i32, got_ax) - @as(i32, ax));
+        const err_rt = @abs(@as(i32, got_rt) - @as(i32, rt));
+        const err_rx = @abs(@as(i32, got_rx) - @as(i32, rx));
+        if (err_ax > tol_ax or err_rt > 1 or err_rx > tol_rx) {
+            std.debug.print(
+                "BITS ROUND-TRIP FAIL: ax want={d} got={d} err={d} tol={d} | rt want={d} got={d} err={d} | rx want={d} got={d} err={d} tol={d} raw={d}\n",
+                .{ ax, got_ax, err_ax, tol_ax, rt, got_rt, err_rt, rx, got_rx, err_rx, tol_rx, rx_raw },
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+    // At least one right_x target above must invert to a negative raw, or
+    // this case has silently stopped covering sign extension and two's-
+    // complement repacking.
+    try testing.expect(saw_negative_rx_raw);
 }
 
 fn getDeltaFieldForTag(delta: GamepadStateDelta, tag: FieldTag) ?i64 {

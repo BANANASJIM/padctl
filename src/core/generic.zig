@@ -18,7 +18,7 @@ pub const GenericFieldSlot = struct {
     start_bit: u3 = 0,
     bit_count: u6 = 0,
     is_signed: bool = false,
-    transforms: interpreter.CompiledTransformChain = .{ .type_tag = .u8 },
+    transforms: interpreter.CompiledTransformChain = .{ .t_max = interpreter.typeMaxByTag(.u8) },
     has_transform: bool = false,
 };
 
@@ -100,7 +100,11 @@ pub fn compileGenericState(cfg: *const device.DeviceConfig) !GenericDeviceState 
                         slot.offset = @intCast(fc.offset orelse continue);
                     }
                     if (fc.transform) |tr| {
-                        slot.transforms = interpreter.compileTransformChain(tr, slot.type_tag);
+                        const t_max = switch (slot.mode) {
+                            .standard => interpreter.typeMaxByTag(slot.type_tag),
+                            .bits => interpreter.bitsFullScale(slot.bit_count, slot.is_signed),
+                        };
+                        slot.transforms = interpreter.compileTransformChain(tr, t_max);
                         slot.has_transform = true;
                     }
                     found = true;

@@ -146,9 +146,9 @@ test "boundary: chain deadzone(1000), scale(-32768, 32767)" {
 test "negate/abs single-point saturation matches Lean oracle" {
     // i8: t_max = 127, type-min = -(127+1) = -128.
     {
-        var neg = interpreter.compileTransformChain("negate", .i8);
+        var neg = interpreter.compileTransformChain("negate", interpreter.typeMaxByTag(.i8));
         try testing.expectEqual(@as(i64, 127), interpreter.runTransformChain(-128, &neg));
-        var abs_ = interpreter.compileTransformChain("abs", .i8);
+        var abs_ = interpreter.compileTransformChain("abs", interpreter.typeMaxByTag(.i8));
         try testing.expectEqual(@as(i64, 127), interpreter.runTransformChain(-128, &abs_));
         // Non-minInt out-of-range input must NOT saturate (oracle: raw -val/natAbs).
         try testing.expectEqual(@as(i64, 256), interpreter.runTransformChain(-256, &neg));
@@ -158,9 +158,9 @@ test "negate/abs single-point saturation matches Lean oracle" {
     }
     // Wider type i32le: t_max = 2147483647, type-min = -2147483648.
     {
-        var neg = interpreter.compileTransformChain("negate", .i32le);
+        var neg = interpreter.compileTransformChain("negate", interpreter.typeMaxByTag(.i32le));
         try testing.expectEqual(@as(i64, 2147483647), interpreter.runTransformChain(-2147483648, &neg));
-        var abs_ = interpreter.compileTransformChain("abs", .i32le);
+        var abs_ = interpreter.compileTransformChain("abs", interpreter.typeMaxByTag(.i32le));
         try testing.expectEqual(@as(i64, 2147483647), interpreter.runTransformChain(-2147483648, &abs_));
     }
 }

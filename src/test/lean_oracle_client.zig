@@ -160,7 +160,7 @@ pub fn extractFieldsViaLean(oracle: *LeanOracle, cr: *const CompiledReport, raw:
 }
 
 fn runChainViaLean(oracle: *LeanOracle, initial: i64, cf: *const CompiledField) !i64 {
-    const t_max = typeMax(cf.transforms.type_tag);
+    const t_max = cf.transforms.t_max;
     var chain_buf: [512]u8 = undefined;
     var pos: usize = 0;
     for (cf.transforms.items[0..cf.transforms.len], 0..) |tr, i| {
@@ -184,17 +184,6 @@ fn formatTransformOp(tr: interp_mod.CompiledTransform, buf: []u8) !usize {
         .deadzone => try std.fmt.bufPrint(buf, "deadzone({d})", .{tr.a}),
     };
     return s.len;
-}
-
-fn typeMax(t: FieldType) i64 {
-    return switch (t) {
-        .u8 => 255,
-        .i8 => 127,
-        .u16le, .u16be => 65535,
-        .i16le, .i16be => 32767,
-        .u32le, .u32be => 4294967295,
-        .i32le, .i32be => 2147483647,
-    };
 }
 
 fn fieldTypeStr(t: FieldType) []const u8 {

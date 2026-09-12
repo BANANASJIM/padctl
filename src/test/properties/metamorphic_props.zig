@@ -230,7 +230,7 @@ test "metamorphic: scale linearity — doubling input roughly doubles output" {
     const rng = prng.random();
 
     // scale(0, 100) on u8 type_tag (t_max = 255): identity is avoided, exercises real linearity.
-    var chain = compileTransformChain("scale(0, 100)", .u8);
+    var chain = compileTransformChain("scale(0, 100)", interpreter_mod.typeMaxByTag(.u8));
 
     for (0..1000) |_| {
         // Pick v in [1, 127] so 2v fits in u8 range

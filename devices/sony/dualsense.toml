@@ -44,7 +44,7 @@ accel_z = { offset = 26, type = "i16le" }
 # Sensor timestamp: u32le microseconds
 sensor_timestamp = { offset = 28, type = "u32le" }
 # Touchpad contact bytes (offset 33/37): bit7=inactive, bits[6:0]=finger ID
-# Sub-byte extraction (bits DSL) is Phase 2; raw contact bytes declared here
+# Declared as whole bytes: consumers read the ID and the active flag themselves
 touch0_contact = { offset = 33, type = "u8" }
 touch1_contact = { offset = 37, type = "u8" }
 # Battery: bits[3:0]=level(0-10), bits[7:4]=charging state (ignored)
