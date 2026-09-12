@@ -1050,9 +1050,11 @@ fn lintFaceButtons(allocator: std.mem.Allocator, out: *const OutputConfig) !std.
     return findings;
 }
 
-/// Renders the warning for one key ("X" or "Y") of `finding`. The table named is
-/// the one that declares the codes, so a profile that only overlays an identity
-/// onto inherited codes still points at the root [output.buttons].
+/// Renders the warning for one key ("X" or "Y") of `finding`. A table that
+/// declares its own codes -- the root [output.buttons], or a profile's own
+/// [.buttons] -- is named directly. A profile that only inherits the root
+/// table is pointed at an override of its own instead, since the root table
+/// may already be correct for the root's own identity (e.g. a Sony vid).
 fn formatFaceButtonWarning(
     buf: []u8,
     source: []const u8,
@@ -1060,33 +1062,37 @@ fn formatFaceButtonWarning(
     key: []const u8,
     code: []const u8,
 ) ![]const u8 {
-    var table_buf: [128]u8 = undefined;
-    const table = if (finding.buttons_profile) |name|
-        std.fmt.bufPrint(&table_buf, "output.profiles.{s}.buttons", .{name}) catch "output.profiles.buttons"
-    else
-        "output.buttons";
     var vid_buf: [32]u8 = undefined;
     const vid_text = if (finding.vid) |vid|
         std.fmt.bufPrint(&vid_buf, "vid 0x{x}", .{vid}) catch "an unprintable vid"
     else
         "no declared vid";
-    var identity_buf: [192]u8 = undefined;
-    var identity = vid_text;
+
     if (finding.buttons_profile == null) {
-        if (finding.profile) |name|
-            identity = std.fmt.bufPrint(
-                &identity_buf,
-                "{s} from [output.profiles.{s}]",
-                .{ vid_text, name },
-            ) catch vid_text;
+        if (finding.profile) |name| {
+            return std.fmt.bufPrint(
+                buf,
+                "config: {s}: [output.profiles.{s}] inherits [output.buttons] where {s} = \"{s}\", " ++
+                    "but its non-Sony output identity ({s}) needs the SDL/xpad codes; declare its own " ++
+                    "[output.profiles.{s}.buttons] with X = \"BTN_NORTH\" (0x133) and Y = \"BTN_WEST\" (0x134), " ++
+                    "leaving [output.buttons] unchanged. X/Y follow SDL x/y semantics (Xbox layout), not the printed label.",
+                .{ source, name, key, code, vid_text, name },
+            );
+        }
     }
+
+    var table_buf: [128]u8 = undefined;
+    const table = if (finding.buttons_profile) |name|
+        std.fmt.bufPrint(&table_buf, "output.profiles.{s}.buttons", .{name}) catch "output.profiles.buttons"
+    else
+        "output.buttons";
     return std.fmt.bufPrint(
         buf,
         "config: {s}: [{s}] {s} = \"{s}\" with non-Sony output identity ({s}); " ++
             "SDL and xpad expect X = \"BTN_NORTH\" (0x133) and Y = \"BTN_WEST\" (0x134). " ++
             "X/Y follow SDL x/y semantics (Xbox layout), not the printed label. " ++
             "Explicit declaration is kept as-is.",
-        .{ source, table, key, code, identity },
+        .{ source, table, key, code, vid_text },
     );
 }
 
@@ -4242,8 +4248,10 @@ test "device: lintFaceButtons flags inherited buttons under a profile that overr
 
     var buf: [1024]u8 = undefined;
     const msg = try formatFaceButtonWarning(&buf, "devices/vendor/pad.toml", finding, "X", finding.x_code.?);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.buttons] X = \"BTN_WEST\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "vid 0x45e from [output.profiles.xbox]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "[output.profiles.xbox] inherits [output.buttons] where X = \"BTN_WEST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "vid 0x45e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "declare its own [output.profiles.xbox.buttons] with X = \"BTN_NORTH\" (0x133) and Y = \"BTN_WEST\" (0x134)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "leaving [output.buttons] unchanged") != null);
 }
 
 test "device: the load path warns about the face-button codes it parsed" {
