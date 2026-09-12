@@ -525,11 +525,18 @@ fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf
             // bits mode — a bit field may carry a transform chain whose
             // denominator is the declared bit width, so invert it here too.
             const raw_val = if (cf.has_transform) applyInverseTransforms(val, cf) else val;
-            const raw: u32 = @intCast(@as(u64, @bitCast(raw_val)) & ((@as(u64, 1) << @intCast(cf.bit_count)) - 1));
+            const field_mask = (@as(u64, 1) << @intCast(cf.bit_count)) - 1;
+            const raw: u32 = @intCast(@as(u64, @bitCast(raw_val)) & field_mask);
             const shifted = @as(u64, raw) << @intCast(cf.start_bit);
+            const shifted_mask = field_mask << @intCast(cf.start_bit);
             const needed: u8 = (@as(u8, cf.start_bit) + @as(u8, cf.bit_count) + 7) / 8;
+            // Clear the declared range first so a repeated write can lower
+            // bits; neighbouring fields sharing these bytes stay untouched.
             for (0..needed) |i| {
-                buf[cf.byte_offset + i] |= @intCast((shifted >> @intCast(i * 8)) & 0xFF);
+                const shift: u6 = @intCast(i * 8);
+                const keep: u8 = ~@as(u8, @intCast((shifted_mask >> shift) & 0xFF));
+                const value: u8 = @intCast((shifted >> shift) & 0xFF);
+                buf[cf.byte_offset + i] = (buf[cf.byte_offset + i] & keep) | value;
             }
         }
     }
@@ -642,8 +649,10 @@ test "l3_e2e: packet builder inverts transform chains on bit fields" {
     const rt_targets = [_]u8{ 0, 37, 128, 200, 255 };
     const rx_targets = [_]i16{ -20000, -8000, 500, 12000, 30000 };
     var saw_negative_rx_raw = false;
+    // One packet reused across targets: each write must replace the previous
+    // value rather than OR into it, or a lower raw could never follow a higher.
+    var packet = [_]u8{0} ** 8;
     for (ax_targets, rt_targets, rx_targets) |ax, rt, rx| {
-        var packet = [_]u8{0} ** 8;
         buildPacketFromDelta(cr, .{ .ax = ax, .rt = rt, .rx = rx }, &packet);
 
         // Read the packed bits back with the same primitives the production
