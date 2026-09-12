@@ -168,9 +168,9 @@ Transforms are applied left-to-right as a comma-separated chain:
 
 Example: `transform = "scale(-32768, 32767), negate"` — scales a u8 (0–255) to -32768..32767, then negates the result.
 
-`scale` maps the source field's full scale onto the target range, and `negate` /
-`abs` saturate at the source field's minimum. The full scale comes from the
-declared field:
+`scale` maps the source field's full scale onto the target range. For `negate`
+and `abs`, an input equal to the source minimum saturates to the positive full
+scale. The full scale comes from the declared field:
 
 | Declaration | Full scale |
 |-------------|------------|
