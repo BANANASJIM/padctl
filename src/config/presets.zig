@@ -26,8 +26,8 @@ const xbox360_axes = [_]AxisEntry{
 const xbox360_buttons = [_]ButtonEntry{
     .{ .name = "A", .code = "BTN_SOUTH" },
     .{ .name = "B", .code = "BTN_EAST" },
-    .{ .name = "X", .code = "BTN_WEST" },
-    .{ .name = "Y", .code = "BTN_NORTH" },
+    .{ .name = "X", .code = "BTN_NORTH" },
+    .{ .name = "Y", .code = "BTN_WEST" },
     .{ .name = "LB", .code = "BTN_TL" },
     .{ .name = "RB", .code = "BTN_TR" },
     .{ .name = "Select", .code = "BTN_SELECT" },

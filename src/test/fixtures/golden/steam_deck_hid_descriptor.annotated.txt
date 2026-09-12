@@ -26,8 +26,8 @@ offset | bytes          | item
 0x0008 | 05 09          | Usage Page (Button)
 0x000A | 09 01          | Usage (Button 1)  | A / BTN_SOUTH
 0x000C | 09 02          | Usage (Button 2)  | B / BTN_EAST
-0x000E | 09 05          | Usage (Button 5)  | X / BTN_WEST
-0x0010 | 09 04          | Usage (Button 4)  | Y / BTN_NORTH
+0x000E | 09 04          | Usage (Button 4)  | X / BTN_NORTH
+0x0010 | 09 05          | Usage (Button 5)  | Y / BTN_WEST
 0x0012 | 09 07          | Usage (Button 7)  | LB / BTN_TL
 0x0014 | 09 08          | Usage (Button 8)  | RB / BTN_TR
 0x0016 | 09 09          | Usage (Button 9)  | LT / BTN_TL2
