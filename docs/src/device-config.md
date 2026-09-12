@@ -118,6 +118,12 @@ the high nibble of byte 9 is `dpad = { bits = [9, 4, 4] }`.
 > is rejected at load time, because two writers for the same four button bits
 > have no defined merge order.
 
+> **Same report as the buttons:** on a multi-report device, put the `dpad` field
+> in the same `[[report]]` as the `[report.button_group]` it ships with. Each
+> report replaces the whole button mask, so a report carrying only the hat's
+> d-pad bits clears the buttons another report set, and vice versa. `padctl`
+> warns at load time when it sees that layout.
+
 #### Data Types
 
 `u8` `i8` `u16le` `i16le` `u16be` `i16be` `u32le` `i32le` `u32be` `i32be`
