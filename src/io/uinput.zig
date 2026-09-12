@@ -119,6 +119,26 @@ pub const AuxOutputDevice = struct {
 // Resolved button mapping: ButtonId index → uinput BTN code (0 = unmapped)
 const BUTTON_COUNT = @typeInfo(state.ButtonId).@"enum".fields.len;
 
+/// `[output.dpad] type = "hat"` sends the synthesized hat axes as ABS_HAT0X/Y;
+/// any other value sends BTN_DPAD_* key events resolved from `[output.buttons]`.
+pub fn dpadIsHat(cfg: *const device.OutputConfig) bool {
+    const dp = cfg.dpad orelse return false;
+    return std.mem.eql(u8, dp.type, "hat");
+}
+
+/// Resolve `[output.buttons]` into the ButtonId-indexed BTN code table `emit`
+/// reads (0 = unmapped). Entries naming an unknown button are ignored.
+pub fn resolveButtonCodes(cfg: *const device.OutputConfig) ![BUTTON_COUNT]u16 {
+    var codes: [BUTTON_COUNT]u16 = [_]u16{0} ** BUTTON_COUNT;
+    const buttons = cfg.buttons orelse return codes;
+    var it = buttons.map.iterator();
+    while (it.next()) |entry| {
+        const btn_id = std.meta.stringToEnum(state.ButtonId, entry.key_ptr.*) orelse continue;
+        codes[@intFromEnum(btn_id)] = try input_codes.resolveBtnCode(entry.value_ptr.*);
+    }
+    return codes;
+}
+
 pub const UinputDevice = struct {
     fd: std.posix.fd_t,
     prev: state.GamepadState = .{},
@@ -157,17 +177,12 @@ pub const UinputDevice = struct {
         var axis_codes: [16]u16 = undefined;
         var axis_state_offsets: [16]AxisStateField = undefined;
         var axis_count: usize = 0;
-        var has_dpad_hat = false;
+        const has_dpad_hat = dpadIsHat(cfg);
 
         if (cfg.axes != null) has_abs = true;
         if (cfg.buttons != null) has_key = true;
-        if (cfg.dpad) |dp| {
-            if (std.mem.eql(u8, dp.type, "hat")) {
-                has_abs = true;
-                has_dpad_hat = true;
-            } else {
-                has_key = true;
-            }
+        if (cfg.dpad != null) {
+            if (has_dpad_hat) has_abs = true else has_key = true;
         }
         if (cfg.force_feedback != null) has_ff = true;
 
@@ -194,23 +209,15 @@ pub const UinputDevice = struct {
             try ioctlInt(fd, UI_SET_ABSBIT, c.ABS_HAT0Y);
         }
 
-        var button_codes: [BUTTON_COUNT]u16 = [_]u16{0} ** BUTTON_COUNT;
-        if (cfg.buttons) |buttons| {
-            var it = buttons.map.iterator();
-            while (it.next()) |entry| {
-                const btn_id = std.meta.stringToEnum(state.ButtonId, entry.key_ptr.*) orelse continue;
-                const code = try input_codes.resolveBtnCode(entry.value_ptr.*);
-                try ioctlInt(fd, UI_SET_KEYBIT, @intCast(code));
-                button_codes[@intFromEnum(btn_id)] = code;
-            }
+        const button_codes = try resolveButtonCodes(cfg);
+        for (button_codes) |code| {
+            if (code != 0) try ioctlInt(fd, UI_SET_KEYBIT, @intCast(code));
         }
-        if (cfg.dpad) |dp| {
-            if (!std.mem.eql(u8, dp.type, "hat")) {
-                try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_UP);
-                try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_DOWN);
-                try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_LEFT);
-                try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_RIGHT);
-            }
+        if (cfg.dpad != null and !has_dpad_hat) {
+            try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_UP);
+            try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_DOWN);
+            try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_LEFT);
+            try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_DPAD_RIGHT);
         }
         if (has_ff) try ioctlInt(fd, UI_SET_FFBIT, c.FF_RUMBLE);
 

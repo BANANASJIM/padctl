@@ -142,28 +142,34 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .touch1_active => delta.touch1_active = val != 0,
         .battery_level => delta.battery_level = saturateCast(u8, val),
         .dpad => {
-            const decoded = decodeDpadHat(val);
-            delta.dpad_x = decoded.x;
-            delta.dpad_y = decoded.y;
+            const bits = delta.buttons orelse 0;
+            delta.buttons = (bits & ~DPAD_BUTTON_MASK) | decodeDpadHat(val);
         },
         .unknown => {},
     }
 }
 
-pub const DpadHat = struct {
-    x: i8,
-    y: i8,
-};
+fn btnBit(id: state.ButtonId) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+}
 
-pub fn decodeDpadHat(val: i64) DpadHat {
+pub const DPAD_BUTTON_MASK: u64 = btnBit(.DPadUp) | btnBit(.DPadDown) |
+    btnBit(.DPadLeft) | btnBit(.DPadRight);
+
+pub fn decodeDpadHat(val: i64) u64 {
     // HID hat switch: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8+=neutral.
-    const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
-    const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
-    if (val >= 0 and val < 8) {
-        const idx: usize = @intCast(val);
-        return .{ .x = HAT_X[idx], .y = HAT_Y[idx] };
-    }
-    return .{ .x = 0, .y = 0 };
+    const HAT_BITS = [8]u64{
+        btnBit(.DPadUp),
+        btnBit(.DPadUp) | btnBit(.DPadRight),
+        btnBit(.DPadRight),
+        btnBit(.DPadDown) | btnBit(.DPadRight),
+        btnBit(.DPadDown),
+        btnBit(.DPadDown) | btnBit(.DPadLeft),
+        btnBit(.DPadLeft),
+        btnBit(.DPadUp) | btnBit(.DPadLeft),
+    };
+    if (val >= 0 and val < 8) return HAT_BITS[@intCast(val)];
+    return 0;
 }
 
 // --- pre-compiled transform chain ---
@@ -1697,16 +1703,29 @@ test "interpreter: touch0_active bits round-trip" {
     try testing.expectEqual(@as(?bool, false), d2.touch0_active);
 }
 
-test "interpreter: FieldTag.dpad: hat switch values 0-7 decode correctly" {
+test "interpreter: FieldTag.dpad: hat switch values 0-7 set DPad button bits" {
     // HID hat: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
-    const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
-    const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
+    const expected = [8]u64{
+        btnBit(.DPadUp),
+        btnBit(.DPadUp) | btnBit(.DPadRight),
+        btnBit(.DPadRight),
+        btnBit(.DPadDown) | btnBit(.DPadRight),
+        btnBit(.DPadDown),
+        btnBit(.DPadDown) | btnBit(.DPadLeft),
+        btnBit(.DPadLeft),
+        btnBit(.DPadUp) | btnBit(.DPadLeft),
+    };
     for (0..8) |i| {
         var delta = GamepadStateDelta{};
         applyFieldTag(&delta, .dpad, @intCast(i));
-        try std.testing.expectEqual(HAT_X[i], delta.dpad_x.?);
-        try std.testing.expectEqual(HAT_Y[i], delta.dpad_y.?);
+        try std.testing.expectEqual(expected[i], delta.buttons.?);
     }
+}
+
+test "interpreter: FieldTag.dpad: hat bits merge with button_group bits" {
+    var delta = GamepadStateDelta{ .buttons = btnBit(.A) | btnBit(.DPadDown) };
+    applyFieldTag(&delta, .dpad, 6);
+    try std.testing.expectEqual(btnBit(.A) | btnBit(.DPadLeft), delta.buttons.?);
 }
 
 // --- mutation audit: each test proves the suite can catch a specific mutation ---
@@ -1887,16 +1906,12 @@ test "mutation audit: processReport match polarity" {
     try testing.expectEqual(@as(?GamepadStateDelta, null), d_zero);
 }
 
-test "interpreter: FieldTag.dpad: value 8 (released) and >8 treated as neutral" {
-    var delta = GamepadStateDelta{};
-    applyFieldTag(&delta, .dpad, 8);
-    try std.testing.expectEqual(@as(i8, 0), delta.dpad_x.?);
-    try std.testing.expectEqual(@as(i8, 0), delta.dpad_y.?);
-
-    var delta2 = GamepadStateDelta{};
-    applyFieldTag(&delta2, .dpad, 15);
-    try std.testing.expectEqual(@as(i8, 0), delta2.dpad_x.?);
-    try std.testing.expectEqual(@as(i8, 0), delta2.dpad_y.?);
+test "interpreter: FieldTag.dpad: value 8 (released), >8 and negative clear DPad bits" {
+    for ([_]i64{ 8, 15, 255, -1 }) |val| {
+        var delta = GamepadStateDelta{ .buttons = btnBit(.A) | DPAD_BUTTON_MASK };
+        applyFieldTag(&delta, .dpad, val);
+        try std.testing.expectEqual(btnBit(.A), delta.buttons.?);
+    }
 }
 
 test "compileReport: rejects button_group source.size > 8" {

@@ -21,8 +21,31 @@ const CompiledReport = interp_mod.CompiledReport;
 const FieldType = interp_mod.FieldType;
 const MAX_FIELDS = interp_mod.MAX_FIELDS;
 
-const HAT_X = [8]i8{ 0, 1, 1, 1, 0, -1, -1, -1 };
-const HAT_Y = [8]i8{ -1, -1, 0, 1, 1, 1, 0, -1 };
+const ButtonId = @import("../../core/state.zig").ButtonId;
+
+fn btnMask(id: ButtonId) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+}
+
+const DPAD_MASK = btnMask(.DPadUp) | btnMask(.DPadDown) |
+    btnMask(.DPadLeft) | btnMask(.DPadRight);
+
+// Reference reimplementation of the HID hat -> DPad* bit decode.
+const HAT_BITS = [8]u64{
+    btnMask(.DPadUp),
+    btnMask(.DPadUp) | btnMask(.DPadRight),
+    btnMask(.DPadRight),
+    btnMask(.DPadDown) | btnMask(.DPadRight),
+    btnMask(.DPadDown),
+    btnMask(.DPadDown) | btnMask(.DPadLeft),
+    btnMask(.DPadLeft),
+    btnMask(.DPadUp) | btnMask(.DPadLeft),
+};
+
+fn hatBits(hat: i64) u64 {
+    if (hat >= 0 and hat < 8) return HAT_BITS[@intCast(hat)];
+    return 0;
+}
 
 fn saturate(comptime T: type, v: i64) T {
     if (v > std.math.maxInt(T)) return std.math.maxInt(T);
@@ -55,14 +78,6 @@ fn injectChecksum(cr: *const CompiledReport, pkt: []u8) void {
             std.mem.writeInt(u32, pkt[cs.expect_off..][0..4], computed, .little);
         },
     }
-}
-
-fn hatDecode(hat: i64) struct { x: i8, y: i8 } {
-    if (hat >= 0 and hat < 8) {
-        const idx: usize = @intCast(hat);
-        return .{ .x = HAT_X[idx], .y = HAT_Y[idx] };
-    }
-    return .{ .x = 0, .y = 0 };
 }
 
 // Compare oracle results against production delta.
@@ -145,11 +160,7 @@ fn compareDelta(fr: lean.FieldResult, delta: anytype) !void {
             try testing.expectEqual(@as(u8, @intCast(fr.val & 0xff)), delta.battery_level.?);
         },
         .dpad => {
-            const hat = fr.val;
-            const exp_x: i8 = if (hat >= 0 and hat < 8) HAT_X[@intCast(hat)] else 0;
-            const exp_y: i8 = if (hat >= 0 and hat < 8) HAT_Y[@intCast(hat)] else 0;
-            try testing.expectEqual(exp_x, delta.dpad_x orelse 0);
-            try testing.expectEqual(exp_y, delta.dpad_y orelse 0);
+            try testing.expectEqual(hatBits(fr.val), (delta.buttons orelse 0) & DPAD_MASK);
         },
         .unknown => {},
     }
@@ -348,7 +359,7 @@ fn writeField(buf: []u8, offset: usize, t: FieldType, value: i64) void {
     }
 }
 
-test "DRT: dpad hat-switch exhaustive — all 9 values decode correctly" {
+test "DRT: dpad hat-switch exhaustive — all 9 values set the right DPad bits" {
     const allocator = testing.allocator;
     const toml =
         \\[device]
@@ -372,13 +383,9 @@ test "DRT: dpad hat-switch exhaustive — all 9 values decode correctly" {
     defer parsed.deinit();
     const interp = interp_mod.Interpreter.init(&parsed.value);
 
-    const expected_x = [9]i8{ 0, 1, 1, 1, 0, -1, -1, -1, 0 };
-    const expected_y = [9]i8{ -1, -1, 0, 1, 1, 1, 0, -1, 0 };
-
     for (0..9) |hat| {
         var raw = [_]u8{ 0xAA, @intCast(hat), 0, 0 };
         const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
-        try testing.expectEqual(expected_x[hat], delta.dpad_x orelse 0);
-        try testing.expectEqual(expected_y[hat], delta.dpad_y orelse 0);
+        try testing.expectEqual(hatBits(@intCast(hat)), delta.buttons orelse 0);
     }
 }

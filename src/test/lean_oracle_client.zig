@@ -108,17 +108,11 @@ pub const LeanOracle = struct {
         return @intCast(try parseUnsigned(result));
     }
 
-    pub fn queryDpadHat(self: *LeanOracle, value: u8) !struct { dx: i8, dy: i8 } {
+    pub fn queryDpadHat(self: *LeanOracle, value: u8) !u64 {
         var cmd_buf: [64]u8 = undefined;
         const cmd = std.fmt.bufPrint(&cmd_buf, "DPAD_HAT {d}", .{value}) catch return error.BufOverflow;
         const result = try self.sendRecv(cmd);
-        var it = std.mem.splitScalar(u8, result, ' ');
-        const dx_str = it.next() orelse return error.BadProtocol;
-        const dy_str = it.next() orelse return error.BadProtocol;
-        return .{
-            .dx = @intCast(try parseInt(dx_str)),
-            .dy = @intCast(try parseInt(dy_str)),
-        };
+        return parseUnsigned(result);
     }
 
     pub fn querySignExtend(self: *LeanOracle, value: u32, bit_count: u6) !i64 {

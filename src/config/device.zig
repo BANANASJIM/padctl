@@ -635,6 +635,16 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
+    try validateDpadDeclaration(cfg);
+    if (dpadSplitAcrossReports(cfg)) |split| {
+        std.log.warn(
+            "device '{s}': dpad hat in report '{s}' but button bits in report '{s}'; " ++
+                "a report's button mask replaces the previous one, so the two clear each other — " ++
+                "declare the hat in the same report as its button_group",
+            .{ cfg.device.name, split.hat, split.group },
+        );
+    }
+
     // Generic mode validation
     if (cfg.device.mode) |m| {
         if (std.mem.eql(u8, m, "generic")) {
@@ -663,6 +673,69 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             }
         }
     }
+}
+
+fn isDpadButtonName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "DPadUp") or std.mem.eql(u8, name, "DPadDown") or
+        std.mem.eql(u8, name, "DPadLeft") or std.mem.eql(u8, name, "DPadRight");
+}
+
+// A `dpad` hat field and DPad* button_group bits are two writers for the same
+// four button bits with no defined merge order, so a config may declare only
+// one of them — the rule spans the whole config, not a single report.
+fn validateDpadDeclaration(cfg: *const DeviceConfig) !void {
+    var hat_report: ?[]const u8 = null;
+    var bits_report: ?[]const u8 = null;
+
+    for (cfg.report) |report| {
+        if (hat_report == null) {
+            if (report.fields) |fields| {
+                if (fields.map.get("dpad") != null) hat_report = report.name;
+            }
+        }
+        if (bits_report == null) {
+            if (report.button_group) |bg| {
+                var it = bg.map.map.iterator();
+                while (it.next()) |entry| {
+                    if (isDpadButtonName(entry.key_ptr.*)) {
+                        bits_report = report.name;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    const hat = hat_report orelse return;
+    const bits = bits_report orelse return;
+    std.log.warn(
+        "device '{s}': dpad declared twice — hat field in report '{s}' and DPad* button_group bits in report '{s}'; keep only one",
+        .{ cfg.device.name, hat, bits },
+    );
+    return error.InvalidConfig;
+}
+
+const DpadSplit = struct { hat: []const u8, group: []const u8 };
+
+// `applyDelta` replaces the whole button mask, so a report carrying only a
+// hat's DPad* bits clears the buttons another report set, and vice versa. The
+// layout loads but cannot work, so it is warned about rather than rejected.
+fn dpadSplitAcrossReports(cfg: *const DeviceConfig) ?DpadSplit {
+    var hat_report: ?[]const u8 = null;
+    var group_report: ?[]const u8 = null;
+
+    for (cfg.report) |report| {
+        const has_hat = if (report.fields) |fields| fields.map.get("dpad") != null else false;
+        if (has_hat and report.button_group == null) {
+            if (hat_report == null) hat_report = report.name;
+        } else if (report.button_group != null) {
+            if (group_report == null) group_report = report.name;
+        }
+    }
+
+    const hat = hat_report orelse return null;
+    const group = group_report orelse return null;
+    return .{ .hat = hat, .group = group };
 }
 
 fn validateMappingEntries(mapping: toml.HashMap(MappingEntry)) !void {
@@ -3652,4 +3725,80 @@ test "device: all shipped devices/*.toml lint clean" {
         checked += 1;
     }
     try std.testing.expect(checked >= 1);
+}
+
+test "device: dpad hat and button bits in separate reports is flagged as a split" {
+    const allocator = std.testing.allocator;
+    const split_toml =
+        \\[device]
+        \\name = "Split Pad"
+        \\vid = 1
+        \\pid = 2
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "hat"
+        \\interface = 0
+        \\size = 4
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\
+        \\[report.fields]
+        \\dpad = { offset = 1, type = "u8" }
+        \\
+        \\[[report]]
+        \\name = "buttons"
+        \\interface = 0
+        \\size = 4
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x02]
+        \\
+        \\[report.button_group]
+        \\source = { offset = 1, size = 1 }
+        \\map = { A = 0 }
+    ;
+    // The shape still loads — only the layout is unsupported.
+    const parsed = try parseString(allocator, split_toml);
+    defer parsed.deinit();
+
+    const split = dpadSplitAcrossReports(&parsed.value) orelse return error.SplitNotDetected;
+    try std.testing.expectEqualStrings("hat", split.hat);
+    try std.testing.expectEqualStrings("buttons", split.group);
+}
+
+test "device: dpad hat beside its button_group in one report is not a split" {
+    const allocator = std.testing.allocator;
+    const joint_toml =
+        \\[device]
+        \\name = "Together Pad"
+        \\vid = 1
+        \\pid = 2
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "input"
+        \\interface = 0
+        \\size = 4
+        \\
+        \\[report.fields]
+        \\dpad = { offset = 1, type = "u8" }
+        \\
+        \\[report.button_group]
+        \\source = { offset = 2, size = 1 }
+        \\map = { A = 0 }
+    ;
+    const parsed = try parseString(allocator, joint_toml);
+    defer parsed.deinit();
+
+    try std.testing.expect(dpadSplitAcrossReports(&parsed.value) == null);
 }

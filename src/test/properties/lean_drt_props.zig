@@ -383,10 +383,14 @@ test "lean_drt: hat decode vectors" {
         if (!isDataLine(line)) break;
         const f = try splitFields(line);
         const decoded = interp.decodeDpadHat(try parseInt(f[0]));
-        const expected_dx: i8 = @intCast(try parseInt(f[1]));
-        const expected_dy: i8 = @intCast(try parseInt(f[2]));
-        try testing.expectEqual(expected_dx, decoded.x);
-        try testing.expectEqual(expected_dy, decoded.y);
+        try testing.expectEqual(try parseUint(f[1]), decoded);
+
+        // Same vector carries the axes the emit path derives from those bits.
+        var gs = state.GamepadState{};
+        gs.buttons = decoded;
+        gs.synthesizeDpadAxes();
+        try testing.expectEqual(@as(i8, @intCast(try parseInt(f[2]))), gs.dpad_x);
+        try testing.expectEqual(@as(i8, @intCast(try parseInt(f[3]))), gs.dpad_y);
         count += 1;
     }
     try testing.expect(count > 0);

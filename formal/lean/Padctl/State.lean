@@ -9,6 +9,7 @@ structure GamepadState where
   lt : Nat := 0
   rt : Nat := 0
   buttons : Nat := 0
+  -- Output axes derived from the DPad* bits by synthesizeDpadAxes.
   dpad_x : Int := 0
   dpad_y : Int := 0
   gyro_x : Int := 0
@@ -34,8 +35,6 @@ structure GamepadStateDelta where
   lt : Option Nat := none
   rt : Option Nat := none
   buttons : Option Nat := none
-  dpad_x : Option Int := none
-  dpad_y : Option Int := none
   gyro_x : Option Int := none
   gyro_y : Option Int := none
   gyro_z : Option Int := none
@@ -59,8 +58,9 @@ def applyDelta (s : GamepadState) (d : GamepadStateDelta) : GamepadState :=
     lt := d.lt.getD s.lt
     rt := d.rt.getD s.rt
     buttons := d.buttons.getD s.buttons
-    dpad_x := d.dpad_x.getD s.dpad_x
-    dpad_y := d.dpad_y.getD s.dpad_y
+    -- Derived output axes: no delta field writes them.
+    dpad_x := s.dpad_x
+    dpad_y := s.dpad_y
     gyro_x := d.gyro_x.getD s.gyro_x
     gyro_y := d.gyro_y.getD s.gyro_y
     gyro_z := d.gyro_z.getD s.gyro_z
@@ -85,8 +85,6 @@ def diff (a b : GamepadState) : GamepadStateDelta :=
     lt := if a.lt ≠ b.lt then some a.lt else none
     rt := if a.rt ≠ b.rt then some a.rt else none
     buttons := if a.buttons ≠ b.buttons then some a.buttons else none
-    dpad_x := if a.dpad_x ≠ b.dpad_x then some a.dpad_x else none
-    dpad_y := if a.dpad_y ≠ b.dpad_y then some a.dpad_y else none
     gyro_x := if a.gyro_x ≠ b.gyro_x then some a.gyro_x else none
     gyro_y := if a.gyro_y ≠ b.gyro_y then some a.gyro_y else none
     gyro_z := if a.gyro_z ≠ b.gyro_z then some a.gyro_z else none
@@ -131,6 +129,9 @@ def dpadUpBit : Nat := ButtonId.toNat .dpadUp
 def dpadDownBit : Nat := ButtonId.toNat .dpadDown
 def dpadLeftBit : Nat := ButtonId.toNat .dpadLeft
 def dpadRightBit : Nat := ButtonId.toNat .dpadRight
+
+def dpadButtonMask : Nat :=
+  (1 <<< dpadUpBit) ||| (1 <<< dpadDownBit) ||| (1 <<< dpadLeftBit) ||| (1 <<< dpadRightBit)
 
 def testBit (n : Nat) (bit : Nat) : Bool := (n / (2 ^ bit)) % 2 == 1
 

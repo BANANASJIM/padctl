@@ -43,6 +43,8 @@ pub const GamepadState = struct {
     ry: i16 = 0,
     lt: u8 = 0,
     rt: u8 = 0,
+    // Output axes derived from the DPad* button bits by synthesizeDpadAxes;
+    // no input path writes them.
     dpad_x: i8 = 0,
     dpad_y: i8 = 0,
     buttons: u64 = 0,
@@ -68,8 +70,6 @@ pub const GamepadState = struct {
         if (self.ry != prev.ry) d.ry = self.ry;
         if (self.lt != prev.lt) d.lt = self.lt;
         if (self.rt != prev.rt) d.rt = self.rt;
-        if (self.dpad_x != prev.dpad_x) d.dpad_x = self.dpad_x;
-        if (self.dpad_y != prev.dpad_y) d.dpad_y = self.dpad_y;
         if (self.buttons != prev.buttons) d.buttons = self.buttons;
         if (self.gyro_x != prev.gyro_x) d.gyro_x = self.gyro_x;
         if (self.gyro_y != prev.gyro_y) d.gyro_y = self.gyro_y;
@@ -106,8 +106,6 @@ pub const GamepadState = struct {
         if (delta.ry) |v| self.ry = v;
         if (delta.lt) |v| self.lt = v;
         if (delta.rt) |v| self.rt = v;
-        if (delta.dpad_x) |v| self.dpad_x = v;
-        if (delta.dpad_y) |v| self.dpad_y = v;
         if (delta.buttons) |v| self.buttons = v;
         if (delta.gyro_x) |v| self.gyro_x = v;
         if (delta.gyro_y) |v| self.gyro_y = v;
@@ -134,8 +132,6 @@ pub const GamepadStateDelta = struct {
     ry: ?i16 = null,
     lt: ?u8 = null,
     rt: ?u8 = null,
-    dpad_x: ?i8 = null,
-    dpad_y: ?i8 = null,
     buttons: ?u64 = null,
     gyro_x: ?i16 = null,
     gyro_y: ?i16 = null,
@@ -189,8 +185,6 @@ test "state: applyDelta: full overwrite" {
         .ry = -200,
         .lt = 128,
         .rt = 64,
-        .dpad_x = 1,
-        .dpad_y = -1,
         .buttons = 0xDEAD,
         .gyro_x = 10,
         .gyro_y = 20,
@@ -205,8 +199,6 @@ test "state: applyDelta: full overwrite" {
     try std.testing.expectEqual(@as(i16, -200), s.ry);
     try std.testing.expectEqual(@as(u8, 128), s.lt);
     try std.testing.expectEqual(@as(u8, 64), s.rt);
-    try std.testing.expectEqual(@as(i8, 1), s.dpad_x);
-    try std.testing.expectEqual(@as(i8, -1), s.dpad_y);
     try std.testing.expectEqual(@as(u64, 0xDEAD), s.buttons);
     try std.testing.expectEqual(@as(i16, 10), s.gyro_x);
     try std.testing.expectEqual(@as(i16, -30), s.accel_z);

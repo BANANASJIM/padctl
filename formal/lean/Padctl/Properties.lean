@@ -88,9 +88,10 @@ theorem chain_singleton (v : Int) (op : TransformOp) (tMax : Nat) :
     runTransformChain v [op] tMax = applyTransform op v tMax := by
   simp [runTransformChain]
 
--- P12: applyDelta(s, diff(t, s)) = t (round-trip)
+-- P12: applyDelta(s, diff(t, s)) = t up to the derived dpad axes, which the
+-- delta does not carry
 theorem apply_diff_roundtrip (s t : GamepadState) :
-    applyDelta s (diff t s) = t := by
+    applyDelta s (diff t s) = { t with dpad_x := s.dpad_x, dpad_y := s.dpad_y } := by
   cases s; cases t
   simp only [applyDelta, diff, Option.getD]
   congr 1 <;> (split <;> simp_all)
@@ -212,33 +213,61 @@ theorem layer_mutual_exclusion (s : MapperState) (th : TapHoldState) (j : Nat)
 theorem toggle_involutive (b : Bool) : !(!b) = b := by
   cases b <;> simp
 
--- P21: Dpad arrows — dx = 0 in output when input dx = 0
-theorem dpad_arrows_zero_dx (dy prevDx prevDy : Int) (suppress : Bool) :
-    (processDpad 0 dy prevDx prevDy .arrows suppress).dpadX = 0 := by
+-- P21: Dpad arrows — an unchanged direction produces no arrow-key events
+theorem dpad_arrows_no_edge (dx dy : Int) (suppress : Bool) :
+    (processDpad dx dy dx dy .arrows suppress).auxEvents = [] := by
   simp [processDpad]
 
--- P21b: Dpad gamepad mode is passthrough
-theorem dpad_gamepad_passthrough (dx dy prevDx prevDy : Int) :
-    (processDpad dx dy prevDx prevDy .gamepad false).dpadX = dx ∧
-    (processDpad dx dy prevDx prevDy .gamepad false).dpadY = dy := by
+-- P21b: Dpad gamepad mode emits nothing and suppresses nothing
+theorem dpad_gamepad_inert (dx dy prevDx prevDy : Int) :
+    (processDpad dx dy prevDx prevDy .gamepad false).auxEvents = [] ∧
+    (processDpad dx dy prevDx prevDy .gamepad false).suppressButtons = 0 ∧
+    (processDpad dx dy prevDx prevDy .gamepad false).suppressDpadHat = false := by
   simp [processDpad]
 
--- P23: decodeDpadHat exhaustive — all 9 cases produce valid (dx, dy) pairs
+-- P23: decodeDpadHat exhaustive — all 9 cases produce the right DPad* bits
 -- Hat values 0-7 each produce a unique direction; 8+ produce neutral
 theorem dpadHat_exhaustive :
-    decodeDpadHat 0 = (0, -1) ∧ decodeDpadHat 1 = (1, -1) ∧
-    decodeDpadHat 2 = (1, 0) ∧ decodeDpadHat 3 = (1, 1) ∧
-    decodeDpadHat 4 = (0, 1) ∧ decodeDpadHat 5 = (-1, 1) ∧
-    decodeDpadHat 6 = (-1, 0) ∧ decodeDpadHat 7 = (-1, -1) ∧
-    decodeDpadHat 8 = (0, 0) := by decide
+    decodeDpadHat 0 = 1 <<< dpadUpBit ∧
+    decodeDpadHat 1 = (1 <<< dpadUpBit) ||| (1 <<< dpadRightBit) ∧
+    decodeDpadHat 2 = 1 <<< dpadRightBit ∧
+    decodeDpadHat 3 = (1 <<< dpadDownBit) ||| (1 <<< dpadRightBit) ∧
+    decodeDpadHat 4 = 1 <<< dpadDownBit ∧
+    decodeDpadHat 5 = (1 <<< dpadDownBit) ||| (1 <<< dpadLeftBit) ∧
+    decodeDpadHat 6 = 1 <<< dpadLeftBit ∧
+    decodeDpadHat 7 = (1 <<< dpadUpBit) ||| (1 <<< dpadLeftBit) ∧
+    decodeDpadHat 8 = 0 := by decide
 
--- P24: decodeDpadHat opposing directions cancel (up/down: hat 0 vs hat 4)
+-- P23b: decoding a hat and then synthesizing the axes reproduces HID hat
+-- semantics end to end
+theorem dpadHat_axes_roundtrip :
+    synthesizeDpadAxes (decodeDpadHat 0) = (0, -1) ∧
+    synthesizeDpadAxes (decodeDpadHat 1) = (1, -1) ∧
+    synthesizeDpadAxes (decodeDpadHat 2) = (1, 0) ∧
+    synthesizeDpadAxes (decodeDpadHat 3) = (1, 1) ∧
+    synthesizeDpadAxes (decodeDpadHat 4) = (0, 1) ∧
+    synthesizeDpadAxes (decodeDpadHat 5) = (-1, 1) ∧
+    synthesizeDpadAxes (decodeDpadHat 6) = (-1, 0) ∧
+    synthesizeDpadAxes (decodeDpadHat 7) = (-1, -1) ∧
+    synthesizeDpadAxes (decodeDpadHat 8) = (0, 0) := by decide
+
+-- P23c: applyDpadHat replaces the DPad* bits and preserves the others
+theorem dpadHat_preserves_other_bits :
+    applyDpadHat ((1 <<< 0) ||| dpadButtonMask) 6 = (1 <<< 0) ||| (1 <<< dpadLeftBit) ∧
+    applyDpadHat ((1 <<< 0) ||| dpadButtonMask) 8 = 1 <<< 0 := by decide
+
+-- P24: hat 0 (up) and hat 4 (down) oppose on the y axis — the bits they decode
+-- to are disjoint, and the axes they synthesize are non-zero and negate
 theorem dpadHat_opposing_y :
-    (decodeDpadHat 0).2 = -(decodeDpadHat 4).2 := by decide
+    decodeDpadHat 0 &&& decodeDpadHat 4 = 0 ∧
+    (synthesizeDpadAxes (decodeDpadHat 0)).2 = -(synthesizeDpadAxes (decodeDpadHat 4)).2 ∧
+    (synthesizeDpadAxes (decodeDpadHat 0)).2 ≠ 0 := by decide
 
--- P25: decodeDpadHat opposing directions cancel (left/right: hat 6 vs hat 2)
+-- P25: hat 6 (left) and hat 2 (right) oppose on the x axis, same sense as P24
 theorem dpadHat_opposing_x :
-    (decodeDpadHat 6).1 = -(decodeDpadHat 2).1 := by decide
+    decodeDpadHat 6 &&& decodeDpadHat 2 = 0 ∧
+    (synthesizeDpadAxes (decodeDpadHat 6)).1 = -(synthesizeDpadAxes (decodeDpadHat 2)).1 ∧
+    (synthesizeDpadAxes (decodeDpadHat 6)).1 ≠ 0 := by decide
 
 -- P22: assembleButtons — inject bits always present in output
 theorem assemble_inject_present (raw suppress inject : Nat) :

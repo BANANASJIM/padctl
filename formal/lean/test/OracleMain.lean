@@ -386,16 +386,24 @@ private def emitChecksumVectors : IO Unit := do
 
 private def emitHatDecodeVectors : IO Unit := do
   println "# HAT_DECODE"
-  println "# hatValue,expected_dx,expected_dy"
-  let expected : List (Nat × Int × Int) :=
-    [(0, 0, -1), (1, 1, -1), (2, 1, 0), (3, 1, 1),
-     (4, 0, 1), (5, -1, 1), (6, -1, 0), (7, -1, -1),
-     (8, 0, 0), (15, 0, 0)]
-  for (hat, edx, edy) in expected do
-    let (dx, dy) := decodeDpadHat hat
-    println s!"{hat},{intToString dx},{intToString dy}"
+  println "# hatValue,expected_buttons,expected_dx,expected_dy"
+  let up := 1 <<< dpadUpBit
+  let down := 1 <<< dpadDownBit
+  let left := 1 <<< dpadLeftBit
+  let right := 1 <<< dpadRightBit
+  let expected : List (Nat × Nat × Int × Int) :=
+    [(0, up, 0, -1), (1, up ||| right, 1, -1), (2, right, 1, 0),
+     (3, down ||| right, 1, 1), (4, down, 0, 1), (5, down ||| left, -1, 1),
+     (6, left, -1, 0), (7, up ||| left, -1, -1),
+     (8, 0, 0, 0), (15, 0, 0, 0)]
+  for (hat, ebits, edx, edy) in expected do
+    let bits := decodeDpadHat hat
+    let (dx, dy) := synthesizeDpadAxes bits
+    println s!"{hat},{bits},{intToString dx},{intToString dy}"
+    if bits != ebits then
+      throw (IO.userError s!"decodeDpadHat({hat}) = {bits}, expected {ebits}")
     if dx != edx || dy != edy then
-      throw (IO.userError s!"decodeDpadHat({hat}) = ({intToString dx},{intToString dy}), expected ({intToString edx},{intToString edy})")
+      throw (IO.userError s!"synthesizeDpadAxes (decodeDpadHat {hat}) = ({intToString dx},{intToString dy}), expected ({intToString edx},{intToString edy})")
 
 /-! ## Button decode vectors -/
 
@@ -597,9 +605,7 @@ private def handleCommand (parts : List String) (stdout : IO.FS.Stream) : IO Uni
 
   | ["DPAD_HAT", valStr] => do
     match parseNat valStr with
-    | some v =>
-      let (dx, dy) := decodeDpadHat v
-      stdout.putStrLn s!"RESULT {intToString dx} {intToString dy}"
+    | some v => stdout.putStrLn s!"RESULT {decodeDpadHat v}"
     | none => stdout.putStrLn "ERROR bad args"
 
   | ["SIGNEXTEND", valStr, bitCountStr] => do

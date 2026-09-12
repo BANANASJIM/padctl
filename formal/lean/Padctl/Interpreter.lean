@@ -1,5 +1,6 @@
 -- Interpreter core operations matching src/core/interpreter.zig
 import Padctl.Types
+import Padctl.State
 
 -- Byte-level field reading (models readFieldByTag)
 def readU8 (raw : ByteArray) (off : Nat) : Option Nat :=
@@ -122,17 +123,22 @@ def checkMatch (raw : ByteArray) (offset : Nat) (expected : ByteArray) : Bool :=
 
 -- HID hat switch decode (models applyFieldTag .dpad branch)
 -- 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8+=neutral
-def decodeDpadHat (hatValue : Nat) : Int × Int :=
+def decodeDpadHat (hatValue : Nat) : Nat :=
   match hatValue with
-  | 0 => (0, -1)    -- Up
-  | 1 => (1, -1)    -- Up-Right
-  | 2 => (1, 0)     -- Right
-  | 3 => (1, 1)     -- Down-Right
-  | 4 => (0, 1)     -- Down
-  | 5 => (-1, 1)    -- Down-Left
-  | 6 => (-1, 0)    -- Left
-  | 7 => (-1, -1)   -- Up-Left
-  | _ => (0, 0)     -- Neutral (8 or any other value)
+  | 0 => 1 <<< dpadUpBit                            -- Up
+  | 1 => (1 <<< dpadUpBit) ||| (1 <<< dpadRightBit) -- Up-Right
+  | 2 => 1 <<< dpadRightBit                         -- Right
+  | 3 => (1 <<< dpadDownBit) ||| (1 <<< dpadRightBit) -- Down-Right
+  | 4 => 1 <<< dpadDownBit                          -- Down
+  | 5 => (1 <<< dpadDownBit) ||| (1 <<< dpadLeftBit) -- Down-Left
+  | 6 => 1 <<< dpadLeftBit                          -- Left
+  | 7 => (1 <<< dpadUpBit) ||| (1 <<< dpadLeftBit)  -- Up-Left
+  | _ => 0                                          -- Neutral (8 or any other value)
+
+-- Merge a decoded hat into a button mask: the four DPad* bits are replaced,
+-- every other bit is preserved (models the applyFieldTag .dpad branch).
+def applyDpadHat (buttons : Nat) (hatValue : Nat) : Nat :=
+  (buttons &&& (dpadButtonMask ^^^ (2 ^ 64 - 1))) ||| decodeDpadHat hatValue
 
 -- Button group decoding (models extractAndFillCompiled button logic)
 -- entries: list of (bit_idx_in_source, button_bit_in_output)

@@ -126,6 +126,9 @@ const Decoder = struct {
         };
         const prev = self.state;
         self.state.applyDelta(delta);
+        // DPadX/DPadY are derived from the DPad* button bits, never carried by
+        // the delta, so they only exist once synthesized.
+        self.state.synthesizeDpadAxes();
         try formatEvents(w, prev, self.state);
     }
 };
@@ -498,6 +501,35 @@ test "decode: axes printed on change with value" {
     raw[15] = 0;
     try dec.feed(w, &raw);
     try testing.expectEqualStrings("LT=0\n", out.items);
+}
+
+test "decode: dpad button bits print the derived DPadX/DPadY axes" {
+    const allocator = testing.allocator;
+    const parsed = try device_mod.parseFile(allocator, "devices/flydigi/vader5.toml");
+    defer parsed.deinit();
+    const interp = interpreter_mod.Interpreter.init(&parsed.value);
+    var dec = Decoder{ .interp = &interp, .interface_id = 1 };
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    const w = out.writer(allocator);
+
+    // DPadUp = button_group bit 0 → byte 11, bit 0
+    var raw = vader5Report();
+    raw[11] = 0x01;
+    try dec.feed(w, &raw);
+    try testing.expectEqualStrings("DPadUp down\nDPadY=-1\n", out.items);
+
+    // DPadRight = bit 1: the axes follow the bits on every frame
+    out.clearRetainingCapacity();
+    raw[11] = 0x02;
+    try dec.feed(w, &raw);
+    try testing.expectEqualStrings("DPadUp up\nDPadRight down\nDPadX=1\nDPadY=0\n", out.items);
+
+    out.clearRetainingCapacity();
+    raw[11] = 0;
+    try dec.feed(w, &raw);
+    try testing.expectEqualStrings("DPadRight up\nDPadX=0\n", out.items);
 }
 
 test "decode: buttons and axes in one report" {
