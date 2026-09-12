@@ -387,7 +387,7 @@ test "e2e: dual uinput routing — same frame: gamepad remap + key remap both ro
 
 // --- 6. DPad arrows ---
 
-test "e2e: dpad arrows — dpad_y=-1 (first press) → KEY_UP press" {
+test "e2e: dpad arrows — DPadUp pressed → KEY_UP press" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(
         \\[dpad]
@@ -396,8 +396,7 @@ test "e2e: dpad arrows — dpad_y=-1 (first press) → KEY_UP press" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    // prev dpad_y = 0 (default), current = -1
-    const ev = try m.apply(.{ .dpad_y = -1 }, 16, 0);
+    const ev = try m.apply(.{ .buttons = btnMask(.DPadUp) }, 16, 0);
     var found_key_up_press = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
@@ -410,7 +409,7 @@ test "e2e: dpad arrows — dpad_y=-1 (first press) → KEY_UP press" {
     try testing.expect(found_key_up_press);
 }
 
-test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
+test "e2e: dpad arrows — DPadUp released → KEY_UP release" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(
         \\[dpad]
@@ -419,11 +418,8 @@ test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    // Set prev to dpad_y = -1 by applying that state first
-    _ = try m.apply(.{ .dpad_y = -1 }, 16, 0);
-
-    // Now dpad_y returns to 0 → KEY_UP release
-    const ev = try m.apply(.{ .dpad_y = 0 }, 16, 0);
+    _ = try m.apply(.{ .buttons = btnMask(.DPadUp) }, 16, 0);
+    const ev = try m.apply(.{ .buttons = 0 }, 16, 0);
     var found_key_up_release = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
@@ -436,10 +432,8 @@ test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
     try testing.expect(found_key_up_release);
 }
 
-test "e2e: dpad gamepad mode — dpad passes through unchanged, no aux KEY events" {
+test "e2e: dpad gamepad mode — DPad bits drive the hat axes, no aux KEY events" {
     const allocator = testing.allocator;
-    // Default mode is "gamepad". emit_state.synthesizeDpadAxes() derives dpad axes
-    // from button state, so drive the test via the DPadUp button bit.
     var ctx = try makeMapper("", allocator);
     defer ctx.deinit();
     var m = &ctx.mapper;
@@ -454,7 +448,7 @@ test "e2e: dpad gamepad mode — dpad passes through unchanged, no aux KEY event
     try testing.expectEqual(@as(i8, -1), ev.gamepad.dpad_y);
 }
 
-test "e2e: dpad arrows suppress_gamepad — dpad_x/y zeroed in emit_state" {
+test "e2e: dpad arrows suppress_gamepad — hat axes and DPad bits zeroed in emit_state" {
     const allocator = testing.allocator;
     var ctx = try makeMapper(
         \\[dpad]
@@ -464,9 +458,10 @@ test "e2e: dpad arrows suppress_gamepad — dpad_x/y zeroed in emit_state" {
     defer ctx.deinit();
     var m = &ctx.mapper;
 
-    const ev = try m.apply(.{ .dpad_y = -1 }, 16, 0);
+    const ev = try m.apply(.{ .buttons = btnMask(.DPadUp) }, 16, 0);
     try testing.expectEqual(@as(i8, 0), ev.gamepad.dpad_y);
     try testing.expectEqual(@as(i8, 0), ev.gamepad.dpad_x);
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.DPadUp));
 }
 
 // --- 7. prev-frame suppress correctness ---
@@ -648,8 +643,8 @@ test "e2e: layer active — dpad mode switches to arrows" {
     _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
     _ = m.layer.onTimerExpired();
 
-    // dpad_y = -1 → KEY_UP (arrows mode active via layer)
-    const ev_up = try m.apply(.{ .dpad_y = -1 }, 16, 0);
+    // DPadUp → KEY_UP (arrows mode active via layer)
+    const ev_up = try m.apply(.{ .buttons = btnMask(.DPadUp) }, 16, 0);
     var found_key_up = false;
     for (ev_up.aux.slice()) |e| {
         switch (e) {
@@ -661,8 +656,8 @@ test "e2e: layer active — dpad mode switches to arrows" {
     }
     try testing.expect(found_key_up);
 
-    // dpad_y = 1 → KEY_DOWN
-    const ev_down = try m.apply(.{ .dpad_y = 1 }, 16, 0);
+    // DPadDown → KEY_DOWN
+    const ev_down = try m.apply(.{ .buttons = btnMask(.DPadDown) }, 16, 0);
     var found_key_down = false;
     for (ev_down.aux.slice()) |e| {
         switch (e) {

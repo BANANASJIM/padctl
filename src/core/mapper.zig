@@ -343,6 +343,8 @@ pub const Mapper = struct {
     pub fn seedInputState(self: *Mapper, current: GamepadState) void {
         var seeded = current;
         self.applyTriggerThreshold(&seeded);
+        // The carried-over axes may be stale; the DPad* bits are the source.
+        seeded.synthesizeDpadAxes();
         self.state = seeded;
         self.prev = seeded;
         self.seeded_buttons = seeded.buttons;
@@ -457,6 +459,9 @@ pub const Mapper = struct {
         }
 
         self.state.applyDelta(delta);
+        // Arrow-mode edge detection reads self.state/self.prev dpad axes, so
+        // they must track the DPad* bits the same way the emitted frame does.
+        self.state.synthesizeDpadAxes();
         self.applyTriggerThreshold(&self.state);
         self.suppressSeededEdges();
 
@@ -1537,6 +1542,27 @@ fn makeMapping(toml_str: []const u8, allocator: std.mem.Allocator) !mapping.Pars
 fn makeMapper(cfg: *const MappingConfig, allocator: std.mem.Allocator) !Mapper {
     // Use -1 as a dummy fd for tests (timer operations are no-ops on invalid fd)
     return Mapper.init(cfg, std.posix.STDIN_FILENO, allocator);
+}
+
+test "mapper: seedInputState derives dpad axes so a held dpad raises no arrow edge" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[dpad]
+        \\mode = "arrows"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Takeover: the previous instance hands over raw buttons only.
+    m.seedInputState(.{ .buttons = buttonBit("DPadUp") });
+    const ev = try m.apply(.{ .buttons = buttonBit("DPadUp") }, 16, 0);
+
+    for (ev.aux.slice()) |e| switch (e) {
+        .key => return error.UnexpectedKeyEvent,
+        else => {},
+    };
 }
 
 test "mapper: resetRuntimeState clears transient layer timer and input state" {
@@ -3183,9 +3209,11 @@ test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
 
     const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
     const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const up_idx: u6 = @intCast(@intFromEnum(ButtonId.DPadUp));
+    const up_mask: u64 = @as(u64, 1) << up_idx;
 
     // Frame 1: LT + dpad-up pressed simultaneously → layer PENDING, dpad recorded in prev
-    _ = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16, 0);
+    _ = try m.apply(.{ .buttons = lt_mask | up_mask }, 16, 0);
 
     // Timer fires: PENDING → ACTIVE
     _ = m.onLayerTimerExpired();
@@ -3194,7 +3222,7 @@ test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
     // prev.dpad_y should be reset to 0 so edge triggers KEY_UP press
     const configs = parsed.value.layer.?;
     _ = configs; // suppress unused warning
-    const ev = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16, 0);
+    const ev = try m.apply(.{ .buttons = lt_mask | up_mask }, 16, 0);
 
     var got_key_up = false;
     for (ev.aux.slice()) |e| switch (e) {
@@ -3345,12 +3373,15 @@ test "mapper: dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
+    const up_idx: u6 = @intCast(@intFromEnum(ButtonId.DPadUp));
+    const up_mask: u64 = @as(u64, 1) << up_idx;
+
     // Frame 1: dpad up
-    const ev1 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16, 0);
+    const ev1 = try m.apply(.{ .buttons = up_mask }, 16, 0);
     try testing.expectEqual(@as(i8, 0), ev1.gamepad.dpad_y);
 
     // Frame 2: same dpad — masked_prev should also have dpad_y = 0
-    const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 }, 16, 0);
+    const ev2 = try m.apply(.{ .buttons = up_mask }, 16, 0);
     try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
 }
 

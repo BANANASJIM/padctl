@@ -73,10 +73,11 @@ const LAYER_TRIGGER_MASK: u64 = blk: {
 ///    each frame (prod `mapper.zig:338-342`; oracle step [6] `.gamepad_button`).
 ///  * `.disabled` — both no-op + source bit added to suppress mask.
 ///  * dpad-arrow synthesis — prod delegates to `dpad.zig:processDpad`; oracle
-///    `processDpad` is line-for-line identical (edge detect on dpad_x/y vs
-///    prev, KEY_UP/DOWN/LEFT/RIGHT, `suppress_gamepad` -> DPad* suppress +
-///    hat zero). `effectiveDpadConfig` with no layer == `cfg.dpad orelse {}`,
-///    matching oracle `dpad_cfg = cfg.dpad`.
+///    `processDpad` is line-for-line identical (edge detect on the axes derived
+///    from the raw DPad* bits vs prev, KEY_UP/DOWN/LEFT/RIGHT,
+///    `suppress_gamepad` -> DPad* suppress + hat zero). `effectiveDpadConfig`
+///    with no layer == `cfg.dpad orelse {}`, matching oracle
+///    `dpad_cfg = cfg.dpad`.
 ///  * dpad hat axis — both derive `emit.dpad_x/y` from post-remap DPad* bits
 ///    (prod `emit_state.synthesizeDpadAxes()`; oracle step [7] reimpl).
 ///  * prev-frame mask — both snapshot prev buttons / prev dpad each frame.
@@ -476,8 +477,9 @@ test "generative: dpad arrows mode emits KEY events" {
     const parsed = try mapping.parseString(allocator, toml_str);
     defer parsed.deinit();
 
-    const prod = ctx.mapper.apply(.{ .dpad_x = -1 }, 0, 0) catch unreachable;
-    const oout = mapper_oracle.apply(&oracle, .{ .dpad_x = -1 }, &parsed.value, 0);
+    const left = helpers.btnMask(.DPadLeft);
+    const prod = ctx.mapper.apply(.{ .buttons = left }, 0, 0) catch unreachable;
+    const oout = mapper_oracle.apply(&oracle, .{ .buttons = left }, &parsed.value, 0);
 
     try testing.expectEqual(oout.gamepad.dpad_x, prod.gamepad.dpad_x);
     try testing.expectEqual(@as(i8, 0), prod.gamepad.dpad_x);

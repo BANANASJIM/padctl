@@ -635,6 +635,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
     }
 
+    try validateDpadDeclaration(cfg);
+
     // Generic mode validation
     if (cfg.device.mode) |m| {
         if (std.mem.eql(u8, m, "generic")) {
@@ -663,6 +665,46 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             }
         }
     }
+}
+
+fn isDpadButtonName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "DPadUp") or std.mem.eql(u8, name, "DPadDown") or
+        std.mem.eql(u8, name, "DPadLeft") or std.mem.eql(u8, name, "DPadRight");
+}
+
+// A `dpad` hat field and DPad* button_group bits are two writers for the same
+// four button bits with no defined merge order, so a config may declare only
+// one of them — the rule spans the whole config, not a single report.
+fn validateDpadDeclaration(cfg: *const DeviceConfig) !void {
+    var hat_report: ?[]const u8 = null;
+    var bits_report: ?[]const u8 = null;
+
+    for (cfg.report) |report| {
+        if (hat_report == null) {
+            if (report.fields) |fields| {
+                if (fields.map.get("dpad") != null) hat_report = report.name;
+            }
+        }
+        if (bits_report == null) {
+            if (report.button_group) |bg| {
+                var it = bg.map.map.iterator();
+                while (it.next()) |entry| {
+                    if (isDpadButtonName(entry.key_ptr.*)) {
+                        bits_report = report.name;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    const hat = hat_report orelse return;
+    const bits = bits_report orelse return;
+    std.log.warn(
+        "device '{s}': dpad declared twice — hat field in report '{s}' and DPad* button_group bits in report '{s}'; keep only one",
+        .{ cfg.device.name, hat, bits },
+    );
+    return error.InvalidConfig;
 }
 
 fn validateMappingEntries(mapping: toml.HashMap(MappingEntry)) !void {

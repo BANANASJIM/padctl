@@ -46,6 +46,7 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
     const n_fields = rng.intRangeAtMost(u8, 3, @min(8, @as(u8, @intCast(field_tags.len))));
     var used: [21]bool = .{false} ** 21;
     var next_offset: u8 = 1; // skip match byte
+    var dpad_field = false;
 
     for (0..n_fields) |fi| {
         const idx = if (fi == 0) blk: {
@@ -55,6 +56,7 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
             break :blk forced;
         } else pickUnused(rng, &used, field_tags.len);
         const tag = field_tags[idx];
+        if (std.mem.eql(u8, tag, "dpad")) dpad_field = true;
         const type_idx = rng.intRangeAtMost(usize, 0, field_types.len - 1);
         const type_str = field_types[type_idx];
         const size: u8 = typeSize(type_str);
@@ -88,6 +90,13 @@ pub fn randomDeviceConfig(rng: std.Random, buf: []u8) []const u8 {
         w.print("[report.button_group]\nsource = {{ offset = {d}, size = {d} }}\nmap = {{ ", .{ bg_offset, bg_size }) catch return buf[0..fbs.pos];
         const n_btns = rng.intRangeAtMost(u8, 2, @min(4, bg_size * 8));
         var btn_used: [button_names.len]bool = .{false} ** button_names.len;
+        // A dpad hat field already owns the DPad* bits; claiming them in the
+        // button group too is rejected at load time.
+        if (dpad_field) {
+            for (button_names, 0..) |name, i| {
+                if (std.mem.startsWith(u8, name, "DPad")) btn_used[i] = true;
+            }
+        }
         for (0..n_btns) |i| {
             const bi = pickUnused(rng, &btn_used, button_names.len);
             if (i > 0) w.writeAll(", ") catch break;

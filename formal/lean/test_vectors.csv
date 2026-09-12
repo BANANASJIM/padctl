@@ -132,17 +132,17 @@ xor,0,2,2,0
 crc32,0,9,computed=3421780262,expected=3421780262,1
 crc32_verify,0,9,9,1
 # HAT_DECODE
-# hatValue,expected_dx,expected_dy
-0,0,-1
-1,1,-1
-2,1,0
-3,1,1
-4,0,1
-5,-1,1
-6,-1,0
-7,-1,-1
-8,0,0
-15,0,0
+# hatValue,expected_buttons,expected_dx,expected_dy
+0,16384,0,-1
+1,147456,1,-1
+2,131072,1,0
+3,163840,1,1
+4,32768,0,1
+5,98304,-1,1
+6,65536,-1,0
+7,81920,-1,-1
+8,0,0,0
+15,0,0,0
 # BUTTON_DECODE
 # srcOff,srcSize,entries,hex_bytes,expected
 0,1,0:0|2:4,17

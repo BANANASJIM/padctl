@@ -329,7 +329,6 @@ test "property: extreme axis values — no overflow after processing" {
         .{ .gyro_x = std.math.minInt(i16), .gyro_y = std.math.maxInt(i16), .gyro_z = std.math.minInt(i16) },
         .{ .accel_x = std.math.maxInt(i16), .accel_y = std.math.minInt(i16), .accel_z = std.math.maxInt(i16) },
         .{ .touch0_x = std.math.minInt(i16), .touch0_y = std.math.maxInt(i16), .touch0_active = true },
-        .{ .dpad_x = std.math.minInt(i8), .dpad_y = std.math.maxInt(i8) },
     };
 
     for (extreme_deltas) |delta| {

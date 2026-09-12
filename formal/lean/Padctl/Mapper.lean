@@ -258,21 +258,15 @@ def KEY_LEFT : Nat := 105
 def KEY_RIGHT : Nat := 106
 
 structure DpadResult where
-  dpadX : Int := 0
-  dpadY : Int := 0
   auxEvents : List AuxEvent := []
   suppressDpadHat : Bool := false
   suppressButtons : Nat := 0
   deriving Repr
 
--- Dpad button bits for suppression mask
-private def dpadButtonMask : Nat :=
-  (1 <<< dpadUpBit) ||| (1 <<< dpadDownBit) ||| (1 <<< dpadLeftBit) ||| (1 <<< dpadRightBit)
-
 def processDpad (dx dy prevDx prevDy : Int) (mode : DpadMode) (suppressGamepad : Bool)
     : DpadResult :=
   match mode with
-  | .gamepad => { dpadX := dx, dpadY := dy }
+  | .gamepad => {}
   | .arrows =>
     let up := dy < 0
     let down := dy > 0
@@ -288,9 +282,7 @@ def processDpad (dx dy prevDx prevDy : Int) (mode : DpadMode) (suppressGamepad :
       (if left != prevLeft then [AuxEvent.key KEY_LEFT left] else []) ++
       (if right != prevRight then [AuxEvent.key KEY_RIGHT right] else [])
     let suppress := suppressGamepad
-    { dpadX := if suppress then 0 else dx,
-      dpadY := if suppress then 0 else dy,
-      auxEvents := aux,
+    { auxEvents := aux,
       suppressDpadHat := suppress,
       suppressButtons := if suppress then dpadButtonMask else 0 }
 
@@ -467,8 +459,11 @@ def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelt
   -- [2b] resolve per-layer config overrides
   let cfg := resolveConfig config curActiveLayer config.layerOverrides
 
-  -- [3] dpad processing
-  let dpadRes := processDpad newGs.dpad_x newGs.dpad_y gs.dpad_x gs.dpad_y
+  -- [3] dpad processing — the arrow-mode edge detector reads the axes derived
+  -- from this frame's and the previous frame's raw DPad* bits
+  let (curDx, curDy) := synthesizeDpadAxes buttons
+  let (prevDx, prevDy) := synthesizeDpadAxes gs.buttons
+  let dpadRes := processDpad curDx curDy prevDx prevDy
       cfg.dpadMode cfg.dpadSuppressGamepad
 
   -- [3b] gyro activation check (boolean only, not float math)
@@ -512,6 +507,8 @@ def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelt
 
   -- [8] assemble emit state + prev-frame masking
   let emitButtons := assembleButtons buttons suppress inject'
+  -- The emitted hat axes are derived from the post-remap DPad* bits.
+  let (emitDx, emitDy) := synthesizeDpadAxes emitButtons
   let emitGs : GamepadState := {
     newGs with
     buttons := emitButtons
@@ -523,15 +520,16 @@ def Mapper.apply (s : MapperState) (gs : GamepadState) (delta : GamepadStateDelt
           else if stickSuppressR then 0 else newGs.rx
     ry := if suppressRightStickGyro then newGs.ry
           else if stickSuppressR then 0 else newGs.ry
-    dpad_x := dpadRes.dpadX
-    dpad_y := dpadRes.dpadY
+    dpad_x := if dpadRes.suppressDpadHat then 0 else emitDx
+    dpad_y := if dpadRes.suppressDpadHat then 0 else emitDy
   }
 
   -- prev-frame masking: apply same suppress/inject to prevButtons so that
   -- downstream diff does not produce spurious release events for suppressed buttons
   let maskedPrevButtons := assembleButtons s2.prevButtons suppress inject'
-  let maskedPrevDpadX := if dpadRes.suppressDpadHat then 0 else gs.dpad_x
-  let maskedPrevDpadY := if dpadRes.suppressDpadHat then 0 else gs.dpad_y
+  let (maskedPrevDx, maskedPrevDy) := synthesizeDpadAxes maskedPrevButtons
+  let maskedPrevDpadX := if dpadRes.suppressDpadHat then 0 else maskedPrevDx
+  let maskedPrevDpadY := if dpadRes.suppressDpadHat then 0 else maskedPrevDy
   let maskedPrev : GamepadState := {
     gs with
     buttons := maskedPrevButtons

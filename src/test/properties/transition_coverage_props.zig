@@ -205,7 +205,7 @@ test "transition_coverage: all 23 TransitionId classes reached" {
         const parsed = try mapping.parseString(allocator, toml_str);
         defer parsed.deinit();
         var oracle = OracleState{};
-        drive(&tracker, &oracle, .{ .dpad_x = -1 }, &parsed.value, 0); // dpad_arrows_emit
+        drive(&tracker, &oracle, .{ .buttons = helpers.btnMask(.DPadLeft) }, &parsed.value, 0); // dpad_arrows_emit
 
         const toml_str2 =
             \\[dpad]
@@ -214,7 +214,7 @@ test "transition_coverage: all 23 TransitionId classes reached" {
         const parsed2 = try mapping.parseString(allocator, toml_str2);
         defer parsed2.deinit();
         var oracle2 = OracleState{};
-        drive(&tracker, &oracle2, .{ .dpad_x = 1 }, &parsed2.value, 0); // dpad_gamepad_passthrough
+        drive(&tracker, &oracle2, .{ .buttons = helpers.btnMask(.DPadRight) }, &parsed2.value, 0); // dpad_gamepad_passthrough
     }
 
     // --- Scenario 6: gyro activated / deactivated ---

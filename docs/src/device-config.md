@@ -78,6 +78,46 @@ Use `offset` + `type` for whole-byte fields. Use `bits` for sub-byte bit extract
 
 > **Note:** When using `bits`, the `type` field must be `null`, `"unsigned"`, or `"signed"` — standard type strings like `"u8"` or `"i16le"` are not valid.
 
+#### Field names
+
+Field names are fixed: `left_x` `left_y` `right_x` `right_y` (also accepted as
+`ax` `ay` `rx` `ry`), `lt` `rt`, `gyro_x` `gyro_y` `gyro_z`, `accel_x` `accel_y`
+`accel_z`, `touch0_x` `touch0_y` `touch1_x` `touch1_y`, `touch0_active`
+`touch1_active`, `battery_level`, and `dpad`. Unrecognised names are ignored.
+
+#### `dpad` — HID hat switch
+
+`dpad` reads a HID hat switch: a single enum value, not a bitfield. It is
+decoded into the `DPadUp` / `DPadDown` / `DPadLeft` / `DPadRight` buttons, so
+remapping, layers, `[dpad] mode = "arrows"` and both `[output.dpad]` types
+behave exactly as they do for a device whose d-pad arrives as four bits.
+
+| Value | Direction |
+|-------|-----------|
+| `0` | up |
+| `1` | up + right |
+| `2` | right |
+| `3` | down + right |
+| `4` | down |
+| `5` | down + left |
+| `6` | left |
+| `7` | up + left |
+| `8` or above | neutral (all four released) |
+
+```toml
+[report.fields]
+dpad = { offset = 9, type = "u8" }
+```
+
+When the hat occupies part of a byte, declare it with `bits` instead — a hat in
+the high nibble of byte 9 is `dpad = { bits = [9, 4, 4] }`.
+
+> **Exclusive with DPad\* buttons:** a device declares its d-pad *either* as a
+> `dpad` hat field *or* as `DPadUp` / `DPadDown` / `DPadLeft` / `DPadRight`
+> entries in a `[report.button_group]` map — never both. A config that does both
+> is rejected at load time, because two writers for the same four button bits
+> have no defined merge order.
+
 #### Data Types
 
 `u8` `i8` `u16le` `i16le` `u16be` `i16be` `u32le` `i32le` `u32be` `i32be`
@@ -274,6 +314,12 @@ B = "BTN_EAST"
 [output.dpad]
 type = "hat"   # or "buttons"
 ```
+
+`hat` emits `ABS_HAT0X` / `ABS_HAT0Y`; `buttons` emits key events, which
+requires `DPadUp` / `DPadDown` / `DPadLeft` / `DPadRight` entries in
+`[output.buttons]`. Both forms are driven by the same DPad\* button state, so
+the input side may declare its d-pad in either form (see
+[`dpad` — HID hat switch](#dpad--hid-hat-switch)).
 
 ### `[output.force_feedback]`
 
