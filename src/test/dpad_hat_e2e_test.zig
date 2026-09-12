@@ -2,10 +2,15 @@ const std = @import("std");
 const testing = std.testing;
 
 const device_mod = @import("../config/device.zig");
-const input_codes = @import("../config/input_codes.zig");
 const interpreter_mod = @import("../core/interpreter.zig");
 const state_mod = @import("../core/state.zig");
+const uinput = @import("../io/uinput.zig");
 const helpers = @import("helpers.zig");
+
+const c = @cImport({
+    @cInclude("linux/input.h");
+    @cInclude("linux/input-event-codes.h");
+});
 
 const Interpreter = interpreter_mod.Interpreter;
 const GamepadState = state_mod.GamepadState;
@@ -53,6 +58,10 @@ fn expectedDy(hat: u8) i8 {
 // field, or four button_group bits. Every behavioural test below runs against
 // both so the engine cannot treat them differently.
 const Form = enum { hat, bits };
+
+/// The `[output.dpad] type` a test declares: `hat` emits ABS_HAT0X/Y, `buttons`
+/// emits BTN_DPAD_* key events.
+const OutputForm = enum { hat, buttons };
 
 const hat_device_toml =
     \\[device]
@@ -138,6 +147,13 @@ const output_buttons_toml =
     \\DPadRight = "BTN_DPAD_RIGHT"
     \\
 ;
+
+fn outputToml(out_form: OutputForm) []const u8 {
+    return switch (out_form) {
+        .hat => output_hat_toml,
+        .buttons => output_buttons_toml,
+    };
+}
 
 fn deviceToml(allocator: std.mem.Allocator, form: Form, output: []const u8) ![]u8 {
     const base = switch (form) {
@@ -261,11 +277,63 @@ test "dpad hat: bits-mode hat field decodes identically to offset mode" {
     }
 }
 
+/// Push one emitted state through the real uinput backend over a pipe, with
+/// `[output]` resolved the way `UinputDevice.create` resolves it for a live
+/// node. Every call starts from a fresh device, so the events describe the
+/// whole non-neutral state rather than a diff against an earlier frame.
+fn emitOnce(out_cfg: *const device_mod.OutputConfig, s: GamepadState, out: []c.input_event) !usize {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = uinput.UinputDevice{
+        .fd = pfds[1],
+        .button_codes = try uinput.resolveButtonCodes(out_cfg),
+        .has_dpad_hat = uinput.dpadIsHat(out_cfg),
+    };
+    try dev.emit(s);
+
+    const bytes = std.posix.read(pfds[0], std.mem.sliceAsBytes(out)) catch return 0;
+    return bytes / @sizeOf(c.input_event);
+}
+
+fn eventValue(evs: []const c.input_event, ev_type: u16, code: u16) ?i32 {
+    for (evs) |e| {
+        if (e.type == ev_type and e.code == code) return e.value;
+    }
+    return null;
+}
+
+/// The wire events must carry the d-pad in the form `[output.dpad]` declares:
+/// ABS_HAT0X/Y for `type = "hat"`, BTN_DPAD_* key presses for `type = "buttons"`,
+/// and nothing of the other form. `out_form` is what the test declared, so the
+/// expectation never moves with the code that resolves the declaration.
+fn expectDpadOutput(out_form: OutputForm, hat: u8, evs: []const c.input_event) !void {
+    const hat_form = out_form == .hat;
+    const bits = expectedDpadBits(hat);
+
+    const want_x: ?i32 = if (hat_form and expectedDx(hat) != 0) expectedDx(hat) else null;
+    const want_y: ?i32 = if (hat_form and expectedDy(hat) != 0) expectedDy(hat) else null;
+    try testing.expectEqual(want_x, eventValue(evs, c.EV_ABS, c.ABS_HAT0X));
+    try testing.expectEqual(want_y, eventValue(evs, c.EV_ABS, c.ABS_HAT0Y));
+
+    const dpad_keys = [_]struct { id: ButtonId, code: u16 }{
+        .{ .id = .DPadUp, .code = c.BTN_DPAD_UP },
+        .{ .id = .DPadDown, .code = c.BTN_DPAD_DOWN },
+        .{ .id = .DPadLeft, .code = c.BTN_DPAD_LEFT },
+        .{ .id = .DPadRight, .code = c.BTN_DPAD_RIGHT },
+    };
+    for (dpad_keys) |k| {
+        const want: ?i32 = if (!hat_form and bits & btn(k.id) != 0) 1 else null;
+        try testing.expectEqual(want, eventValue(evs, c.EV_KEY, k.code));
+    }
+}
+
 // --- mapper path and no-mapper path, for both output.dpad types ---
 
-fn runMapperPath(form: Form, output: []const u8, mapping_toml: []const u8) !void {
+fn runMapperPath(form: Form, out_form: OutputForm, mapping_toml: []const u8) !void {
     const allocator = testing.allocator;
-    const toml = try deviceToml(allocator, form, output);
+    const toml = try deviceToml(allocator, form, outputToml(out_form));
     defer allocator.free(toml);
     const parsed = try device_mod.parseString(allocator, toml);
     defer parsed.deinit();
@@ -273,6 +341,8 @@ fn runMapperPath(form: Form, output: []const u8, mapping_toml: []const u8) !void
 
     var ctx = try helpers.makeMapper(mapping_toml, allocator);
     defer ctx.deinit();
+
+    const out_cfg = parsed.value.output orelse return error.NoOutput;
 
     for (0..16) |i| {
         const hat: u8 = @intCast(i);
@@ -282,16 +352,22 @@ fn runMapperPath(form: Form, output: []const u8, mapping_toml: []const u8) !void
         try testing.expectEqual(expectedDx(hat), ev.gamepad.dpad_x);
         try testing.expectEqual(expectedDy(hat), ev.gamepad.dpad_y);
         try testing.expectEqual(expectedDpadBits(hat), ev.gamepad.buttons & dpadMask());
+
+        var evs: [16]c.input_event = undefined;
+        const n = try emitOnce(&out_cfg, ev.gamepad, &evs);
+        try expectDpadOutput(out_form, hat, evs[0..n]);
     }
 }
 
-fn runNoMapperPath(form: Form, output: []const u8) !void {
+fn runNoMapperPath(form: Form, out_form: OutputForm) !void {
     const allocator = testing.allocator;
-    const toml = try deviceToml(allocator, form, output);
+    const toml = try deviceToml(allocator, form, outputToml(out_form));
     defer allocator.free(toml);
     const parsed = try device_mod.parseString(allocator, toml);
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
+
+    const out_cfg = parsed.value.output orelse return error.NoOutput;
 
     // Mirrors the mapper-less branch of the event loop: accumulate the delta,
     // then derive the hat axes before emitting.
@@ -305,54 +381,34 @@ fn runNoMapperPath(form: Form, output: []const u8) !void {
         try testing.expectEqual(expectedDx(hat), gs.dpad_x);
         try testing.expectEqual(expectedDy(hat), gs.dpad_y);
         try testing.expectEqual(expectedDpadBits(hat), gs.buttons & dpadMask());
+
+        var evs: [16]c.input_event = undefined;
+        const n = try emitOnce(&out_cfg, gs, &evs);
+        try expectDpadOutput(out_form, hat, evs[0..n]);
     }
 }
 
 test "dpad hat: mapper path, output.dpad.type = hat" {
-    try runMapperPath(.hat, output_hat_toml, "");
+    try runMapperPath(.hat, .hat, "");
 }
 
 test "dpad hat: mapper path, output.dpad.type = buttons" {
-    try runMapperPath(.hat, output_buttons_toml, "");
+    try runMapperPath(.hat, .buttons, "");
 }
 
 test "dpad hat: no-mapper path, output.dpad.type = hat" {
-    try runNoMapperPath(.hat, output_hat_toml);
+    try runNoMapperPath(.hat, .hat);
 }
 
 test "dpad hat: no-mapper path, output.dpad.type = buttons" {
-    try runNoMapperPath(.hat, output_buttons_toml);
+    try runNoMapperPath(.hat, .buttons);
 }
 
 test "dpad bits: mapper path and no-mapper path, both output types" {
-    try runMapperPath(.bits, output_hat_toml, "");
-    try runMapperPath(.bits, output_buttons_toml, "");
-    try runNoMapperPath(.bits, output_hat_toml);
-    try runNoMapperPath(.bits, output_buttons_toml);
-}
-
-test "dpad hat: output.dpad.type = buttons declares the four BTN_DPAD codes" {
-    const allocator = testing.allocator;
-    const toml = try deviceToml(allocator, .hat, output_buttons_toml);
-    defer allocator.free(toml);
-    const parsed = try device_mod.parseString(allocator, toml);
-    defer parsed.deinit();
-
-    const out = parsed.value.output orelse return error.NoOutput;
-    const buttons = out.buttons orelse return error.NoOutputButtons;
-    const expected = [_]struct { name: []const u8, code: []const u8 }{
-        .{ .name = "DPadUp", .code = "BTN_DPAD_UP" },
-        .{ .name = "DPadDown", .code = "BTN_DPAD_DOWN" },
-        .{ .name = "DPadLeft", .code = "BTN_DPAD_LEFT" },
-        .{ .name = "DPadRight", .code = "BTN_DPAD_RIGHT" },
-    };
-    for (expected) |e| {
-        const declared = buttons.map.get(e.name) orelse return error.MissingDpadButton;
-        try testing.expectEqual(
-            try input_codes.resolveBtnCode(e.code),
-            try input_codes.resolveBtnCode(declared),
-        );
-    }
+    try runMapperPath(.bits, .hat, "");
+    try runMapperPath(.bits, .buttons, "");
+    try runNoMapperPath(.bits, .hat);
+    try runNoMapperPath(.bits, .buttons);
 }
 
 // --- remap / layer / arrows / suppress_gamepad parity across input forms ---

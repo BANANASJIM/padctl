@@ -256,13 +256,18 @@ theorem dpadHat_preserves_other_bits :
     applyDpadHat ((1 <<< 0) ||| dpadButtonMask) 6 = (1 <<< 0) ||| (1 <<< dpadLeftBit) ∧
     applyDpadHat ((1 <<< 0) ||| dpadButtonMask) 8 = 1 <<< 0 := by decide
 
--- P24: hat decode opposing directions are disjoint (up/down: hat 0 vs hat 4)
+-- P24: hat 0 (up) and hat 4 (down) oppose on the y axis — the bits they decode
+-- to are disjoint, and the axes they synthesize are non-zero and negate
 theorem dpadHat_opposing_y :
-    decodeDpadHat 0 &&& decodeDpadHat 4 = 0 := by decide
+    decodeDpadHat 0 &&& decodeDpadHat 4 = 0 ∧
+    (synthesizeDpadAxes (decodeDpadHat 0)).2 = -(synthesizeDpadAxes (decodeDpadHat 4)).2 ∧
+    (synthesizeDpadAxes (decodeDpadHat 0)).2 ≠ 0 := by decide
 
--- P25: hat decode opposing directions are disjoint (left/right: hat 6 vs hat 2)
+-- P25: hat 6 (left) and hat 2 (right) oppose on the x axis, same sense as P24
 theorem dpadHat_opposing_x :
-    decodeDpadHat 6 &&& decodeDpadHat 2 = 0 := by decide
+    decodeDpadHat 6 &&& decodeDpadHat 2 = 0 ∧
+    (synthesizeDpadAxes (decodeDpadHat 6)).1 = -(synthesizeDpadAxes (decodeDpadHat 2)).1 ∧
+    (synthesizeDpadAxes (decodeDpadHat 6)).1 ≠ 0 := by decide
 
 -- P22: assembleButtons — inject bits always present in output
 theorem assemble_inject_present (raw suppress inject : Nat) :

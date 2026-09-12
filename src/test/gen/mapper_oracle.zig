@@ -633,33 +633,24 @@ test "mapper_oracle: suppress accumulates base + layer" {
 }
 
 test "mapper_oracle: dpad hat synthesized from DPad button bits" {
-    // The DPad* button bits are the only source of the emitted hat axes.
-    {
-        var os = OracleState{};
-        const parsed = try parseCfg(
-            \\[dpad]
-            \\mode = "gamepad"
-        );
-        defer parsed.deinit();
+    // The DPad* button bits are the only source of the emitted hat axes, and
+    // the axes are re-derived every frame rather than latched.
+    var os = OracleState{};
+    const parsed = try parseCfg(
+        \\[dpad]
+        \\mode = "gamepad"
+    );
+    defer parsed.deinit();
 
-        const out = apply(&os, .{ .buttons = 0 }, &parsed.value, 0);
-        try testing.expectEqual(@as(i8, 0), out.gamepad.dpad_x);
-        try testing.expectEqual(@as(i8, 0), out.gamepad.dpad_y);
-        try testing.expectEqual(@as(usize, 0), out.aux.len);
-    }
-    {
-        var os = OracleState{};
-        const parsed = try parseCfg(
-            \\[dpad]
-            \\mode = "gamepad"
-        );
-        defer parsed.deinit();
+    const pressed = apply(&os, .{ .buttons = btnMask(.DPadRight) | btnMask(.DPadUp) }, &parsed.value, 0);
+    try testing.expectEqual(@as(i8, 1), pressed.gamepad.dpad_x);
+    try testing.expectEqual(@as(i8, -1), pressed.gamepad.dpad_y);
+    try testing.expectEqual(@as(usize, 0), pressed.aux.len);
 
-        const out = apply(&os, .{ .buttons = btnMask(.DPadRight) | btnMask(.DPadUp) }, &parsed.value, 0);
-        try testing.expectEqual(@as(i8, 1), out.gamepad.dpad_x);
-        try testing.expectEqual(@as(i8, -1), out.gamepad.dpad_y);
-        try testing.expectEqual(@as(usize, 0), out.aux.len);
-    }
+    const released = apply(&os, .{ .buttons = 0 }, &parsed.value, 0);
+    try testing.expectEqual(@as(i8, 0), released.gamepad.dpad_x);
+    try testing.expectEqual(@as(i8, 0), released.gamepad.dpad_y);
+    try testing.expectEqual(@as(usize, 0), released.aux.len);
 }
 
 test "mapper_oracle: prev_buttons in output" {
