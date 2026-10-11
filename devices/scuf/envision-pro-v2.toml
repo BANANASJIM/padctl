@@ -1,0 +1,105 @@
+# Adapted from besseddrest's author-reported SCUF Envision Pro V2 config.
+# Source (2026-10-10):
+# https://github.com/besseddrest/my-padctl/blob/120b4635427b68360fff934b84147073ff3fad7a/devices/scuf-envision-pro-v2.toml
+# Confirm the input layout on hardware with unmodified onboard button mappings;
+# the reported controller was refurbished and may have retained iCUE remapping.
+# Stick Y polarity and additional button bits still need hardware confirmation.
+
+[device]
+name = "SCUF Envision Pro V2"
+vid = 0x1b1c
+pid = 0x3a08
+
+[[device.interface]]
+id = 3
+class = "hid"
+
+[[report]]
+name = "main"
+interface = 3
+size = 16
+
+[report.match]
+offset = 0
+expect = [0x06]
+
+[report.fields]
+# 4 analog sticks, i16le (bytes 1-8), center ~0
+left_x  = { offset = 1, type = "i16le" }
+left_y  = { offset = 3, type = "i16le" }
+right_x = { offset = 5, type = "i16le" }
+right_y = { offset = 7, type = "i16le" }
+
+# Two packed 10-bit triggers; scale their full 0-1023 range to 0-255.
+lt = { bits = [9, 0, 10], transform = "scale(0, 255)" }
+rt = { bits = [10, 2, 10], transform = "scale(0, 255)" }
+
+# D-pad: byte11 high nibble, HID hat-switch ordering handled by padctl
+# (8 = neutral, 0-7 = directions)
+dpad = { bits = [11, 4, 4] }
+
+# Buttons: bytes 12-15 as one 32-bit little-endian group.
+# src bit = (byte-12)*8 + bit: byte12=0-7, byte13=8-15, byte14=16-23, byte15=24-31
+# byte12: A=01(bit0) B=02(bit1) X=04(bit2) Y=08(bit3)
+#         LB=10(bit4) RB=20(bit5) View=40(bit6) Menu=80(bit7)
+# byte13: LS=01(bit8) RS=02(bit9)
+# byte14: P1=08(bit19) P2=10(bit20) P3=20(bit21) P4=40(bit22) LM=80(bit23)
+# byte15: RM=01(bit24)
+[report.button_group]
+source = { offset = 12, size = 4 }
+[report.button_group.map]
+A = 0
+B = 1
+X = 2
+Y = 3
+LB = 4
+RB = 5
+Select = 6
+Start = 7
+LS = 8
+RS = 9
+M1 = 19
+M2 = 20
+M3 = 21
+M4 = 22
+Home = 11
+C = 12
+Z = 13
+O = 14
+LM = 23
+RM = 24
+
+[output]
+name = "Xbox Elite Series 2 SCUF"
+vid = 0x045e
+pid = 0x0b00
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_NORTH"
+Y      = "BTN_WEST"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+LM     = "BTN_TRIGGER_HAPPY11"
+RM     = "BTN_TRIGGER_HAPPY12"
+M1 = "BTN_TRIGGER_HAPPY8"
+M2 = "BTN_TRIGGER_HAPPY7"
+M3 = "BTN_TRIGGER_HAPPY6"
+M4 = "BTN_TRIGGER_HAPPY5"
+
+[output.dpad]
+type = "hat"

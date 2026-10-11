@@ -18,6 +18,7 @@
   - [Lenovo Legion Go S](devices/lenovo-lenovo-legion-go-s.md)
   - [Microsoft Xbox Elite Series 2](devices/microsoft-xbox-elite-series-2.md)
   - [Nintendo Switch Pro](devices/nintendo-nintendo-switch-pro-controller.md)
+  - [SCUF Envision Pro V2](devices/scuf-scuf-envision-pro-v2.md)
   - [Sony DualSense](devices/sony-sony-dualsense.md)
   - [Sony DualShock 4](devices/sony-sony-dualshock-4.md)
   - [Sony DualShock 4 v2](devices/sony-sony-dualshock-4-v2.md)
