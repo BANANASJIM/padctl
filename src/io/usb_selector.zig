@@ -11,10 +11,6 @@ pub fn addUnique(selected: *?Resolved, candidate: Resolved) error{AmbiguousUsbIn
     selected.* = candidate;
 }
 
-pub fn select(config: c.libusb_config_descriptor, match: [3]u8, context: anytype, comptime read_active: anytype) !Resolved {
-    return selectAny(config, &.{match}, context, read_active);
-}
-
 pub fn selectAny(config: c.libusb_config_descriptor, patterns: []const [3]u8, context: anytype, comptime read_active: anytype) !Resolved {
     var selected: ?Resolved = null;
     for (config.interface[0..config.bNumInterfaces]) |iface| {
@@ -55,16 +51,16 @@ test "USB selector: full descriptor traversal rejects zero and multiple active m
     var cfg = std.mem.zeroes(c.libusb_config_descriptor);
     cfg.interface = &ifaces;
     const match = [3]u8{ 255, 93, 1 };
-    try std.testing.expectError(error.UsbInterfaceNotFound, select(cfg, match, {}, Query.read));
+    try std.testing.expectError(error.UsbInterfaceNotFound, selectAny(cfg, &.{match}, {}, Query.read));
     cfg.bNumInterfaces = 1;
-    try std.testing.expectEqual(@as(u8, 7), (try select(cfg, match, {}, Query.read)).interface_id);
+    try std.testing.expectEqual(@as(u8, 7), (try selectAny(cfg, &.{match}, {}, Query.read)).interface_id);
     cfg.bNumInterfaces = 2;
-    try std.testing.expectError(error.AmbiguousUsbInterface, select(cfg, match, {}, Query.read));
+    try std.testing.expectError(error.AmbiguousUsbInterface, selectAny(cfg, &.{match}, {}, Query.read));
     cfg.bNumInterfaces = 1;
     alts[0].bAlternateSetting = 3;
-    try std.testing.expectError(error.QueryFailed, select(cfg, match, {}, Query.read));
+    try std.testing.expectError(error.QueryFailed, selectAny(cfg, &.{match}, {}, Query.read));
     alts[0].bInterfaceProtocol = 2;
-    try std.testing.expectError(error.UsbInterfaceNotFound, select(cfg, match, {}, Query.read));
+    try std.testing.expectError(error.UsbInterfaceNotFound, selectAny(cfg, &.{match}, {}, Query.read));
 }
 
 test "USB selector: multiple eligible physical interfaces fail closed" {
@@ -131,10 +127,6 @@ fn matchesAny(alt: c.libusb_interface_descriptor, patterns: []const [3]u8) bool 
     return false;
 }
 
-pub fn mayMatch(iface: c.libusb_interface, match: [3]u8) bool {
-    return mayMatchAny(iface, &.{match});
-}
-
 pub fn mayMatchAny(iface: c.libusb_interface, patterns: []const [3]u8) bool {
     if (iface.num_altsetting <= 0) return false;
     for (iface.altsetting[0..@intCast(iface.num_altsetting)]) |alt| if (matchesAny(alt, patterns)) return true;
@@ -143,10 +135,6 @@ pub fn mayMatchAny(iface: c.libusb_interface, patterns: []const [3]u8) bool {
 
 /// Inspect only the active alternate. Fixtures and the live descriptor path use
 /// the same endpoint validation, independent of physical endpoint numbering.
-pub fn resolve(iface: c.libusb_interface, active: u8, match: [3]u8) SelectionError!?Resolved {
-    return resolveAny(iface, active, &.{match});
-}
-
 pub fn resolveAny(iface: c.libusb_interface, active: u8, patterns: []const [3]u8) SelectionError!?Resolved {
     if (iface.num_altsetting <= 0) return error.MissingAlternate;
     var selected: ?c.libusb_interface_descriptor = null;
@@ -194,12 +182,12 @@ test "USB selector: active alternate and arbitrary endpoint addresses" {
     alts[1].bInterfaceProtocol = 2;
     const iface = c.libusb_interface{ .altsetting = &alts, .num_altsetting = 2 };
     const match = [3]u8{ 255, 93, 1 };
-    try std.testing.expect(mayMatch(iface, match));
-    try std.testing.expectEqual(Resolved{ .interface_id = 7, .ep_in = 0x85, .ep_out = 6 }, (try resolve(iface, 0, match)).?);
-    try std.testing.expectEqual(@as(?Resolved, null), try resolve(iface, 1, match));
-    try std.testing.expectError(error.MissingAlternate, resolve(iface, 2, match));
+    try std.testing.expect(mayMatchAny(iface, &.{match}));
+    try std.testing.expectEqual(Resolved{ .interface_id = 7, .ep_in = 0x85, .ep_out = 6 }, (try resolveAny(iface, 0, &.{match})).?);
+    try std.testing.expectEqual(@as(?Resolved, null), try resolveAny(iface, 1, &.{match}));
+    try std.testing.expectError(error.MissingAlternate, resolveAny(iface, 2, &.{match}));
     alts[1].bAlternateSetting = 0;
-    try std.testing.expectError(error.AmbiguousAlternate, resolve(iface, 0, match));
+    try std.testing.expectError(error.AmbiguousAlternate, resolveAny(iface, 0, &.{match}));
 }
 
 test "USB selector: missing, ambiguous and malformed interrupt endpoints fail closed" {
@@ -219,15 +207,15 @@ test "USB selector: missing, ambiguous and malformed interrupt endpoints fail cl
     const iface = c.libusb_interface{ .altsetting = &alt, .num_altsetting = 1 };
     const match = [3]u8{ 255, 93, 1 };
     eps[1].bmAttributes = 2;
-    try std.testing.expectError(error.MissingEndpoint, resolve(iface, 0, match));
+    try std.testing.expectError(error.MissingEndpoint, resolveAny(iface, 0, &.{match}));
     eps[1].bmAttributes = 3;
     eps[1].bEndpointAddress = 0x82;
-    try std.testing.expectError(error.AmbiguousEndpoint, resolve(iface, 0, match));
+    try std.testing.expectError(error.AmbiguousEndpoint, resolveAny(iface, 0, &.{match}));
     eps[1].bEndpointAddress = 0;
-    try std.testing.expectError(error.InvalidEndpoint, resolve(iface, 0, match));
+    try std.testing.expectError(error.InvalidEndpoint, resolveAny(iface, 0, &.{match}));
     eps[1].bEndpointAddress = 0x72;
-    try std.testing.expectError(error.InvalidEndpoint, resolve(iface, 0, match));
+    try std.testing.expectError(error.InvalidEndpoint, resolveAny(iface, 0, &.{match}));
     eps[1].bEndpointAddress = 2;
     eps[1].wMaxPacketSize = 0;
-    try std.testing.expectError(error.InvalidEndpoint, resolve(iface, 0, match));
+    try std.testing.expectError(error.InvalidEndpoint, resolveAny(iface, 0, &.{match}));
 }

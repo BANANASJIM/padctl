@@ -38,10 +38,8 @@ pub fn generateDevicePage(
     }
 
     for (dev.interface) |iface| {
-        if (iface.usb_match != null or iface.usb_match_any != null) {
+        if (iface.usb_match_any) |patterns| {
             try writer.print("Logical interface `{d}` selects one physical USB interface matching class/subclass/protocol ", .{iface.id});
-            const single = [_][]const i64{iface.usb_match orelse &.{}};
-            const patterns = iface.usb_match_any orelse &single;
             for (patterns, 0..) |match, index| {
                 if (index > 0) try writer.writeAll(" or ");
                 try writer.print("`0x{x:0>2}/0x{x:0>2}/0x{x:0>2}`", .{ @as(u8, @intCast(match[0])), @as(u8, @intCast(match[1])), @as(u8, @intCast(match[2])) });

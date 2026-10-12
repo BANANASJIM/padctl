@@ -27,7 +27,6 @@ test "Razer PC: production config decodes signed sticks and independent triggers
     try testing.expect(output.force_feedback == null);
     try testing.expect(output.buttons.?.map.get("M1") == null);
     const iface = parsed.value.device.interface[0];
-    try testing.expect(iface.usb_match == null);
     try testing.expectEqual(@as(usize, 3), iface.usb_match_any.?.len);
     try testing.expectEqualSlices(i64, &.{ 255, 93, 1 }, iface.usb_match_any.?[0]);
     try testing.expectEqualSlices(i64, &.{ 255, 93, 129 }, iface.usb_match_any.?[1]);
@@ -120,10 +119,8 @@ test "Razer PC: descriptor selector schema rejects unsupported and mixed declara
     const source = try std.fs.cwd().readFileAlloc(testing.allocator, "devices/razer/wolverine-v3-pro-pc.toml", 65536);
     defer testing.allocator.free(source);
     const replacements = [_][]const u8{
-        "usb_match = [255, 93]",                    "usb_match = [255, 93, 256]",                           "usb_match = [255, -1, 1]",
-        "usb_match = [255, 93, 1]\nep_in = 0x81",   "usb_match = [255, 93, 1]\nep_out = 0x01",              "usb_match_any = []",
-        "usb_match_any = [[255,93]]",               "usb_match_any = [[255,93,256]]",                       "usb_match_any = [[255,-1,1]]",
-        "usb_match_any = [[255,93,1],[255,93,1]]",  "usb_match_any = [[255,93,1]]\nusb_match = [255,93,1]", "usb_match_any = [[255,93,1]]\nep_in = 0x81",
+        "usb_match_any = []",                       "usb_match_any = [[255,93]]",              "usb_match_any = [[255,93,256]]",
+        "usb_match_any = [[255,-1,1]]",             "usb_match_any = [[255,93,1],[255,93,1]]", "usb_match_any = [[255,93,1]]\nep_in = 0x81",
         "usb_match_any = [[255,93,1]]\nep_out = 1",
     };
     for (replacements) |replacement| {
@@ -131,11 +128,11 @@ test "Razer PC: descriptor selector schema rejects unsupported and mixed declara
         defer testing.allocator.free(text);
         try testing.expectError(error.InvalidConfig, config.parseString(testing.allocator, text));
     }
-    const single = try std.mem.replaceOwned(u8, testing.allocator, source, pattern_declaration, "usb_match = [255, 93, 1]");
+    const single = try std.mem.replaceOwned(u8, testing.allocator, source, pattern_declaration, "usb_match_any = [[255, 93, 1]]");
     defer testing.allocator.free(single);
-    var legacy = try config.parseString(testing.allocator, single);
-    defer legacy.deinit();
-    try testing.expectEqualSlices(i64, &.{ 255, 93, 1 }, legacy.value.device.interface[0].usb_match.?);
+    var singleton = try config.parseString(testing.allocator, single);
+    defer singleton.deinit();
+    try testing.expectEqualSlices(i64, &.{ 255, 93, 1 }, singleton.value.device.interface[0].usb_match_any.?[0]);
     for ([_][]const u8{ "hid", "suppress" }) |class| {
         const replacement = try std.fmt.allocPrint(testing.allocator, "class = \"{s}\"", .{class});
         defer testing.allocator.free(replacement);

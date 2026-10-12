@@ -168,10 +168,6 @@ pub const UsbrawDevice = struct {
         return openSelected(alloc, vid, pid, interface_id, ep_in, ep_out, null);
     }
 
-    pub fn openMatched(alloc: std.mem.Allocator, vid: u16, pid: u16, match: [3]u8) !*UsbrawDevice {
-        return openMatchedAny(alloc, vid, pid, &.{match});
-    }
-
     pub fn openMatchedAny(alloc: std.mem.Allocator, vid: u16, pid: u16, patterns: []const [3]u8) !*UsbrawDevice {
         return openSelected(alloc, vid, pid, 0, null, 0, patterns);
     }

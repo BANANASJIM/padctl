@@ -75,7 +75,7 @@ fn closedClose(_: *anyopaque) void {}
 /// one can never satisfy it.
 fn initTargetsInterface(init_cfg: device_cfg.InitConfig, iface: InterfaceConfig) bool {
     if (init_cfg.interface) |init_iface| return iface.id == init_iface;
-    return std.mem.eql(u8, iface.class, "vendor") and iface.ep_in != null;
+    return std.mem.eql(u8, iface.class, "vendor") and (iface.ep_in != null or iface.usb_match_any != null);
 }
 
 fn createDeviceIO(
@@ -100,10 +100,6 @@ fn createDeviceIO(
             defer allocator.free(converted);
             for (patterns, converted) |pattern, *target| target.* = .{ @intCast(pattern[0]), @intCast(pattern[1]), @intCast(pattern[2]) };
             const dev = try UsbrawDevice.openMatchedAny(allocator, vid, pid, converted);
-            return dev.deviceIO();
-        }
-        if (iface.usb_match) |match| {
-            const dev = try UsbrawDevice.openMatched(allocator, vid, pid, .{ @intCast(match[0]), @intCast(match[1]), @intCast(match[2]) });
             return dev.deviceIO();
         }
         // ep_in may be absent: a write-only interface carries output commands
@@ -1333,6 +1329,78 @@ test "DeviceInstance.init: suppress preceding report routes init via helper, not
 
         try testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd }, mock.write_log.items);
     }
+}
+
+test "DeviceInstance: selected vendor implicit init uses logical routing and explicit target wins" {
+    const allocator = testing.allocator;
+    const source =
+        \\[device]
+        \\name = "SelectedInit"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "suppress"
+        \\[[device.interface]]
+        \\id = 9
+        \\class = "hid"
+        \\[[device.interface]]
+        \\id = 7
+        \\class = "vendor"
+        \\usb_match_any = [[255, 93, 1]]
+        \\[[device.interface]]
+        \\id = 3
+        \\class = "vendor"
+        \\ep_out = 2
+        \\[device.init]
+        \\commands = ["aabb"]
+        \\[[report]]
+        \\name = "input"
+        \\interface = 7
+        \\size = 1
+    ;
+    var parsed = try device_mod.parseString(allocator, source);
+    defer parsed.deinit();
+    var output_only = try MockDeviceIO.init(allocator, &.{});
+    defer output_only.deinit();
+    var selected = try MockDeviceIO.init(allocator, &.{});
+    defer selected.deinit();
+    var hid = try MockDeviceIO.init(allocator, &.{});
+    defer hid.deinit();
+    var devices = [_]DeviceIO{ hid.deviceIO(), selected.deviceIO(), output_only.deviceIO() };
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+    var inst = DeviceInstance{
+        .allocator = allocator,
+        .devices = &devices,
+        .loop = loop,
+        .interp = Interpreter.init(&parsed.value),
+        .mapper = null,
+        .owner = .none,
+        .primary_output = null,
+        .imu_output = null,
+        .aux_dev = null,
+        .touchpad_dev = null,
+        .generic_state = null,
+        .generic_uinput = null,
+        .device_cfg = &parsed.value,
+        .pending_mapping = null,
+        .stopped = false,
+        .poll_timeout_ms = 100,
+    };
+    try inst.rerunInitSequence();
+    try testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, selected.write_log.items);
+    try testing.expectEqual(@as(usize, 0), output_only.write_log.items.len);
+    try testing.expectEqual(@as(usize, 0), hid.write_log.items.len);
+    // Explicit logical id remains authoritative, including HID targets.
+    parsed.value.device.init.?.interface = 9;
+    try inst.rerunInitSequence();
+    try testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, hid.write_log.items);
+    try testing.expectEqual(@as(usize, 2), selected.write_log.items.len);
+    parsed.value.device.init.?.interface = 7;
+    try inst.rerunInitSequence();
+    try testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xaa, 0xbb }, selected.write_log.items);
+    try testing.expectEqual(@as(usize, 0), output_only.write_log.items.len);
 }
 
 test "DeviceInstance: rerunInitSequence propagates init write errors" {
