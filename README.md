@@ -82,13 +82,20 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 
 ## Supported Devices
 
-Ships with production configs for **12 supported device families** across 8
-vendors. `devices/` also contains a Flydigi DInput/2.4G compatibility variant
-plus example/test fixtures, so the raw TOML file count is higher:
+Ships device configs for **14 model families** across 9 vendors, including the
+Razer bringup candidate described below. The Vader 4 Pro DInput/2.4G variant and
+example/test fixtures make the raw TOML file count higher:
 
-**Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (2) · **HORI** (1) · **Lenovo** (2)
+**Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (3) · **HORI** (1) · **Lenovo** (2) · **Razer** (1)
 
 [Full device list with feature matrix →](https://bananasjim.github.io/padctl/devices/)
+
+A source-backed **Razer Wolverine V3 Pro PC Tournament mode** bringup candidate
+is also included. Launch it explicitly with
+`padctl --config devices/razer/wolverine-v3-pro-pc.toml`; hardware verification
+and automatic service discovery remain pending. It covers standard controls and
+uses xpad's three Razer vendor-specific interface patterns; the actual descriptor
+match still needs hardware confirmation. It does not claim extra-button or rumble support.
 
 ## Installation
 

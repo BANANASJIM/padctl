@@ -18,6 +18,7 @@
   - [Lenovo Legion Go S](devices/lenovo-lenovo-legion-go-s.md)
   - [Microsoft Xbox Elite Series 2](devices/microsoft-xbox-elite-series-2.md)
   - [Nintendo Switch Pro](devices/nintendo-nintendo-switch-pro-controller.md)
+  - [Razer Wolverine V3 Pro (PC Tournament Mode)](devices/razer-razer-wolverine-v3-pro-pc-tournament-mode.md)
   - [Sony DualSense](devices/sony-sony-dualsense.md)
   - [Sony DualShock 4](devices/sony-sony-dualshock-4.md)
   - [Sony DualShock 4 v2](devices/sony-sony-dualshock-4-v2.md)

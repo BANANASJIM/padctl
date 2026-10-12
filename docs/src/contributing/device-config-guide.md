@@ -86,6 +86,43 @@ type = "hat"
 
 **Output emulation:** For maximum game compatibility, emulate a well-supported controller profile. `emulate = "xbox-elite2"` gives an Xbox Elite Series 2 identity, while `emulate = "dualsense-edge"` gives a DualSense Edge identity with `M1`-`M4` on the Edge extra-button slots. If the device is well-known and you are publishing its real protocol, use its real VID/PID.
 
+## USB descriptor selection
+
+Vendor interfaces can opt into descriptor selection when physical interface and
+endpoint numbers vary. Keep `id` as a logical report routing ID and specify the
+exact USB class, subclass and protocol:
+
+```toml
+[[device.interface]]
+id = 0
+class = "vendor"
+usb_match_any = [[0xff, 0x5d, 0x01]] # Xbox 360 controller interface
+```
+
+When a source supports several exact interface bindings for the same device,
+list the alternatives in `usb_match_any`:
+
+```toml
+usb_match_any = [[0xff, 0x5d, 0x01], [0xff, 0x5d, 0x81], [0xff, 0x47, 0xd0]]
+```
+
+These are the three Razer vendor-specific patterns in xpad; its explicit `1532:0a4c` entry
+selects Xbox 360 packet decoding independently of the interface protocol. They
+describe eligible interfaces, not a verified descriptor from this controller.
+
+Alternatives must be
+nonempty, unique triples of byte values. Omit `ep_in` and `ep_out` with the
+selector. padctl selects one matching active
+alternate with exactly one interrupt IN and one interrupt OUT endpoint. Missing
+or ambiguous descriptors fail before any driver is detached. For interfaces with
+multiple alternates, a bounded GET_INTERFACE request checks the active alternate;
+padctl does not change it. Existing explicit interface and endpoint configs keep
+their current behavior.
+
+Use `padctl --config devices/vendor/model.toml` for initial bringup. Automatic
+directory scanning and service hotplug still require a real declared HID anchor;
+descriptor selection alone does not add pure USB device discovery.
+
 ## Multiple Report Types
 
 Some gamepads send different report IDs for different data:
