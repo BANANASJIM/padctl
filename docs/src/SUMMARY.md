@@ -13,6 +13,7 @@
   - [8BitDo Ultimate](devices/8bitdo-8bitdo-ultimate-controller.md)
   - [Flydigi Vader 4 Pro](devices/flydigi-flydigi-vader-4-pro.md)
   - [Flydigi Vader 5 Pro](devices/flydigi-flydigi-vader-5-pro.md)
+  - [GameSir G7 Pro Amazon (wired, experimental)](devices/gamesir-gamesir-g7-pro-amazon-wired.md)
   - [HORI Horipad Steam](devices/hori-hori-horipad-steam.md)
   - [Lenovo Legion Go](devices/lenovo-lenovo-legion-go.md)
   - [Lenovo Legion Go S](devices/lenovo-lenovo-legion-go-s.md)

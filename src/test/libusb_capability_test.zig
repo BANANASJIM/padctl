@@ -16,7 +16,7 @@ const helpers = @import("helpers.zig");
 
 // Configs known to require libusb. Drift here surfaces a shipped-config vs
 // build-capability mismatch instead of a silent runtime failure.
-const libusb_configs = [_][]const u8{"vader5.toml"};
+const libusb_configs = [_][]const u8{ "vader5.toml", "g7-pro-amazon-wired.toml" };
 
 fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
@@ -89,4 +89,19 @@ test "libusb: shipped libusb-needing configs match the known set" {
             try testing.expect(isKnownLibusbConfig(path));
         }
     }
+}
+
+test "G7 keepalive: shipped vendor config fails clearly without libusb" {
+    if (usbraw.have_libusb) return error.SkipZigTest;
+    const parsed = try device_mod.parseFile(testing.allocator, "devices/gamesir/g7-pro-amazon-wired.toml");
+    defer parsed.deinit();
+    const iface = parsed.value.device.interface[0];
+    try testing.expectError(error.LibusbUnavailable, usbraw.UsbrawDevice.open(
+        testing.allocator,
+        @intCast(parsed.value.device.vid),
+        @intCast(parsed.value.device.pid),
+        @intCast(iface.id),
+        @intCast(iface.ep_in.?),
+        @intCast(iface.ep_out.?),
+    ));
 }

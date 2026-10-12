@@ -30,6 +30,7 @@ const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
 const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_writer_mod = @import("core/rumble_writer.zig");
 const RumbleWriter = rumble_writer_mod.RumbleWriter;
+const Keepalive = @import("core/keepalive.zig").Keepalive;
 const rumble_log = std.log.scoped(.rumble);
 const input_trace = @import("diagnostics/input_trace.zig");
 const flight_recorder = @import("diagnostics/flight_recorder.zig");
@@ -496,6 +497,7 @@ pub const EventLoop = struct {
     native_rumble_device: ?*UhidDevice,
     rumble_writer_slot: ?usize,
     rumble_writer: RumbleWriter,
+    keepalive: ?Keepalive = null,
     disconnected: bool,
     running: bool,
     gamepad_state: state.GamepadState,
@@ -631,6 +633,8 @@ pub const EventLoop = struct {
     /// slice. The number of devices must match the original count.
     pub fn rebindDevices(self: *EventLoop, devices: []DeviceIO) !void {
         if (devices.len != self.device_count) return error.DeviceCountMismatch;
+        std.debug.assert(!self.rumble_writer.isRunning());
+        self.keepalive = null;
         for (devices, 0..) |dev, i| {
             self.pollfds[self.device_base + i] = dev.pollfd();
         }
@@ -863,8 +867,21 @@ pub const EventLoop = struct {
         }
     }
 
-    fn handleRumbleWriterCompletion(self: *EventLoop, ctx: EventLoopContext) void {
+    fn handleRumbleWriterCompletion(self: *EventLoop, ctx: EventLoopContext) !void {
         const completion = self.rumble_writer.takeCompletion() orelse return;
+        if (completion.kind == .keepalive) {
+            if (completion.result == .disconnected) {
+                self.markDisconnected();
+                return;
+            }
+            if (self.keepalive) |*ka| {
+                ka.completed(completion.completed_ns, completion.result == .written) catch |err| {
+                    self.markDisconnected();
+                    return err;
+                };
+            }
+            return;
+        }
         const frame = RumbleScheduler.Frame{
             .strong = completion.frame.strong,
             .weak = completion.frame.weak,
@@ -907,21 +924,30 @@ pub const EventLoop = struct {
         }
 
         self.running = true;
-        errdefer self.running = false;
+        defer {
+            self.rumble_writer.stop();
+            if (self.keepalive) |*ka| ka.pause(monotonicNs());
+            if (self.rumble_writer_slot) |slot| {
+                self.pollfds[slot] = .{ .fd = -1, .events = 0, .revents = 0 };
+            }
+            self.running = false;
+        }
+
         if (ctx.allocator != null) {
             if (ctx.device_config) |dcfg| {
-                if (hasPhysicalRumbleCommand(dcfg)) {
+                if (hasPhysicalRumbleCommand(dcfg) or dcfg.device.keepalive != null) {
                     if (builtin.is_test and ctx.test_fail_rumble_writer_start) return error.TestRumbleWriterStartFailed;
                     try self.startRumbleWriter();
                 }
             }
         }
-        defer {
-            self.rumble_writer.stop();
-            if (self.rumble_writer_slot) |slot| {
-                self.pollfds[slot] = .{ .fd = -1, .events = 0, .revents = 0 };
+        if (ctx.device_config) |dcfg| {
+            if (dcfg.device.keepalive) |cfg| {
+                if (self.keepalive) |*ka| {
+                    ka.restart(monotonicNs());
+                } else self.keepalive = try Keepalive.init(cfg, monotonicNs());
+                if (!self.rumble_writer.isRunning()) try self.startRumbleWriter();
             }
-            self.running = false;
         }
         var buf: [512]u8 = undefined;
 
@@ -936,12 +962,25 @@ pub const EventLoop = struct {
             }
         }
 
-        const timeout: ?posix.timespec = if (ctx.poll_timeout_ms) |ms|
+        const base_timeout: ?posix.timespec = if (ctx.poll_timeout_ms) |ms|
             .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) }
         else
             null;
 
+        var pending_input = [_]bool{false} ** MAX_DEVICE_INTERFACES;
         while (self.running) {
+            var timeout = base_timeout;
+            if (self.keepalive) |ka| {
+                if (!ka.in_flight) {
+                    const ns = @max(0, ka.deadline_ns - monotonicNs());
+                    const ka_timeout = posix.timespec{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) };
+                    if (timeout == null or ka_timeout.sec < timeout.?.sec or
+                        (ka_timeout.sec == timeout.?.sec and ka_timeout.nsec < timeout.?.nsec)) timeout = ka_timeout;
+                }
+            }
+            for (pending_input) |pending| {
+                if (pending) timeout = .{ .sec = 0, .nsec = 0 };
+            }
             _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => {
@@ -989,6 +1028,8 @@ pub const EventLoop = struct {
                 const slot = self.device_base + i;
                 std.debug.assert(slot < self.fd_count);
 
+                if (pending_input[i]) self.pollfds[slot].revents |= posix.POLL.IN;
+                pending_input[i] = false;
                 const revents = self.pollfds[slot].revents;
                 const has_in = revents & posix.POLL.IN != 0;
                 const has_hup = revents & (posix.POLL.HUP | posix.POLL.ERR) != 0;
@@ -1005,8 +1046,16 @@ pub const EventLoop = struct {
 
                 if (!has_in) continue;
 
-                // Drain all available frames from this device
+                // A maintenance-enabled loop bounds each input turn without
+                // discarding reports. Carry readiness across turns because a
+                // DeviceIO may drain notification bytes ahead of its ring.
+                var input_frames: usize = 0;
                 while (true) {
+                    if (self.keepalive != null and input_frames >= 64) {
+                        pending_input[i] = true;
+                        break;
+                    }
+                    input_frames += 1;
                     const n = dev.read(&buf) catch |err| switch (err) {
                         error.Again => break,
                         error.Disconnected => {
@@ -1103,7 +1152,21 @@ pub const EventLoop = struct {
             // result only after this cycle's physical input has been drained.
             if (self.rumble_writer_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
-                    self.handleRumbleWriterCompletion(ctx);
+                    try self.handleRumbleWriterCompletion(ctx);
+                }
+            }
+
+            // Admit at most one maintenance packet after physical input work.
+            // Writes happen on the existing worker, never on this poll thread.
+            if (self.running) {
+                if (self.keepalive) |*ka| {
+                    if (ka.due(monotonicNs())) {
+                        const cfg = ctx.device_config.?.device.keepalive.?;
+                        const index = resolveIfaceIdx(ctx.device_config.?, cfg.interface) orelse return error.InvalidConfig;
+                        if (index >= ctx.devices.len) return error.InvalidConfig;
+                        try self.rumble_writer.publishKeepalive(ctx.devices[index], ka.packet());
+                        ka.submitted();
+                    }
                 }
             }
 
