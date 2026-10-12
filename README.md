@@ -82,11 +82,11 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 
 ## Supported Devices
 
-Ships with production configs for **13 supported device families** across 9
-vendors. `devices/` also contains a Flydigi DInput/2.4G compatibility variant
+Ships with production configs for **14 supported device families** across 9
+vendors. `devices/` also contains a Vader 4 Pro DInput/2.4G compatibility variant
 plus example/test fixtures, so the raw TOML file count is higher:
 
-**Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (2) · **HORI** (1) · **Lenovo** (2) · **SCUF** (1)
+**Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (3) · **HORI** (1) · **Lenovo** (2) · **SCUF** (1)
 
 [Full device list with feature matrix →](https://bananasjim.github.io/padctl/devices/)
 
