@@ -95,6 +95,10 @@ fn createDeviceIO(
         };
         return dev.deviceIO();
     } else if (std.mem.eql(u8, iface.class, "vendor")) {
+        if (iface.usb_match) |match| {
+            const dev = try UsbrawDevice.openMatched(allocator, vid, pid, .{ @intCast(match[0]), @intCast(match[1]), @intCast(match[2]) });
+            return dev.deviceIO();
+        }
         // ep_in may be absent: a write-only interface carries output commands
         // (e.g. rumble) without contributing input reports.
         const ep_in: ?u8 = if (iface.ep_in) |e| @intCast(e) else null;

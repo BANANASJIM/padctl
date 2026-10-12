@@ -37,6 +37,12 @@ pub fn generateDevicePage(
         try writer.writeByte('\n');
     }
 
+    for (dev.interface) |iface| {
+        if (iface.usb_match) |match| {
+            try writer.print("Logical interface `{d}` selects the physical USB interface by class/subclass/protocol `0x{x:0>2}/0x{x:0>2}/0x{x:0>2}`. Its interrupt endpoints are resolved from the active alternate.\n\n", .{ iface.id, @as(u8, @intCast(match[0])), @as(u8, @intCast(match[1])), @as(u8, @intCast(match[2])) });
+        }
+    }
+
     // Reports
     for (cfg.report) |report| {
         try writer.print("## Report: `{s}` ({d} bytes, interface {d})\n\n", .{

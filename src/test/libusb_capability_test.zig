@@ -16,7 +16,7 @@ const helpers = @import("helpers.zig");
 
 // Configs known to require libusb. Drift here surfaces a shipped-config vs
 // build-capability mismatch instead of a silent runtime failure.
-const libusb_configs = [_][]const u8{"vader5.toml"};
+const libusb_configs = [_][]const u8{ "vader5.toml", "wolverine-v3-pro-pc.toml" };
 
 fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
@@ -56,6 +56,11 @@ test "libusb: stub openSuppress returns LibusbUnavailable" {
     if (usbraw.have_libusb) return error.SkipZigTest;
     const result = usbraw.UsbrawSuppress.openSuppress(testing.allocator, 0x1234, 0x5678, 0);
     try testing.expectError(error.LibusbUnavailable, result);
+}
+
+test "libusb: stub descriptor-selected open returns LibusbUnavailable" {
+    if (usbraw.have_libusb) return error.SkipZigTest;
+    try testing.expectError(error.LibusbUnavailable, usbraw.UsbrawDevice.openMatched(testing.allocator, 0x1532, 0x0a4c, .{ 255, 93, 1 }));
 }
 
 test "libusb: LibusbUnavailable is not a transient open error" {
