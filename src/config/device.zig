@@ -931,6 +931,10 @@ fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !voi
 
         // uhid+pid requires [output.imu] as the UHID routing gate.
         if (is_uhid and is_pid) {
+            if (cfg.device.keepalive != null) {
+                std.log.warn("device '{s}': keepalive cannot be combined with UHID PID passthrough; disable keepalive or select queued rumble output", .{cfg.device.name});
+                return error.InvalidConfig;
+            }
             if (out.imu == null) return error.InvalidConfig;
         }
 

@@ -391,3 +391,59 @@ test "G7 keepalive: failed init cleans worker and rebind reset is transactional"
     try loop.rebindDevices(&devices);
     try testing.expect(loop.keepalive == null);
 }
+
+// A valid legacy HID PID passthrough setup, before adding maintenance. Its
+// FfbForwarder uses a direct physical fd writer, unlike queued rumble output.
+const pid_base =
+    \\[device]
+    \\name = "PID maintenance contract"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "input"
+    \\interface = 0
+    \\size = 1
+;
+const pid_output =
+    \\[output.imu]
+    \\backend = "uhid"
+    \\[output.force_feedback]
+    \\backend = "uhid"
+    \\kind = "pid"
+;
+const pid_profile =
+    \\[output.profiles.passthrough.imu]
+    \\backend = "uhid"
+    \\[output.profiles.passthrough.force_feedback]
+    \\backend = "uhid"
+    \\kind = "pid"
+;
+const pid_maintenance =
+    \\[device.keepalive]
+    \\interface = 0
+    \\packet = "00"
+    \\report_size = 1
+    \\period_ms = 50
+    \\sequence_offset = 0
+;
+
+test "G7 keepalive: reject second physical PID writer in root and profiles, preserve legacy and queued rumble" {
+    const root = try device.parseString(testing.allocator, pid_base ++ "\n" ++ pid_output);
+    defer root.deinit();
+    try device.validate(&root.value);
+    const profile = try device.parseString(testing.allocator, pid_base ++ "\n" ++ pid_profile);
+    defer profile.deinit();
+    try device.validate(&profile.value);
+    try testing.expectError(error.InvalidConfig, device.parseString(testing.allocator, pid_base ++ "\n" ++ pid_output ++ "\n" ++ pid_maintenance));
+    try testing.expectError(error.InvalidConfig, device.parseString(testing.allocator, pid_base ++ "\n" ++ pid_profile ++ "\n" ++ pid_maintenance));
+    const queued = try device.parseString(testing.allocator, pid_base ++ "\n" ++ pid_maintenance ++ "\n" ++
+        \\[output.force_feedback]
+        \\backend = "uinput"
+        \\kind = "rumble"
+    );
+    defer queued.deinit();
+    try device.validate(&queued.value);
+}

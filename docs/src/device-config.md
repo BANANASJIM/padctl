@@ -62,7 +62,10 @@ Only one maintenance packet can be in flight. Missed periods do not create a
 backlog. Three consecutive write errors end the session. Mapping restarts retain
 the sequence; a physical rebind starts a fresh sequence and priming phase.
 This sequence belongs to maintenance packets only; it is not injected into
-other command templates or shared with rumble commands.
+other command templates or shared with rumble commands. Keepalive cannot be
+combined with UHID PID force-feedback passthrough, including in output profiles:
+that legacy path writes directly to the physical fd outside the shared writer.
+Queued rumble output remains compatible.
 
 ## `[[report]]`
 
