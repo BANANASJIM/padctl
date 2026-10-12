@@ -9,6 +9,7 @@ pub const Keepalive = struct {
     len: usize,
     sequence_offset: usize,
     sequence: u8,
+    sequence_skip_zero: bool,
     period_ns: i128,
     startup_interval_ns: i128,
     short_intervals_left: u8,
@@ -19,12 +20,13 @@ pub const Keepalive = struct {
 
     pub fn init(cfg: Config, now_ns: i128) !Keepalive {
         if (cfg.report_size < 1 or cfg.report_size > 64 or cfg.sequence_offset < 0 or cfg.sequence_offset >= cfg.report_size or
-            cfg.sequence_start < 0 or cfg.sequence_start > 255 or cfg.period_ms < 10 or cfg.period_ms > 60000 or
+            cfg.sequence_start < 0 or cfg.sequence_start > 255 or (cfg.sequence_skip_zero and cfg.sequence_start == 0) or cfg.period_ms < 10 or cfg.period_ms > 60000 or
             cfg.startup_count < 0 or cfg.startup_count > 32 or cfg.startup_interval_ms < 10 or cfg.startup_interval_ms > 60000) return error.InvalidConfig;
         var result = Keepalive{
             .len = @intCast(cfg.report_size),
             .sequence_offset = @intCast(cfg.sequence_offset),
             .sequence = @intCast(cfg.sequence_start),
+            .sequence_skip_zero = cfg.sequence_skip_zero,
             .period_ns = cfg.period_ms * std.time.ns_per_ms,
             .startup_interval_ns = cfg.startup_interval_ms * std.time.ns_per_ms,
             .short_intervals_left = @intCast(cfg.startup_count),
@@ -61,6 +63,7 @@ pub const Keepalive = struct {
         std.debug.assert(!self.in_flight);
         self.in_flight = true;
         self.sequence +%= 1;
+        if (self.sequence_skip_zero and self.sequence == 0) self.sequence = 1;
     }
 
     pub fn completed(self: *Keepalive, now_ns: i128, success: bool) !void {

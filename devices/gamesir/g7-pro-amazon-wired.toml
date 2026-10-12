@@ -2,7 +2,10 @@
 # Protocol source:
 # https://github.com/broroeror/gamesir-linux-tools/blob/771b28ae75b0a614a6a7fec9aa606606a27b3b8d/vendors/gamesir/models/g7pro/protocol.py
 # Heartbeat-only session maintenance follows reader.py at the same commit.
+# Sequence source: vendors/gamesir/control.py at the same commit.
 # No onboard profile writes or identity-switch handshake are sent.
+# The reference also queries profile/firmware every 2s; this F2-only route
+# has not established heartbeat necessity or sufficiency on hardware.
 # Prototype: no local hardware validation. Use --config explicitly; daemon
 # auto-discovery currently requires a hidraw anchor this identity lacks.
 # Other editions, receiver identities and G7 Pro 8K are not covered.
@@ -25,6 +28,8 @@ report_size = 64
 period_ms = 450
 sequence_offset = 2
 sequence_start = 1
+# Reference control.py sequencer emits 1..255, never zero.
+sequence_skip_zero = true
 # Three priming packets with a 50ms interval after each; the first regular
 # packet follows at 150ms, subsequent intervals are 450ms (plus write time).
 startup_count = 3
@@ -36,9 +41,8 @@ interface = 0
 size = 64
 
 [report.match]
-offset = 0
-expect = [0x10, 0, 0, 0x3c, 0xe0]
-mask = [0xff, 0, 0, 0xff, 0xff]
+offset = 3
+expect = [0x3c, 0xe0]
 
 [report.fields]
 # Processed stick axes rest at 128, range 0..255. This existing linear

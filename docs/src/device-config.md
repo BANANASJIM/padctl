@@ -43,7 +43,8 @@ Opt-in periodic physical session maintenance, sent on the existing physical
 writer after bounded input processing. Use only a protocol-confirmed keepalive
 packet. The scheduler sends only the configured bytes. The GameSir example
 uses a heartbeat and configures no onboard profile writes or identity-switch
-handshake.
+handshake. Whether heartbeat-only maintenance is necessary and sufficient for
+this device has not been verified on hardware here.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -51,8 +52,9 @@ handshake.
 | `packet` | string | Static hex bytes, with optional spaces; no placeholders |
 | `report_size` | integer | Zero-padded packet length, 1–64 bytes |
 | `period_ms` | integer | Interval after regular write completions, 10–60000 ms |
-| `sequence_offset` | integer | Byte to overwrite with a modulo-256 sequence; must be within the supplied hex bytes |
+| `sequence_offset` | integer | Byte to overwrite with the sequence; must be within the supplied hex bytes |
 | `sequence_start` | integer | First sequence value, 0–255; default 1 |
+| `sequence_skip_zero` | bool | Skip zero after 255, cycling 1–255; default false (modulo 256). When true, `sequence_start` must be nonzero |
 | `startup_count` | integer | First 0–32 completions that use the shorter interval; default 0 |
 | `startup_interval_ms` | integer | Startup completion-to-next-write interval, 10–60000 ms; default 50 |
 
@@ -85,13 +87,6 @@ Disambiguates reports when multiple share an interface.
 |-------|------|-------------|
 | `offset` | integer | Byte position to inspect |
 | `expect` | integer[] | Expected bytes at that offset |
-| `mask` | integer[] | Optional byte masks, same length as `expect`; default all `0xff` |
-
-Each byte compares `(actual & mask) == (expect & mask)`. A zero mask skips
-that byte. For example, `expect=[0x10,0,0,0x3c,0xe0]` with
-`mask=[0xff,0,0,0xff,0xff]` checks a report ID and a later input marker while
-allowing the intervening header bytes to vary. Without `mask`, existing exact
-matching is preserved.
 
 ### `[report.fields]`
 

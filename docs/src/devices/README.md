@@ -25,4 +25,6 @@ experimental and has not been tested on hardware here. It requires libusb and
 an explicit `--config` invocation: this identity lacks the hidraw anchor needed
 by automatic discovery. Other variants, receiver modes, rumble and IMU output
 are outside this configuration. Confirm stick direction/centering and button
-mapping on the exact hardware before relying on it.
+mapping on the exact hardware before relying on it. The reference reader also
+queries profile and firmware every two seconds; this candidate sends only the
+F2 heartbeat. Its necessity and sufficiency for telemetry remain unverified.

@@ -12,13 +12,13 @@
 
 ## Session Maintenance
 
-Interface 0; `0f000002f200` padded to 64 bytes; sequence byte 2 starts at 1 and wraps modulo 256.
+Interface 0; `0f000002f200` padded to 64 bytes; sequence byte 2 starts at 1 and cycles 1–255 (zero skipped).
 
 The first 3 completed packets use a 50 ms interval before the next packet; subsequent intervals are 450 ms. Timing starts from write completion, without catch-up bursts. Three consecutive write failures end the session.
 
 ## Report: `telemetry` (64 bytes, interface 0)
 
-Match (masked): `byte[0] & 0xff = 0x10`, `byte[1] & 0x00 = 0x00`, `byte[2] & 0x00 = 0x00`, `byte[3] & 0xff = 0x3c`, `byte[4] & 0xff = 0xe0`
+Match: byte[3] = `0x3c`, `0xe0`
 
 ### Fields
 

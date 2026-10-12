@@ -58,6 +58,7 @@ pub const KeepaliveConfig = struct {
     period_ms: i64,
     sequence_offset: i64,
     sequence_start: i64 = 1,
+    sequence_skip_zero: bool = false,
     startup_count: i64 = 0,
     startup_interval_ms: i64 = 50,
 };
@@ -76,7 +77,6 @@ pub const DeviceInfo = struct {
 pub const MatchConfig = struct {
     offset: i64,
     expect: []const i64,
-    mask: ?[]const i64 = null,
 };
 
 pub const FieldConfig = struct {
@@ -542,6 +542,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             ka.startup_count < 0 or ka.startup_count > 32 or
             ka.startup_interval_ms < 10 or ka.startup_interval_ms > 60000 or
             ka.sequence_start < 0 or ka.sequence_start > 255 or
+            (ka.sequence_skip_zero and ka.sequence_start == 0) or
             ka.sequence_offset < 0 or ka.sequence_offset >= ka.report_size) return error.InvalidConfig;
         var nibble_count: usize = 0;
         for (ka.packet) |ch| {
@@ -657,10 +658,6 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
 
         if (report.match) |m| {
-            if (m.mask) |mask| {
-                if (mask.len != m.expect.len) return error.InvalidConfig;
-                for (mask) |byte| if (byte < 0 or byte > 255) return error.InvalidConfig;
-            }
             if (m.offset < 0) return error.InvalidConfig;
             for (m.expect) |byte| {
                 if (byte < 0 or byte > 255) return error.InvalidConfig;

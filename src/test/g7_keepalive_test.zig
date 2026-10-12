@@ -71,7 +71,7 @@ test "G7 keepalive: wrap, bounded failure, pause and physical reset" {
     try expectPacket(ka.packet(), 255);
     ka.submitted();
     try ka.completed(0, true);
-    try expectPacket(ka.packet(), 0);
+    try expectPacket(ka.packet(), 1);
     ka.submitted();
     try ka.completed(50 * ms, false);
     try testing.expectEqual(@as(i128, 500 * ms), ka.deadline_ns);
@@ -90,11 +90,12 @@ test "G7 keepalive: wrap, bounded failure, pause and physical reset" {
     try testing.expect(ka.due(2000 * ms));
 }
 
-test "G7 keepalive: parser rejects unsafe maintenance and masks" {
+test "G7 keepalive: parser rejects unsafe maintenance" {
     var parsed = try device.parseFile(testing.allocator, path);
     defer parsed.deinit();
     const original = parsed.value.device.keepalive.?;
     const bad = [_]device.KeepaliveConfig{
+        .{ .interface = 0, .packet = "0f00", .report_size = 64, .period_ms = 450, .sequence_offset = 1, .sequence_start = 0, .sequence_skip_zero = true },
         .{ .interface = 9, .packet = "0f00", .report_size = 64, .period_ms = 450, .sequence_offset = 1 },
         .{ .interface = 0, .packet = "0f00", .report_size = 65, .period_ms = 450, .sequence_offset = 1 },
         .{ .interface = 0, .packet = "0f00", .report_size = 64, .period_ms = 0, .sequence_offset = 1 },
@@ -109,60 +110,75 @@ test "G7 keepalive: parser rejects unsafe maintenance and masks" {
         try testing.expectError(error.InvalidConfig, device.validate(&parsed.value));
     }
     parsed.value.device.keepalive = original;
-    var reports = [_]device.ReportConfig{parsed.value.report[0]};
-    parsed.value.report = &reports;
-    const original_match = reports[0].match.?;
-    for ([_][]const i64{ &.{255}, &.{ 255, 0, 0, 255, 256 }, &.{ 255, 0, 0, 255, -1 } }) |mask| {
-        reports[0].match.?.mask = mask;
-        try testing.expectError(error.InvalidConfig, device.validate(&parsed.value));
-    }
-    reports[0].match = original_match;
     try device.validate(&parsed.value);
 }
 
-test "G7 keepalive: masked telemetry framing rejects responses and preserves exact legacy matching" {
-    var parsed = try device.parseFile(testing.allocator, path);
+test "G7 keepalive: telemetry suffix matching rejects non-input markers" {
+    const parsed = try device.parseFile(testing.allocator, path);
     defer parsed.deinit();
-    var reports = [_]device.ReportConfig{parsed.value.report[0]};
-    parsed.value.report = &reports;
     var raw = neutralPacket();
     const interp = Interpreter.init(&parsed.value);
-    var page: std.ArrayList(u8) = .{};
-    defer page.deinit(testing.allocator);
-    try @import("../tools/docgen.zig").generateDevicePage(&parsed.value, "gamesir", page.writer(testing.allocator));
-    try testing.expect(std.mem.indexOf(u8, page.items, "byte[0] & 0xff = 0x10") != null);
-    try testing.expect(std.mem.indexOf(u8, page.items, "byte[1] & 0x00 = 0x00") != null);
-    try testing.expect(std.mem.indexOf(u8, page.items, "0x+") == null);
-    for (0..256) |seq| {
-        raw[1] = @intCast(seq);
-        raw[2] = @intCast(255 - seq);
+    for (0..256) |header| {
+        // Existing exact match at byte3 intentionally leaves bytes0..2 unchecked.
+        raw[0] = @intCast(header);
+        raw[1] = @intCast(255 - header);
+        raw[2] = @intCast(header);
         try testing.expect((try interp.processReport(0, &raw)) != null);
     }
-    for ([_]usize{ 0, 3, 4 }) |off| {
+    for ([_]usize{ 3, 4 }) |off| {
         var wrong = raw;
         wrong[off] ^= 1;
         try testing.expect((try interp.processReport(0, &wrong)) == null);
     }
-    raw[4] = 0x05; // register response shares report10/3c, not input
+    raw[4] = 0x05; // register response marker, not telemetry marker e0
     try testing.expect((try interp.processReport(0, &raw)) == null);
     raw = neutralPacket();
     try testing.expect((try interp.processReport(1, &raw)) == null);
     try testing.expect((try interp.processReport(0, raw[0..63])) == null);
-    // Partial masks compare BOTH sides, not an already-masked expect value.
-    reports[0].match = .{ .offset = 0, .expect = &.{0x1f}, .mask = &.{0xf0} };
-    const partial = Interpreter.init(&parsed.value);
-    try testing.expect((try partial.processReport(0, &raw)) != null);
-    raw[0] = 0x20;
-    try testing.expect((try partial.processReport(0, &raw)) == null);
-    reports[0].match = .{ .offset = 0, .expect = &.{0x10} };
-    const exact = Interpreter.init(&parsed.value);
-    try testing.expect((try exact.processReport(0, &raw)) == null);
-    raw[0] = 0x10;
-    try testing.expect((try exact.processReport(0, &raw)) != null);
-    reports[0].match = .{ .offset = 0, .expect = &.{0x10}, .mask = &.{0} };
-    const wildcard = Interpreter.init(&parsed.value);
-    raw[0] = 0xff;
-    try testing.expect((try wildcard.processReport(0, &raw)) != null);
+}
+
+test "G7 keepalive: production writer emits source sequence 1 through 255 then 1" {
+    const parsed = try device.parseFile(testing.allocator, path);
+    defer parsed.deinit();
+    var ka = try Keepalive.init(parsed.value.device.keepalive.?, 0);
+    var mock = try MockDeviceIO.init(testing.allocator, &.{});
+    defer mock.deinit();
+    var writer: @import("../core/rumble_writer.zig").RumbleWriter = .{};
+    // Rejected admission must not consume the first wire sequence.
+    try testing.expectError(error.NotRunning, writer.publishKeepalive(mock.deviceIO(), ka.packet()));
+    try expectPacket(ka.packet(), 1);
+    try writer.start();
+    defer writer.stop();
+    for (0..257) |i| {
+        try testing.expect(ka.due(ka.deadline_ns));
+        try writer.publishKeepalive(mock.deviceIO(), ka.packet());
+        ka.submitted();
+        try readable(writer.completionFd());
+        const completion = writer.takeCompletion().?;
+        try testing.expectEqual(.keepalive, completion.kind);
+        try testing.expectEqual(.written, completion.result);
+        try ka.completed(ka.deadline_ns, true);
+        // Independent oracle follows source control.py's 1..255 counter.
+        try expectPacket(mock.write_log.items[i * 64 ..][0..64], @intCast(i % 255 + 1));
+    }
+    try testing.expectEqual(@as(usize, 257 * 64), mock.write_log.items.len);
+    // Legacy generic default remains modulo256, including a zero byte.
+    var legacy: device.KeepaliveConfig = .{
+        .interface = 0,
+        .packet = "0f000002f200",
+        .report_size = 64,
+        .period_ms = 450,
+        .sequence_offset = 2,
+        .sequence_start = 255,
+    }; // omission proves the generic default, not an explicit false override
+    ka = try Keepalive.init(legacy, 0);
+    try expectPacket(ka.packet(), 255);
+    ka.submitted();
+    try ka.completed(0, true);
+    try expectPacket(ka.packet(), 0);
+    legacy.sequence_skip_zero = true;
+    legacy.sequence_start = 0;
+    try testing.expectError(error.InvalidConfig, Keepalive.init(legacy, 0));
 }
 
 test "G7 keepalive: pre-remap buttons, four extras, hats and processed axes" {
