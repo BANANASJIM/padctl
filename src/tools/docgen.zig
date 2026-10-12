@@ -54,7 +54,7 @@ pub fn generateDevicePage(
                 try writer.writeAll("Match (masked): ");
                 for (m.expect, mask, 0..) |b, bits, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.print("`byte[{d}] & 0x{x:0>2} = 0x{x:0>2}`", .{ m.offset + @as(i64, @intCast(i)), bits, b & bits });
+                    try writer.print("`byte[{d}] & 0x{x:0>2} = 0x{x:0>2}`", .{ m.offset + @as(i64, @intCast(i)), @as(u64, @intCast(bits)), @as(u64, @intCast(b & bits)) });
                 }
             } else {
                 try writer.print("Match: byte[{d}] = ", .{m.offset});

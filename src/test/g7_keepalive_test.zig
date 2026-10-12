@@ -127,6 +127,12 @@ test "G7 keepalive: masked telemetry framing rejects responses and preserves exa
     parsed.value.report = &reports;
     var raw = neutralPacket();
     const interp = Interpreter.init(&parsed.value);
+    var page: std.ArrayList(u8) = .{};
+    defer page.deinit(testing.allocator);
+    try @import("../tools/docgen.zig").generateDevicePage(&parsed.value, "gamesir", page.writer(testing.allocator));
+    try testing.expect(std.mem.indexOf(u8, page.items, "byte[0] & 0xff = 0x10") != null);
+    try testing.expect(std.mem.indexOf(u8, page.items, "byte[1] & 0x00 = 0x00") != null);
+    try testing.expect(std.mem.indexOf(u8, page.items, "0x+") == null);
     for (0..256) |seq| {
         raw[1] = @intCast(seq);
         raw[2] = @intCast(255 - seq);

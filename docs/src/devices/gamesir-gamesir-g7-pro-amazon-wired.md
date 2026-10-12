@@ -18,7 +18,7 @@ The first 3 completed packets use a 50 ms interval before the next packet; subse
 
 ## Report: `telemetry` (64 bytes, interface 0)
 
-Match (masked): `byte[0] & 0x+ff = 0x+10`, `byte[1] & 0x+0 = 0x+0`, `byte[2] & 0x+0 = 0x+0`, `byte[3] & 0x+ff = 0x+3c`, `byte[4] & 0x+ff = 0x+e0`
+Match (masked): `byte[0] & 0xff = 0x10`, `byte[1] & 0x00 = 0x00`, `byte[2] & 0x00 = 0x00`, `byte[3] & 0xff = 0x3c`, `byte[4] & 0xff = 0xe0`
 
 ### Fields
 
