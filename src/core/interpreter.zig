@@ -504,9 +504,11 @@ pub const Interpreter = struct {
 
 fn checkMatch(m: device.MatchConfig, raw: []const u8) bool {
     const off: usize = @intCast(m.offset);
+    if (m.mask) |mask| if (mask.len != m.expect.len) return false;
     if (raw.len < off + m.expect.len) return false;
     for (m.expect, 0..) |byte, i| {
-        if (raw[off + i] != @as(u8, @intCast(byte))) return false;
+        const mask: u8 = if (m.mask) |values| @intCast(values[i]) else 0xff;
+        if ((raw[off + i] & mask) != (@as(u8, @intCast(byte)) & mask)) return false;
     }
     return true;
 }

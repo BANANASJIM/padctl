@@ -82,11 +82,17 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 
 ## Supported Devices
 
-Ships with production configs for **12 supported device families** across 8
-vendors. `devices/` also contains a Flydigi DInput/2.4G compatibility variant
+Ships device configs for **14 model families** across 9 vendors, including
+the experimental GameSir route described below. `devices/` also contains a Vader 4 Pro DInput/2.4G compatibility variant
 plus example/test fixtures, so the raw TOML file count is higher:
 
-**Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (2) · **HORI** (1) · **Lenovo** (2)
+**Sony** (3) · **Nintendo** (1) · **Microsoft** (1) · **Valve** (1) · **8BitDo** (1) · **Flydigi** (3) · **HORI** (1) · **Lenovo** (2) · **GameSir** (1)
+
+The GameSir G7 Pro Amazon wired config (`3537:10ba`) is an experimental
+telemetry route, pending hardware validation. It requires libusb and explicit
+`--config devices/gamesir/g7-pro-amazon-wired.toml`; automatic daemon discovery
+currently requires a hidraw anchor this identity lacks. Other editions and
+receiver identities are not covered; this config does not enable rumble or IMU.
 
 [Full device list with feature matrix →](https://bananasjim.github.io/padctl/devices/)
 

@@ -37,6 +37,12 @@ pub fn generateDevicePage(
         try writer.writeByte('\n');
     }
 
+    if (dev.keepalive) |ka| {
+        try writer.writeAll("## Session Maintenance\n\n");
+        try writer.print("Interface {d}; `{s}` padded to {d} bytes; sequence byte {d} starts at {d} and wraps modulo 256.\n\n", .{ ka.interface, ka.packet, ka.report_size, ka.sequence_offset, ka.sequence_start });
+        try writer.print("The first {d} completed packets use a {d} ms interval before the next packet; subsequent intervals are {d} ms. Timing starts from write completion, without catch-up bursts. Three consecutive write failures end the session.\n\n", .{ ka.startup_count, ka.startup_interval_ms, ka.period_ms });
+    }
+
     // Reports
     for (cfg.report) |report| {
         try writer.print("## Report: `{s}` ({d} bytes, interface {d})\n\n", .{
@@ -44,10 +50,18 @@ pub fn generateDevicePage(
         });
 
         if (report.match) |m| {
-            try writer.print("Match: byte[{d}] = ", .{m.offset});
-            for (m.expect, 0..) |b, i| {
-                if (i > 0) try writer.writeAll(", ");
-                try writer.print("`0x{x:0>2}`", .{@as(u64, @intCast(b))});
+            if (m.mask) |mask| {
+                try writer.writeAll("Match (masked): ");
+                for (m.expect, mask, 0..) |b, bits, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.print("`byte[{d}] & 0x{x:0>2} = 0x{x:0>2}`", .{ m.offset + @as(i64, @intCast(i)), bits, b & bits });
+                }
+            } else {
+                try writer.print("Match: byte[{d}] = ", .{m.offset});
+                for (m.expect, 0..) |b, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.print("`0x{x:0>2}`", .{@as(u64, @intCast(b))});
+                }
             }
             try writer.writeAll("\n\n");
         }

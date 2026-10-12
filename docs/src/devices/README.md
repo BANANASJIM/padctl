@@ -19,3 +19,10 @@ find devices -type f -name '*.toml' -print | sort | while IFS= read -r f; do
     ./zig-out/bin/padctl --doc-gen --config "$f" --output docs/src/devices
 done
 ```
+
+The GameSir G7 Pro Amazon wired (`3537:10ba`) telemetry configuration is
+experimental and has not been tested on hardware here. It requires libusb and
+an explicit `--config` invocation: this identity lacks the hidraw anchor needed
+by automatic discovery. Other variants, receiver modes, rumble and IMU output
+are outside this configuration. Confirm stick direction/centering and button
+mapping on the exact hardware before relying on it.

@@ -35,7 +35,10 @@ pub const CompletionResult = enum {
     disconnected,
 };
 
+pub const RequestKind = enum { rumble, keepalive };
+
 pub const Completion = struct {
+    kind: RequestKind = .rumble,
     frame: Frame,
     result: CompletionResult,
     retry_count: u8,
@@ -44,6 +47,7 @@ pub const Completion = struct {
 };
 
 const Request = struct {
+    kind: RequestKind = .rumble,
     device: DeviceIO,
     frame: Frame,
     retry_count: u8,
@@ -53,7 +57,7 @@ const Request = struct {
     bytes: [MAX_FRAME_BYTES]u8,
 
     fn isStop(self: Request) bool {
-        return self.frame.strong == 0 and self.frame.weak == 0;
+        return self.kind == .rumble and self.frame.strong == 0 and self.frame.weak == 0;
     }
 };
 
@@ -68,6 +72,7 @@ pub const RumbleWriter = struct {
     mutex: Mutex = .{},
     pending: ?Request = null,
     pending_stop: ?Request = null,
+    pending_keepalive: ?Request = null,
     completion: ?Completion = null,
     wake_r: posix.fd_t = -1,
     wake_w: posix.fd_t = -1,
@@ -101,6 +106,7 @@ pub const RumbleWriter = struct {
         self.mutex.lock();
         self.pending = null;
         self.pending_stop = null;
+        self.pending_keepalive = null;
         self.completion = null;
         self.mutex.unlock();
 
@@ -156,6 +162,33 @@ pub const RumbleWriter = struct {
         signal(self.wake_w);
     }
 
+    /// A separate bounded slot: maintenance never masquerades as a rumble
+    /// STOP, replaces a PLAY, or enters shutdown flushing. One producer and
+    /// completion acknowledgement preserve the shared physical-writer contract.
+    pub fn publishKeepalive(self: *RumbleWriter, device: DeviceIO, bytes: []const u8) error{ NotRunning, FrameTooLarge, Busy }!void {
+        if (self.thread == null) return error.NotRunning;
+        if (bytes.len > MAX_FRAME_BYTES) return error.FrameTooLarge;
+        var request = Request{
+            .kind = .keepalive,
+            .device = device,
+            .frame = .{ .strong = 0, .weak = 0 },
+            .retry_count = 0,
+            .generation = 0,
+            .min_interval_ns = 0,
+            .len = bytes.len,
+            .bytes = undefined,
+        };
+        @memcpy(request.bytes[0..bytes.len], bytes);
+        self.mutex.lock();
+        if (self.pending_keepalive != null) {
+            self.mutex.unlock();
+            return error.Busy;
+        }
+        self.pending_keepalive = request;
+        self.mutex.unlock();
+        signal(self.wake_w);
+    }
+
     pub fn takeCompletion(self: *RumbleWriter) ?Completion {
         drain(self.completion_r);
         self.mutex.lock();
@@ -169,6 +202,10 @@ pub const RumbleWriter = struct {
     fn workerMain(self: *RumbleWriter) void {
         var last_success: ?SuccessfulWrite = null;
         while (true) {
+            if (self.shutting_down.load(.acquire)) {
+                self.writePendingOnShutdown(last_success);
+                return;
+            }
             const selection = self.takeReadyRequest(last_success);
             const request = switch (selection) {
                 .request => |request| request,
@@ -190,7 +227,7 @@ pub const RumbleWriter = struct {
             const result = writeRequest(request);
             const completed_ns = monotonicNs();
             if (result == .written) {
-                last_success = successfulWrite(request, completed_ns);
+                last_success = recordSuccessfulWrite(last_success, request, completed_ns);
             }
 
             if (self.shutting_down.load(.acquire)) {
@@ -201,6 +238,7 @@ pub const RumbleWriter = struct {
             self.mutex.lock();
             std.debug.assert(self.completion == null);
             self.completion = .{
+                .kind = request.kind,
                 .frame = request.frame,
                 .result = result,
                 .retry_count = request.retry_count,
@@ -228,6 +266,9 @@ pub const RumbleWriter = struct {
     }
 
     fn writePendingOnShutdown(self: *RumbleWriter, last_success: ?SuccessfulWrite) void {
+        self.mutex.lock();
+        self.pending_keepalive = null;
+        self.mutex.unlock();
         while (true) {
             switch (self.takeReadyRequest(last_success)) {
                 .request => |request| {
@@ -268,6 +309,12 @@ pub const RumbleWriter = struct {
         return success;
     }
 
+    fn recordSuccessfulWrite(previous: ?SuccessfulWrite, request: Request, completed_ns: i128) ?SuccessfulWrite {
+        // Maintenance has its own completion-based cadence. It must not reset
+        // rumble throttling/deduplication or starve PLAY on a longer interval.
+        return if (request.kind == .rumble) successfulWrite(request, completed_ns) else previous;
+    }
+
     fn payloadsEqual(request: Request, success: SuccessfulWrite) bool {
         return request.device.ptr == success.device.ptr and
             request.device.vtable == success.device.vtable and
@@ -276,6 +323,10 @@ pub const RumbleWriter = struct {
     }
 
     fn takeReadyRequest(self: *RumbleWriter, last_success: ?SuccessfulWrite) Selection {
+        return self.takeReadyRequestAt(last_success, monotonicNs());
+    }
+
+    fn takeReadyRequestAt(self: *RumbleWriter, last_success: ?SuccessfulWrite, now_ns: i128) Selection {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -286,6 +337,12 @@ pub const RumbleWriter = struct {
             }
             return .{ .request = request };
         }
+        // STOP remains the safety barrier; maintenance must not starve under
+        // a continuous PLAY stream. Only one admitted maintenance packet exists.
+        if (self.pending_keepalive) |request| {
+            self.pending_keepalive = null;
+            return .{ .request = request };
+        }
         while (self.pending) |request| {
             if (last_success) |success| {
                 if (payloadsEqual(request, success)) {
@@ -293,7 +350,7 @@ pub const RumbleWriter = struct {
                     continue;
                 }
                 const interval_ns: i128 = @intCast(request.min_interval_ns);
-                const remaining = success.completed_ns + interval_ns - monotonicNs();
+                const remaining = success.completed_ns + interval_ns - now_ns;
                 if (remaining > 0) return .{ .wait = remaining };
             }
             self.pending = null;
@@ -360,3 +417,60 @@ pub const RumbleWriter = struct {
         }
     }
 };
+
+fn maintenanceTestRequest(device: DeviceIO, kind: RequestKind, payload: u8, strong: u16) Request {
+    var request = Request{
+        .kind = kind,
+        .device = device,
+        .frame = .{ .strong = strong, .weak = 0 },
+        .retry_count = 0,
+        .generation = 1,
+        .min_interval_ns = 500 * std.time.ns_per_ms,
+        .len = 1,
+        .bytes = undefined,
+    };
+    request.bytes[0] = payload;
+    return request;
+}
+
+test "G7 keepalive writer: maintenance cannot reset rumble cadence or dedup" {
+    const Mock = @import("../test/mock_device_io.zig").MockDeviceIO;
+    var mock = try Mock.init(std.testing.allocator, &.{});
+    defer mock.deinit();
+    const first = maintenanceTestRequest(mock.deviceIO(), .rumble, 0xaa, 1);
+    const previous = RumbleWriter.successfulWrite(first, 0);
+    const maintenance = maintenanceTestRequest(mock.deviceIO(), .keepalive, 0xaa, 0);
+    const mixed = RumbleWriter.recordSuccessfulWrite(previous, maintenance, 450 * std.time.ns_per_ms).?;
+    try std.testing.expectEqual(@as(i128, 0), mixed.completed_ns);
+    var writer = RumbleWriter{};
+    writer.pending_keepalive = maintenance;
+    const selected = writer.takeReadyRequestAt(mixed, 450 * std.time.ns_per_ms);
+    try std.testing.expect(selected == .request);
+    try std.testing.expectEqual(RequestKind.keepalive, selected.request.kind); // identical payload is not deduplicated
+    writer.pending = maintenanceTestRequest(mock.deviceIO(), .rumble, 0xbb, 1);
+    const wait = writer.takeReadyRequestAt(mixed, 499 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(i128, std.time.ns_per_ms), wait.wait);
+    const play = writer.takeReadyRequestAt(mixed, 500 * std.time.ns_per_ms);
+    try std.testing.expect(play == .request);
+    try std.testing.expectEqual(@as(u8, 0xbb), play.request.bytes[0]);
+}
+
+test "G7 keepalive writer: STOP priority and shutdown discard maintenance" {
+    const Mock = @import("../test/mock_device_io.zig").MockDeviceIO;
+    var mock = try Mock.init(std.testing.allocator, &.{});
+    defer mock.deinit();
+    var writer = RumbleWriter{};
+    writer.pending_keepalive = maintenanceTestRequest(mock.deviceIO(), .keepalive, 0x0f, 0);
+    writer.pending_stop = maintenanceTestRequest(mock.deviceIO(), .rumble, 0x00, 0);
+    const stop = writer.takeReadyRequestAt(null, 0);
+    try std.testing.expect(stop.request.isStop());
+    try std.testing.expectEqual(RequestKind.keepalive, writer.takeReadyRequestAt(null, 0).request.kind);
+    writer.pending_keepalive = maintenanceTestRequest(mock.deviceIO(), .keepalive, 0x0f, 0);
+    writer.writePendingOnShutdown(null);
+    try std.testing.expectEqual(@as(usize, 0), mock.write_log.items.len);
+    try std.testing.expect(writer.pending_keepalive == null);
+    writer.pending_keepalive = maintenanceTestRequest(mock.deviceIO(), .keepalive, 0x0f, 0);
+    writer.pending_stop = maintenanceTestRequest(mock.deviceIO(), .rumble, 0x00, 0);
+    writer.writePendingOnShutdown(null);
+    try std.testing.expectEqualSlices(u8, &.{0}, mock.write_log.items);
+}

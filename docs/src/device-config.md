@@ -37,6 +37,33 @@ Optional initialization sequence sent after device open.
 | `require_response` | bool | no | When `true`, `commands` or `enable` and at least one ACK criterion are required; failure to receive a response matching every configured criterion fails init/re-init instead of continuing. Use for devices whose input reports are valid only after an acknowledged mode switch. |
 | `feature_report` | integer[] | no | HID feature report sent via `HIDIOCSFEATURE` immediately after `commands`. Encoded as a list of byte values (0–255); `byte[0]` is the report ID. |
 
+## `[device.keepalive]`
+
+Opt-in periodic physical session maintenance, sent on the existing physical
+writer after bounded input processing. Use only a protocol-confirmed keepalive
+packet. The scheduler sends only the configured bytes. The GameSir example
+uses a heartbeat and configures no onboard profile writes or identity-switch
+handshake.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `interface` | integer | Declared, non-suppress interface receiving the packet |
+| `packet` | string | Static hex bytes, with optional spaces; no placeholders |
+| `report_size` | integer | Zero-padded packet length, 1–64 bytes |
+| `period_ms` | integer | Interval after regular write completions, 10–60000 ms |
+| `sequence_offset` | integer | Byte to overwrite with a modulo-256 sequence; must be within the supplied hex bytes |
+| `sequence_start` | integer | First sequence value, 0–255; default 1 |
+| `startup_count` | integer | First 0–32 completions that use the shorter interval; default 0 |
+| `startup_interval_ms` | integer | Startup completion-to-next-write interval, 10–60000 ms; default 50 |
+
+For `startup_count=3`, `startup_interval_ms=50`, `period_ms=450`, immediate
+writes occur at approximately 0, 50, 100, 150, 600 ms, plus transport write time.
+Only one maintenance packet can be in flight. Missed periods do not create a
+backlog. Three consecutive write errors end the session. Mapping restarts retain
+the sequence; a physical rebind starts a fresh sequence and priming phase.
+This sequence belongs to maintenance packets only; it is not injected into
+other command templates or shared with rumble commands.
+
 ## `[[report]]`
 
 Describes one incoming HID report.
@@ -55,6 +82,13 @@ Disambiguates reports when multiple share an interface.
 |-------|------|-------------|
 | `offset` | integer | Byte position to inspect |
 | `expect` | integer[] | Expected bytes at that offset |
+| `mask` | integer[] | Optional byte masks, same length as `expect`; default all `0xff` |
+
+Each byte compares `(actual & mask) == (expect & mask)`. A zero mask skips
+that byte. For example, `expect=[0x10,0,0,0x3c,0xe0]` with
+`mask=[0xff,0,0,0xff,0xff]` checks a report ID and a later input marker while
+allowing the intervening header bytes to vary. Without `mask`, existing exact
+matching is preserved.
 
 ### `[report.fields]`
 
