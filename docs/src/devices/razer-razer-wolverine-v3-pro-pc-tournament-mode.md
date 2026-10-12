@@ -10,7 +10,7 @@
 |----|-------|-------|--------|
 | 0 | vendor | — | — |
 
-Logical interface `0` selects the physical USB interface by class/subclass/protocol `0xff/0x5d/0x01`. Its interrupt endpoints are resolved from the active alternate.
+Logical interface `0` selects one physical USB interface matching class/subclass/protocol `0xff/0x5d/0x01` or `0xff/0x5d/0x81` or `0xff/0x47/0xd0`. Its interrupt endpoints are resolved from the active alternate.
 
 ## Report: `xbox360` (20 bytes, interface 0)
 

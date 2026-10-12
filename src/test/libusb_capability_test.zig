@@ -61,6 +61,7 @@ test "libusb: stub openSuppress returns LibusbUnavailable" {
 test "libusb: stub descriptor-selected open returns LibusbUnavailable" {
     if (usbraw.have_libusb) return error.SkipZigTest;
     try testing.expectError(error.LibusbUnavailable, usbraw.UsbrawDevice.openMatched(testing.allocator, 0x1532, 0x0a4c, .{ 255, 93, 1 }));
+    try testing.expectError(error.LibusbUnavailable, usbraw.UsbrawDevice.openMatchedAny(testing.allocator, 0x1532, 0x0a4c, &.{ .{ 255, 93, 1 }, .{ 255, 71, 208 } }));
 }
 
 test "libusb: LibusbUnavailable is not a transient open error" {

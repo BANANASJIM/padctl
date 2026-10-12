@@ -38,8 +38,15 @@ pub fn generateDevicePage(
     }
 
     for (dev.interface) |iface| {
-        if (iface.usb_match) |match| {
-            try writer.print("Logical interface `{d}` selects the physical USB interface by class/subclass/protocol `0x{x:0>2}/0x{x:0>2}/0x{x:0>2}`. Its interrupt endpoints are resolved from the active alternate.\n\n", .{ iface.id, @as(u8, @intCast(match[0])), @as(u8, @intCast(match[1])), @as(u8, @intCast(match[2])) });
+        if (iface.usb_match != null or iface.usb_match_any != null) {
+            try writer.print("Logical interface `{d}` selects one physical USB interface matching class/subclass/protocol ", .{iface.id});
+            const single = [_][]const i64{iface.usb_match orelse &.{}};
+            const patterns = iface.usb_match_any orelse &single;
+            for (patterns, 0..) |match, index| {
+                if (index > 0) try writer.writeAll(" or ");
+                try writer.print("`0x{x:0>2}/0x{x:0>2}/0x{x:0>2}`", .{ @as(u8, @intCast(match[0])), @as(u8, @intCast(match[1])), @as(u8, @intCast(match[2])) });
+            }
+            try writer.writeAll(". Its interrupt endpoints are resolved from the active alternate.\n\n");
         }
     }
 

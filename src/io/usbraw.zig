@@ -26,13 +26,13 @@ pub const DeviceIO = io.DeviceIO;
 const selector = @import("usb_selector.zig");
 const c = selector.c;
 
-fn resolveUsbInterface(handle: *c.libusb_device_handle, match: [3]u8) !selector.Resolved {
+fn resolveUsbInterface(handle: *c.libusb_device_handle, patterns: []const [3]u8) !selector.Resolved {
     var config: ?*c.libusb_config_descriptor = null;
     if (c.libusb_get_active_config_descriptor(c.libusb_get_device(handle), &config) != 0)
         return error.UsbDescriptorUnavailable;
     const cfg = config orelse return error.UsbDescriptorUnavailable;
     defer c.libusb_free_config_descriptor(cfg);
-    return selector.select(cfg.*, match, handle, readActiveAlternate);
+    return selector.selectAny(cfg.*, patterns, handle, readActiveAlternate);
 }
 
 fn readActiveAlternate(handle: *c.libusb_device_handle, interface_id: u8) !u8 {
@@ -107,7 +107,7 @@ pub const RingBuffer = struct {
 // interface. On any failure the partially-acquired state is rolled back and
 // the error is returned; on success the caller owns ctx + handle and the
 // claimed interface.
-fn libusbOpenAndClaim(vid: u16, pid: u16, configured_interface_id: u8, match: ?[3]u8) !struct {
+fn libusbOpenAndClaim(vid: u16, pid: u16, configured_interface_id: u8, match: ?[]const [3]u8) !struct {
     ctx: *c.libusb_context,
     handle: *c.libusb_device_handle,
     resolved: ?selector.Resolved,
@@ -169,10 +169,14 @@ pub const UsbrawDevice = struct {
     }
 
     pub fn openMatched(alloc: std.mem.Allocator, vid: u16, pid: u16, match: [3]u8) !*UsbrawDevice {
-        return openSelected(alloc, vid, pid, 0, null, 0, match);
+        return openMatchedAny(alloc, vid, pid, &.{match});
     }
 
-    fn openSelected(alloc: std.mem.Allocator, vid: u16, pid: u16, configured_interface_id: u8, configured_ep_in: ?u8, configured_ep_out: u8, match: ?[3]u8) !*UsbrawDevice {
+    pub fn openMatchedAny(alloc: std.mem.Allocator, vid: u16, pid: u16, patterns: []const [3]u8) !*UsbrawDevice {
+        return openSelected(alloc, vid, pid, 0, null, 0, patterns);
+    }
+
+    fn openSelected(alloc: std.mem.Allocator, vid: u16, pid: u16, configured_interface_id: u8, configured_ep_in: ?u8, configured_ep_out: u8, match: ?[]const [3]u8) !*UsbrawDevice {
         const claimed = try libusbOpenAndClaim(vid, pid, configured_interface_id, match);
         const ctx = claimed.ctx;
         const handle = claimed.handle;

@@ -12,7 +12,10 @@ pid = 0x0a4c
 [[device.interface]]
 id = 0 # Logical report routing ID; physical interface is selected below.
 class = "vendor"
-usb_match = [0xff, 0x5d, 0x01]
+# The three Razer vendor-specific interface patterns from pinned xpad. The explicit
+# PID entry selects Xbox 360 decoding before protocol inference; its actual
+# descriptor triple still needs hardware confirmation. Require one active match.
+usb_match_any = [[0xff, 0x5d, 0x01], [0xff, 0x5d, 0x81], [0xff, 0x47, 0xd0]]
 
 [[report]]
 name = "xbox360"

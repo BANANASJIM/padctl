@@ -95,6 +95,13 @@ fn createDeviceIO(
         };
         return dev.deviceIO();
     } else if (std.mem.eql(u8, iface.class, "vendor")) {
+        if (iface.usb_match_any) |patterns| {
+            const converted = try allocator.alloc([3]u8, patterns.len);
+            defer allocator.free(converted);
+            for (patterns, converted) |pattern, *target| target.* = .{ @intCast(pattern[0]), @intCast(pattern[1]), @intCast(pattern[2]) };
+            const dev = try UsbrawDevice.openMatchedAny(allocator, vid, pid, converted);
+            return dev.deviceIO();
+        }
         if (iface.usb_match) |match| {
             const dev = try UsbrawDevice.openMatched(allocator, vid, pid, .{ @intCast(match[0]), @intCast(match[1]), @intCast(match[2]) });
             return dev.deviceIO();

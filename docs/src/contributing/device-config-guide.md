@@ -99,7 +99,20 @@ class = "vendor"
 usb_match = [0xff, 0x5d, 0x01] # Xbox 360 controller interface
 ```
 
-Omit `ep_in` and `ep_out` with `usb_match`. padctl selects one matching active
+When a source supports several exact interface bindings for the same device,
+use `usb_match_any` instead:
+
+```toml
+usb_match_any = [[0xff, 0x5d, 0x01], [0xff, 0x5d, 0x81], [0xff, 0x47, 0xd0]]
+```
+
+These are the three Razer vendor-specific patterns in xpad; its explicit `1532:0a4c` entry
+selects Xbox 360 packet decoding independently of the interface protocol. They
+describe eligible interfaces, not a verified descriptor from this controller.
+
+`usb_match` and `usb_match_any` are mutually exclusive. Alternatives must be
+nonempty, unique triples of byte values. Omit `ep_in` and `ep_out` with either
+selector. padctl selects one matching active
 alternate with exactly one interrupt IN and one interrupt OUT endpoint. Missing
 or ambiguous descriptors fail before any driver is detached. For interfaces with
 multiple alternates, a bounded GET_INTERFACE request checks the active alternate;

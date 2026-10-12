@@ -3,7 +3,9 @@ const config = @import("../config/device.zig");
 const interpreter = @import("../core/interpreter.zig");
 const state = @import("../core/state.zig");
 const docgen = @import("../tools/docgen.zig");
+const selector = @import("../io/usb_selector.zig");
 const testing = std.testing;
+const pattern_declaration = "usb_match_any = [[0xff, 0x5d, 0x01], [0xff, 0x5d, 0x81], [0xff, 0x47, 0xd0]]";
 
 fn load() !config.ParseResult {
     return config.parseFile(testing.allocator, "devices/razer/wolverine-v3-pro-pc.toml");
@@ -25,7 +27,11 @@ test "Razer PC: production config decodes signed sticks and independent triggers
     try testing.expect(output.force_feedback == null);
     try testing.expect(output.buttons.?.map.get("M1") == null);
     const iface = parsed.value.device.interface[0];
-    try testing.expectEqualSlices(i64, &.{ 255, 93, 1 }, iface.usb_match.?);
+    try testing.expect(iface.usb_match == null);
+    try testing.expectEqual(@as(usize, 3), iface.usb_match_any.?.len);
+    try testing.expectEqualSlices(i64, &.{ 255, 93, 1 }, iface.usb_match_any.?[0]);
+    try testing.expectEqualSlices(i64, &.{ 255, 93, 129 }, iface.usb_match_any.?[1]);
+    try testing.expectEqualSlices(i64, &.{ 255, 71, 208 }, iface.usb_match_any.?[2]);
     try testing.expect(iface.ep_in == null and iface.ep_out == null);
     var interp = interpreter.Interpreter.init(&parsed.value);
     const packet = [_]u8{ 0x00, 0x14, 0x00, 0x00, 0x23, 0xe1, 0x34, 0x12, 0x00, 0x80, 0x00, 0x80, 0xff, 0x7f, 0, 0, 0, 0, 0, 0 };
@@ -114,14 +120,22 @@ test "Razer PC: descriptor selector schema rejects unsupported and mixed declara
     const source = try std.fs.cwd().readFileAlloc(testing.allocator, "devices/razer/wolverine-v3-pro-pc.toml", 65536);
     defer testing.allocator.free(source);
     const replacements = [_][]const u8{
-        "usb_match = [255, 93]",                  "usb_match = [255, 93, 256]",              "usb_match = [255, -1, 1]",
-        "usb_match = [255, 93, 1]\nep_in = 0x81", "usb_match = [255, 93, 1]\nep_out = 0x01",
+        "usb_match = [255, 93]",                    "usb_match = [255, 93, 256]",                           "usb_match = [255, -1, 1]",
+        "usb_match = [255, 93, 1]\nep_in = 0x81",   "usb_match = [255, 93, 1]\nep_out = 0x01",              "usb_match_any = []",
+        "usb_match_any = [[255,93]]",               "usb_match_any = [[255,93,256]]",                       "usb_match_any = [[255,-1,1]]",
+        "usb_match_any = [[255,93,1],[255,93,1]]",  "usb_match_any = [[255,93,1]]\nusb_match = [255,93,1]", "usb_match_any = [[255,93,1]]\nep_in = 0x81",
+        "usb_match_any = [[255,93,1]]\nep_out = 1",
     };
     for (replacements) |replacement| {
-        const text = try std.mem.replaceOwned(u8, testing.allocator, source, "usb_match = [0xff, 0x5d, 0x01]", replacement);
+        const text = try std.mem.replaceOwned(u8, testing.allocator, source, pattern_declaration, replacement);
         defer testing.allocator.free(text);
         try testing.expectError(error.InvalidConfig, config.parseString(testing.allocator, text));
     }
+    const single = try std.mem.replaceOwned(u8, testing.allocator, source, pattern_declaration, "usb_match = [255, 93, 1]");
+    defer testing.allocator.free(single);
+    var legacy = try config.parseString(testing.allocator, single);
+    defer legacy.deinit();
+    try testing.expectEqualSlices(i64, &.{ 255, 93, 1 }, legacy.value.device.interface[0].usb_match.?);
     for ([_][]const u8{ "hid", "suppress" }) |class| {
         const replacement = try std.fmt.allocPrint(testing.allocator, "class = \"{s}\"", .{class});
         defer testing.allocator.free(replacement);
@@ -139,5 +153,49 @@ test "Razer PC: generated reference explains logical descriptor routing" {
     try docgen.generateDevicePage(&parsed.value, "razer", output.writer(testing.allocator));
     try testing.expect(std.mem.indexOf(u8, output.items, "Logical interface `0`") != null);
     try testing.expect(std.mem.indexOf(u8, output.items, "`0xff/0x5d/0x01`") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "`0xff/0x5d/0x81`") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "`0xff/0x47/0xd0`") != null);
     try testing.expect(std.mem.indexOf(u8, output.items, "Force Feedback") == null);
+}
+
+test "Razer PC: xpad binding alternatives retain explicit PID Xbox 360 packet decoding" {
+    var parsed = try load();
+    defer parsed.deinit();
+    var interp = interpreter.Interpreter.init(&parsed.value);
+    var patterns: [3][3]u8 = undefined;
+    for (parsed.value.device.interface[0].usb_match_any.?, &patterns) |pattern, *target| target.* = .{ @intCast(pattern[0]), @intCast(pattern[1]), @intCast(pattern[2]) };
+    const c = selector.c;
+    const Query = struct {
+        fn read(_: void, _: u8) !u8 {
+            return error.UnexpectedQuery;
+        }
+    };
+    var endpoints = [_]c.libusb_endpoint_descriptor{std.mem.zeroes(c.libusb_endpoint_descriptor)} ** 2;
+    endpoints[0].bEndpointAddress = 0x85;
+    endpoints[1].bEndpointAddress = 6;
+    for (&endpoints) |*ep| {
+        ep.bmAttributes = 3;
+        ep.wMaxPacketSize = 64;
+    }
+    var alt = std.mem.zeroes(c.libusb_interface_descriptor);
+    alt.bInterfaceNumber = 7;
+    alt.endpoint = &endpoints;
+    alt.bNumEndpoints = 2;
+    const iface = c.libusb_interface{ .altsetting = &alt, .num_altsetting = 1 };
+    var descriptor = std.mem.zeroes(c.libusb_config_descriptor);
+    descriptor.interface = &iface;
+    descriptor.bNumInterfaces = 1;
+    const packet = [_]u8{ 0, 0x14, 0, 0x10, 0x17, 0xff, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (patterns) |pattern| {
+        alt.bInterfaceClass = pattern[0];
+        alt.bInterfaceSubClass = pattern[1];
+        alt.bInterfaceProtocol = pattern[2];
+        try testing.expectEqual(@as(u8, 7), (try selector.selectAny(descriptor, &patterns, {}, Query.read)).interface_id);
+        const decoded = (try interp.processReport(0, &packet)).?;
+        try testing.expectEqual(@as(i16, 0x1234), decoded.ax.?);
+        try testing.expectEqual(@as(u8, 0x17), decoded.lt.?);
+        try testing.expectEqual(@as(u8, 0xff), decoded.rt.?);
+        try testing.expectEqual(@as(u64, 1) << @intFromEnum(state.ButtonId.A), decoded.buttons.?);
+        try testing.expect((try interp.processReport(7, &packet)) == null);
+    }
 }

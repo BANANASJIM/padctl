@@ -94,7 +94,8 @@ A source-backed **Razer Wolverine V3 Pro PC Tournament mode** bringup candidate
 is also included. Launch it explicitly with
 `padctl --config devices/razer/wolverine-v3-pro-pc.toml`; hardware verification
 and automatic service discovery remain pending. It covers standard controls and
-does not claim extra-button or rumble support.
+uses xpad's three Razer vendor-specific interface patterns; the actual descriptor
+match still needs hardware confirmation. It does not claim extra-button or rumble support.
 
 ## Installation
 

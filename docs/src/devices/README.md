@@ -14,6 +14,8 @@ padctl --config devices/razer/wolverine-v3-pro-pc.toml
 ```
 
 Use PC Tournament mode before launching. This candidate covers standard controls;
+its descriptor alternatives follow xpad's three Razer vendor-specific patterns,
+whose actual match on this model still needs hardware confirmation.
 it does not advertise independent extra buttons, rumble, Xbox/GIP mode (`0a3f`)
 or the different Wolverine V3 Pro 8K PC. Pure vendor USB devices are not yet
 automatically discovered by the service. Confirm cold attach, descriptor

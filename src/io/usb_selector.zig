@@ -12,15 +12,19 @@ pub fn addUnique(selected: *?Resolved, candidate: Resolved) error{AmbiguousUsbIn
 }
 
 pub fn select(config: c.libusb_config_descriptor, match: [3]u8, context: anytype, comptime read_active: anytype) !Resolved {
+    return selectAny(config, &.{match}, context, read_active);
+}
+
+pub fn selectAny(config: c.libusb_config_descriptor, patterns: []const [3]u8, context: anytype, comptime read_active: anytype) !Resolved {
     var selected: ?Resolved = null;
     for (config.interface[0..config.bNumInterfaces]) |iface| {
-        if (!mayMatch(iface, match)) continue;
+        if (!mayMatchAny(iface, patterns)) continue;
         const number = iface.altsetting[0].bInterfaceNumber;
         for (iface.altsetting[0..@intCast(iface.num_altsetting)]) |alt|
             if (alt.bInterfaceNumber != number) return error.UsbDescriptorUnavailable;
         var active = iface.altsetting[0].bAlternateSetting;
         if (iface.num_altsetting > 1 or active != 0) active = try read_active(context, number);
-        if (try resolve(iface, active, match)) |candidate| try addUnique(&selected, candidate);
+        if (try resolveAny(iface, active, patterns)) |candidate| try addUnique(&selected, candidate);
     }
     return selected orelse error.UsbInterfaceNotFound;
 }
@@ -69,19 +73,81 @@ test "USB selector: multiple eligible physical interfaces fail closed" {
     try std.testing.expectError(error.AmbiguousUsbInterface, addUnique(&selected, .{ .interface_id = 9, .ep_in = 0x81, .ep_out = 2 }));
 }
 
+test "USB selector: exact binding alternatives count each physical interface once" {
+    const Query = struct {
+        fn read(active: u8, _: u8) !u8 {
+            return active;
+        }
+    };
+    const patterns = [_][3]u8{ .{ 255, 93, 1 }, .{ 255, 93, 129 }, .{ 255, 71, 208 } };
+    var eps = [_]c.libusb_endpoint_descriptor{std.mem.zeroes(c.libusb_endpoint_descriptor)} ** 2;
+    eps[0].bEndpointAddress = 0x85;
+    eps[1].bEndpointAddress = 6;
+    for (&eps) |*ep| {
+        ep.bmAttributes = 3;
+        ep.wMaxPacketSize = 64;
+    }
+    var alts = [_]c.libusb_interface_descriptor{std.mem.zeroes(c.libusb_interface_descriptor)} ** 2;
+    for (&alts, 0..) |*alt, index| {
+        alt.bInterfaceNumber = 7;
+        alt.bAlternateSetting = @intCast(index);
+        alt.bInterfaceClass = patterns[index][0];
+        alt.bInterfaceSubClass = patterns[index][1];
+        alt.bInterfaceProtocol = patterns[index][2];
+        alt.endpoint = &eps;
+        alt.bNumEndpoints = 2;
+    }
+    var iface = c.libusb_interface{ .altsetting = &alts, .num_altsetting = 2 };
+    var cfg = std.mem.zeroes(c.libusb_config_descriptor);
+    cfg.interface = &iface;
+    cfg.bNumInterfaces = 1;
+    for (0..2) |active| try std.testing.expectEqual(@as(u8, 7), (try selectAny(cfg, &patterns, @as(u8, @intCast(active)), Query.read)).interface_id);
+    const overlap = [_][3]u8{ patterns[0], patterns[0], patterns[1] };
+    try std.testing.expectEqual(@as(u8, 7), (try selectAny(cfg, &overlap, @as(u8, 0), Query.read)).interface_id);
+    iface.num_altsetting = 1;
+    for (patterns) |pattern| {
+        alts[0].bInterfaceClass = pattern[0];
+        alts[0].bInterfaceSubClass = pattern[1];
+        alts[0].bInterfaceProtocol = pattern[2];
+        try std.testing.expectEqual(@as(u8, 7), (try selectAny(cfg, &patterns, @as(u8, 0), Query.read)).interface_id);
+    }
+    alts[0].bInterfaceSubClass = 3;
+    try std.testing.expectError(error.UsbInterfaceNotFound, selectAny(cfg, &patterns, @as(u8, 0), Query.read));
+    alts[0].bInterfaceSubClass = 71;
+    var second = alts[0];
+    second.bInterfaceNumber = 9;
+    const ifaces = [_]c.libusb_interface{ iface, .{ .altsetting = &second, .num_altsetting = 1 } };
+    cfg.interface = &ifaces;
+    cfg.bNumInterfaces = 2;
+    try std.testing.expectError(error.AmbiguousUsbInterface, selectAny(cfg, &patterns, @as(u8, 0), Query.read));
+}
+
 fn matches(alt: c.libusb_interface_descriptor, match: [3]u8) bool {
     return alt.bInterfaceClass == match[0] and alt.bInterfaceSubClass == match[1] and alt.bInterfaceProtocol == match[2];
 }
 
+fn matchesAny(alt: c.libusb_interface_descriptor, patterns: []const [3]u8) bool {
+    for (patterns) |pattern| if (matches(alt, pattern)) return true;
+    return false;
+}
+
 pub fn mayMatch(iface: c.libusb_interface, match: [3]u8) bool {
+    return mayMatchAny(iface, &.{match});
+}
+
+pub fn mayMatchAny(iface: c.libusb_interface, patterns: []const [3]u8) bool {
     if (iface.num_altsetting <= 0) return false;
-    for (iface.altsetting[0..@intCast(iface.num_altsetting)]) |alt| if (matches(alt, match)) return true;
+    for (iface.altsetting[0..@intCast(iface.num_altsetting)]) |alt| if (matchesAny(alt, patterns)) return true;
     return false;
 }
 
 /// Inspect only the active alternate. Fixtures and the live descriptor path use
 /// the same endpoint validation, independent of physical endpoint numbering.
 pub fn resolve(iface: c.libusb_interface, active: u8, match: [3]u8) SelectionError!?Resolved {
+    return resolveAny(iface, active, &.{match});
+}
+
+pub fn resolveAny(iface: c.libusb_interface, active: u8, patterns: []const [3]u8) SelectionError!?Resolved {
     if (iface.num_altsetting <= 0) return error.MissingAlternate;
     var selected: ?c.libusb_interface_descriptor = null;
     for (iface.altsetting[0..@intCast(iface.num_altsetting)]) |alt| {
@@ -90,7 +156,7 @@ pub fn resolve(iface: c.libusb_interface, active: u8, match: [3]u8) SelectionErr
         selected = alt;
     }
     const alt = selected orelse return error.MissingAlternate;
-    if (!matches(alt, match)) return null;
+    if (!matchesAny(alt, patterns)) return null;
     var ep_in: ?u8 = null;
     var ep_out: ?u8 = null;
     for (alt.endpoint[0..alt.bNumEndpoints]) |ep| {
