@@ -55,7 +55,7 @@ Source: offset 12, size 4 byte(s)
 
 ## Output Capabilities
 
-uinput device name: **Xbox Elite Series 2 SCUF** | VID `0x045e` | PID `0x0b00`
+uinput device name: **SCUF Envision Pro V2** | VID `0x045e` | PID `0x0b00`
 
 ### Axes
 

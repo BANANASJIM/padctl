@@ -70,7 +70,7 @@ LM = 23
 RM = 24
 
 [output]
-name = "Xbox Elite Series 2 SCUF"
+name = "SCUF Envision Pro V2"
 vid = 0x045e
 pid = 0x0b00
 
