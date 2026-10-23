@@ -4,21 +4,29 @@ This file records third-party runtime dependencies and vendored test material.
 padctl binaries statically link the C libraries below; the hhd material is
 explicitly test-only.
 
-## libusb 1.0.26
+## libusb 1.0.30
 
 - License: LGPL-2.1-or-later
 - Source: https://github.com/libusb/libusb
-- Packaging: https://github.com/allyourcodebase/libusb (tag `v1.0.26-zig`,
-  commit `363c73885e5b04384bd4702605c613e67da45797`)
+- Source archive: https://github.com/libusb/libusb/archive/refs/tags/v1.0.30.tar.gz
+- Linux build configuration: `tools/build_libusb.zig` and
+  `third_party/libusb/config.h` (netlink hotplug, no libudev).
 - Pulled in via `build.zig.zon` and compiled statically into every release
   build (musl, no system libusb at build or run time).
+- Includes the upstream CVE-2026-23679 descriptor parser fix. The malformed
+  endpoint regression in `tests/libusb_descriptor_security.c` uses the input
+  from libusb's `tests/fuzz/corpus/descriptor_parsers/regression_bug_a_endpoint_null.bin`.
 
-## wasm3
+## wasm3 0.9.0
 
 - License: MIT
 - Source: https://github.com/wasm3/wasm3 (commit
-  `79d412ea5fcf92f0efe658d52827a0e0a96ff442`)
+  `0cd38327f0c721e75172f4f1eeb55854dc0517af`)
 - Vendored under `third_party/wasm3/`.
+- Includes upstream module validation (PR #572); padctl compiles and validates
+  every plugin function during loading, before exposing plugin callbacks.
+- OSV-2021-689 remains open upstream with no published fixed revision; load
+  only plugins from trusted sources.
 
 ## hhd DualSense Edge USB test fixtures
 

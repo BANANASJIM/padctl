@@ -8,8 +8,8 @@
             .hash = "toml-0.3.0-bV14BVqIAQANb68hDuVPZ72hrcIhT-fv_fcIbetQIAyg",
         },
         .libusb = .{
-            .url = "git+https://github.com/allyourcodebase/libusb?ref=v1.0.26-zig#363c73885e5b04384bd4702605c613e67da45797",
-            .hash = "libusb-0.0.1-P02YQmeOFwBE3lScFnBmBaOrz-EKAMHX3r9YIDh7ZSul",
+            .url = "https://github.com/libusb/libusb/archive/refs/tags/v1.0.30.tar.gz",
+            .hash = "N-V-__8AAPiYHABnv0glu6zoTGkhikaLpjx-2pBKdChsqtW4",
         },
     },
     .minimum_zig_version = "0.15.0",

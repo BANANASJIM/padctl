@@ -83,17 +83,36 @@
 # endif
 
 # if !defined(M3_HAS_TAIL_CALL)
-#  if defined(__EMSCRIPTEN__)
-#   define M3_HAS_TAIL_CALL 0
-#  else
-#   define M3_HAS_TAIL_CALL 1
-#  endif
+#  define M3_HAS_TAIL_CALL 1
 # endif
 
 # if M3_HAS_TAIL_CALL && M3_COMPILER_HAS_ATTRIBUTE(musttail)
 #   define M3_MUSTTAIL __attribute__((musttail))
+#   define M3_GUARANTEED_TAIL_CALL 1
 # else
 #   define M3_MUSTTAIL
+    // Without musttail a tail call happens only if the compiler feels like emitting one,
+    // and that is not something we can predict: GCC on x86-64 does it at -O3, but on
+    // ppc64 and alpha it does not (indirect sibling calls are restricted by those ABIs),
+    // and MSVC does not reliably anywhere. The interpreter merely runs slower when a
+    // dispatch isn't tail-called, but return_call would lose the frame it reuses -- so
+    // only claim a guarantee when the compiler actually gives one. GCC 15 has musttail.
+    // Builders who know their target sibling-calls can force it with -Dd_m3CanTailCall=1.
+#   define M3_GUARANTEED_TAIL_CALL 0
+# endif
+
+// A cheap read of the current native stack pointer, used to bound recursion
+// depth (see d_m3MaxNativeStack). Both the low-water mark and the per-call
+// probe must use this same primitive so they measure the same stack -- notably
+// __builtin_frame_address reads the real machine stack even when ASan relocates
+// locals to its heap "fake stack".
+# if defined(__GNUC__) || defined(__clang__)
+#   define m3_NativeStackPtr()   ((void*) __builtin_frame_address (0))
+# elif defined(_MSC_VER)
+#   include <intrin.h>
+#   define m3_NativeStackPtr()   (_AddressOfReturnAddress ())
+# else
+#   define m3_NativeStackPtr()   ((void*) & (volatile char){ 0 })
 # endif
 
 # ifndef M3_MIN
@@ -198,6 +217,9 @@ typedef int8_t          i8;
 # endif
 #  ifndef d_m3MaxFunctionStackHeight
 #    define d_m3MaxFunctionStackHeight          128
+#  endif
+#  ifndef d_m3MaxNativeStack
+#    define d_m3MaxNativeStack                  0
 #  endif
 #  ifndef d_m3CodePageAlignSize
 #    define d_m3CodePageAlignSize               1024

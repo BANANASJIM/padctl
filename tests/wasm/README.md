@@ -15,6 +15,8 @@ After editing any `*.wat`, recompile its `*.wasm` with `wat2wasm` from
 wat2wasm tests/wasm/echo_plugin.wat -o tests/wasm/echo_plugin.wasm
 wat2wasm tests/wasm/no_exports.wat  -o tests/wasm/no_exports.wasm
 wat2wasm tests/wasm/trap_plugin.wat -o tests/wasm/trap_plugin.wasm
+wat2wasm --no-check tests/wasm/invalid_result_type.wat -o tests/wasm/invalid_result_type.wasm
+wat2wasm --no-check tests/wasm/invalid_global_initializer.wat -o tests/wasm/invalid_global_initializer.wasm
 ```
 
 Output is deterministic for a given wabt version (verified reproducible with
@@ -27,6 +29,8 @@ Output is deterministic for a given wabt version (verified reproducible with
 | `echo_plugin.wat` | `init_device`, `process_calibration`, `process_report` (echoes input → output via `memory.copy`) | echo round-trip / initDevice / lifecycle / calibration tests |
 | `no_exports.wat` | `memory` only — no plugin functions | issue #214 defensive load() path (missing-export must not crash) |
 | `trap_plugin.wat` | `process_report` only, body `unreachable` | trap handling + trap rate-limit auto-unload tests |
+| `invalid_result_type.wat` | `init_device` with a mismatched result type | Reject an invalid function before callbacks become available |
+| `invalid_global_initializer.wat` | none; initializer references a defined global | Reject an invalid constant expression before instantiation |
 
 ## Note on issue #214
 

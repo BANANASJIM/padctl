@@ -70,8 +70,10 @@ pub const Wasm3Plugin = struct {
             return error.PluginLoadFailed;
         }
         s.module_ = mod;
+        errdefer s.module_ = null;
 
         linkHostFunctions(s);
+        if (c.m3_CompileModule(mod) != null) return error.InvalidModule;
 
         // A plugin may legitimately omit any of these exports. m3_FindFunction
         // returns a non-null M3Result on miss; don't rely on its out-pointer
@@ -351,6 +353,25 @@ const testing = std.testing;
 fn testCreate() !struct { plugin: WasmPlugin, self: *Wasm3Plugin } {
     const plugin = try Wasm3Plugin.create(testing.allocator);
     return .{ .plugin = plugin, .self = @ptrCast(@alignCast(plugin.ptr)) };
+}
+
+test "wasm3: validation rejects invalid modules and permits a subsequent valid load" {
+    const fixtures = [_][]const u8{
+        @embedFile("../../tests/wasm/invalid_result_type.wasm"),
+        @embedFile("../../tests/wasm/invalid_global_initializer.wasm"),
+    };
+    for (fixtures) |fixture| {
+        const t = try testCreate();
+        defer t.plugin.destroy(testing.allocator);
+        var ctx = HostContext.init(testing.allocator);
+        defer ctx.deinit();
+        try testing.expectError(error.InvalidModule, t.plugin.load(fixture, &ctx));
+        try testing.expect(t.self.env == null);
+        try testing.expect(t.self.rt == null);
+        try testing.expect(t.self.module_ == null);
+        try t.plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+        try testing.expect(t.plugin.initDevice());
+    }
 }
 
 test "wasm3: load echo plugin succeeds" {
