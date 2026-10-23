@@ -9,15 +9,16 @@
 #define wasm3_h
 
 #define M3_VERSION_MAJOR 0
-#define M3_VERSION_MINOR 5
-#define M3_VERSION_REV   1
-#define M3_VERSION       "0.5.1"
+#define M3_VERSION_MINOR 9
+#define M3_VERSION_REV   0
+#define M3_VERSION       "0.9.0"
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdarg.h>
+#include <stddef.h>
 
 #include "wasm3_defs.h"
 
@@ -75,7 +76,28 @@ typedef enum M3ValueType
     c_m3Type_f32    = 3,
     c_m3Type_f64    = 4,
 
-    c_m3Type_unknown
+    // Opaque 16-byte slot used purely so wasm3 can PARSE modules
+    // whose function signatures or local-variable declarations
+    // mention v128 (the SIMD value type, wasm-encoded as 0x7B).
+    // Actual v128 OPCODES still error at compile-time with
+    // m3Err_unknownOpcode - we only avoid the parse-time
+    // m3Err_invalidTypeId rejection. LLVM's auto-vectorizer emits
+    // unused v128 locals into many `+simd128` modules even when no
+    // SIMD op executes; without this slot wasm3 rejects every such
+    // module before it ever sees a function body.
+    c_m3Type_v128   = 5,
+
+    // Reference values are opaque pointer-sized words and null is always 0.
+    // A funcref holds an IM3Function; an externref holds a host-defined handle,
+    // which the host is free to encode however it likes as long as 0 means null.
+    c_m3Type_funcref    = 6,
+    c_m3Type_externref  = 7,
+
+    // the number of concrete value types
+    c_m3Type_count,
+
+    // "not a valid type" - returned where a lookup or a mapping failed.
+    c_m3Type_unknown = c_m3Type_count
 } M3ValueType;
 
 typedef struct M3TaggedValue
@@ -87,6 +109,7 @@ typedef struct M3TaggedValue
         uint64_t    i64;
         float       f32;
         double      f64;
+        const void* ref;        // funcref / externref; NULL is the null reference
     } value;
 }
 M3TaggedValue, * IM3TaggedValue;
@@ -161,6 +184,20 @@ d_m3ErrorConst  (settingImmutableGlobal,        "attempting to set an immutable 
 d_m3ErrorConst  (typeMismatch,                  "incorrect type on stack")
 d_m3ErrorConst  (typeCountMismatch,             "incorrect value count on stack")
 
+// validation errors. The wording follows the spec's own assert_invalid failure
+d_m3ErrorConst  (unknownType,                   "unknown type")
+d_m3ErrorConst  (unknownLabel,                  "unknown label")
+d_m3ErrorConst  (unknownLocal,                  "unknown local")
+d_m3ErrorConst  (unknownGlobal,                 "unknown global")
+d_m3ErrorConst  (unknownFunction,               "unknown function")
+d_m3ErrorConst  (unknownTable,                  "unknown table")
+d_m3ErrorConst  (unknownMemory,                 "unknown memory")
+d_m3ErrorConst  (unknownDataSegment,            "unknown data segment")
+d_m3ErrorConst  (unknownElemSegment,            "unknown elem segment")
+d_m3ErrorConst  (dataCountRequired,             "data count section required")
+d_m3ErrorConst  (invalidAlignment,              "alignment must not be larger than natural")
+d_m3ErrorConst  (undeclaredFuncRef,             "undeclared function reference")
+
 // runtime errors
 d_m3ErrorConst  (missingCompiledCode,           "function is missing compiled m3 code")
 d_m3ErrorConst  (wasmMemoryOverflow,            "runtime ran out of memory")
@@ -179,7 +216,12 @@ d_m3ErrorConst  (trapIntegerOverflow,           "[trap] integer overflow")
 d_m3ErrorConst  (trapIntegerConversion,         "[trap] invalid conversion to integer")
 d_m3ErrorConst  (trapIndirectCallTypeMismatch,  "[trap] indirect call type mismatch")
 d_m3ErrorConst  (trapTableIndexOutOfRange,      "[trap] undefined element")
-d_m3ErrorConst  (trapTableElementIsNull,        "[trap] null table element")
+d_m3ErrorConst  (trapTableElementIsNull,        "[trap] uninitialized element")
+d_m3ErrorConst  (trapNullReference,             "[trap] null reference")
+d_m3ErrorConst  (trapNullFunctionRef,           "[trap] null function reference")
+// call_indirect past the end of the table is "undefined element"; the table
+// access instructions report an out of bounds access instead
+d_m3ErrorConst  (trapTableOutOfBounds,          "[trap] out of bounds table access")
 d_m3ErrorConst  (trapExit,                      "[trap] program called exit")
 d_m3ErrorConst  (trapAbort,                     "[trap] program called abort")
 d_m3ErrorConst  (trapUnreachable,               "[trap] unreachable executed")
@@ -265,6 +307,12 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
                                                      M3RawCall              i_function,
                                                      const void *           i_userdata);
 
+    // supplies the value of an imported global, regardless of its mutability
+    M3Result            m3_LinkGlobal               (IM3Module              io_module,
+                                                     const char * const     i_moduleName,
+                                                     const char * const     i_globalName,
+                                                     const IM3TaggedValue   i_value);
+
     const char*         m3_GetModuleName            (IM3Module i_module);
     void                m3_SetModuleName            (IM3Module i_module, const char* name);
     IM3Runtime          m3_GetModuleRuntime         (IM3Module i_module);
@@ -337,7 +385,10 @@ d_m3ErrorConst  (trapStackOverflow,             "[trap] stack overflow")
 
 # define m3ApiReturnType(TYPE)                 TYPE* raw_return = ((TYPE*) (_sp++));
 # define m3ApiMultiValueReturnType(TYPE, NAME) TYPE* NAME = ((TYPE*) (_sp++));
-# define m3ApiGetArg(TYPE, NAME)               TYPE NAME = * ((TYPE *) (_sp++));
+# define m3ApiGetArg(TYPE, NAME)               TYPE NAME = \
+    (sizeof(TYPE) >= sizeof(uint32_t)) ? \
+    (*((TYPE *)(_sp++))) : \
+    ((TYPE)(uintptr_t)(*((uint32_t *)(_sp++))));
 # define m3ApiGetArgMem(TYPE, NAME)            TYPE NAME = (TYPE)m3ApiOffsetToPtr(* ((uint32_t *) (_sp++)));
 
 # define m3ApiIsNullPtr(addr)       ((void*)(addr) <= _mem)

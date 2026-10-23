@@ -5,8 +5,6 @@
 //  Copyright © 2019 Volodymyr Shymanskyy. All rights reserved.
 //
 
-#define _POSIX_C_SOURCE 200809L
-
 #include "m3_api_libc.h"
 
 #include "m3_env.h"
@@ -27,6 +25,7 @@ m3ApiRawFunction(m3_libc_abort)
 m3ApiRawFunction(m3_libc_exit)
 {
     m3ApiGetArg     (int32_t, code)
+    (void) code;
 
     m3ApiTrap(m3Err_trapExit);
 }
@@ -129,6 +128,12 @@ m3ApiRawFunction(m3_libc_printf)
             length++;
             continue;
         }
+        // A trailing '%' has no conversion character: the next byte is the
+        // terminating NUL. Stop here rather than consuming it, which would
+        // step the cursor past the end of the guest string.
+        if (not *i_fmt) {
+            break;
+        }
         ch = *i_fmt++;
         switch (ch) {
             case 'c': {
@@ -194,7 +199,7 @@ m3ApiRawFunction(m3_libc_clock_ms)
 static
 M3Result  SuppressLookupFailure (M3Result i_result)
 {
-    if (i_result == m3Err_functionLookupFailed)
+    if (i_result == m3Err_functionLookupFailed or i_result == m3Err_globalLookupFailed)
         return m3Err_none;
     else
         return i_result;
@@ -218,6 +223,34 @@ _   (SuppressLookupFailure (m3_LinkRawFunction (module, spectest, "print_f32",  
 _   (SuppressLookupFailure (m3_LinkRawFunction (module, spectest, "print_f64",     "v(F)",     &m3_spectest_dummy)));
 _   (SuppressLookupFailure (m3_LinkRawFunction (module, spectest, "print_i32_f32", "v(if)",    &m3_spectest_dummy)));
 _   (SuppressLookupFailure (m3_LinkRawFunction (module, spectest, "print_i64_f64", "v(IF)",    &m3_spectest_dummy)));
+
+_catch:
+    return result;
+}
+
+
+// Separate from m3_LinkSpecTest because a global's value has to be in place
+// before the module is instantiated: another global's initializer may read it.
+M3Result  m3_LinkSpecTestGlobals  (IM3Module module)
+{
+    M3Result result = m3Err_none;
+
+    const char* spectest = "spectest";
+    M3TaggedValue g;
+
+    g = (M3TaggedValue){ .type = c_m3Type_i32, .value.i32 = 666 };
+_   (SuppressLookupFailure (m3_LinkGlobal (module, spectest, "global_i32", &g)));
+
+    g = (M3TaggedValue){ .type = c_m3Type_i64, .value.i64 = 666 };
+_   (SuppressLookupFailure (m3_LinkGlobal (module, spectest, "global_i64", &g)));
+
+# if d_m3HasFloat
+    g = (M3TaggedValue){ .type = c_m3Type_f32, .value.f32 = 666.6f };
+_   (SuppressLookupFailure (m3_LinkGlobal (module, spectest, "global_f32", &g)));
+
+    g = (M3TaggedValue){ .type = c_m3Type_f64, .value.f64 = 666.6 };
+_   (SuppressLookupFailure (m3_LinkGlobal (module, spectest, "global_f64", &g)));
+# endif
 
 _catch:
     return result;

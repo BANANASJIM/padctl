@@ -165,7 +165,9 @@ jobs:
           cp staging/usr/share/bash-completion/completions/padctl.bash "${STAGING}/completions/"
           cp staging/usr/share/zsh/site-functions/_padctl "${STAGING}/completions/"
           cp -r devices "${STAGING}/"
-          cp LICENSE README.md "${STAGING}/"
+          cp LICENSE README.md THIRD_PARTY.md "${STAGING}/"
+          mkdir -p "${STAGING}/licenses"
+          cp third_party/wasm3/LICENSE "${STAGING}/licenses/wasm3-LICENSE"
           tar czf "${ARCHIVE}" "${STAGING}"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
@@ -243,6 +245,8 @@ jobs:
 
           cp -r "${SRC}/devices" "${DEST}/usr/share/padctl/"
           install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
+          install -Dm644 "${SRC}/THIRD_PARTY.md" "${DEST}/usr/share/doc/padctl/THIRD_PARTY.md"
+          install -Dm644 "${SRC}/licenses/wasm3-LICENSE" "${DEST}/usr/share/doc/padctl/licenses/wasm3-LICENSE"
 
           dpkg-deb --build --root-owner-group "${DEST}" "${PKG}.deb"
           echo "DEB=${PKG}.deb" >> "$GITHUB_ENV"
@@ -294,6 +298,8 @@ jobs:
             test -f /usr/lib/modules-load.d/padctl.conf
             test -f /usr/share/bash-completion/completions/padctl.bash
             test -f /usr/share/zsh/vendor-completions/_padctl
+            test -f /usr/share/doc/padctl/THIRD_PARTY.md
+            test -f /usr/share/doc/padctl/licenses/wasm3-LICENSE
             grep -qx uhid /usr/lib/modules-load.d/padctl.conf
             grep -qx uinput /usr/lib/modules-load.d/padctl.conf
           "
