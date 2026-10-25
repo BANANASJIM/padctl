@@ -30,6 +30,9 @@ pub const InterfaceConfig = struct {
     class: []const u8,
     ep_in: ?i64 = null,
     ep_out: ?i64 = null,
+    /// Opt-in exact USB descriptor alternatives [class, subclass, protocol]. `id` remains
+    /// the logical report interface; the physical interface is resolved at open.
+    usb_match_any: ?[]const []const i64 = null,
 };
 
 pub const InitConfig = struct {
@@ -484,6 +487,15 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         const is_hid = std.mem.eql(u8, iface.class, "hid");
         const is_vendor = std.mem.eql(u8, iface.class, "vendor");
         const is_suppress = std.mem.eql(u8, iface.class, "suppress");
+        if (iface.usb_match_any) |matches| {
+            if (!is_vendor or iface.ep_in != null or iface.ep_out != null or matches.len == 0) return error.InvalidConfig;
+            if (iface.id < 0 or iface.id > 255) return error.InvalidConfig;
+            for (matches, 0..) |match, index| {
+                if (match.len != 3) return error.InvalidConfig;
+                for (match) |value| if (value < 0 or value > 255) return error.InvalidConfig;
+                for (matches[0..index]) |previous| if (std.mem.eql(i64, match, previous)) return error.InvalidConfig;
+            }
+        }
         if (!is_hid and !is_vendor and !is_suppress) return error.InvalidConfig;
         if (is_suppress and (iface.ep_in != null or iface.ep_out != null))
             return error.InvalidConfig;
@@ -562,6 +574,10 @@ pub fn validate(cfg: *const DeviceConfig) !void {
 
     for (cfg.report) |report| {
         if (report.size < 0 or report.size > MAX_REPORT_SIZE) return error.ReportSizeTooLarge;
+        for (cfg.device.interface) |iface| {
+            if (iface.id == report.interface and iface.usb_match_any != null and report.size > LIBUSB_SLOT_SIZE)
+                return error.ReportSizeTooLarge;
+        }
 
         if (report.fields) |fields| {
             var seen_buf: [64][]const u8 = undefined;

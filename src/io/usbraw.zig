@@ -23,9 +23,24 @@ const Mutex = if (builtin.sanitize_thread) struct {
 
 pub const DeviceIO = io.DeviceIO;
 
-const c = @cImport({
-    @cInclude("libusb-1.0/libusb.h");
-});
+const selector = @import("usb_selector.zig");
+const c = selector.c;
+
+fn resolveUsbInterface(handle: *c.libusb_device_handle, patterns: []const [3]u8) !selector.Resolved {
+    var config: ?*c.libusb_config_descriptor = null;
+    if (c.libusb_get_active_config_descriptor(c.libusb_get_device(handle), &config) != 0)
+        return error.UsbDescriptorUnavailable;
+    const cfg = config orelse return error.UsbDescriptorUnavailable;
+    defer c.libusb_free_config_descriptor(cfg);
+    return selector.selectAny(cfg.*, patterns, handle, readActiveAlternate);
+}
+
+fn readActiveAlternate(handle: *c.libusb_device_handle, interface_id: u8) !u8 {
+    var active: u8 = 0;
+    if (c.libusb_control_transfer(handle, 0x81, 0x0a, 0, interface_id, &active, 1, 100) != 1)
+        return error.UsbAlternateUnavailable;
+    return active;
+}
 
 // A zero libusb return code does not guarantee that the entire interrupt OUT
 // payload was transferred. Treat anything other than an exact write as I/O
@@ -92,9 +107,11 @@ pub const RingBuffer = struct {
 // interface. On any failure the partially-acquired state is rolled back and
 // the error is returned; on success the caller owns ctx + handle and the
 // claimed interface.
-fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
+fn libusbOpenAndClaim(vid: u16, pid: u16, configured_interface_id: u8, match: ?[]const [3]u8) !struct {
     ctx: *c.libusb_context,
     handle: *c.libusb_device_handle,
+    resolved: ?selector.Resolved,
+    interface_id: u8,
 } {
     if (!have_libusb) return error.LibusbUnavailable;
 
@@ -105,18 +122,22 @@ fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
         c.libusb_exit(ctx);
         return error.NotFound;
     };
+    errdefer {
+        c.libusb_close(handle);
+        c.libusb_exit(ctx);
+    }
+    const resolved = if (match) |m| try resolveUsbInterface(handle, m) else null;
+    const interface_id = if (resolved) |r| r.interface_id else configured_interface_id;
 
     _ = c.libusb_detach_kernel_driver(handle, interface_id);
 
     const rc = c.libusb_claim_interface(handle, interface_id);
     if (rc != 0) {
         _ = c.libusb_attach_kernel_driver(handle, interface_id);
-        c.libusb_close(handle);
-        c.libusb_exit(ctx);
         return if (rc == c.LIBUSB_ERROR_BUSY) error.Busy else error.ClaimFailed;
     }
 
-    return .{ .ctx = ctx.?, .handle = handle };
+    return .{ .ctx = ctx.?, .handle = handle, .resolved = resolved, .interface_id = interface_id };
 }
 
 pub const UsbrawDevice = struct {
@@ -144,9 +165,20 @@ pub const UsbrawDevice = struct {
         ep_in: ?u8,
         ep_out: u8,
     ) !*UsbrawDevice {
-        const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
+        return openSelected(alloc, vid, pid, interface_id, ep_in, ep_out, null);
+    }
+
+    pub fn openMatchedAny(alloc: std.mem.Allocator, vid: u16, pid: u16, patterns: []const [3]u8) !*UsbrawDevice {
+        return openSelected(alloc, vid, pid, 0, null, 0, patterns);
+    }
+
+    fn openSelected(alloc: std.mem.Allocator, vid: u16, pid: u16, configured_interface_id: u8, configured_ep_in: ?u8, configured_ep_out: u8, match: ?[]const [3]u8) !*UsbrawDevice {
+        const claimed = try libusbOpenAndClaim(vid, pid, configured_interface_id, match);
         const ctx = claimed.ctx;
         const handle = claimed.handle;
+        const interface_id = claimed.interface_id;
+        const ep_in = if (claimed.resolved) |r| r.ep_in else configured_ep_in;
+        const ep_out = if (claimed.resolved) |r| r.ep_out else configured_ep_out;
 
         // Claim succeeded; release it and restore the kernel driver on any later
         // failure so the interface is never leaked claimed-but-unowned.
@@ -318,7 +350,7 @@ pub const UsbrawSuppress = struct {
         pid: u16,
         interface_id: u8,
     ) !*UsbrawSuppress {
-        const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
+        const claimed = try libusbOpenAndClaim(vid, pid, interface_id, null);
         const ctx = claimed.ctx;
         const handle = claimed.handle;
 

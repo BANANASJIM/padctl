@@ -122,6 +122,7 @@ pub const testing_support = struct {
     pub const validate_e2e_test = @import("test/validate_e2e_test.zig");
     pub const cli_e2e_test = @import("test/cli_e2e_test.zig");
     pub const auto_device_test = @import("test/auto_device_test.zig");
+    pub const razer_wolverine_pc_test = @import("test/razer_wolverine_pc_test.zig");
     pub const transform_boundary_test = @import("test/transform_boundary_test.zig");
     pub const bugfix_regression_test = @import("test/bugfix_regression_test.zig");
     pub const doctor_accuracy_test = @import("test/doctor_accuracy_test.zig");
