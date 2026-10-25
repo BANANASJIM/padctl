@@ -37,6 +37,12 @@ pub fn generateDevicePage(
         try writer.writeByte('\n');
     }
 
+    if (dev.keepalive) |ka| {
+        try writer.writeAll("## Session Maintenance\n\n");
+        try writer.print("Interface {d}; `{s}` padded to {d} bytes; sequence byte {d} starts at {d} and cycles {s}.\n\n", .{ ka.interface, ka.packet, ka.report_size, ka.sequence_offset, ka.sequence_start, if (ka.sequence_skip_zero) "1–255 (zero skipped)" else "0–255 (modulo 256)" });
+        try writer.print("The first {d} completed packets use a {d} ms interval before the next packet; subsequent intervals are {d} ms. Timing starts from write completion, without catch-up bursts. Three consecutive write failures end the session.\n\n", .{ ka.startup_count, ka.startup_interval_ms, ka.period_ms });
+    }
+
     // Reports
     for (cfg.report) |report| {
         try writer.print("## Report: `{s}` ({d} bytes, interface {d})\n\n", .{

@@ -49,12 +49,27 @@ pub const InitConfig = struct {
     feature_report: ?[]const i64 = null,
 };
 
+/// Opt-in physical session maintenance. Only the configured packet is sent;
+/// callers must establish its protocol purpose before enabling this section.
+pub const KeepaliveConfig = struct {
+    interface: i64,
+    packet: []const u8,
+    report_size: i64,
+    period_ms: i64,
+    sequence_offset: i64,
+    sequence_start: i64 = 1,
+    sequence_skip_zero: bool = false,
+    startup_count: i64 = 0,
+    startup_interval_ms: i64 = 50,
+};
+
 pub const DeviceInfo = struct {
     name: []const u8,
     vid: i64,
     pid: i64,
     interface: []const InterfaceConfig,
     init: ?InitConfig = null,
+    keepalive: ?KeepaliveConfig = null,
     mode: ?[]const u8 = null,
     block_kernel_drivers: ?[]const []const u8 = null,
 };
@@ -520,6 +535,24 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             }
         }
     }
+    if (cfg.device.keepalive) |ka| {
+        if (!interfaceExists(cfg, ka.interface) or isSuppressInterface(cfg, ka.interface)) return error.InvalidConfig;
+        if (ka.report_size < 1 or ka.report_size > 64 or
+            ka.period_ms < 10 or ka.period_ms > 60000 or
+            ka.startup_count < 0 or ka.startup_count > 32 or
+            ka.startup_interval_ms < 10 or ka.startup_interval_ms > 60000 or
+            ka.sequence_start < 0 or ka.sequence_start > 255 or
+            (ka.sequence_skip_zero and ka.sequence_start == 0) or
+            ka.sequence_offset < 0 or ka.sequence_offset >= ka.report_size) return error.InvalidConfig;
+        var nibble_count: usize = 0;
+        for (ka.packet) |ch| {
+            if (ch == ' ') continue;
+            _ = std.fmt.charToDigit(ch, 16) catch return error.InvalidConfig;
+            nibble_count += 1;
+        }
+        if (nibble_count == 0 or nibble_count % 2 != 0 or nibble_count / 2 > ka.report_size or
+            ka.sequence_offset >= nibble_count / 2) return error.InvalidConfig;
+    }
     if (cfg.device.init) |init_cfg| {
         if (init_cfg.interface) |iface_id| {
             if (!interfaceExists(cfg, iface_id)) return error.InvalidConfig;
@@ -895,6 +928,10 @@ fn validateOutputConfig(cfg: *const DeviceConfig, out: *const OutputConfig) !voi
 
         // uhid+pid requires [output.imu] as the UHID routing gate.
         if (is_uhid and is_pid) {
+            if (cfg.device.keepalive != null) {
+                std.log.warn("device '{s}': keepalive cannot be combined with UHID PID passthrough; disable keepalive or select queued rumble output", .{cfg.device.name});
+                return error.InvalidConfig;
+            }
             if (out.imu == null) return error.InvalidConfig;
         }
 
@@ -957,6 +994,8 @@ fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
             std.mem.eql(u8, child, "mapping") or
             std.mem.eql(u8, child, "aux.buttons")) return null; // free-form
     }
+
+    if (std.mem.eql(u8, header, "device.keepalive")) return sf(KeepaliveConfig);
 
     if (std.mem.eql(u8, header, "wasm")) return sf(WasmConfig);
     if (std.mem.eql(u8, header, "wasm.overrides")) return sf(WasmOverridesConfig);

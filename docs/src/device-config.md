@@ -37,6 +37,38 @@ Optional initialization sequence sent after device open.
 | `require_response` | bool | no | When `true`, `commands` or `enable` and at least one ACK criterion are required; failure to receive a response matching every configured criterion fails init/re-init instead of continuing. Use for devices whose input reports are valid only after an acknowledged mode switch. |
 | `feature_report` | integer[] | no | HID feature report sent via `HIDIOCSFEATURE` immediately after `commands`. Encoded as a list of byte values (0–255); `byte[0]` is the report ID. |
 
+## `[device.keepalive]`
+
+Opt-in periodic physical session maintenance, sent on the existing physical
+writer after bounded input processing. Use only a protocol-confirmed keepalive
+packet. The scheduler sends only the configured bytes. The GameSir example
+uses a heartbeat and configures no onboard profile writes or identity-switch
+handshake. Whether heartbeat-only maintenance is necessary and sufficient for
+this device has not been verified on hardware here.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `interface` | integer | Declared, non-suppress interface receiving the packet |
+| `packet` | string | Static hex bytes, with optional spaces; no placeholders |
+| `report_size` | integer | Zero-padded packet length, 1–64 bytes |
+| `period_ms` | integer | Interval after regular write completions, 10–60000 ms |
+| `sequence_offset` | integer | Byte to overwrite with the sequence; must be within the supplied hex bytes |
+| `sequence_start` | integer | First sequence value, 0–255; default 1 |
+| `sequence_skip_zero` | bool | Skip zero after 255, cycling 1–255; default false (modulo 256). When true, `sequence_start` must be nonzero |
+| `startup_count` | integer | First 0–32 completions that use the shorter interval; default 0 |
+| `startup_interval_ms` | integer | Startup completion-to-next-write interval, 10–60000 ms; default 50 |
+
+For `startup_count=3`, `startup_interval_ms=50`, `period_ms=450`, immediate
+writes occur at approximately 0, 50, 100, 150, 600 ms, plus transport write time.
+Only one maintenance packet can be in flight. Missed periods do not create a
+backlog. Three consecutive write errors end the session. Mapping restarts retain
+the sequence; a physical rebind starts a fresh sequence and priming phase.
+This sequence belongs to maintenance packets only; it is not injected into
+other command templates or shared with rumble commands. Keepalive cannot be
+combined with UHID PID force-feedback passthrough, including in output profiles:
+that legacy path writes directly to the physical fd outside the shared writer.
+Queued rumble output remains compatible.
+
 ## `[[report]]`
 
 Describes one incoming HID report.
