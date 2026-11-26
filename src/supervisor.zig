@@ -2723,10 +2723,16 @@ pub const Supervisor = struct {
                 )
             else
                 std.log.info("{x:0>4}:{x:0>4}: model ID {d} -> {s}", .{ vid, pid, outcome.id.?, candidates[i].path }),
-            .override => |i| std.log.info(
-                "{x:0>4}:{x:0>4}: model ID {d}; keeping override {s} (it has no [device.probe] ids)",
-                .{ vid, pid, outcome.id.?, candidates[i].path },
-            ),
+            .override => |i| if (outcome.id) |id|
+                std.log.info(
+                    "{x:0>4}:{x:0>4}: model ID {d}; keeping override {s} (it has no [device.probe] ids)",
+                    .{ vid, pid, id, candidates[i].path },
+                )
+            else
+                std.log.info(
+                    "{x:0>4}:{x:0>4}: model not identified ({s}); keeping override {s} (it has no [device.probe] ids)",
+                    .{ vid, pid, outcome.reason, candidates[i].path },
+                ),
             .unlisted => |i| std.log.warn(
                 "{x:0>4}:{x:0>4}: model ID {d} is not listed in any config's [device.probe] ids; guessing {s}. " ++
                     "If inputs are wrong, add the ID to the right config.",
@@ -6883,4 +6889,12 @@ test "supervisor: a leading override without ids is chosen without probing (ADR-
     const chosen = (try sup.selectConfigFor("/dev/hidraw7", 0x04b4, 0x2412)) orelse return error.NoSelection;
     try testing.expectEqualStrings("My V1 pad", chosen.device.name);
     try testing.expectEqual(@as(u32, 0), sup.probe_state.count());
+}
+
+test "supervisor: logModelChoice handles an override chosen without a model ID" {
+    const hid2 = [_]config_device.InterfaceConfig{.{ .id = 2, .class = "hid" }};
+    const cfg = DeviceConfig{ .device = .{ .name = "T", .vid = 1, .pid = 2, .interface = &hid2 }, .report = &.{} };
+    const cands = [_]usb_layout.Candidate{.{ .cfg = &cfg, .path = "user/t.toml", .is_override = true }};
+    Supervisor.logModelChoice(1, 2, &cands, .{ .override = 0 }, .{ .id = null, .reason = "no reply" });
+    Supervisor.logModelChoice(1, 2, &cands, .{ .override = 0 }, .{ .id = 84 });
 }

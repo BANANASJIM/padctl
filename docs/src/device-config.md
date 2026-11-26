@@ -63,8 +63,11 @@ config whose `ids` list it.
 The query of the first matching config that declares one is used; the others
 only need their `ids`. An ID is trusted once two replies agree (across retries); if the pad answered only once when retries run out, that ID is used with a warning. A user or
 system config without `ids` that matches the layout keeps its priority. If the pad does not answer within about 6 s (for example
-it is off) or reports an ID no config lists, padctl uses the first matching
-config and logs a warning saying it guessed.
+it is off) or reports an ID no config lists, padctl guesses (the first
+matching config that claims nothing through libusb, else the first match) and
+logs a warning saying it guessed. To pin a config for your pad regardless, copy
+it to `~/.config/padctl/devices/` and remove its `ids` (with the default config
+directories; a daemon started with `--config-dir` reads only that directory).
 
 ### `[device.init]`
 

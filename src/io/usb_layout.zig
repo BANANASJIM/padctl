@@ -247,9 +247,9 @@ pub const ModelChoice = union(enum) {
     listed: usize,
     /// A user/system override without `ids` ahead of any listing candidate.
     override: usize,
-    /// The model was identified but no candidate lists it; first match is a guess.
+    /// The model was identified but no candidate lists it; a guess (see `guess`).
     unlisted: usize,
-    /// No model ID; first match is a guess.
+    /// No model ID; a guess (see `guess`).
     unidentified: usize,
 };
 
@@ -258,7 +258,6 @@ pub const ModelChoice = union(enum) {
 /// for this device before probing existed, so it wins over listed builtins.
 pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: ?u8) ModelChoice {
     std.debug.assert(matched.len > 0);
-    const model = id orelse return .{ .unidentified = matched[0] };
     for (matched) |idx| {
         const c = candidates[idx];
         const ids: []const i64 = if (c.cfg.device.probe) |p| p.ids else &.{};
@@ -266,11 +265,26 @@ pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: 
             if (c.is_override) return .{ .override = idx };
             continue;
         }
+        const model = id orelse continue;
         for (ids) |listed| {
             if (listed == model) return .{ .listed = idx };
         }
     }
-    return .{ .unlisted = matched[0] };
+    if (id == null) return .{ .unidentified = guess(candidates, matched) };
+    return .{ .unlisted = guess(candidates, matched) };
+}
+
+/// The candidate to fall back on when the model is unknown (ADR-030 §3): the
+/// first config that claims nothing through libusb, since a wrong hidraw-only
+/// guess only misreads input while a wrong libusb one also takes the
+/// interfaces (and the kernel driver) from the right config. Otherwise the
+/// first match. An override without ids wins before this unless an earlier
+/// config lists the probed ID (with no ID, none can).
+fn guess(candidates: []const Candidate, matched: []const usize) usize {
+    for (matched) |idx| {
+        if (!config_device.usesLibusb(candidates[idx].cfg)) return idx;
+    }
+    return matched[0];
 }
 
 /// Explain a `select` result. Skipped user/system overrides and a failed
@@ -577,6 +591,52 @@ test "usb_layout: chooseByModel picks the candidate listing the model" {
         .{ .cfg = &apex, .path = "apex4.toml" },
     };
     try testing.expectEqual(@as(usize, 1), chooseByModel(&plain_builtin, &.{ 0, 1 }, 84).listed);
+}
+
+test "usb_layout: an unknown model falls back to the least invasive config" {
+    const libusb_ifaces = [_]InterfaceConfig{
+        .{ .id = 0, .class = "vendor", .ep_in = 0x81 },
+        .{ .id = 2, .class = "vendor", .ep_in = 0x83 },
+    };
+    const hid2 = [_]InterfaceConfig{.{ .id = 2, .class = "hid" }};
+    const vader3 = probeConfig(&libusb_ifaces, flydigiProbe(&.{28}));
+    const apex = probeConfig(&hid2, flydigiProbe(&.{84}));
+    // vader3 first, as a directory walk might order it.
+    const cands = [_]Candidate{
+        .{ .cfg = &vader3, .path = "vader3.toml" },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+    };
+    const matched = [_]usize{ 0, 1 };
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&cands, &matched, null).unidentified);
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&cands, &matched, 22).unlisted);
+    // A listed model still gets its config, libusb or not.
+    try testing.expectEqual(@as(usize, 0), chooseByModel(&cands, &matched, 28).listed);
+
+    // An override whose ids exclude the model is known not to fit; it gets no
+    // priority in the guess.
+    const user_v3 = [_]Candidate{
+        .{ .cfg = &vader3, .path = "user/vader3.toml", .is_override = true },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&user_v3, &matched, 22).unlisted);
+
+    // An override without ids wins unless an earlier config lists the probed
+    // ID, so the choice doesn't depend on whether the pad answered.
+    const hid_override = testConfig(&hid2);
+    const two_overrides = [_]Candidate{
+        .{ .cfg = &vader3, .path = "user/a.toml", .is_override = true },
+        .{ .cfg = &hid_override, .path = "user/b.toml", .is_override = true },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&two_overrides, &.{ 0, 1, 2 }, null).override);
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&two_overrides, &.{ 0, 1, 2 }, 84).override);
+
+    // All candidates use libusb: first match.
+    const both_libusb = [_]Candidate{
+        .{ .cfg = &vader3, .path = "a.toml" },
+        .{ .cfg = &vader3, .path = "b.toml" },
+    };
+    try testing.expectEqual(@as(usize, 0), chooseByModel(&both_libusb, &matched, null).unidentified);
 }
 
 test "usb_layout: probeFor needs two matches and a declared probe" {
