@@ -1,0 +1,114 @@
+# Flydigi Vader 3 (DInput) on the 2.4G dongle / wired USB — 04b4:2412.
+#
+# USB layout (verified 2026-11-25 on the 2.4G receiver):
+#   IF0 class 3/0/0, EP 0x81 IN              — 9-byte standard gamepad report
+#   IF1 class 3/1/1, EP 0x82 IN              — gyro mouse
+#   IF2 class 3/0/0, EP 0x05 OUT / 0x83 IN   — vendor report ID 0x04, 32 bytes
+#   IF3 class 3/0/0, EP 0x84 IN              — vendor HID
+#
+# IF0 is claimed through libusb rather than read as hidraw. Claiming it detaches
+# usbhid, so the kernel stops creating the physical 04b4:2412 evdev/hidraw pad.
+# That removes two problems at once: the descriptor declares 19 buttons and
+# skips usage 13, so the back button on that node lands on the undefined key
+# code 319, and SDL's HIDAPI backend opens the physical hidraw directly and
+# reports a 15-button pad instead of the virtual one. With IF0 claimed, only the
+# virtual pad below is visible.
+#
+# IF2 must also be read: the pad streams IF0 reports only while a reader is
+# attached to its vendor interface. It is declared as a read-only vendor
+# interface (EP 0x83 IN, no OUT endpoint) so the keepalive runs over libusb as
+# well and IF2's hidraw node disappears too. The report below is declared only
+# to keep that reader alive; nothing is decoded from it. Nothing is written to
+# this interface, so EP 0x05 is deliberately not declared.
+#
+# The IF2 keepalive is the non-obvious part: with IF0 claimed and IF2 idle, the
+# pad sends nothing at all, which looks exactly like a dead device.
+
+[device]
+name = "Flydigi Vader 3 (DInput)"
+vid = 0x04b4
+pid = 0x2412
+
+[[device.interface]]
+id = 0
+class = "vendor"
+ep_in = 0x81
+
+[[device.interface]]
+id = 2
+class = "vendor"
+ep_in = 0x83
+
+# --- Standard input report (9 bytes, no report ID) ---
+# Descriptor: 4x 8-bit axes, 4-bit hat, 1 consumer bit (byte4 bit4 -> KEY_RED),
+# then 19 buttons declared as usage 20,19,18,17,16,15,14,12,11,...,1.
+# The kernel maps usage N>=16 to BTN_TRIGGER_HAPPY(N-16) and usage 16 to the
+# undefined code 319, so the back buttons below follow the physical layout
+# learned from the device, not the declaration order.
+[[report]]
+name = "input"
+interface = 0
+size = 9
+
+[report.fields]
+left_x  = { offset = 0, type = "u8", transform = "scale(-32768, 32767)" }
+left_y  = { offset = 1, type = "u8", transform = "scale(-32768, 32767)" }
+right_x = { offset = 2, type = "u8", transform = "scale(-32768, 32767)" }
+right_y = { offset = 3, type = "u8", transform = "scale(-32768, 32767)" }
+dpad    = { bits = [4, 0, 4] }
+
+# bit = (byte - 4) * 8 + bit_in_byte, group covers bytes 4..6.
+[report.button_group]
+source = { offset = 4, size = 3 }
+map = { Capture = 4, O = 5, M4 = 6, M3 = 7, M2 = 8, M1 = 9, RS = 10, LS = 11, Start = 12, Select = 13, RT = 14, LT = 15, RB = 16, LB = 17, Z = 18, Y = 19, X = 20, C = 21, B = 22, A = 23 }
+
+# --- Vendor keepalive report (report ID 0x04, 32 bytes) ---
+[[report]]
+name = "vendor-keepalive"
+interface = 2
+size = 32
+
+[report.match]
+offset = 0
+expect = [0x04]
+
+# --- Output device ---
+# Same identity as the physical pad: SDL's controller database already maps
+# 04b4:2412 to "Flydigi Apex 4", so games show a Flydigi name in both the
+# gamepad and the keyboard/mouse path. The virtual pad is a uinput device, not
+# a hidraw one, so SDL's HIDAPI backend cannot see it twice.
+[output]
+name = "Flydigi Apex 4"
+vid = 0x04b4
+pid = 0x2412
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+
+[output.buttons]
+A       = "BTN_SOUTH"
+B       = "BTN_EAST"
+X       = "BTN_NORTH"
+Y       = "BTN_WEST"
+LB      = "BTN_TL"
+RB      = "BTN_TR"
+LT      = "BTN_TL2"
+RT      = "BTN_TR2"
+Select  = "BTN_SELECT"
+Start   = "BTN_START"
+LS      = "BTN_THUMBL"
+RS      = "BTN_THUMBR"
+M1      = "BTN_TRIGGER_HAPPY1"
+M2      = "BTN_TRIGGER_HAPPY2"
+M3      = "BTN_TRIGGER_HAPPY3"
+M4      = "BTN_TRIGGER_HAPPY4"
+C       = "BTN_TRIGGER_HAPPY5"
+Z       = "BTN_TRIGGER_HAPPY6"
+O       = "BTN_TRIGGER_HAPPY7"
+Capture = "BTN_TRIGGER_HAPPY8"
+
+[output.dpad]
+type = "hat"
