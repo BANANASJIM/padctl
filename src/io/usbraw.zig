@@ -155,10 +155,14 @@ fn verifyEndpointsOnInterface(handle: *c.libusb_device_handle, vid: u16, pid: u1
 
     var refs: [max_endpoint_refs]EndpointRef = undefined;
     var n: usize = 0;
+    if (cfg.?.bNumInterfaces == 0) return;
     const ifaces = cfg.?.interface[0..cfg.?.bNumInterfaces];
     for (ifaces) |iface| {
         if (iface.num_altsetting < 1) continue;
         const alt = iface.altsetting[0];
+        // libusb leaves endpoint NULL when there are none, and slicing a null
+        // C pointer panics even for an empty range.
+        if (alt.bNumEndpoints == 0) continue;
         for (alt.endpoint[0..alt.bNumEndpoints]) |ep| {
             if (n == refs.len) break;
             refs[n] = .{ .interface = alt.bInterfaceNumber, .address = ep.bEndpointAddress };
