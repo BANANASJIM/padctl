@@ -219,6 +219,60 @@ pub fn select(candidates: []const Candidate, layout: ?*const UsbLayout) ?usize {
     return null;
 }
 
+/// Indices of every candidate whose declared layout matches, in order.
+pub fn matching(candidates: []const Candidate, layout: *const UsbLayout, out: []usize) []usize {
+    var n: usize = 0;
+    for (candidates, 0..) |c, idx| {
+        if (n == out.len) break;
+        if (check(c.cfg.device.interface, layout) == null) {
+            out[n] = idx;
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+/// The model query to run when several candidates match the same layout: the
+/// first matched candidate that declares one (ADR-030).
+pub fn probeFor(candidates: []const Candidate, matched: []const usize) ?*const config_device.ProbeConfig {
+    if (matched.len < 2) return null;
+    for (matched) |idx| {
+        if (candidates[idx].cfg.device.probe) |*p| return p;
+    }
+    return null;
+}
+
+pub const ModelChoice = union(enum) {
+    /// A candidate lists this model ID.
+    listed: usize,
+    /// A user/system override without `ids` ahead of any listing candidate.
+    override: usize,
+    /// The model was identified but no candidate lists it; first match is a guess.
+    unlisted: usize,
+    /// No model ID; first match is a guess.
+    unidentified: usize,
+};
+
+/// Choose among layout-matched candidates by the probed model ID. A user or
+/// system override without `ids` keeps its priority (ADR-029): it was written
+/// for this device before probing existed, so it wins over listed builtins.
+pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: ?u8) ModelChoice {
+    std.debug.assert(matched.len > 0);
+    const model = id orelse return .{ .unidentified = matched[0] };
+    for (matched) |idx| {
+        const c = candidates[idx];
+        const ids: []const i64 = if (c.cfg.device.probe) |p| p.ids else &.{};
+        if (ids.len == 0) {
+            if (c.is_override) return .{ .override = idx };
+            continue;
+        }
+        for (ids) |listed| {
+            if (listed == model) return .{ .listed = idx };
+        }
+    }
+    return .{ .unlisted = matched[0] };
+}
+
 /// Explain a `select` result. Skipped user/system overrides and a failed
 /// match are warnings and name every candidate's mismatch plus the actual
 /// layout, so a report can be fixed without asking for `lsusb`.
@@ -476,6 +530,65 @@ test "usb_layout: logSelection explains a failed match" {
     const idx = select(&cands, &l);
     try testing.expectEqual(@as(?usize, null), idx);
     logSelection(0x37d7, 0x2401, &cands, &l, idx);
+}
+
+fn probeConfig(ifaces: []const InterfaceConfig, probe: ?config_device.ProbeConfig) DeviceConfig {
+    var c = testConfig(ifaces);
+    c.device.probe = probe;
+    return c;
+}
+
+fn flydigiProbe(ids: []const i64) config_device.ProbeConfig {
+    return .{ .interface = 2, .command = "05 ec", .reply = .{ .offset = 15, .expect = &.{0xec} }, .id_offset = 3, .ids = ids };
+}
+
+test "usb_layout: chooseByModel picks the candidate listing the model" {
+    const hid2 = [_]InterfaceConfig{.{ .id = 2, .class = "hid" }};
+    const apex = probeConfig(&hid2, flydigiProbe(&.{84}));
+    const vader4 = probeConfig(&hid2, flydigiProbe(&.{ 85, 91, 105 }));
+    const vader3 = probeConfig(&hid2, flydigiProbe(&.{28}));
+    const cands = [_]Candidate{
+        .{ .cfg = &apex, .path = "apex4.toml" },
+        .{ .cfg = &vader4, .path = "vader4.toml" },
+        .{ .cfg = &vader3, .path = "vader3.toml" },
+    };
+    const l = parse(vader5OldFirmware(), 1).?; // has a HID IF2
+    var buf: [8]usize = undefined;
+    const matched = matching(&cands, &l, &buf);
+    try testing.expectEqual(@as(usize, 3), matched.len);
+    try testing.expect(probeFor(&cands, matched) != null);
+
+    try testing.expectEqual(@as(usize, 2), chooseByModel(&cands, matched, 28).listed);
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&cands, matched, 91).listed);
+    try testing.expectEqual(@as(usize, 0), chooseByModel(&cands, matched, 19).unlisted);
+    try testing.expectEqual(@as(usize, 0), chooseByModel(&cands, matched, null).unidentified);
+
+    // A user override without ids, ahead of the builtins, keeps priority.
+    const user_copy = testConfig(&hid2);
+    const with_override = [_]Candidate{
+        .{ .cfg = &user_copy, .path = "user/vader4.toml", .is_override = true },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+        .{ .cfg = &vader4, .path = "vader4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 0), chooseByModel(&with_override, &.{ 0, 1, 2 }, 84).override);
+    // A builtin without ids is not a catch-all.
+    const plain_builtin = [_]Candidate{
+        .{ .cfg = &user_copy, .path = "other.toml" },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&plain_builtin, &.{ 0, 1 }, 84).listed);
+}
+
+test "usb_layout: probeFor needs two matches and a declared probe" {
+    const hid2 = [_]InterfaceConfig{.{ .id = 2, .class = "hid" }};
+    const plain = testConfig(&hid2);
+    const probed = probeConfig(&hid2, flydigiProbe(&.{84}));
+    const two_plain = [_]Candidate{ .{ .cfg = &plain, .path = "a" }, .{ .cfg = &plain, .path = "b" } };
+    try testing.expect(probeFor(&two_plain, &.{ 0, 1 }) == null);
+    const one = [_]Candidate{.{ .cfg = &probed, .path = "a" }};
+    try testing.expect(probeFor(&one, &.{0}) == null);
+    const mixed = [_]Candidate{ .{ .cfg = &plain, .path = "a" }, .{ .cfg = &probed, .path = "b" } };
+    try testing.expect(probeFor(&mixed, &.{ 0, 1 }) != null);
 }
 
 test "usb_layout: readForHidraw follows sysfs from the hidraw node to the USB device" {

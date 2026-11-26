@@ -3,8 +3,8 @@
 # All Flydigi V1-protocol pads share the dongle identity 04b4:2412 (Cypress)
 # and report the vendor "extended" stream on interface 2. The controller model
 # is distinguished at runtime by device ID (Apex 4 = 84), reported in the
-# response to command 0xEC; padctl matches statically, so select this profile
-# in config.toml when the connected pad is an Apex 4.
+# response to command 0xEC, which padctl reads to select this profile (see
+# [device.probe] below).
 #
 # Byte layout from SDL SDL_hidapi_flydigi.c (HandleStatePacketV1), verified
 # upstream against Apex 4 hardware (libsdl-org/SDL#12874), cross-checked with
@@ -25,6 +25,20 @@ pid = 0x2412
 [[device.interface]]
 id = 2
 class = "hid"
+
+# Every V1 pad shares this dongle identity and USB layout; padctl asks the pad
+# for its model (SDL_hidapi_flydigi.c: report 05 ec, reply byte 15 = 0xec,
+# model ID at byte 3) to pick the right config (ADR-030).
+[device.probe]
+interface = 2
+command = "05 ec 00 00 00 00 00 00 00 00 00 00"
+reply = { offset = 15, expect = [0xec] }
+reply_size = 32
+# Input reports (04 fe ...) are also 32 bytes and byte 15 is accelerometer
+# data, so it can read 0xec; never take one for the reply.
+reply_exclude = { offset = 1, expect = [0xfe] }
+id_offset = 3
+ids = [84]
 
 # --- Extended input (header 0x04 0xFE, 32 bytes) ---
 # offset 0-2:  header 04 FE 66

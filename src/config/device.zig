@@ -49,12 +49,33 @@ pub const InitConfig = struct {
     feature_report: ?[]const i64 = null,
 };
 
+/// Model query that tells apart configs sharing a VID/PID and USB layout, e.g.
+/// pads behind one shared receiver (ADR-030). Sent on the interface's hidraw
+/// node before any config is chosen.
+pub const ProbeConfig = struct {
+    interface: i64,
+    /// Hex bytes, report ID first.
+    command: []const u8,
+    /// Identifies the reply among other frames.
+    reply: MatchConfig,
+    /// Exact reply length, when the device's other frames could match `reply`.
+    reply_size: ?i64 = null,
+    /// Frames matching this are never the reply, e.g. the device's input
+    /// report header when an input field can take the reply's match value.
+    reply_exclude: ?MatchConfig = null,
+    /// Byte of the reply holding the model ID.
+    id_offset: i64,
+    /// Model IDs this config is for.
+    ids: []const i64 = &.{},
+};
+
 pub const DeviceInfo = struct {
     name: []const u8,
     vid: i64,
     pid: i64,
     interface: []const InterfaceConfig,
     init: ?InitConfig = null,
+    probe: ?ProbeConfig = null,
     mode: ?[]const u8 = null,
     block_kernel_drivers: ?[]const []const u8 = null,
 };
@@ -530,6 +551,23 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             }
         }
     }
+    if (cfg.device.probe) |probe| {
+        if (!interfaceExists(cfg, probe.interface)) return error.InvalidConfig;
+        const cmd_len = try initCommandByteLen(probe.command);
+        if (cmd_len == 0 or cmd_len > MAX_INIT_COMMAND_SIZE) return error.InvalidConfig;
+        if (probe.reply.offset < 0 or probe.reply.offset >= 64 or probe.reply.expect.len == 0) return error.InvalidConfig;
+        for (probe.reply.expect) |b| if (b < 0 or b > 255) return error.InvalidConfig;
+        if (probe.id_offset < 0 or probe.id_offset >= 64) return error.InvalidConfig;
+        if (probe.reply_size) |n| {
+            const match_end = probe.reply.offset + @as(i64, @intCast(probe.reply.expect.len));
+            if (n <= probe.id_offset or n < match_end or n > 64) return error.InvalidConfig;
+        }
+        if (probe.reply_exclude) |ex| {
+            if (ex.offset < 0 or ex.offset >= 64 or ex.expect.len == 0) return error.InvalidConfig;
+            for (ex.expect) |b| if (b < 0 or b > 255) return error.InvalidConfig;
+        }
+        for (probe.ids) |id| if (id < 0 or id > 255) return error.InvalidConfig;
+    }
     if (cfg.device.init) |init_cfg| {
         if (init_cfg.interface) |iface_id| {
             if (!interfaceExists(cfg, iface_id)) return error.InvalidConfig;
@@ -932,6 +970,7 @@ fn lintAllowlistFor(header: []const u8) ?[]const []const u8 {
 
     if (std.mem.eql(u8, header, "device")) return sf(DeviceInfo);
     if (std.mem.eql(u8, header, "device.init")) return sf(InitConfig);
+    if (std.mem.eql(u8, header, "device.probe")) return sf(ProbeConfig);
     if (std.mem.eql(u8, header, "device.interface")) return sf(InterfaceConfig);
 
     if (std.mem.eql(u8, header, "report")) return sf(ReportConfig);
@@ -4429,4 +4468,46 @@ test "device: lintFaceButtons checks every output profile against the overlaid v
     var buf: [1024]u8 = undefined;
     const msg = try formatFaceButtonWarning(&buf, "devices/vendor/pad.toml", finding, "Y", finding.y_code.?);
     try std.testing.expect(std.mem.indexOf(u8, msg, "[output.profiles.alt.buttons] Y = \"BTN_NORTH\"") != null);
+}
+
+test "device: [device.probe] parses and is validated" {
+    const allocator = std.testing.allocator;
+    const base =
+        \\[device]
+        \\name = "T"
+        \\vid = 0x04b4
+        \\pid = 0x2412
+        \\[[device.interface]]
+        \\id = 2
+        \\class = "hid"
+        \\[device.probe]
+        \\interface = 2
+        \\command = "05 ec 00"
+        \\reply = { offset = 15, expect = [0xec] }
+        \\id_offset = 3
+        \\ids = [84]
+        \\[[report]]
+        \\name = "r"
+        \\interface = 2
+        \\size = 1
+    ;
+    const parsed = try parseString(allocator, base);
+    defer parsed.deinit();
+    const probe = parsed.value.device.probe.?;
+    try std.testing.expectEqual(@as(i64, 2), probe.interface);
+    try std.testing.expectEqual(@as(i64, 15), probe.reply.offset);
+    try std.testing.expectEqualSlices(i64, &.{84}, probe.ids);
+
+    const bad_iface = try std.mem.replaceOwned(u8, allocator, base, "[device.probe]\ninterface = 2", "[device.probe]\ninterface = 5");
+    defer allocator.free(bad_iface);
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_iface));
+    const bad_id = try std.mem.replaceOwned(u8, allocator, base, "ids = [84]", "ids = [300]");
+    defer allocator.free(bad_id);
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_id));
+    const short_reply = try std.mem.replaceOwned(u8, allocator, base, "id_offset = 3", "id_offset = 3\nreply_size = 10");
+    defer allocator.free(short_reply);
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, short_reply));
+    const bad_cmd = try std.mem.replaceOwned(u8, allocator, base, "command = \"05 ec 00\"", "command = \"05 e\"");
+    defer allocator.free(bad_cmd);
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad_cmd));
 }
