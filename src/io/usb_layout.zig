@@ -1,9 +1,5 @@
-//! USB interface/endpoint layout of a physical device, read from sysfs, and
-//! selection among device configs that share a VID/PID (ADR-029).
-//!
 //! Firmware revisions can move endpoints between interfaces without changing
-//! VID/PID or bcdDevice, so the layout itself is what decides which config
-//! can bind.
+//! VID/PID or bcdDevice, so the USB layout decides which config can bind.
 
 const std = @import("std");
 const config_device = @import("../config/device.zig");
@@ -49,8 +45,7 @@ pub const UsbLayout = struct {
         return null;
     }
 
-    /// One line, e.g. "IF0 ff [81 05], IF1 03 [82]": the interface number, its
-    /// class and endpoint addresses, enough to rewrite a device config.
+    /// "IF0 ff [81 05], IF1 03 [82]"
     pub fn format(self: *const UsbLayout, writer: anytype) !void {
         for (self.interfaces(), 0..) |*i, n| {
             if (n > 0) try writer.writeAll(", ");
@@ -71,10 +66,7 @@ pub const UsbLayout = struct {
     }
 };
 
-/// Parse the sysfs `descriptors` blob: the device descriptor followed by every
-/// configuration's full descriptor set. Only the active configuration and each
-/// interface's altsetting 0 are kept, matching what usbraw claims. Returns null
-/// for malformed data or when the active configuration is absent.
+/// Keeps the active configuration and altsetting 0 only, as usbraw claims.
 pub fn parse(bytes: []const u8, active_config: u8) ?UsbLayout {
     if (active_config == 0 or bytes.len < device_descriptor_len) return null;
     var layout = UsbLayout{};
@@ -123,18 +115,13 @@ pub fn parse(bytes: []const u8, active_config: u8) ?UsbLayout {
     return layout;
 }
 
-/// Read the layout of the USB device owning a hidraw node. `devname` is the
-/// node basename (e.g. "hidraw3"). Returns null when sysfs is unavailable,
-/// e.g. for non-USB transports; callers then fall back to the first config.
+/// Null for non-USB transports.
 pub fn readForHidraw(sys_root: []const u8, devname: []const u8) ?UsbLayout {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    // hidrawN/device is the HID device, its parent the USB interface, and the
-    // grandparent the USB device that carries `descriptors`.
     const usb_dir = std.fmt.bufPrint(&path_buf, "{s}/class/hidraw/{s}/device/../..", .{ sys_root, devname }) catch return null;
     return readFromUsbDeviceDir(usb_dir);
 }
 
-/// Read the layout of a USB device directory such as /sys/bus/usb/devices/1-4.
 pub fn readFromUsbDeviceDir(usb_dir: []const u8) ?UsbLayout {
     var dir = std.fs.openDirAbsolute(usb_dir, .{}) catch return null;
     defer dir.close();
@@ -173,8 +160,6 @@ pub const Mismatch = union(enum) {
     }
 };
 
-/// Check the layout a config declares against the device. Only fields the
-/// config already carries are used; no extra DSL.
 pub fn check(ifaces: []const InterfaceConfig, layout: *const UsbLayout) ?Mismatch {
     for (ifaces) |ic| {
         const number: u8 = std.math.cast(u8, ic.id) orelse return .{ .missing_interface = 0xff };
@@ -192,24 +177,18 @@ pub fn check(ifaces: []const InterfaceConfig, layout: *const UsbLayout) ?Mismatc
                 return .{ .endpoint_absent = .{ .ep = ep, .interface = number } };
             }
         }
-        // suppress (and any other class) only needs the interface to exist.
     }
     return null;
 }
 
 pub const Candidate = struct {
     cfg: *const DeviceConfig,
-    /// Source file, for diagnostics only.
     path: []const u8,
-    /// A user/system file standing in for a builtin; skipping it is worth a
-    /// warning, skipping a builtin variant is routine.
+    /// From a user/system dir: skipping it warns, skipping a builtin doesn't.
     is_override: bool = false,
 };
 
-/// Pick the config for one physical device. `candidates` share its VID/PID and
-/// are in priority order (user > system > builtin). Without a layout the first
-/// candidate wins, as before ADR-029. With one, the first candidate whose
-/// declared layout matches wins. Returns null when none match.
+/// `candidates` are in priority order; without a layout the first wins.
 pub fn select(candidates: []const Candidate, layout: ?*const UsbLayout) ?usize {
     if (candidates.len == 0) return null;
     const l = layout orelse return 0;
@@ -219,7 +198,6 @@ pub fn select(candidates: []const Candidate, layout: ?*const UsbLayout) ?usize {
     return null;
 }
 
-/// Indices of every candidate whose declared layout matches, in order.
 pub fn matching(candidates: []const Candidate, layout: *const UsbLayout, out: []usize) []usize {
     var n: usize = 0;
     for (candidates, 0..) |c, idx| {
@@ -232,8 +210,6 @@ pub fn matching(candidates: []const Candidate, layout: *const UsbLayout, out: []
     return out[0..n];
 }
 
-/// The model query to run when several candidates match the same layout: the
-/// first matched candidate that declares one (ADR-030).
 pub fn probeFor(candidates: []const Candidate, matched: []const usize) ?*const config_device.ProbeConfig {
     if (matched.len < 2) return null;
     for (matched) |idx| {
@@ -243,19 +219,13 @@ pub fn probeFor(candidates: []const Candidate, matched: []const usize) ?*const c
 }
 
 pub const ModelChoice = union(enum) {
-    /// A candidate lists this model ID.
     listed: usize,
-    /// A user/system override without `ids` ahead of any listing candidate.
     override: usize,
-    /// The model was identified but no candidate lists it; a guess (see `guess`).
     unlisted: usize,
-    /// No model ID; a guess (see `guess`).
     unidentified: usize,
 };
 
-/// Choose among layout-matched candidates by the probed model ID. A user or
-/// system override without `ids` keeps its priority (ADR-029): it was written
-/// for this device before probing existed, so it wins over listed builtins.
+/// An override without `ids` keeps its priority over builtins listing the model.
 pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: ?u8) ModelChoice {
     std.debug.assert(matched.len > 0);
     for (matched) |idx| {
@@ -274,12 +244,8 @@ pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: 
     return .{ .unlisted = guess(candidates, matched) };
 }
 
-/// The candidate to fall back on when the model is unknown (ADR-030 §3): the
-/// first config that claims nothing through libusb, since a wrong hidraw-only
-/// guess only misreads input while a wrong libusb one also takes the
-/// interfaces (and the kernel driver) from the right config. Otherwise the
-/// first match. An override without ids wins before this unless an earlier
-/// config lists the probed ID (with no ID, none can).
+/// A wrong hidraw-only guess just misreads input; a wrong libusb one also
+/// takes the interfaces and kernel driver from the right config.
 fn guess(candidates: []const Candidate, matched: []const usize) usize {
     for (matched) |idx| {
         if (!config_device.usesLibusb(candidates[idx].cfg)) return idx;
@@ -287,9 +253,6 @@ fn guess(candidates: []const Candidate, matched: []const usize) usize {
     return matched[0];
 }
 
-/// Explain a `select` result. Skipped user/system overrides and a failed
-/// match are warnings and name every candidate's mismatch plus the actual
-/// layout, so a report can be fixed without asking for `lsusb`.
 pub fn logSelection(
     vid: u16,
     pid: u16,

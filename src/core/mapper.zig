@@ -3811,7 +3811,7 @@ test "mapper: gyro blend_stick=false: output equals pure gyro value (zero-regres
     try testing.expect(ev.gamepad.ry != physical_ry);
 }
 
-test "mapper: gyro blend_stick omitted(null) == explicit false (ADR-018 absent invariant)" {
+test "mapper: gyro blend_stick omitted(null) == explicit false" {
     // Pins the `mc.blend_stick orelse false` default contract: a [gyro] config with NO
     // blend_stick line (TOML omits it -> null) must behave byte-identically to explicit
     // blend_stick = false. Falsifiable: would FAIL if the default were `orelse true`

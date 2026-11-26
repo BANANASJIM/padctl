@@ -1,11 +1,6 @@
-//! Notices when an interface keeps delivering reports but none of them match
-//! a `[[report]]` in the device config — the usual symptom of a firmware whose
-//! report format differs from the config. Fires once per bind.
-
 const std = @import("std");
 
-/// Unmatched frames tolerated before warning. High enough to skip the ACKs
-/// and status frames some devices send right after init.
+/// High enough to skip the ACKs and status frames some devices send after init.
 pub const threshold = 200;
 
 pub const ReportWatch = struct {
@@ -16,8 +11,7 @@ pub const ReportWatch = struct {
     last_shown: usize = 0,
     last_len: usize = 0,
 
-    /// Record one frame. Returns true exactly once, when `threshold` frames
-    /// have arrived and none has matched since the last reset.
+    /// True once per bind, when `threshold` frames arrived and none matched.
     pub fn observe(self: *ReportWatch, matched: bool, frame: []const u8) bool {
         if (self.matched_any or self.warned) return false;
         if (matched) {

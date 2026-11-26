@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Canonical padctl build image (ADR-019).
+# Canonical padctl build image.
 #
 # debian:bookworm-slim ships glibc 2.36, which avoids the Zig issue #147
 # `R_X86_64_PC64 in .sframe` linker error seen on glibc 2.43+ hosts.

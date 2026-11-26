@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # Resolve the canonical build image reference from .zigversion.
   # GitHub Actions cannot read a file inside a `container:` expression, so the
   # tag is computed once here and consumed via needs.image-ref.outputs.ref.
   # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
@@ -78,7 +78,7 @@ jobs:
   gen-install-artifacts:
     runs-on: ubuntu-22.04
     needs: [image-ref]
-    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # Run inside the canonical build image: Zig + libusb are baked
     # in, so no setup-zig step is needed.
     container: ${{ needs.image-ref.outputs.ref }}
     # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.
@@ -108,7 +108,7 @@ jobs:
   build:
     needs: [image-ref, create-release, gen-install-artifacts]
     runs-on: ubuntu-22.04
-    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # Run inside the canonical build image: Zig + libusb are baked
     # in, so no setup-zig step is needed. `gh` is not in the canonical image
     # and is installed below for the release-upload step.
     container: ${{ needs.image-ref.outputs.ref }}

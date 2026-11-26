@@ -48,7 +48,6 @@ fn responseMatches(
         std.mem.startsWith(u8, response, command_prefix);
 }
 
-/// What arrived while waiting for an init ACK, for the failure report.
 pub const AckDiag = struct {
     timeout_ms: u64 = 0,
     frames: usize = 0,
@@ -179,8 +178,7 @@ fn logAckFailure(
         );
         return;
     }
-    // An ACK must start with both prefixes. Usually one begins with the other
-    // and the longer says it all; otherwise show both, since no reply can match.
+    // If neither prefix begins the other, no reply can ever match.
     const longer = if (command_prefix.len > response_prefix.len) command_prefix else response_prefix;
     const shorter = if (command_prefix.len > response_prefix.len) response_prefix else command_prefix;
     if (std.mem.startsWith(u8, longer, shorter)) {

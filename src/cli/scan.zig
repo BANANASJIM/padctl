@@ -214,8 +214,6 @@ pub fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16
     return findConfigForLayout(allocator, config_dir, vid, pid, iface_id, null);
 }
 
-/// Like findConfig, but skips configs whose declared interfaces do not match
-/// the device's USB layout, as the daemon does (ADR-029).
 fn findConfigForNode(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8, hidraw_path: []const u8) ![]const u8 {
     const layout = usb_layout.readForHidraw("/sys", std.fs.path.basename(hidraw_path));
     return findConfigForLayout(allocator, config_dir, vid, pid, iface_id, if (layout) |*l| l else null);
@@ -806,7 +804,7 @@ test "scan: render: no entries and no daemon devices prints No HID devices found
     try std.testing.expectEqualStrings("No HID devices found.\n", fbs.getWritten());
 }
 
-test "scan: findConfig skips a same-VID/PID config whose layout does not match (ADR-029)" {
+test "scan: findConfig skips a same-VID/PID config whose layout does not match" {
     const allocator = std.testing.allocator;
     const new_l = usb_layout.parse(&usb_layout.fixtures.vader5_new_firmware, 1).?;
     const old_l = usb_layout.parse(&usb_layout.fixtures.vader5_old_firmware, 1).?;

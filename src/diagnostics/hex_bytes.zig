@@ -1,6 +1,3 @@
-//! Spaced hex for byte strings in log lines ("5a a5 ef"), easier to compare
-//! with a device config than run-together `{x}` output.
-
 const std = @import("std");
 
 pub const HexBytes = struct {

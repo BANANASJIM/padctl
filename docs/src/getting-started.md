@@ -342,7 +342,7 @@ See the [Diagnostic Logging guide](diagnostic-logging.md) for the full `padctl d
 
 ## udev Permissions
 
-padctl needs access to `/dev/hidraw*`, `/dev/uinput`, and `/dev/uhid`. The first two are standard for HID gamepad daemons; `/dev/uhid` is required for the SDL3-visible IMU pairing path (per ADR-015) and native HID output profiles such as `dualsense-edge-native`. `padctl install` writes the necessary udev rules (`60-padctl.rules`) automatically.
+padctl needs access to `/dev/hidraw*`, `/dev/uinput`, and `/dev/uhid`. The first two are standard for HID gamepad daemons; `/dev/uhid` is required for the SDL3-visible IMU pairing path and native HID output profiles such as `dualsense-edge-native`. `padctl install` writes the necessary udev rules (`60-padctl.rules`) automatically.
 
 The `padctl install` command generates and installs udev rules automatically from device configs.
 

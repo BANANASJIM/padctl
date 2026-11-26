@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Build and publish the canonical padctl build image (ADR-019) to GHCR.
+  # Build and publish the canonical padctl build image to GHCR.
   # The image is tagged with the Zig version read from .zigversion. On a
   # push event the job builds and pushes only when that version tag is not
   # already in the registry (manifest-inspect cache check); on a fork
@@ -71,7 +71,7 @@ jobs:
             ZIG_VERSION=${{ steps.img.outputs.version }}
             ZIG_SHA256=${{ steps.sha.outputs.amd64 }}
 
-  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # Resolve the canonical build image reference from .zigversion.
   # GitHub Actions cannot read a file inside a `container:` expression, so the
   # tag is computed once here and consumed via needs.image-ref.outputs.ref.
   # Mirrors the build-image job's "Resolve image reference" step — .zigversion
@@ -130,7 +130,7 @@ jobs:
     name: check / ${{ matrix.os }} / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     needs: [lean-oracle, image-ref, build-image]
-    # Run inside the canonical build image (ADR-019): Zig + libusb + kernel
+    # Run inside the canonical build image: Zig + libusb + kernel
     # headers are baked in, so no setup-zig step or apt install is needed.
     container: ${{ needs.image-ref.outputs.ref }}
     # debian:bookworm-slim links /bin/sh to dash; force bash so run: steps
@@ -254,7 +254,7 @@ jobs:
     name: tsan / ubuntu-22.04
     runs-on: ubuntu-22.04
     needs: [image-ref, build-image]
-    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # Run inside the canonical build image: Zig + libusb are baked
     # in. gdb is only needed by the failure-only diagnostics step below and is
     # installed there to keep the happy path free of an apt install.
     container: ${{ needs.image-ref.outputs.ref }}
@@ -307,7 +307,7 @@ jobs:
             tsan*
 
   # Compile the musl-static padctl binary once inside the canonical build
-  # image (ADR-019) and publish it as an artifact. The distro-check matrix
+  # image and publish it as an artifact. The distro-check matrix
   # then `docker run`s this binary on pristine debian:12 / fedora:41 images,
   # which stay free of any padctl toolchain so the smoke test reflects a real
   # end-user environment.
@@ -335,7 +335,7 @@ jobs:
   distro-check:
     name: distro-check / ${{ matrix.name }}
     runs-on: ubuntu-22.04
-    # The musl-static binary is built once in the canonical image (ADR-019);
+    # The musl-static binary is built once in the canonical image;
     # this job only `docker run`s it on pristine distros, so it cannot itself
     # be a `container:` job and instead depends on the distro-musl-build
     # artifact.
@@ -375,7 +375,7 @@ jobs:
               padctl --validate /devices/sony/dualsense.toml
             "
 
-  # Drift-guard (ADR-019): the migrated workflows must build/test only inside
+  # Drift-guard: the migrated workflows must build/test only inside
   # the canonical image. Fail if `mlugg/setup-zig` or a `zig-version:` input is
   # reintroduced into any of them. coverage.yml (kcov) and lean.yml are
   # intentionally not migrated and are deliberately excluded from this check.
@@ -394,7 +394,7 @@ jobs:
             # Strip comment lines so prose mentioning the action does not trip
             # the guard; match the action ref and the setup-zig input key.
             if grep -nE '^[^#]*(mlugg/setup-zig|zig-version:)' "$path"; then
-              echo "ERROR: $path reintroduced a hardcoded Zig toolchain (ADR-019)." >&2
+              echo "ERROR: $path reintroduced a hardcoded Zig toolchain." >&2
               status=1
             fi
           done

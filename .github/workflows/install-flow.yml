@@ -7,7 +7,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # Resolve the canonical build image reference from .zigversion.
   # GitHub Actions cannot read a file inside a `container:` expression, so the
   # tag is computed once here and consumed via needs.image-ref.outputs.ref.
   # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
@@ -27,7 +27,7 @@ jobs:
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           echo "ref=ghcr.io/${owner}/padctl-build:${ver}" >> "$GITHUB_OUTPUT"
 
-  # Compile the padctl binary once inside the canonical build image (ADR-019)
+  # Compile the padctl binary once inside the canonical build image
   # and publish it as an artifact. The downstream install/pkg/systemd jobs run
   # on the bare runner so they can `docker run` pristine distro images, which
   # is not possible from inside a `container:` job. A musl-static binary is

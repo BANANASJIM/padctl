@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # Resolve the canonical build image reference from .zigversion.
   # GitHub Actions cannot read a file inside a `container:` expression, so the
   # tag is computed once here and consumed via needs.image-ref.outputs.ref.
   # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
@@ -38,7 +38,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     needs: [image-ref]
-    # Run inside the canonical build image (ADR-019): Zig + libusb + kernel
+    # Run inside the canonical build image: Zig + libusb + kernel
     # headers are baked in, so no setup-zig step or apt install is needed.
     container: ${{ needs.image-ref.outputs.ref }}
     # debian:bookworm-slim links /bin/sh to dash; force bash for run: steps.

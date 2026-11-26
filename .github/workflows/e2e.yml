@@ -6,7 +6,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Resolve the canonical build image reference from .zigversion (ADR-019).
+  # Resolve the canonical build image reference from .zigversion.
   # GitHub Actions cannot read a file inside a `container:` expression, so the
   # tag is computed once here and consumed via needs.image-ref.outputs.ref.
   # Mirrors the image-ref job in ci.yml — .zigversion stays the single source
@@ -29,7 +29,7 @@ jobs:
   e2e:
     runs-on: ubuntu-22.04
     needs: [image-ref]
-    # Run inside the canonical build image (ADR-019): Zig + libusb are baked
+    # Run inside the canonical build image: Zig + libusb are baked
     # in. --privileged is required so the UHID L2/L3 tests can load the uhid
     # kernel module and access /dev/uhid from inside the container.
     container:
