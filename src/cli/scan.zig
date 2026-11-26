@@ -6,6 +6,8 @@ const hidraw = @import("../io/hidraw.zig");
 const readPhysicalPath = hidraw.readPhysicalPath;
 const readInterfaceId = hidraw.readInterfaceId;
 const toml_extract = @import("toml_extract.zig");
+const config_device = @import("../config/device.zig");
+const usb_layout = @import("../io/usb_layout.zig");
 const perm_hint = @import("perm_hint.zig");
 const socket_client = @import("socket_client.zig");
 const StatusDevice = socket_client.StatusDevice;
@@ -95,7 +97,7 @@ fn accessDeniedEntry(allocator: std.mem.Allocator, config_dir: []const u8, path:
         .pid = info.pid,
         .name = name,
         .phys = phys,
-        .config_path = findConfig(allocator, config_dir, info.vid, info.pid, iface_id) catch null,
+        .config_path = findConfigForNode(allocator, config_dir, info.vid, info.pid, iface_id, path) catch null,
         .interface_id = iface_id,
         .access_denied = true,
     };
@@ -155,7 +157,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         const vid: u16 = @bitCast(info.vendor);
         const pid: u16 = @bitCast(info.product);
         const iface_id = readInterfaceId(path);
-        const matched_config: ?[]const u8 = if (findConfig(allocator, config_dir, vid, pid, iface_id)) |m| m else |err| switch (err) {
+        const matched_config: ?[]const u8 = if (findConfigForNode(allocator, config_dir, vid, pid, iface_id, path)) |m| m else |err| switch (err) {
             error.NotFound => null,
             else => return err,
         };
@@ -209,12 +211,23 @@ fn suppressUnmatchedSiblings(allocator: std.mem.Allocator, entries: *std.ArrayLi
 }
 
 pub fn findConfig(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8) ![]const u8 {
+    return findConfigForLayout(allocator, config_dir, vid, pid, iface_id, null);
+}
+
+/// Like findConfig, but skips configs whose declared interfaces do not match
+/// the device's USB layout, as the daemon does (ADR-029).
+fn findConfigForNode(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8, hidraw_path: []const u8) ![]const u8 {
+    const layout = usb_layout.readForHidraw("/sys", std.fs.path.basename(hidraw_path));
+    return findConfigForLayout(allocator, config_dir, vid, pid, iface_id, if (layout) |*l| l else null);
+}
+
+fn findConfigForLayout(allocator: std.mem.Allocator, config_dir: []const u8, vid: u16, pid: u16, iface_id: ?u8, layout: ?*const usb_layout.UsbLayout) ![]const u8 {
     var dir = if (std.fs.path.isAbsolute(config_dir))
         try std.fs.openDirAbsolute(config_dir, .{ .iterate = true })
     else
         try std.fs.cwd().openDir(config_dir, .{ .iterate = true });
     defer dir.close();
-    return findConfigInDir(allocator, dir, config_dir, vid, pid, iface_id);
+    return findConfigInDir(allocator, dir, config_dir, vid, pid, iface_id, layout);
 }
 
 fn findConfigInDir(
@@ -224,6 +237,7 @@ fn findConfigInDir(
     vid: u16,
     pid: u16,
     iface_id: ?u8,
+    layout: ?*const usb_layout.UsbLayout,
 ) ![]const u8 {
     var it = dir.iterate();
     while (try it.next()) |entry| {
@@ -233,7 +247,7 @@ fn findConfigInDir(
                 defer sub.close();
                 const sub_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
                 defer allocator.free(sub_path);
-                if (findConfigInDir(allocator, sub, sub_path, vid, pid, iface_id)) |m| return m else |_| {}
+                if (findConfigInDir(allocator, sub, sub_path, vid, pid, iface_id, layout)) |m| return m else |_| {}
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
@@ -244,6 +258,12 @@ fn findConfigInDir(
                     break :blk null;
                 };
                 if (match_result) |iface_match| {
+                    if (layout) |l| {
+                        if (!layoutMatches(allocator, full_path, l)) {
+                            allocator.free(full_path);
+                            continue;
+                        }
+                    }
                     // Config declares an interface constraint
                     if (iface_match) |matches| {
                         if (matches) return full_path;
@@ -259,6 +279,12 @@ fn findConfigInDir(
         }
     }
     return error.NotFound;
+}
+
+fn layoutMatches(allocator: std.mem.Allocator, path: []const u8, layout: *const usb_layout.UsbLayout) bool {
+    var parsed = config_device.parseFile(allocator, path) catch return false;
+    defer parsed.deinit();
+    return usb_layout.check(parsed.value.device.interface, layout) == null;
 }
 
 /// Returns null if VID/PID don't match. Otherwise returns ?bool:
@@ -778,4 +804,16 @@ test "scan: render: no entries and no daemon devices prints No HID devices found
     var fbs = std.io.fixedBufferStream(&buf);
     try render(fbs.writer(), &.{}, &.{});
     try std.testing.expectEqualStrings("No HID devices found.\n", fbs.getWritten());
+}
+
+test "scan: findConfig skips a same-VID/PID config whose layout does not match (ADR-029)" {
+    const allocator = std.testing.allocator;
+    const new_l = usb_layout.parse(&usb_layout.fixtures.vader5_new_firmware, 1).?;
+    const old_l = usb_layout.parse(&usb_layout.fixtures.vader5_old_firmware, 1).?;
+    const on_new = try findConfigForLayout(allocator, "devices", 0x37d7, 0x2401, 1, &new_l);
+    defer allocator.free(on_new);
+    try std.testing.expect(std.mem.endsWith(u8, on_new, "vader5-if2.toml"));
+    const on_old = try findConfigForLayout(allocator, "devices", 0x37d7, 0x2401, 1, &old_l);
+    defer allocator.free(on_old);
+    try std.testing.expect(std.mem.endsWith(u8, on_old, "/vader5.toml"));
 }

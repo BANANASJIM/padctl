@@ -1,0 +1,233 @@
+[device]
+name = "Flydigi Vader 5 Pro"
+vid = 0x37d7
+pid = 0x2401
+block_kernel_drivers = ["xpad"]
+
+# The pad exposes an XInput-signature vendor interface (IF0, class ff/5d/01)
+# plus three HID interfaces. Current firmware (Space Station web era) puts the
+# vendor channel on IF2 (read EP 0x83 / write EP 0x06); IF1 is a keyboard/mouse
+# HID and IF3 a vendor HID. padctl claims IF2 via libusb for extended input and
+# init, IF0 write-only for rumble, and IF1/IF3 suppress-only; libusb_claim
+# detaches the kernel HID driver, so their hidraw nodes vanish and Steam sees
+# only the virtual Elite pad. Only xpad is blocked at udev — hid_generic/usbhid
+# must keep binding so a hidraw node exists for discovery before padctl claims
+# it. Older firmware has the vendor channel on IF1 (vader5.toml); padctl
+# picks between the two by the device's USB layout. The report and init ACK
+# path on EP 0x83 are inferred from issue #526, not yet confirmed on hardware.
+[[device.interface]]
+id = 2
+class = "vendor"   # EP3 IN extended input, EP6 OUT config commands
+ep_in = 0x83
+ep_out = 0x06
+
+# Rumble only. Declared after IF2 so IF2 keeps devices[] index 0. Omitting
+# ep_in leaves EP 0x81 unpolled: its 20-byte standard report carries no IMU,
+# paddles or extra buttons, all of which come from the extended report.
+[[device.interface]]
+id = 0
+class = "vendor"
+ep_out = 0x05
+
+[[device.interface]]
+id = 1
+class = "suppress"   # Keyboard/mouse HID
+
+[[device.interface]]
+id = 3
+class = "suppress"   # vendor HID
+
+[device.init]
+interface = 2
+report_size = 32
+commands = [
+    "5aa5 0102 03",
+    "5aa5 a102 a3",
+    "5aa5 0202 04",
+    "5aa5 0402 06",
+]
+response_prefix = [0x5a, 0xa5]
+# Correlate each ACK with the command opcode. Extended input reports also
+# begin with 5a a5 (5a a5 ef), so the broad prefix alone is not an ACK.
+response_command_prefix_len = 3
+require_response = true
+enable  = "5aa5 1107 ff01 ffff ff15 00"
+disable = "5aa5 1107 ff00 ffff ff14 00"
+
+# --- IF2 extended input (magic 5a a5 ef, 32 bytes) ---
+[[report]]
+name = "extended"
+interface = 2
+size = 32
+
+[report.match]
+offset = 0
+expect = [0x5a, 0xa5, 0xef]
+
+[report.fields]
+left_x  = { offset = 3,  type = "i16le" }
+left_y  = { offset = 5,  type = "i16le", transform = "negate" }
+right_x = { offset = 7,  type = "i16le" }
+right_y = { offset = 9,  type = "i16le", transform = "negate" }
+lt      = { offset = 15, type = "u8" }
+rt      = { offset = 16, type = "u8" }
+gyro_x  = { offset = 17, type = "i16le" }
+gyro_y  = { offset = 21, type = "i16le", transform = "negate" }
+gyro_z  = { offset = 19, type = "i16le" }
+accel_x = { offset = 23, type = "i16le" }
+accel_y = { offset = 25, type = "i16le" }
+accel_z = { offset = 27, type = "i16le" }
+
+[report.button_group]
+source = { offset = 11, size = 4 }
+# Bit layout (byte 11 bit 0 = bit 0, byte 14 bit 7 = bit 31). Extra
+# Vader 5 buttons use explicit Trigger Happy output codes below:
+#   C  = 16   (extra face button, right of Y)
+#   Z  = 17   (extra face button, left of A)
+#   LM = 22   (top paddle, left shoulder)
+#   RM = 23   (top paddle, right shoulder)
+# Comment syntax does not work inside TOML inline tables, so the bits
+# remain present below but the output side controls whether they fire.
+map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Select = 6, X = 7, Y = 8, Start = 9, LB = 10, RB = 11, LS = 14, RS = 15, C = 16, Z = 17, M1 = 18, M2 = 19, M3 = 20, M4 = 21, LM = 22, RM = 23, O = 24, Home = 27 }
+
+# --- Commands ---
+# Rumble goes to the XInput endpoint on IF0, not the IF1 vendor channel. The
+# receiver handles a vendor command synchronously and pauses every input
+# endpoint for ~18ms per command; the XInput endpoint has no such cost, so this
+# device needs no extra coalescing on top of the writer's default 10ms cadence.
+# The packet is the standard 8-byte XInput frame, which carries no checksum.
+[commands.rumble]
+interface = 0
+template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+
+# --- Output device ---
+# Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and
+# most games apply Xbox button mappings without additional configuration.
+[output]
+default_profile = "xbox-elite2"
+name = "Xbox Elite Series 2"
+vid = 0x045e
+pid = 0x0b00
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_NORTH"
+Y      = "BTN_WEST"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY5"
+# Real Elite 2 exposes back paddles P1-P4 as BTN_TRIGGER_HAPPY5-8 (Linux xpad).
+# Steam reads paddle slots from that layout; M2/M3 swapped so Vader M2 lands at P3, M3 at P2.
+M2     = "BTN_TRIGGER_HAPPY7"
+M3     = "BTN_TRIGGER_HAPPY6"
+M4     = "BTN_TRIGGER_HAPPY8"
+C      = "BTN_TRIGGER_HAPPY9"
+Z      = "BTN_TRIGGER_HAPPY10"
+LM     = "BTN_TRIGGER_HAPPY11"
+RM     = "BTN_TRIGGER_HAPPY12"
+O      = "BTN_TRIGGER_HAPPY13"
+
+[output.dpad]
+type = "hat"
+
+[output.aux]
+type = "mouse"
+name = "Vader 5 Pro Virtual Mouse"
+
+[output.force_feedback]
+type = "rumble"
+max_effects = 16
+
+# Optional Steam Input profile. Select it from config.toml:
+#
+# [[device]]
+# name = "Flydigi Vader 5 Pro"
+# output_profile = "dualsense-edge"
+#
+# The profile keeps 16-bit stick ranges while publishing a DualSense Edge
+# VID/PID/name and Edge-style M1-M4 slots. Native Steam gyro still requires a
+# UHID IMU profile; this safer profile stays on the existing uinput path.
+[output.profiles.dualsense-edge]
+emulate = "dualsense-edge"
+
+[output.profiles.dualsense-edge.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.profiles.dualsense-edge.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_WEST"
+Y      = "BTN_NORTH"
+LB     = "BTN_TL"
+RB     = "BTN_TR"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY1"
+M2     = "BTN_TRIGGER_HAPPY2"
+M3     = "BTN_TRIGGER_HAPPY3"
+M4     = "BTN_TRIGGER_HAPPY4"
+C      = "BTN_TRIGGER_HAPPY5"
+Z      = "BTN_TRIGGER_HAPPY6"
+LM     = "BTN_TRIGGER_HAPPY7"
+RM     = "BTN_TRIGGER_HAPPY8"
+O      = "BTN_TRIGGER_HAPPY9"
+
+[output.profiles.dualsense-edge.dpad]
+type = "hat"
+
+[output.profiles.dualsense-edge.aux]
+type = "mouse"
+name = "Vader 5 Pro Virtual Mouse"
+
+[output.profiles.dualsense-edge.force_feedback]
+type = "rumble"
+max_effects = 16
+
+# Native USB DualSense Edge personality for SDL HIDAPI. Unlike the generic
+# dualsense-edge option above, this uses the controller's real 8-bit USB wire
+# ranges and the single-UHID native route.
+[output.profiles.dualsense-edge-native]
+emulate = "dualsense-edge"
+backend = "uhid"
+protocol = "dualsense-edge-usb"
+
+[output.profiles.dualsense-edge-native.axes]
+left_x  = { code = "ABS_X",  min = 0, max = 255 }
+left_y  = { code = "ABS_Y",  min = 0, max = 255 }
+right_x = { code = "ABS_RX", min = 0, max = 255 }
+right_y = { code = "ABS_RY", min = 0, max = 255 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.profiles.dualsense-edge-native.force_feedback]
+type = "rumble"
+
+[output.profiles.dualsense-edge-native.touch_synthesis]
+left_button = "C"
+right_button = "Z"
+left_x = 480
+right_x = 1440
+y = 540
+click = true

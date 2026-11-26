@@ -6,6 +6,8 @@ const scan = @import("scan.zig");
 const toml_extract = @import("toml_extract.zig");
 const perm_hint = @import("perm_hint.zig");
 const paths = @import("../config/paths.zig");
+const config_device = @import("../config/device.zig");
+const usb_layout = @import("../io/usb_layout.zig");
 
 pub const StatusDevice = socket_client.StatusDevice;
 pub const parseStatusLine = socket_client.parseStatusLine;
@@ -454,6 +456,28 @@ fn firstOverlapping(matches: []const ConfigMatch, idx: usize) ?usize {
     return null;
 }
 
+/// With the device present, report which file the daemon selects by USB
+/// layout (ADR-029) and why each other file was skipped.
+pub fn printLayoutSelection(allocator: std.mem.Allocator, writer: anytype, matches: []const ConfigMatch, layout: *const usb_layout.UsbLayout) !void {
+    var selected = false;
+    for (matches) |m| {
+        var parsed = config_device.parseFile(allocator, m.path) catch {
+            try writer.print("  skipped: {s}: does not parse\n", .{m.path});
+            continue;
+        };
+        defer parsed.deinit();
+        if (usb_layout.check(parsed.value.device.interface, layout)) |mismatch| {
+            try writer.print("  skipped: {s}: {f}\n", .{ m.path, mismatch });
+        } else if (selected) {
+            try writer.print("  shadowed: {s}\n", .{m.path});
+        } else {
+            try writer.print("  config: {s} (matches USB layout)\n", .{m.path});
+            selected = true;
+        }
+    }
+    if (!selected) try writer.writeAll("  config: none matches the USB layout; padctl will not bind this device\n");
+}
+
 /// Print which device TOML wins, flagging files it shadows. Files constrained
 /// to disjoint interfaces are co-active and each get their own line.
 pub fn printProvenance(writer: anytype, matches: []const ConfigMatch) !void {
@@ -586,10 +610,25 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
         else
             null;
         defer if (matches) |ms| freeConfigMatches(allocator, ms);
-        if (matches) |ms| try printProvenance(writer, ms);
 
         const presence = probeUsbPresence(allocator, entry.vid, entry.pid, "") catch null;
         defer if (presence) |p| p.deinit(allocator);
+
+        if (matches) |ms| {
+            const layout: ?usb_layout.UsbLayout = blk: {
+                const p = presence orelse break :blk null;
+                if (!p.present or p.bus_id.len == 0) break :blk null;
+                var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const usb_dir = std.fmt.bufPrint(&dir_buf, "/sys/bus/usb/devices/{s}", .{p.bus_id}) catch break :blk null;
+                break :blk usb_layout.readFromUsbDeviceDir(usb_dir);
+            };
+            if (layout) |*l| {
+                try printLayoutSelection(allocator, writer, ms, l);
+            } else {
+                try printProvenance(writer, ms);
+                if (ms.len > 1) try writer.writeAll("  note: with the device connected, padctl picks among these by USB layout\n");
+            }
+        }
 
         if (presence) |p| {
             if (p.present) {

@@ -15,6 +15,7 @@ const Mapper = @import("core/mapper.zig").Mapper;
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
+const usb_layout = @import("io/usb_layout.zig");
 const netlink = @import("io/netlink.zig");
 const shadow_grab = @import("io/shadow_grab.zig");
 const ioctl = @import("io/ioctl_constants.zig");
@@ -83,6 +84,13 @@ pub const ManagedInstance = struct {
 };
 
 /// Config snapshot used for hot-reload diffing.
+const ConfigMeta = struct {
+    /// Owned.
+    path: []u8,
+    /// Loaded from a user/system dir that takes priority over the builtin one.
+    is_override: bool,
+};
+
 pub const ConfigEntry = struct {
     phys_key: []const u8,
     device_cfg: *const DeviceConfig,
@@ -234,6 +242,10 @@ pub const Supervisor = struct {
     config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
+    // Source of configs.items[i]; kept in lockstep with configs.
+    config_meta: std.ArrayList(ConfigMeta) = .{},
+    // sysfs root for reading USB layouts (ADR-029); tests point it at a fixture.
+    sys_root: []const u8 = "/sys",
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
@@ -492,6 +504,8 @@ pub const Supervisor = struct {
             self.allocator.destroy(c);
         }
         self.configs.deinit(self.allocator);
+        for (self.config_meta.items) |cm| self.allocator.free(cm.path);
+        self.config_meta.deinit(self.allocator);
         var it = self.devname_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -1264,6 +1278,8 @@ pub const Supervisor = struct {
             self.allocator.destroy(c);
         }
         self.configs.clearRetainingCapacity();
+        for (self.config_meta.items) |cm| self.allocator.free(cm.path);
+        self.config_meta.clearRetainingCapacity();
         self.clearDevnameMap();
     }
 
@@ -2455,42 +2471,109 @@ pub const Supervisor = struct {
     }
 
     pub fn startFromDirWithRoot(self: *Supervisor, dir_path: []const u8, dev_root: []const u8) !void {
+        const first = self.configs.items.len;
+        try self.loadConfigsFromDir(dir_path, false);
+        try self.bindOnlineDevices(first, dev_root);
+    }
+
+    /// Parse every *.toml under dir_path into `configs`. Within a dir the order
+    /// stays the filesystem walk order: 04b4:2412 has two builtin configs with
+    /// identical layouts, and sorting would silently change which one existing
+    /// installs get (ADR-029).
+    fn loadConfigsFromDir(self: *Supervisor, dir_path: []const u8, is_override: bool) !void {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
-
-        // seen deduplicates by physical path across all TOML files; owns the key bytes.
-        var seen = std.StringHashMap(void).init(self.allocator);
-        defer {
-            var kit = seen.keyIterator();
-            while (kit.next()) |k| self.allocator.free(k.*);
-            seen.deinit();
-        }
 
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
         while (try walker.next()) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
-
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const toml_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path });
+            const toml_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, entry.path });
+            var path_owned = true;
+            defer if (path_owned) self.allocator.free(toml_path);
 
             const parsed = config_device.parseFile(self.allocator, toml_path) catch |err| {
                 std.log.warn("skipping device config {s}: {}", .{ toml_path, err });
                 self.recordReloadFailure(toml_path, err);
                 continue;
             };
-            const cfg_ptr = try self.allocator.create(config_device.ParseResult);
+            const cfg_ptr = self.allocator.create(config_device.ParseResult) catch |err| {
+                var p = parsed;
+                p.deinit();
+                return err;
+            };
             cfg_ptr.* = parsed;
+            errdefer {
+                cfg_ptr.deinit();
+                self.allocator.destroy(cfg_ptr);
+            }
             self.applyUserOutputProfile(&cfg_ptr.value);
+            try self.config_meta.ensureUnusedCapacity(self.allocator, 1);
+            try self.configs.append(self.allocator, cfg_ptr);
+            self.config_meta.appendAssumeCapacity(.{ .path = toml_path, .is_override = is_override });
+            path_owned = false;
+        }
+    }
 
+    /// Pick the config for the physical device behind a hidraw node among all
+    /// loaded configs with its VID/PID, using the device's USB layout
+    /// (ADR-029). Null when no config has this VID/PID or none matches.
+    fn selectConfigFor(self: *Supervisor, devname: []const u8, vid: u16, pid: u16) !?*const DeviceConfig {
+        var candidates = std.ArrayList(usb_layout.Candidate){};
+        defer candidates.deinit(self.allocator);
+        for (self.configs.items, 0..) |pr, i| {
+            if (@as(u16, @intCast(pr.value.device.vid)) != vid or
+                @as(u16, @intCast(pr.value.device.pid)) != pid) continue;
+            const meta: ?ConfigMeta = if (i < self.config_meta.items.len) self.config_meta.items[i] else null;
+            try candidates.append(self.allocator, .{
+                .cfg = &pr.value,
+                .path = if (meta) |m| m.path else pr.value.device.name,
+                .is_override = if (meta) |m| m.is_override else false,
+            });
+        }
+        if (candidates.items.len == 0) return null;
+
+        const layout = usb_layout.readForHidraw(self.sys_root, std.fs.path.basename(devname));
+        const idx = usb_layout.select(candidates.items, if (layout) |*l| l else null) orelse {
+            std.log.warn(
+                "no device config matches the USB layout of {x:0>4}:{x:0>4}; the firmware likely differs " ++
+                    "from every config. Please share `lsusb -v -d {x:0>4}:{x:0>4}`",
+                .{ vid, pid, vid, pid },
+            );
+            return null;
+        };
+        return candidates.items[idx].cfg;
+    }
+
+    /// Bind online devices for configs[first..]. A hidraw node is handled by
+    /// the config selected for its physical device, which may come from an
+    /// earlier or later file than the one being scanned.
+    fn bindOnlineDevices(self: *Supervisor, first: usize, dev_root: []const u8) !void {
+        // seen deduplicates by physical path across all configs; owns the key bytes.
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var kit = seen.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            seen.deinit();
+        }
+        // One selection per physical device, so skip/no-match warnings print
+        // once rather than per (config, hidraw node) pair. Owns the key bytes.
+        var selected_for = std.StringHashMap(?*const DeviceConfig).init(self.allocator);
+        defer {
+            var kit = selected_for.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+            selected_for.deinit();
+        }
+
+        var ci: usize = first;
+        while (ci < self.configs.items.len) : (ci += 1) {
+            const cfg_ptr = self.configs.items[ci];
             const vid: u16 = @intCast(cfg_ptr.value.device.vid);
             const pid: u16 = @intCast(cfg_ptr.value.device.pid);
 
             const paths = HidrawDevice.discoverAllWithRoot(self.allocator, vid, pid, dev_root) catch |err| {
-                std.log.warn("discoverAll for {s}: {}", .{ entry.path, err });
-                cfg_ptr.deinit();
-                self.allocator.destroy(cfg_ptr);
+                std.log.warn("discoverAll for {s}: {}", .{ cfg_ptr.value.device.name, err });
                 continue;
             };
             defer {
@@ -2503,7 +2586,6 @@ pub const Supervisor = struct {
                     cfg_ptr.value.device.name, vid, pid,
                 });
                 self.enqueueColdScanRetriesForDevRoot(dev_root);
-                try self.configs.append(self.allocator, cfg_ptr);
                 continue;
             }
 
@@ -2511,6 +2593,25 @@ pub const Supervisor = struct {
 
             var spawned: usize = 0;
             for (paths) |hidraw_path| {
+                const selected = blk: {
+                    const key = readPhysicalPath(self.allocator, hidraw_path) catch break :blk try self.selectConfigFor(hidraw_path, vid, pid);
+                    const gop = selected_for.getOrPut(key) catch |err| {
+                        self.allocator.free(key);
+                        return err;
+                    };
+                    if (gop.found_existing) {
+                        self.allocator.free(key);
+                    } else {
+                        gop.value_ptr.* = self.selectConfigFor(hidraw_path, vid, pid) catch |err| {
+                            _ = selected_for.remove(key);
+                            self.allocator.free(key);
+                            return err;
+                        };
+                    }
+                    break :blk gop.value_ptr.*;
+                } orelse continue;
+                if (selected != &cfg_ptr.value) continue;
+
                 const iface_id = readInterfaceId(hidraw_path) orelse {
                     std.log.debug("cold scan: {s} sysfs not ready, will retry via hotplug path", .{hidraw_path});
                     self.enqueueHotplugRetryForPath(hidraw_path);
@@ -2518,8 +2619,8 @@ pub const Supervisor = struct {
                 };
                 {
                     var declared = false;
-                    for (cfg_ifaces) |ci| {
-                        if (iface_id == @as(u8, @intCast(ci.id))) {
+                    for (cfg_ifaces) |c| {
+                        if (iface_id == @as(u8, @intCast(c.id))) {
                             declared = true;
                             break;
                         }
@@ -2590,9 +2691,8 @@ pub const Supervisor = struct {
                 spawned += 1;
             }
 
-            try self.configs.append(self.allocator, cfg_ptr);
             if (spawned == 0) {
-                std.log.debug("config loaded for {s} (VID={x:0>4} PID={x:0>4}), no device online", .{
+                std.log.debug("no device bound for {s} (VID={x:0>4} PID={x:0>4})", .{
                     cfg_ptr.value.device.name, vid, pid,
                 });
             }
@@ -2604,25 +2704,32 @@ pub const Supervisor = struct {
     }
 
     pub fn startFromDirs(self: *Supervisor, dirs: []const []const u8) void {
-        for (dirs) |dir| {
+        const first = self.configs.items.len;
+        for (dirs, 0..) |dir, di| {
             std.fs.accessAbsolute(dir, .{}) catch |err| {
                 std.log.warn("skipping config dir '{s}': {}", .{ dir, err });
                 continue;
             };
             std.log.info("scanning config dir '{s}'", .{dir});
-            self.startFromDir(dir) catch |err| {
+            // The last dir is the builtin one (config_paths.builtinDir).
+            self.loadConfigsFromDir(dir, di + 1 < dirs.len) catch |err| {
                 std.log.warn("failed to scan config dir '{s}': {}", .{ dir, err });
             };
         }
+        // Bind once all dirs are loaded so a higher-priority config that does
+        // not match the device can fall through to a lower-priority one.
+        self.bindOnlineDevices(first, "/dev") catch |err| {
+            std.log.warn("failed to bind online devices: {}", .{err});
+        };
     }
 
     /// Test-only seam: like startFromDirs but uses caller-provided dev_root
     /// instead of /dev. Allows tests to bypass real /dev/hidraw* enumeration
     /// (which can hang on leaked virtual UHID devices on dev machines).
     pub fn startFromDirsWithRoot(self: *Supervisor, dirs: []const []const u8, dev_root: []const u8) !void {
-        for (dirs) |dir| {
-            try self.startFromDirWithRoot(dir, dev_root);
-        }
+        const first = self.configs.items.len;
+        for (dirs, 0..) |dir, di| try self.loadConfigsFromDir(dir, di + 1 < dirs.len);
+        try self.bindOnlineDevices(first, dev_root);
     }
 
     /// Drops suspended instances; suspended-preservation is the per-phys-key
@@ -2765,15 +2872,7 @@ pub const Supervisor = struct {
         const vid: u16 = @bitCast(info.vendor);
         const pid: u16 = @bitCast(info.product);
 
-        var cfg: ?*const DeviceConfig = null;
-        for (self.configs.items) |pr| {
-            if (@as(u16, @intCast(pr.value.device.vid)) == vid and
-                @as(u16, @intCast(pr.value.device.pid)) == pid)
-            {
-                cfg = &pr.value;
-                break;
-            }
-        }
+        const cfg: ?*const DeviceConfig = try self.selectConfigFor(devname, vid, pid);
         if (cfg == null) return;
 
         const iface_id = readInterfaceId(path) orelse {
@@ -6389,4 +6488,65 @@ test "supervisor: DUMP STATUS reply carries flight recorder fields" {
         "OK dump=on recorder_lines=7 last_flush=rumble-stuck last_flush_ms_ago=1234\n",
         flushed,
     );
+}
+
+test "supervisor: same-VID/PID configs are selected by USB layout across dirs (ADR-029)" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const old_toml = try std.fs.cwd().readFileAlloc(allocator, "devices/flydigi/vader5.toml", 1 << 20);
+    defer allocator.free(old_toml);
+    const new_toml = try std.fs.cwd().readFileAlloc(allocator, "devices/flydigi/vader5-if2.toml", 1 << 20);
+    defer allocator.free(new_toml);
+
+    // A stale user override of the old layout, plus both builtin layouts.
+    try tmp.dir.makePath("user");
+    try tmp.dir.makePath("builtin/flydigi");
+    try tmp.dir.writeFile(.{ .sub_path = "user/vader5.toml", .data = old_toml });
+    try tmp.dir.writeFile(.{ .sub_path = "builtin/flydigi/vader5.toml", .data = old_toml });
+    try tmp.dir.writeFile(.{ .sub_path = "builtin/flydigi/vader5-if2.toml", .data = new_toml });
+    try tmp.dir.makePath("sys");
+    var sys_dir = try tmp.dir.openDir("sys", .{});
+    defer sys_dir.close();
+    try usb_layout.fixtures.writeSysfs(sys_dir, "hidraw7", "1-4", &usb_layout.fixtures.vader5_new_firmware);
+    try usb_layout.fixtures.writeSysfs(sys_dir, "hidraw9", "1-5", &usb_layout.fixtures.vader5_old_firmware);
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fs.path.join(allocator, &.{ root, "user" });
+    defer allocator.free(user_dir);
+    const builtin_dir = try std.fs.path.join(allocator, &.{ root, "builtin" });
+    defer allocator.free(builtin_dir);
+    const sys_root = try std.fs.path.join(allocator, &.{ root, "sys" });
+    defer allocator.free(sys_root);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.sys_root = sys_root;
+
+    try sup.startFromDirsWithRoot(&.{ user_dir, builtin_dir }, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 3), sup.configs.items.len);
+    try testing.expect(std.mem.endsWith(u8, sup.config_meta.items[0].path, "user/vader5.toml"));
+    try testing.expect(sup.config_meta.items[0].is_override);
+    var builtin_old: ?*const DeviceConfig = null;
+    var builtin_new: ?*const DeviceConfig = null;
+    for (sup.config_meta.items[1..], sup.configs.items[1..]) |cm, pr| {
+        try testing.expect(!cm.is_override);
+        if (std.mem.endsWith(u8, cm.path, "flydigi/vader5.toml")) builtin_old = &pr.value;
+        if (std.mem.endsWith(u8, cm.path, "flydigi/vader5-if2.toml")) builtin_new = &pr.value;
+    }
+    try testing.expect(builtin_old != null);
+
+    // New firmware: the user override and the old builtin are skipped.
+    const on_new = (try sup.selectConfigFor("/dev/hidraw7", 0x37d7, 0x2401)) orelse return error.NoSelection;
+    try testing.expectEqual(builtin_new.?, on_new);
+    // Old firmware: the user override still wins.
+    const on_old = (try sup.selectConfigFor("/dev/hidraw9", 0x37d7, 0x2401)) orelse return error.NoSelection;
+    try testing.expectEqual(&sup.configs.items[0].value, on_old);
+    // No sysfs layout (e.g. Bluetooth): first candidate, as before.
+    const no_layout = (try sup.selectConfigFor("/dev/hidraw3", 0x37d7, 0x2401)) orelse return error.NoSelection;
+    try testing.expectEqual(&sup.configs.items[0].value, no_layout);
+    // Unknown VID/PID.
+    try testing.expect((try sup.selectConfigFor("/dev/hidraw7", 0x1234, 0x5678)) == null);
 }
