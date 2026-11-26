@@ -490,6 +490,14 @@ pub const Interpreter = struct {
         return delta;
     }
 
+    /// First `[[report]]` declared for an interface; null when it has none.
+    pub fn firstReportFor(self: *const Interpreter, interface_id: u8) ?*const ReportConfig {
+        for (self.compiled[0..self.report_count]) |*cr| {
+            if (cr.src.interface == @as(i64, interface_id)) return cr.src;
+        }
+        return null;
+    }
+
     pub fn matchReport(self: *const Interpreter, interface_id: u8, raw: []const u8) ?*const CompiledReport {
         for (self.compiled[0..self.report_count]) |*cr| {
             if (cr.src.interface != @as(i64, interface_id)) continue;

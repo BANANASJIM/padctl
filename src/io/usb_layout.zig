@@ -49,6 +49,20 @@ pub const UsbLayout = struct {
         return null;
     }
 
+    /// One line, e.g. "IF0 ff [81 05], IF1 03 [82]": the interface number, its
+    /// class and endpoint addresses, enough to rewrite a device config.
+    pub fn format(self: *const UsbLayout, writer: anytype) !void {
+        for (self.interfaces(), 0..) |*i, n| {
+            if (n > 0) try writer.writeAll(", ");
+            try writer.print("IF{d} {x:0>2} [", .{ i.number, i.class });
+            for (i.endpoints(), 0..) |ep, k| {
+                if (k > 0) try writer.writeByte(' ');
+                try writer.print("{x:0>2}", .{ep});
+            }
+            try writer.writeByte(']');
+        }
+    }
+
     fn endpointOwner(self: *const UsbLayout, ep: u8) ?u8 {
         for (self.interfaces()) |*i| {
             if (i.hasEndpoint(ep)) return i.number;
@@ -193,25 +207,58 @@ pub const Candidate = struct {
 };
 
 /// Pick the config for one physical device. `candidates` share its VID/PID and
-/// are in priority order (user > system > builtin, then path). Without a layout
-/// the first candidate wins, as before ADR-029. With one, the first candidate
-/// whose declared layout matches wins; skipped overrides are warned about.
-/// Returns null when none match.
+/// are in priority order (user > system > builtin). Without a layout the first
+/// candidate wins, as before ADR-029. With one, the first candidate whose
+/// declared layout matches wins. Returns null when none match.
 pub fn select(candidates: []const Candidate, layout: ?*const UsbLayout) ?usize {
     if (candidates.len == 0) return null;
     const l = layout orelse return 0;
     for (candidates, 0..) |c, idx| {
-        if (check(c.cfg.device.interface, l)) |m| {
-            if (c.is_override) {
-                std.log.warn("device config {s} skipped: {f}", .{ c.path, m });
-            } else {
-                std.log.debug("device config {s} skipped: {f}", .{ c.path, m });
-            }
-            continue;
-        }
-        return idx;
+        if (check(c.cfg.device.interface, l) == null) return idx;
     }
     return null;
+}
+
+/// Explain a `select` result. Skipped user/system overrides and a failed
+/// match are warnings and name every candidate's mismatch plus the actual
+/// layout, so a report can be fixed without asking for `lsusb`.
+pub fn logSelection(
+    vid: u16,
+    pid: u16,
+    candidates: []const Candidate,
+    layout: ?*const UsbLayout,
+    selected: ?usize,
+) void {
+    const l = layout orelse {
+        if (candidates.len > 1) std.log.info(
+            "{x:0>4}:{x:0>4}: USB layout unreadable; using the first of {d} configs, {s}",
+            .{ vid, pid, candidates.len, candidates[0].path },
+        );
+        return;
+    };
+    const idx = selected orelse {
+        std.log.warn(
+            "{x:0>4}:{x:0>4}: no device config matches this device's USB layout: {f}. The firmware likely differs from every config:",
+            .{ vid, pid, l },
+        );
+        for (candidates) |c| {
+            const m = check(c.cfg.device.interface, l) orelse continue;
+            std.log.warn("  {s}: {f}", .{ c.path, m });
+        }
+        return;
+    };
+    for (candidates[0..idx]) |c| {
+        const m = check(c.cfg.device.interface, l) orelse continue;
+        if (c.is_override) {
+            std.log.warn("{x:0>4}:{x:0>4}: skipping {s}: {f}", .{ vid, pid, c.path, m });
+        } else {
+            std.log.debug("{x:0>4}:{x:0>4}: skipping {s}: {f}", .{ vid, pid, c.path, m });
+        }
+    }
+    if (candidates.len > 1) std.log.info(
+        "{x:0>4}:{x:0>4}: using {s} (matches USB layout {f})",
+        .{ vid, pid, candidates[idx].path, l },
+    );
 }
 
 // --- tests ---
@@ -412,6 +459,23 @@ test "usb_layout: select keeps priority order among matching candidates" {
     const cands = [_]Candidate{ .{ .cfg = &a, .path = "a.toml" }, .{ .cfg = &b, .path = "b.toml" } };
     const l = parse(vader5NewFirmware(), 1).?;
     try testing.expectEqual(@as(?usize, 0), select(&cands, &l));
+}
+
+test "usb_layout: layout formats as one line per interface" {
+    const l = parse(vader5NewFirmware(), 1).?;
+    var buf: [128]u8 = undefined;
+    const out = try std.fmt.bufPrint(&buf, "{f}", .{&l});
+    try testing.expectEqualStrings("IF0 ff [81 05], IF1 03 [82], IF2 03 [83 06], IF3 03 [84]", out);
+}
+
+test "usb_layout: logSelection explains a failed match" {
+    // Exercises the no-match path; the warnings name every candidate.
+    const old_cfg = testConfig(&old_ifaces);
+    const cands = [_]Candidate{.{ .cfg = &old_cfg, .path = "builtin/vader5.toml" }};
+    const l = parse(vader5NewFirmware(), 1).?;
+    const idx = select(&cands, &l);
+    try testing.expectEqual(@as(?usize, null), idx);
+    logSelection(0x37d7, 0x2401, &cands, &l, idx);
 }
 
 test "usb_layout: readForHidraw follows sysfs from the hidraw node to the USB device" {

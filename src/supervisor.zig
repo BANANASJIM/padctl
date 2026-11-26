@@ -84,6 +84,16 @@ pub const ManagedInstance = struct {
 };
 
 /// Config snapshot used for hot-reload diffing.
+const SelectionLog = struct {
+    phys: []const u8,
+    selected: ?usize,
+    at_ns: u64,
+};
+
+/// Repeat a selection explanation for the same device only after this long,
+/// e.g. on a later replug.
+const selection_log_quiet_ns = 5 * std.time.ns_per_s;
+
 const ConfigMeta = struct {
     /// Owned.
     path: []u8,
@@ -246,6 +256,9 @@ pub const Supervisor = struct {
     config_meta: std.ArrayList(ConfigMeta) = .{},
     // sysfs root for reading USB layouts (ADR-029); tests point it at a fixture.
     sys_root: []const u8 = "/sys",
+    // Last logged config selection, so a device's hidraw nodes (which hotplug
+    // one by one) explain the choice once. Owned.
+    last_selection_log: ?SelectionLog = null,
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
@@ -506,6 +519,7 @@ pub const Supervisor = struct {
         self.configs.deinit(self.allocator);
         for (self.config_meta.items) |cm| self.allocator.free(cm.path);
         self.config_meta.deinit(self.allocator);
+        if (self.last_selection_log) |sl| self.allocator.free(sl.phys);
         var it = self.devname_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -2535,15 +2549,26 @@ pub const Supervisor = struct {
         if (candidates.items.len == 0) return null;
 
         const layout = usb_layout.readForHidraw(self.sys_root, std.fs.path.basename(devname));
-        const idx = usb_layout.select(candidates.items, if (layout) |*l| l else null) orelse {
-            std.log.warn(
-                "no device config matches the USB layout of {x:0>4}:{x:0>4}; the firmware likely differs " ++
-                    "from every config. Please share `lsusb -v -d {x:0>4}:{x:0>4}`",
-                .{ vid, pid, vid, pid },
-            );
-            return null;
-        };
-        return candidates.items[idx].cfg;
+        const layout_ptr: ?*const usb_layout.UsbLayout = if (layout) |*l| l else null;
+        const idx = usb_layout.select(candidates.items, layout_ptr);
+        if (self.shouldLogSelection(devname, idx)) {
+            usb_layout.logSelection(vid, pid, candidates.items, layout_ptr, idx);
+        }
+        return if (idx) |i| candidates.items[i].cfg else null;
+    }
+
+    fn shouldLogSelection(self: *Supervisor, devname: []const u8, selected: ?usize) bool {
+        const phys = readPhysicalPath(self.allocator, devname) catch return true;
+        const now = self.nowNs();
+        if (self.last_selection_log) |sl| {
+            if (std.mem.eql(u8, sl.phys, phys) and sl.selected == selected and now -| sl.at_ns < selection_log_quiet_ns) {
+                self.allocator.free(phys);
+                return false;
+            }
+            self.allocator.free(sl.phys);
+        }
+        self.last_selection_log = .{ .phys = phys, .selected = selected, .at_ns = now };
+        return true;
     }
 
     /// Bind online devices for configs[first..]. A hidraw node is handled by
@@ -6549,4 +6574,19 @@ test "supervisor: same-VID/PID configs are selected by USB layout across dirs (A
     try testing.expectEqual(&sup.configs.items[0].value, no_layout);
     // Unknown VID/PID.
     try testing.expect((try sup.selectConfigFor("/dev/hidraw7", 0x1234, 0x5678)) == null);
+}
+
+test "supervisor: a device's selection is explained once per plug" {
+    var sup = try Supervisor.initForTest(testing.allocator);
+    defer sup.deinit();
+    sup.test_now_override_ns = 1_000;
+
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 1));
+    // Sibling node of the same device, same outcome: quiet.
+    try testing.expect(!sup.shouldLogSelection("/dev/hidraw40", 1));
+    // Different outcome: explain again.
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", null));
+    // Same outcome after the quiet window (a later replug): explain again.
+    sup.test_now_override_ns = 1_000 + selection_log_quiet_ns;
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", null));
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const device_mod = @import("config/device.zig");
+const hexBytes = @import("diagnostics/hex_bytes.zig").hex;
 
 /// Parse a hex string like "5aa5 0102 03" into bytes (skipping spaces).
 pub fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
@@ -47,6 +48,26 @@ fn responseMatches(
         std.mem.startsWith(u8, response, command_prefix);
 }
 
+/// What arrived while waiting for an init ACK, for the failure report.
+pub const AckDiag = struct {
+    timeout_ms: u64 = 0,
+    frames: usize = 0,
+    last_buf: [16]u8 = undefined,
+    last_shown: usize = 0,
+    last_len: usize = 0,
+
+    fn record(self: *AckDiag, frame: []const u8) void {
+        self.frames += 1;
+        self.last_len = frame.len;
+        self.last_shown = @min(frame.len, self.last_buf.len);
+        @memcpy(self.last_buf[0..self.last_shown], frame[0..self.last_shown]);
+    }
+
+    pub fn last(self: *const AckDiag) []const u8 {
+        return self.last_buf[0..self.last_shown];
+    }
+};
+
 fn sendAndWaitPrefix(
     device: DeviceIO,
     bytes: []const u8,
@@ -54,6 +75,19 @@ fn sendAndWaitPrefix(
     command_prefix_len: usize,
     retries: u16,
     report_size: usize,
+) !void {
+    var diag = AckDiag{};
+    return sendAndWaitPrefixDiag(device, bytes, prefix, command_prefix_len, retries, report_size, &diag);
+}
+
+fn sendAndWaitPrefixDiag(
+    device: DeviceIO,
+    bytes: []const u8,
+    prefix: []const u8,
+    command_prefix_len: usize,
+    retries: u16,
+    report_size: usize,
+    diag: *AckDiag,
 ) !void {
     if (command_prefix_len > bytes.len or
         command_prefix_len > device_mod.MAX_INIT_COMMAND_SIZE)
@@ -89,6 +123,7 @@ fn sendAndWaitPrefix(
     var read_buf: [64]u8 = undefined;
     var timer = try std.time.Timer.start();
     const timeout_ns = @as(u64, retries) * init_poll_interval_ns;
+    diag.timeout_ms = timeout_ns / std.time.ns_per_ms;
     var ignored_count: usize = 0;
     while (timer.read() < timeout_ns) {
         const n = device.read(&read_buf) catch |err| switch (err) {
@@ -109,6 +144,7 @@ fn sendAndWaitPrefix(
             }
             return;
         }
+        diag.record(read_buf[0..n]);
         ignored_count += 1;
         if (ignored_count % init_drain_limit == 0) std.Thread.yield() catch {};
     }
@@ -119,6 +155,35 @@ fn sendAndWaitPrefix(
         );
     }
     return error.InitFailed;
+}
+
+fn logAckFailure(
+    interface: ?i64,
+    kind: []const u8,
+    index: usize,
+    cmd_hex: []const u8,
+    response_prefix: []const u8,
+    command_prefix: []const u8,
+    diag: *const AckDiag,
+) void {
+    var iface_buf: [24]u8 = undefined;
+    const iface: []const u8 = if (interface) |n|
+        std.fmt.bufPrint(&iface_buf, "interface {d}", .{n}) catch "the init interface"
+    else
+        "the init interface";
+    if (diag.frames == 0) {
+        std.log.warn(
+            "init: no ACK for {s} {d} ({s}) on {s} within {d} ms, and no data arrived at all; " ++
+                "the interface or endpoint in the device config likely does not match this firmware",
+            .{ kind, index, cmd_hex, iface, diag.timeout_ms },
+        );
+        return;
+    }
+    std.log.warn(
+        "init: no ACK for {s} {d} ({s}) on {s} within {d} ms; expected a reply starting {f} / {f}, " ++
+            "got {d} other frame(s), last ({d} bytes): {f}",
+        .{ kind, index, cmd_hex, iface, diag.timeout_ms, hexBytes(response_prefix), hexBytes(command_prefix), diag.frames, diag.last_len, hexBytes(diag.last()) },
+    );
 }
 
 /// Run device init handshake for a single DeviceIO.
@@ -158,12 +223,16 @@ pub fn runInitSequence(
     var total: usize = 0;
 
     if (init_config.commands) |cmds| {
-        for (cmds) |cmd| {
+        for (cmds, 0..) |cmd, idx| {
             const bytes = try parseHexBytes(allocator, cmd);
             defer allocator.free(bytes);
-            sendAndWaitPrefix(device, bytes, prefix, command_prefix_len, 50, report_size) catch |err| {
+            var diag = AckDiag{};
+            sendAndWaitPrefixDiag(device, bytes, prefix, command_prefix_len, 50, report_size, &diag) catch |err| {
                 if (err == error.InitFailed) {
-                    if (require_response) return err;
+                    if (require_response) {
+                        logAckFailure(init_config.interface, "command", idx, cmd, prefix, bytes[0..@min(command_prefix_len, bytes.len)], &diag);
+                        return err;
+                    }
                     std.log.debug("init command got no ack, continuing", .{});
                 } else return err;
             };
@@ -174,9 +243,13 @@ pub fn runInitSequence(
     if (init_config.enable) |enable_cmd| {
         const bytes = try parseHexBytes(allocator, enable_cmd);
         defer allocator.free(bytes);
-        sendAndWaitPrefix(device, bytes, prefix, command_prefix_len, 50, report_size) catch |err| {
+        var diag = AckDiag{};
+        sendAndWaitPrefixDiag(device, bytes, prefix, command_prefix_len, 50, report_size, &diag) catch |err| {
             if (err == error.InitFailed) {
-                if (require_response) return err;
+                if (require_response) {
+                    logAckFailure(init_config.interface, "enable", 0, enable_cmd, prefix, bytes[0..@min(command_prefix_len, bytes.len)], &diag);
+                    return err;
+                }
                 std.log.debug("enable command got no ack, continuing", .{});
             } else return err;
         };
@@ -716,4 +789,36 @@ test "init: runInitSequence: feature_report write errors propagate" {
     };
 
     try std.testing.expectError(DeviceIO.WriteError.Io, runInitSequence(allocator, failing.deviceIO(), init_cfg));
+}
+
+test "init: ACK timeout records what arrived instead" {
+    const allocator = std.testing.allocator;
+    const input_report = [_]u8{ 0x5a, 0xa5, 0xef, 0x00, 0x11 };
+    const command = [_]u8{ 0x5a, 0xa5, 0x01, 0x02, 0x03 };
+    var mock = WriteTriggeredDeviceIO.init(allocator, &.{}, &.{&input_report});
+    defer mock.deinit();
+
+    var diag = AckDiag{};
+    try std.testing.expectError(
+        error.InitFailed,
+        sendAndWaitPrefixDiag(mock.deviceIO(), &command, &.{ 0x5a, 0xa5 }, 3, 1, 0, &diag),
+    );
+    try std.testing.expectEqual(@as(usize, 1), diag.frames);
+    try std.testing.expectEqual(@as(usize, 5), diag.last_len);
+    try std.testing.expectEqualSlices(u8, &input_report, diag.last());
+    try std.testing.expectEqual(@as(u64, 10), diag.timeout_ms);
+}
+
+test "init: ACK timeout with a silent interface records no frames" {
+    const allocator = std.testing.allocator;
+    const command = [_]u8{ 0x5a, 0xa5, 0x01, 0x02, 0x03 };
+    var mock = WriteTriggeredDeviceIO.init(allocator, &.{}, &.{});
+    defer mock.deinit();
+
+    var diag = AckDiag{};
+    try std.testing.expectError(
+        error.InitFailed,
+        sendAndWaitPrefixDiag(mock.deviceIO(), &command, &.{ 0x5a, 0xa5 }, 3, 1, 0, &diag),
+    );
+    try std.testing.expectEqual(@as(usize, 0), diag.frames);
 }
