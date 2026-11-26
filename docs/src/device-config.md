@@ -28,8 +28,8 @@ reports). A `suppress` interface is claimed only to hide its nodes.
 
 Some firmware streams one interface only while another is being read (the
 Flydigi Vader 3 in DInput mode sends nothing on IF0 unless IF2 is read too).
-Declare the gating interface as well; padctl reads every declared non-suppress
-interface.
+Declare the gating interface as well: padctl keeps reading every `hid`
+interface and every `vendor` interface with `ep_in`.
 
 ### `[device.init]`
 
