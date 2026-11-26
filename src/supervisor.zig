@@ -86,6 +86,8 @@ pub const ManagedInstance = struct {
 /// Config snapshot used for hot-reload diffing.
 const SelectionLog = struct {
     phys: []const u8,
+    vid: u16,
+    pid: u16,
     selected: ?usize,
     at_ns: u64,
 };
@@ -2551,23 +2553,23 @@ pub const Supervisor = struct {
         const layout = usb_layout.readForHidraw(self.sys_root, std.fs.path.basename(devname));
         const layout_ptr: ?*const usb_layout.UsbLayout = if (layout) |*l| l else null;
         const idx = usb_layout.select(candidates.items, layout_ptr);
-        if (self.shouldLogSelection(devname, idx)) {
+        if (self.shouldLogSelection(devname, vid, pid, idx)) {
             usb_layout.logSelection(vid, pid, candidates.items, layout_ptr, idx);
         }
         return if (idx) |i| candidates.items[i].cfg else null;
     }
 
-    fn shouldLogSelection(self: *Supervisor, devname: []const u8, selected: ?usize) bool {
+    fn shouldLogSelection(self: *Supervisor, devname: []const u8, vid: u16, pid: u16, selected: ?usize) bool {
         const phys = readPhysicalPath(self.allocator, devname) catch return true;
         const now = self.nowNs();
         if (self.last_selection_log) |sl| {
-            if (std.mem.eql(u8, sl.phys, phys) and sl.selected == selected and now -| sl.at_ns < selection_log_quiet_ns) {
+            if (std.mem.eql(u8, sl.phys, phys) and sl.vid == vid and sl.pid == pid and sl.selected == selected and now -| sl.at_ns < selection_log_quiet_ns) {
                 self.allocator.free(phys);
                 return false;
             }
             self.allocator.free(sl.phys);
         }
-        self.last_selection_log = .{ .phys = phys, .selected = selected, .at_ns = now };
+        self.last_selection_log = .{ .phys = phys, .vid = vid, .pid = pid, .selected = selected, .at_ns = now };
         return true;
     }
 
@@ -6587,12 +6589,14 @@ test "supervisor: a device's selection is explained once per plug" {
     defer sup.deinit();
     sup.test_now_override_ns = 1_000;
 
-    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 1));
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, 1));
     // Sibling node of the same device, same outcome: quiet.
-    try testing.expect(!sup.shouldLogSelection("/dev/hidraw40", 1));
+    try testing.expect(!sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, 1));
+    // Another PID under the same physical path: explain it too.
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2402, 1));
     // Different outcome: explain again.
-    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", null));
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, null));
     // Same outcome after the quiet window (a later replug): explain again.
     sup.test_now_override_ns = 1_000 + selection_log_quiet_ns;
-    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", null));
+    try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, null));
 }

@@ -179,14 +179,23 @@ fn logAckFailure(
         );
         return;
     }
-    // An ACK must start with both prefixes; the command prefix normally
-    // begins with the response prefix, so the longer one says it all.
-    const expected = if (command_prefix.len > response_prefix.len) command_prefix else response_prefix;
-    std.log.warn(
-        "init: no ACK for {s} {d} ({s}) on {s} within {d} ms; expected a reply starting {f}, " ++
-            "got {d} other frame(s), last ({d} bytes): {f}",
-        .{ kind, index, cmd_hex, iface, diag.timeout_ms, hexBytes(expected), diag.frames, diag.last_len, hexBytes(diag.last()) },
-    );
+    // An ACK must start with both prefixes. Usually one begins with the other
+    // and the longer says it all; otherwise show both, since no reply can match.
+    const longer = if (command_prefix.len > response_prefix.len) command_prefix else response_prefix;
+    const shorter = if (command_prefix.len > response_prefix.len) response_prefix else command_prefix;
+    if (std.mem.startsWith(u8, longer, shorter)) {
+        std.log.warn(
+            "init: no ACK for {s} {d} ({s}) on {s} within {d} ms; expected a reply starting {f}, " ++
+                "got {d} other frame(s), last ({d} bytes): {f}",
+            .{ kind, index, cmd_hex, iface, diag.timeout_ms, hexBytes(longer), diag.frames, diag.last_len, hexBytes(diag.last()) },
+        );
+    } else {
+        std.log.warn(
+            "init: no ACK for {s} {d} ({s}) on {s} within {d} ms; a reply must start with both {f} and {f}, " ++
+                "which no reply can; check response_prefix. Got {d} frame(s), last ({d} bytes): {f}",
+            .{ kind, index, cmd_hex, iface, diag.timeout_ms, hexBytes(response_prefix), hexBytes(command_prefix), diag.frames, diag.last_len, hexBytes(diag.last()) },
+        );
+    }
 }
 
 /// Run device init handshake for a single DeviceIO.

@@ -630,7 +630,7 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
             } else {
                 try printProvenance(writer, ms);
                 if (ms.len > 1) try writer.writeAll(if (connected)
-                    "  note: USB layout unreadable; padctl uses the first config listed\n"
+                    "  note: doctor could not read the USB layout; without one, padctl uses the first config listed\n"
                 else
                     "  note: with the device connected, padctl picks among these by USB layout\n");
             }

@@ -473,11 +473,13 @@ fn logUnmatchedReports(tag: []const u8, interface_id: u8, reason: interpreter_mo
     const tail = " Last frame ({d} bytes): {f}.";
     switch (reason) {
         .too_short => |r| std.log.warn(
-            head ++ "they match [[report]] \"{s}\" but are shorter than its size {d}; the firmware sends a shorter report." ++ tail,
+            head ++ "the last one matches [[report]] \"{s}\" but is shorter than its size {d}. If the controller is on " ++
+                "and inputs do not work, the firmware likely sends a shorter report." ++ tail,
             .{ tag, interface_id, report_watch.threshold, r.name, r.size, w.last_len, hexBytes(w.last()) },
         ),
         .bad_checksum => |r| std.log.warn(
-            head ++ "they match [[report]] \"{s}\" but fail its checksum; check [report.checksum]." ++ tail,
+            head ++ "the last one matches [[report]] \"{s}\" but fails its checksum. If the controller is on " ++
+                "and inputs do not work, check [report.checksum]." ++ tail,
             .{ tag, interface_id, report_watch.threshold, r.name, w.last_len, hexBytes(w.last()) },
         ),
         .no_bytes_match => |r| {
