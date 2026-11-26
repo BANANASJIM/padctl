@@ -88,6 +88,27 @@ pub const RingBuffer = struct {
     }
 };
 
+// libusb_open_device_with_vid_pid returns NULL for every failure, so a device
+// whose node the daemon may not open looked identical to an unplugged one.
+fn openByVidPid(ctx: *c.libusb_context, vid: u16, pid: u16) !*c.libusb_device_handle {
+    var list: [*c]?*c.libusb_device = undefined;
+    const count = c.libusb_get_device_list(ctx, &list);
+    if (count < 0) return error.NotFound;
+    defer c.libusb_free_device_list(list, 1);
+
+    var open_rc: c_int = c.LIBUSB_ERROR_NOT_FOUND;
+    for (list[0..@intCast(count)]) |maybe_dev| {
+        const dev = maybe_dev orelse continue;
+        var desc: c.libusb_device_descriptor = undefined;
+        if (c.libusb_get_device_descriptor(dev, &desc) != 0) continue;
+        if (desc.idVendor != vid or desc.idProduct != pid) continue;
+        var handle: ?*c.libusb_device_handle = null;
+        open_rc = c.libusb_open(dev, &handle);
+        if (open_rc == 0) return handle.?;
+    }
+    return if (open_rc == c.LIBUSB_ERROR_ACCESS) error.AccessDenied else error.NotFound;
+}
+
 // Init libusb, open the device, detach any kernel driver, and claim the
 // interface. On any failure the partially-acquired state is rolled back and
 // the error is returned; on success the caller owns ctx + handle and the
@@ -101,9 +122,9 @@ fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
     var ctx: ?*c.libusb_context = null;
     if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
 
-    const handle = c.libusb_open_device_with_vid_pid(ctx, vid, pid) orelse {
+    const handle = openByVidPid(ctx.?, vid, pid) catch |err| {
         c.libusb_exit(ctx);
-        return error.NotFound;
+        return err;
     };
 
     _ = c.libusb_detach_kernel_driver(handle, interface_id);
@@ -126,7 +147,8 @@ pub const UsbrawDevice = struct {
     // thread exists, so the device never produces input and never signals
     // disconnect from the read side. Disconnect still surfaces from write().
     ep_in: ?u8,
-    ep_out: u8,
+    // null for a read-only interface; write() then reports Io.
+    ep_out: ?u8,
     interface_id: i32,
     pipe_r: std.posix.fd_t,
     pipe_w: std.posix.fd_t,
@@ -142,7 +164,7 @@ pub const UsbrawDevice = struct {
         pid: u16,
         interface_id: u8,
         ep_in: ?u8,
-        ep_out: u8,
+        ep_out: ?u8,
     ) !*UsbrawDevice {
         const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
         const ctx = claimed.ctx;
@@ -247,13 +269,14 @@ pub const UsbrawDevice = struct {
 
     fn write(ptr: *anyopaque, data: []const u8) DeviceIO.WriteError!void {
         const self: *UsbrawDevice = @ptrCast(@alignCast(ptr));
+        const ep_out = self.ep_out orelse return DeviceIO.WriteError.Io;
         var transferred: c_int = 0;
         // libusb wants a mutable pointer even for writes
         var buf: [RingBuffer.SLOT_SIZE]u8 = undefined;
         const n = checkedInterruptWriteLength(data.len, buf.len) catch {
             if (!is_test) std.log.warn(
                 "usbraw: refusing oversized interrupt write: endpoint=0x{x} requested={d} max={d}",
-                .{ self.ep_out, data.len, buf.len },
+                .{ ep_out, data.len, buf.len },
             );
             return DeviceIO.WriteError.Io;
         };
@@ -261,7 +284,7 @@ pub const UsbrawDevice = struct {
 
         const rc = c.libusb_interrupt_transfer(
             self.handle,
-            self.ep_out,
+            ep_out,
             &buf,
             @intCast(n),
             &transferred,
@@ -272,12 +295,12 @@ pub const UsbrawDevice = struct {
                 if (rc == 0) {
                     std.log.warn(
                         "usbraw: incomplete interrupt write: endpoint=0x{x} expected={d} transferred={d}",
-                        .{ self.ep_out, n, transferred },
+                        .{ ep_out, n, transferred },
                     );
                 } else if (rc != c.LIBUSB_ERROR_NO_DEVICE) {
                     std.log.debug(
                         "usbraw: interrupt write failed: endpoint=0x{x} rc={d} expected={d} transferred={d}",
-                        .{ self.ep_out, rc, n, transferred },
+                        .{ ep_out, rc, n, transferred },
                     );
                 }
             }

@@ -75,7 +75,7 @@ fn closedClose(_: *anyopaque) void {}
 /// one can never satisfy it.
 fn initTargetsInterface(init_cfg: device_cfg.InitConfig, iface: InterfaceConfig) bool {
     if (init_cfg.interface) |init_iface| return iface.id == init_iface;
-    return std.mem.eql(u8, iface.class, "vendor") and iface.ep_in != null;
+    return std.mem.eql(u8, iface.class, "vendor") and iface.ep_in != null and iface.ep_out != null;
 }
 
 fn createDeviceIO(
@@ -95,10 +95,11 @@ fn createDeviceIO(
         };
         return dev.deviceIO();
     } else if (std.mem.eql(u8, iface.class, "vendor")) {
-        // ep_in may be absent: a write-only interface carries output commands
-        // (e.g. rumble) without contributing input reports.
+        // Either endpoint may be absent: a write-only interface carries output
+        // commands (e.g. rumble), a read-only one only streams input reports.
         const ep_in: ?u8 = if (iface.ep_in) |e| @intCast(e) else null;
-        const ep_out: u8 = @intCast(iface.ep_out orelse return error.MissingEndpoint);
+        const ep_out: ?u8 = if (iface.ep_out) |e| @intCast(e) else null;
+        if (ep_in == null and ep_out == null) return error.MissingEndpoint;
         const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
         return dev.deviceIO();
     }
@@ -1130,12 +1131,28 @@ test "openDeviceWithRetry: a vendor interface without ep_in is not rejected as a
         try testing.expect(err != error.MissingEndpoint);
     }
 
-    var missing_out = write_only;
-    missing_out.ep_out = null;
+    var no_endpoints = write_only;
+    no_endpoints.ep_out = null;
     try testing.expectError(
         error.MissingEndpoint,
-        openDeviceWithRetry(testing.allocator, missing_out, 0xffff, 0xffff),
+        openDeviceWithRetry(testing.allocator, no_endpoints, 0xffff, 0xffff),
     );
+}
+
+// issue #528: the Flydigi Vader 3's input interface has only an IN endpoint.
+test "openDeviceWithRetry: a vendor interface without ep_out is not rejected as a config error" {
+    const read_only = InterfaceConfig{
+        .id = 0,
+        .class = "vendor",
+        .ep_in = 0x81,
+        .ep_out = null,
+    };
+    if (openDeviceWithRetry(testing.allocator, read_only, 0xffff, 0xffff)) |dev| {
+        dev.close();
+        return error.UnexpectedOpenSuccess;
+    } else |err| {
+        try testing.expect(err != error.MissingEndpoint);
+    }
 }
 
 test "DeviceInstance.init propagates init write errors" {

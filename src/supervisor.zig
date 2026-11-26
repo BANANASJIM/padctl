@@ -2696,7 +2696,7 @@ pub const Supervisor = struct {
 
     fn isLibusbClaimError(err: anyerror) bool {
         return switch (err) {
-            error.NotFound, error.Busy, error.ClaimFailed => true,
+            error.AccessDenied, error.NotFound, error.Busy, error.ClaimFailed => true,
             else => false,
         };
     }
