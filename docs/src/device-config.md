@@ -42,6 +42,27 @@ interface. Configs in `~/.config/padctl/devices` are tried before
 match is skipped with a warning. `padctl doctor`
 shows which file was selected and why the others were skipped.
 
+#### Telling apart pads behind one receiver: `[device.probe]`
+
+Some receivers report one VID/PID and USB layout whatever pad is paired
+(Flydigi's V1 dongle, `04b4:2412`). When several configs match the same layout
+and one declares `[device.probe]`, padctl sends that query on the interface's
+hidraw node before choosing, reads the model ID from the reply, and picks the
+config whose `ids` list it.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `interface` | integer | Interface whose hidraw node receives the query; must be declared |
+| `command` | hex string | Query bytes, report ID first |
+| `reply` | `{ offset, expect }` | How to recognise the reply, like `[report.match]` |
+| `id_offset` | integer | Reply byte holding the model ID |
+| `ids` | integer array | Model IDs this config is for |
+
+The query of the first matching config that declares one is used; the others
+only need their `ids`. If the pad does not answer within about 6 s (for example
+it is off) or reports an ID no config lists, padctl uses the first matching
+config and logs a warning saying it guessed.
+
 ### `[device.init]`
 
 Optional initialization sequence sent after device open.

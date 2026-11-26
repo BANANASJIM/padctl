@@ -14,6 +14,9 @@ const config_device = @import("config/device.zig");
 const Mapper = @import("core/mapper.zig").Mapper;
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
+const readInterfaceIdWithRoot = @import("io/hidraw.zig").readInterfaceIdWithRoot;
+const model_probe = @import("io/model_probe.zig");
+const hexBytes = @import("diagnostics/hex_bytes.zig").hex;
 const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
 const usb_layout = @import("io/usb_layout.zig");
 const netlink = @import("io/netlink.zig");
@@ -84,6 +87,31 @@ pub const ManagedInstance = struct {
 };
 
 /// Config snapshot used for hot-reload diffing.
+const ProbeState = struct {
+    id: ?u8 = null,
+    at_ns: u64 = 0,
+    first_fail_ns: ?u64 = null,
+    last_try_ns: u64 = 0,
+    /// Set when retries ran out, so the device's other nodes reuse the guess.
+    gave_up_ns: ?u64 = null,
+};
+
+const ProbeOutcome = struct {
+    id: ?u8,
+    no_reply: model_probe.NoReply = .{},
+    /// Why no ID, when there is none.
+    reason: []const u8 = "",
+};
+
+/// Reuse a probed model ID for the device's other hidraw nodes.
+const probe_cache_ns = 5 * std.time.ns_per_s;
+/// Keep retrying an unanswered probe this long (within the hotplug retry
+/// budget) before guessing; covers a pad that is still waking up.
+const probe_give_up_ns = 6 * std.time.ns_per_s;
+/// A probe blocks the supervisor for up to ~300 ms; while unanswered, retry it
+/// at most this often however many hidraw nodes the device has.
+const probe_retry_ns = std.time.ns_per_s;
+
 const SelectionLog = struct {
     phys: []const u8,
     vid: u16,
@@ -261,6 +289,10 @@ pub const Supervisor = struct {
     // Last logged config selection, so a device's hidraw nodes (which hotplug
     // one by one) explain the choice once. Owned.
     last_selection_log: ?SelectionLog = null,
+    // Model probe results per "VID:PID@phys" (ADR-030). Keys owned.
+    probe_state: std.StringHashMapUnmanaged(ProbeState) = .{},
+    // Where to look for the probe's hidraw node; tests point it at a fixture.
+    probe_dev_root: []const u8 = "/dev",
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
@@ -522,6 +554,9 @@ pub const Supervisor = struct {
         for (self.config_meta.items) |cm| self.allocator.free(cm.path);
         self.config_meta.deinit(self.allocator);
         if (self.last_selection_log) |sl| self.allocator.free(sl.phys);
+        var pit = self.probe_state.keyIterator();
+        while (pit.next()) |k| self.allocator.free(k.*);
+        self.probe_state.deinit(self.allocator);
         var it = self.devname_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -2552,11 +2587,118 @@ pub const Supervisor = struct {
 
         const layout = usb_layout.readForHidraw(self.sys_root, std.fs.path.basename(devname));
         const layout_ptr: ?*const usb_layout.UsbLayout = if (layout) |*l| l else null;
-        const idx = usb_layout.select(candidates.items, layout_ptr);
+        var idx = usb_layout.select(candidates.items, layout_ptr);
+
+        // Several configs fit the same layout: ask the device which model it is.
+        var model: ?struct { choice: usb_layout.ModelChoice, outcome: ProbeOutcome } = null;
+        if (layout_ptr) |l| if (idx != null) {
+            var matched_buf: [16]usize = undefined;
+            const matched = usb_layout.matching(candidates.items, l, &matched_buf);
+            if (usb_layout.probeFor(candidates.items, matched)) |probe| {
+                const outcome = try self.probeModel(devname, vid, pid, probe);
+                const choice = usb_layout.chooseByModel(candidates.items, matched, outcome.id);
+                idx = switch (choice) {
+                    inline else => |i| i,
+                };
+                model = .{ .choice = choice, .outcome = outcome };
+            }
+        };
+
         if (self.shouldLogSelection(devname, vid, pid, idx)) {
             usb_layout.logSelection(vid, pid, candidates.items, layout_ptr, idx);
+            if (model) |m| logModelChoice(vid, pid, candidates.items, m.choice, m.outcome);
         }
         return if (idx) |i| candidates.items[i].cfg else null;
+    }
+
+    /// Run (or reuse) the model probe for the physical device behind `devname`.
+    /// error.HotplugTransient while an unanswered probe is still within its
+    /// retry window; afterwards an outcome without an ID.
+    fn probeModel(self: *Supervisor, devname: []const u8, vid: u16, pid: u16, probe: *const config_device.ProbeConfig) !ProbeOutcome {
+        const phys = try readPhysicalPath(self.allocator, devname);
+        defer self.allocator.free(phys);
+        const key = try std.fmt.allocPrint(self.allocator, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys });
+        const gop = self.probe_state.getOrPut(self.allocator, key) catch |err| {
+            self.allocator.free(key);
+            return err;
+        };
+        if (gop.found_existing) self.allocator.free(key) else gop.value_ptr.* = .{};
+        const st = gop.value_ptr;
+        const now = self.nowNs();
+        if (st.id) |id| {
+            if (now -| st.at_ns < probe_cache_ns) return .{ .id = id };
+        }
+        if (st.gave_up_ns) |t| {
+            if (now -| t < probe_cache_ns) return .{ .id = null, .reason = "no reply" };
+            st.* = .{};
+        }
+
+        if (st.first_fail_ns != null and now -| st.last_try_ns < probe_retry_ns and
+            now -| st.first_fail_ns.? < probe_give_up_ns) return error.HotplugTransient;
+        st.last_try_ns = now;
+        var outcome = self.runProbeOn(phys, vid, pid, probe);
+        if (outcome.id) |id| {
+            st.* = .{ .id = id, .at_ns = now };
+            return outcome;
+        }
+        const first = st.first_fail_ns orelse blk: {
+            st.first_fail_ns = now;
+            break :blk now;
+        };
+        if (now -| first < probe_give_up_ns) {
+            std.log.debug("{x:0>4}:{x:0>4}: model probe got no reply ({s}); retrying", .{ vid, pid, outcome.reason });
+            return error.HotplugTransient;
+        }
+        // Give up for this plug; a later replug probes afresh.
+        st.* = .{ .gave_up_ns = now };
+        if (outcome.reason.len == 0) outcome.reason = "no reply";
+        return outcome;
+    }
+
+    fn runProbeOn(self: *Supervisor, phys: []const u8, vid: u16, pid: u16, probe: *const config_device.ProbeConfig) ProbeOutcome {
+        const iface: u8 = std.math.cast(u8, probe.interface) orelse return .{ .id = null, .reason = "invalid probe interface" };
+        const paths = HidrawDevice.discoverAllWithRoot(self.allocator, vid, pid, self.probe_dev_root) catch
+            return .{ .id = null, .reason = "cannot list hidraw nodes" };
+        defer {
+            for (paths) |p| self.allocator.free(p);
+            self.allocator.free(paths);
+        }
+        for (paths) |path| {
+            if (readInterfaceIdWithRoot(path, self.sys_root) != iface) continue;
+            const node_phys = readPhysicalPath(self.allocator, path) catch continue;
+            defer self.allocator.free(node_phys);
+            if (!std.mem.eql(u8, node_phys, phys)) continue;
+
+            const dev = self.allocator.create(HidrawDevice) catch return .{ .id = null, .reason = "out of memory" };
+            dev.* = HidrawDevice.init(self.allocator);
+            dev.open(path) catch |err| {
+                self.allocator.destroy(dev);
+                return .{ .id = null, .reason = @errorName(err) };
+            };
+            const io = dev.deviceIO();
+            defer io.close();
+            return switch (model_probe.run(io, probe)) {
+                .id => |id| .{ .id = id },
+                .no_reply => |nr| .{ .id = null, .no_reply = nr, .reason = if (nr.frames == 0) "no data on the probe interface" else "no matching reply" },
+            };
+        }
+        return .{ .id = null, .reason = "probe interface has no hidraw node" };
+    }
+
+    fn logModelChoice(vid: u16, pid: u16, candidates: []const usb_layout.Candidate, choice: usb_layout.ModelChoice, outcome: ProbeOutcome) void {
+        switch (choice) {
+            .listed => |i| std.log.info("{x:0>4}:{x:0>4}: model ID {d} -> {s}", .{ vid, pid, outcome.id.?, candidates[i].path }),
+            .unlisted => |i| std.log.warn(
+                "{x:0>4}:{x:0>4}: model ID {d} is not listed in any config's [device.probe] ids; guessing {s}. " ++
+                    "If inputs are wrong, add the ID to the right config.",
+                .{ vid, pid, outcome.id.?, candidates[i].path },
+            ),
+            .unidentified => |i| std.log.warn(
+                "{x:0>4}:{x:0>4}: model not identified ({s}; {d} other frame(s), last: {f}); guessing {s}. " ++
+                    "If inputs are wrong, check [device.probe] or replug with the controller on.",
+                .{ vid, pid, outcome.reason, outcome.no_reply.frames, hexBytes(outcome.no_reply.last()), candidates[i].path },
+            ),
+        }
     }
 
     fn shouldLogSelection(self: *Supervisor, devname: []const u8, vid: u16, pid: u16, selected: ?usize) bool {
@@ -2571,6 +2713,18 @@ pub const Supervisor = struct {
         }
         self.last_selection_log = .{ .phys = phys, .vid = vid, .pid = pid, .selected = selected, .at_ns = now };
         return true;
+    }
+
+    /// selectConfigFor for the cold scan: a selection that must wait (model
+    /// probe unanswered) is handed to the hotplug retry path.
+    fn selectOrDefer(self: *Supervisor, hidraw_path: []const u8, vid: u16, pid: u16) !?*const DeviceConfig {
+        return self.selectConfigFor(hidraw_path, vid, pid) catch |err| switch (err) {
+            error.HotplugTransient => {
+                self.enqueueHotplugRetryForPath(hidraw_path);
+                return null;
+            },
+            else => return err,
+        };
     }
 
     /// Bind online devices for configs[first..]. A hidraw node is handled by
@@ -2624,7 +2778,7 @@ pub const Supervisor = struct {
                     // Composite receivers expose children with other PIDs
                     // under one physical path, so the key includes VID:PID.
                     const key = blk2: {
-                        const phys = readPhysicalPath(self.allocator, hidraw_path) catch break :blk try self.selectConfigFor(hidraw_path, vid, pid);
+                        const phys = readPhysicalPath(self.allocator, hidraw_path) catch break :blk try self.selectOrDefer(hidraw_path, vid, pid);
                         defer self.allocator.free(phys);
                         break :blk2 try std.fmt.allocPrint(self.allocator, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys });
                     };
@@ -2635,7 +2789,7 @@ pub const Supervisor = struct {
                     if (gop.found_existing) {
                         self.allocator.free(key);
                     } else {
-                        gop.value_ptr.* = self.selectConfigFor(hidraw_path, vid, pid) catch |err| {
+                        gop.value_ptr.* = self.selectOrDefer(hidraw_path, vid, pid) catch |err| {
                             _ = selected_for.remove(key);
                             self.allocator.free(key);
                             return err;
@@ -6599,4 +6753,35 @@ test "supervisor: a device's selection is explained once per plug" {
     // Same outcome after the quiet window (a later replug): explain again.
     sup.test_now_override_ns = 1_000 + selection_log_quiet_ns;
     try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, null));
+}
+
+test "supervisor: an unanswered model probe retries, then gives up for the plug (ADR-030)" {
+    var sup = try Supervisor.initForTest(testing.allocator);
+    defer sup.deinit();
+    sup.probe_dev_root = "/nonexistent_dev_root_xyz";
+    const probe = config_device.ProbeConfig{
+        .interface = 2,
+        .command = "05 ec",
+        .reply = .{ .offset = 15, .expect = &.{0xec} },
+        .id_offset = 3,
+        .ids = &.{84},
+    };
+    const s = std.time.ns_per_s;
+
+    sup.test_now_override_ns = 1;
+    try testing.expectError(error.HotplugTransient, sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe));
+    // Throttled: a sibling node within a second does not probe again.
+    sup.test_now_override_ns = 1 + s / 2;
+    try testing.expectError(error.HotplugTransient, sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe));
+    // Past the retry window: no ID, with the reason.
+    sup.test_now_override_ns = 1 + probe_give_up_ns;
+    const gave_up = try sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe);
+    try testing.expectEqual(@as(?u8, null), gave_up.id);
+    try testing.expectEqualStrings("probe interface has no hidraw node", gave_up.reason);
+    // Other nodes of the same plug reuse the outcome without probing.
+    sup.test_now_override_ns = 2 + probe_give_up_ns;
+    try testing.expectEqual(@as(?u8, null), (try sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe)).id);
+    // A later replug probes afresh.
+    sup.test_now_override_ns = 2 + probe_give_up_ns + probe_cache_ns;
+    try testing.expectError(error.HotplugTransient, sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe));
 }

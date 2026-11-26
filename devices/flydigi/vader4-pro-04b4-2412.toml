@@ -8,6 +8,16 @@ pid = 0x2412
 id = 2
 class = "hid"
 
+# Every V1 pad shares this dongle identity and USB layout; padctl asks the pad
+# for its model (SDL_hidapi_flydigi.c: report 05 ec, reply byte 15 = 0xec,
+# model ID at byte 3) to pick the right config (ADR-030).
+[device.probe]
+interface = 2
+command = "05 ec 00 00 00 00 00 00 00 00 00 00"
+reply = { offset = 15, expect = [0xec] }
+id_offset = 3
+ids = [85, 91, 105]
+
 # --- Extended input (Report ID 0x04, 32 bytes) ---
 [[report]]
 name = "extended"
