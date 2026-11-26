@@ -15,6 +15,7 @@ class = "hid"
 interface = 2
 command = "05 ec 00 00 00 00 00 00 00 00 00 00"
 reply = { offset = 15, expect = [0xec] }
+reply_size = 32
 id_offset = 3
 ids = [85, 91, 105]
 

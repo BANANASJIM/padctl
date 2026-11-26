@@ -245,19 +245,28 @@ pub fn probeFor(candidates: []const Candidate, matched: []const usize) ?*const c
 pub const ModelChoice = union(enum) {
     /// A candidate lists this model ID.
     listed: usize,
+    /// A user/system override without `ids` ahead of any listing candidate.
+    override: usize,
     /// The model was identified but no candidate lists it; first match is a guess.
     unlisted: usize,
     /// No model ID; first match is a guess.
     unidentified: usize,
 };
 
-/// Choose among layout-matched candidates by the probed model ID.
+/// Choose among layout-matched candidates by the probed model ID. A user or
+/// system override without `ids` keeps its priority (ADR-029): it was written
+/// for this device before probing existed, so it wins over listed builtins.
 pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: ?u8) ModelChoice {
     std.debug.assert(matched.len > 0);
     const model = id orelse return .{ .unidentified = matched[0] };
     for (matched) |idx| {
-        const p = candidates[idx].cfg.device.probe orelse continue;
-        for (p.ids) |listed| {
+        const c = candidates[idx];
+        const ids: []const i64 = if (c.cfg.device.probe) |p| p.ids else &.{};
+        if (ids.len == 0) {
+            if (c.is_override) return .{ .override = idx };
+            continue;
+        }
+        for (ids) |listed| {
             if (listed == model) return .{ .listed = idx };
         }
     }
@@ -553,6 +562,21 @@ test "usb_layout: chooseByModel picks the candidate listing the model" {
     try testing.expectEqual(@as(usize, 1), chooseByModel(&cands, matched, 91).listed);
     try testing.expectEqual(@as(usize, 0), chooseByModel(&cands, matched, 19).unlisted);
     try testing.expectEqual(@as(usize, 0), chooseByModel(&cands, matched, null).unidentified);
+
+    // A user override without ids, ahead of the builtins, keeps priority.
+    const user_copy = testConfig(&hid2);
+    const with_override = [_]Candidate{
+        .{ .cfg = &user_copy, .path = "user/vader4.toml", .is_override = true },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+        .{ .cfg = &vader4, .path = "vader4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 0), chooseByModel(&with_override, &.{ 0, 1, 2 }, 84).override);
+    // A builtin without ids is not a catch-all.
+    const plain_builtin = [_]Candidate{
+        .{ .cfg = &user_copy, .path = "other.toml" },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&plain_builtin, &.{ 0, 1 }, 84).listed);
 }
 
 test "usb_layout: probeFor needs two matches and a declared probe" {

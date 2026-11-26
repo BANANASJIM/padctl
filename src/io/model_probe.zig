@@ -11,7 +11,11 @@ const poll_interval_ns = 2 * std.time.ns_per_ms;
 /// How long to wait for a reply after each send.
 pub const reply_window_ms = 100;
 /// Sends per probe; a pad waking from sleep may miss the first.
-pub const attempts = 3;
+pub const attempts = 4;
+/// Replies that must agree before an ID is trusted. An input frame can match
+/// the reply pattern by chance (Flydigi: byte 15 is accelerometer data), but
+/// not twice with the same ID.
+const confirmations = 2;
 
 pub const Result = union(enum) {
     id: u8,
@@ -38,6 +42,7 @@ pub const NoReply = struct {
 
 /// The model ID in `frame` if it is the probe's reply.
 pub fn parseReply(probe: *const ProbeConfig, frame: []const u8) ?u8 {
+    if (probe.reply_size) |n| if (frame.len != @as(usize, @intCast(n))) return null;
     const off: usize = @intCast(probe.reply.offset);
     if (frame.len < off + probe.reply.expect.len) return null;
     for (probe.reply.expect, 0..) |b, i| {
@@ -78,8 +83,14 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64) Re
     var cmd_buf: [64]u8 = undefined;
     const cmd = encodeCommand(probe, &cmd_buf) orelse return .{ .no_reply = none };
     var read_buf: [64]u8 = undefined;
+    // IDs seen so far and how often; a real reply repeats on every send.
+    var seen_ids: [attempts * 2]u8 = undefined;
+    var seen_counts: [attempts * 2]u8 = undefined;
+    var seen: usize = 0;
+    var single: ?u8 = null;
     for (0..attempts) |_| {
-        device.write(cmd) catch return .{ .no_reply = none };
+        // Writes occasionally fail on these receivers; resend (as SDL does).
+        device.write(cmd) catch continue;
         var timer = std.time.Timer.start() catch return .{ .no_reply = none };
         while (timer.read() < window_ms * std.time.ns_per_ms) {
             const n = device.read(&read_buf) catch |err| switch (err) {
@@ -89,10 +100,29 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64) Re
                 },
                 else => return .{ .no_reply = none },
             };
-            if (parseReply(probe, read_buf[0..n])) |id| return .{ .id = id };
-            none.record(read_buf[0..n]);
+            const id = parseReply(probe, read_buf[0..n]) orelse {
+                none.record(read_buf[0..n]);
+                continue;
+            };
+            const slot = for (seen_ids[0..seen], 0..) |s, k| {
+                if (s == id) break k;
+            } else blk: {
+                if (seen == seen_ids.len) break :blk null;
+                seen_ids[seen] = id;
+                seen_counts[seen] = 0;
+                seen += 1;
+                break :blk seen - 1;
+            };
+            if (slot) |k| {
+                seen_counts[k] += 1;
+                if (seen_counts[k] >= confirmations) return .{ .id = id };
+            }
+            if (single == null) single = id;
+            break; // next send
         }
     }
+    // A device that answered only once: trust a lone ID, not a conflict.
+    if (seen == 1) return .{ .id = single.? };
     return .{ .no_reply = none };
 }
 
@@ -105,6 +135,7 @@ const ReplyMock = struct {
     frames: []const []const u8,
     idx: usize = 0,
     writes: usize = 0,
+    fail_writes: usize = 0,
 
     fn init(_: std.mem.Allocator, _: []const []const u8, frames: []const []const u8) ReplyMock {
         return .{ .frames = frames };
@@ -125,6 +156,10 @@ const ReplyMock = struct {
     }
     fn write(ptr: *anyopaque, _: []const u8) DeviceIO.WriteError!void {
         const self: *ReplyMock = @ptrCast(@alignCast(ptr));
+        if (self.fail_writes > 0) {
+            self.fail_writes -= 1;
+            return error.Io;
+        }
         self.writes += 1;
     }
     fn featureReport(_: *anyopaque, _: []const u8) DeviceIO.WriteError!void {}
@@ -170,10 +205,39 @@ test "model_probe: encodeCommand decodes spaced hex" {
 test "model_probe: run returns the ID from the reply after other frames" {
     const input = [_]u8{ 0x04, 0xfe, 0x66, 0x00 };
     const reply = flydigiReply(28);
-    var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &input, &reply });
+    var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &input, &reply, &input, &reply });
     defer mock.deinit();
     const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20);
     try testing.expectEqual(@as(u8, 28), r.id);
+}
+
+test "model_probe: an input frame that looks like a reply is outvoted" {
+    // Byte 15 of a Flydigi input report is accelerometer data; one frame
+    // matching 0xec by chance must not decide the model.
+    var fake = flydigiReply(0x66);
+    fake[0] = 0x04;
+    const reply = flydigiReply(28);
+    var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &fake, &reply, &reply });
+    defer mock.deinit();
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20);
+    try testing.expectEqual(@as(u8, 28), r.id);
+}
+
+test "model_probe: reply_size rejects frames of another length" {
+    var sized = flydigi_probe;
+    sized.reply_size = 32;
+    const reply = flydigiReply(84);
+    try testing.expectEqual(@as(?u8, 84), parseReply(&sized, &reply));
+    try testing.expectEqual(@as(?u8, null), parseReply(&sized, reply[0..20]));
+}
+
+test "model_probe: a failed write is retried" {
+    const reply = flydigiReply(84);
+    var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &reply, &reply });
+    mock.fail_writes = 1;
+    defer mock.deinit();
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20);
+    try testing.expectEqual(@as(u8, 84), r.id);
 }
 
 test "model_probe: run reports what arrived when no reply comes" {

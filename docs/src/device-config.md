@@ -55,11 +55,13 @@ config whose `ids` list it.
 | `interface` | integer | Interface whose hidraw node receives the query; must be declared |
 | `command` | hex string | Query bytes, report ID first |
 | `reply` | `{ offset, expect }` | How to recognise the reply, like `[report.match]` |
+| `reply_size` | integer, optional | Exact reply length, when other frames could match `reply` |
 | `id_offset` | integer | Reply byte holding the model ID |
 | `ids` | integer array | Model IDs this config is for |
 
 The query of the first matching config that declares one is used; the others
-only need their `ids`. If the pad does not answer within about 6 s (for example
+only need their `ids`. An ID is trusted once two replies agree. A user or
+system config without `ids` that matches the layout keeps its priority. If the pad does not answer within about 6 s (for example
 it is off) or reports an ID no config lists, padctl uses the first matching
 config and logs a warning saying it guessed.
 

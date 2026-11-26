@@ -98,6 +98,8 @@ const ProbeState = struct {
 
 const ProbeOutcome = struct {
     id: ?u8,
+    /// The probe command, for the log. Borrowed from the config.
+    command: []const u8 = "",
     no_reply: model_probe.NoReply = .{},
     /// Why no ID, when there is none.
     reason: []const u8 = "",
@@ -2629,14 +2631,18 @@ pub const Supervisor = struct {
             if (now -| st.at_ns < probe_cache_ns) return .{ .id = id };
         }
         if (st.gave_up_ns) |t| {
-            if (now -| t < probe_cache_ns) return .{ .id = null, .reason = "no reply" };
+            if (now -| t < probe_cache_ns) return .{ .id = null, .reason = "no reply", .command = probe.command };
             st.* = .{};
         }
+        // Failures from an earlier plug that never reached give-up (unplugged
+        // mid-retry) must not shorten this plug's retry window.
+        if (st.first_fail_ns != null and now -| st.last_try_ns > probe_give_up_ns) st.* = .{};
 
         if (st.first_fail_ns != null and now -| st.last_try_ns < probe_retry_ns and
             now -| st.first_fail_ns.? < probe_give_up_ns) return error.HotplugTransient;
         st.last_try_ns = now;
         var outcome = self.runProbeOn(phys, vid, pid, probe);
+        outcome.command = probe.command;
         if (outcome.id) |id| {
             st.* = .{ .id = id, .at_ns = now };
             return outcome;
@@ -2688,15 +2694,19 @@ pub const Supervisor = struct {
     fn logModelChoice(vid: u16, pid: u16, candidates: []const usb_layout.Candidate, choice: usb_layout.ModelChoice, outcome: ProbeOutcome) void {
         switch (choice) {
             .listed => |i| std.log.info("{x:0>4}:{x:0>4}: model ID {d} -> {s}", .{ vid, pid, outcome.id.?, candidates[i].path }),
+            .override => |i| std.log.info(
+                "{x:0>4}:{x:0>4}: model ID {d}; keeping override {s} (it has no [device.probe] ids)",
+                .{ vid, pid, outcome.id.?, candidates[i].path },
+            ),
             .unlisted => |i| std.log.warn(
                 "{x:0>4}:{x:0>4}: model ID {d} is not listed in any config's [device.probe] ids; guessing {s}. " ++
                     "If inputs are wrong, add the ID to the right config.",
                 .{ vid, pid, outcome.id.?, candidates[i].path },
             ),
             .unidentified => |i| std.log.warn(
-                "{x:0>4}:{x:0>4}: model not identified ({s}; {d} other frame(s), last: {f}); guessing {s}. " ++
+                "{x:0>4}:{x:0>4}: model not identified ({s} to {s}; {d} other frame(s), last: {f}); guessing {s}. " ++
                     "If inputs are wrong, check [device.probe] or replug with the controller on.",
-                .{ vid, pid, outcome.reason, outcome.no_reply.frames, hexBytes(outcome.no_reply.last()), candidates[i].path },
+                .{ vid, pid, outcome.reason, outcome.command, outcome.no_reply.frames, hexBytes(outcome.no_reply.last()), candidates[i].path },
             ),
         }
     }
@@ -2716,12 +2726,14 @@ pub const Supervisor = struct {
     }
 
     /// selectConfigFor for the cold scan: a selection that must wait (model
-    /// probe unanswered) is handed to the hotplug retry path.
+    /// probe unanswered) hands this node to the hotplug retry path and
+    /// returns error.Deferred. It is not cached, so each of the device's
+    /// nodes queues its own retry; the one carrying a declared interface binds.
     fn selectOrDefer(self: *Supervisor, hidraw_path: []const u8, vid: u16, pid: u16) !?*const DeviceConfig {
         return self.selectConfigFor(hidraw_path, vid, pid) catch |err| switch (err) {
             error.HotplugTransient => {
                 self.enqueueHotplugRetryForPath(hidraw_path);
-                return null;
+                return error.Deferred;
             },
             else => return err,
         };
@@ -2778,7 +2790,10 @@ pub const Supervisor = struct {
                     // Composite receivers expose children with other PIDs
                     // under one physical path, so the key includes VID:PID.
                     const key = blk2: {
-                        const phys = readPhysicalPath(self.allocator, hidraw_path) catch break :blk try self.selectOrDefer(hidraw_path, vid, pid);
+                        const phys = readPhysicalPath(self.allocator, hidraw_path) catch break :blk self.selectOrDefer(hidraw_path, vid, pid) catch |err| switch (err) {
+                            error.Deferred => continue,
+                            else => return err,
+                        };
                         defer self.allocator.free(phys);
                         break :blk2 try std.fmt.allocPrint(self.allocator, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys });
                     };
@@ -2792,6 +2807,7 @@ pub const Supervisor = struct {
                         gop.value_ptr.* = self.selectOrDefer(hidraw_path, vid, pid) catch |err| {
                             _ = selected_for.remove(key);
                             self.allocator.free(key);
+                            if (err == error.Deferred) continue;
                             return err;
                         };
                     }

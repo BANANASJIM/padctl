@@ -58,6 +58,8 @@ pub const ProbeConfig = struct {
     command: []const u8,
     /// Identifies the reply among other frames.
     reply: MatchConfig,
+    /// Exact reply length, when the device's other frames could match `reply`.
+    reply_size: ?i64 = null,
     /// Byte of the reply holding the model ID.
     id_offset: i64,
     /// Model IDs this config is for.
@@ -553,6 +555,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         if (probe.reply.offset < 0 or probe.reply.expect.len == 0) return error.InvalidConfig;
         for (probe.reply.expect) |b| if (b < 0 or b > 255) return error.InvalidConfig;
         if (probe.id_offset < 0 or probe.id_offset >= 64) return error.InvalidConfig;
+        if (probe.reply_size) |n| if (n <= probe.id_offset or n > 64) return error.InvalidConfig;
         for (probe.ids) |id| if (id < 0 or id > 255) return error.InvalidConfig;
     }
     if (cfg.device.init) |init_cfg| {
