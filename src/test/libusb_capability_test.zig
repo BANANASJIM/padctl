@@ -16,7 +16,7 @@ const helpers = @import("helpers.zig");
 
 // Configs known to require libusb. Drift here surfaces a shipped-config vs
 // build-capability mismatch instead of a silent runtime failure.
-const libusb_configs = [_][]const u8{"vader5.toml"};
+const libusb_configs = [_][]const u8{ "vader5.toml", "vader5-if2.toml" };
 
 fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| return path[i + 1 ..];
