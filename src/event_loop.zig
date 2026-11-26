@@ -506,7 +506,6 @@ pub const EventLoop = struct {
     pollfds: [MAX_FDS]posix.pollfd,
     fd_count: usize,
     device_count: usize,
-    // Per device slot; reset when devices are reopened.
     report_watch: [MAX_DEVICE_INTERFACES]report_watch.ReportWatch = [_]report_watch.ReportWatch{.{}} ** MAX_DEVICE_INTERFACES,
     signal_fd: posix.fd_t,
     stop_r: posix.fd_t,

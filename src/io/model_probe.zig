@@ -1,20 +1,13 @@
-//! Ask a device for its model ID with the query a device config declares
-//! (`[device.probe]`, ADR-030), to tell apart configs that share a VID/PID and
-//! USB layout. Talks only through DeviceIO so it can be tested with a mock.
-
 const std = @import("std");
 const DeviceIO = @import("device_io.zig").DeviceIO;
 const config_device = @import("../config/device.zig");
 const ProbeConfig = config_device.ProbeConfig;
 
 const poll_interval_ns = 2 * std.time.ns_per_ms;
-/// How long to wait for a reply after each send.
 pub const reply_window_ms = 100;
-/// Sends per probe; a pad waking from sleep may miss the first.
 pub const attempts = 4;
-/// Replies that must agree before an ID is trusted. An input frame can match
-/// the reply pattern by chance (Flydigi: byte 15 is accelerometer data), but
-/// not twice with the same ID.
+/// An input frame can match the reply pattern by chance, rarely twice with
+/// the same ID.
 const confirmations = 2;
 
 pub const Result = union(enum) {
@@ -41,7 +34,6 @@ pub const NoReply = struct {
     }
 };
 
-/// The model ID in `frame` if it is the probe's reply.
 pub fn parseReply(probe: *const ProbeConfig, frame: []const u8) ?u8 {
     if (probe.reply_size) |n| if (frame.len != @as(usize, @intCast(n))) return null;
     if (probe.reply_exclude) |ex| if (matches(ex, frame)) return null;
@@ -64,7 +56,6 @@ fn matches(m: config_device.MatchConfig, frame: []const u8) bool {
     return true;
 }
 
-/// Encode `probe.command` into `buf`; validation guarantees it fits in 64 bytes.
 pub fn encodeCommand(probe: *const ProbeConfig, buf: *[64]u8) ?[]const u8 {
     var n: usize = 0;
     var i: usize = 0;
@@ -84,14 +75,12 @@ pub fn encodeCommand(probe: *const ProbeConfig, buf: *[64]u8) ?[]const u8 {
     return buf[0..n];
 }
 
-/// Model IDs seen across the probe runs of one plug. A slow pad may answer
-/// only once per run, so confirmation must not reset between retries.
+/// Kept across the retries of one plug: a slow pad may answer once per run.
 pub const Tally = struct {
     ids: [8]u8 = undefined,
     counts: [8]u8 = undefined,
     n: usize = 0,
 
-    /// Count one reply; returns the ID once it has been seen `confirmations` times.
     pub fn add(self: *Tally, id: u8) ?u8 {
         const k = for (self.ids[0..self.n], 0..) |s, i| {
             if (s == id) break i;
@@ -106,14 +95,11 @@ pub const Tally = struct {
         return if (self.counts[k] >= confirmations) id else null;
     }
 
-    /// The only ID ever seen, if exactly one was.
     pub fn lone(self: *const Tally) ?u8 {
         return if (self.n == 1) self.ids[0] else null;
     }
 };
 
-/// Send the query and wait for its reply, up to `attempts` times, counting
-/// replies into `tally`. Returns an ID once `tally` confirms one.
 pub fn run(device: DeviceIO, probe: *const ProbeConfig, tally: *Tally) Result {
     return runWithWindow(device, probe, reply_window_ms, tally);
 }
@@ -125,7 +111,7 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64, ta
     var read_buf: [64]u8 = undefined;
     var writes_ok: usize = 0;
     for (0..attempts) |_| {
-        // Writes occasionally fail on these receivers; resend (as SDL does).
+        // Writes occasionally fail on these receivers (SDL ignores it too).
         device.write(cmd) catch continue;
         writes_ok += 1;
         var timer = std.time.Timer.start() catch return .{ .no_reply = none };
@@ -145,8 +131,6 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64, ta
             break; // next send
         }
     }
-    // A single match is not trusted yet: it may be an input frame that fits
-    // the reply pattern. The caller retries; the tally carries over.
     none.writes_failed = writes_ok == 0;
     return .{ .no_reply = none };
 }

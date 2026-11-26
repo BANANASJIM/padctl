@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# padctl-docker — single entry point for the canonical Docker build image (ADR-019).
+# padctl-docker — single entry point for the canonical Docker build image.
 #
 # Subcommands:
 #   image    build (or reuse) the canonical build image for the pinned Zig version

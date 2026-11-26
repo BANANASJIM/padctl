@@ -92,32 +92,23 @@ const ProbeState = struct {
     at_ns: u64 = 0,
     first_fail_ns: ?u64 = null,
     last_try_ns: u64 = 0,
-    /// Set when retries ran out, so the device's other nodes reuse the guess.
     gave_up_ns: ?u64 = null,
-    /// Replies seen across this plug's probe runs.
     tally: model_probe.Tally = .{},
-    /// `id` was seen only once (taken at give-up).
     unconfirmed: bool = false,
 };
 
 const ProbeOutcome = struct {
     id: ?u8,
-    /// The ID was seen in a single reply only.
     unconfirmed: bool = false,
-    /// The probe command, for the log. Borrowed from the config.
     command: []const u8 = "",
     no_reply: model_probe.NoReply = .{},
-    /// Why no ID, when there is none.
     reason: []const u8 = "",
 };
 
-/// Reuse a probed model ID for the device's other hidraw nodes.
 const probe_cache_ns = 5 * std.time.ns_per_s;
-/// Keep retrying an unanswered probe this long (within the hotplug retry
-/// budget) before guessing; covers a pad that is still waking up.
+/// Within the hotplug retry budget; covers a pad still waking up.
 const probe_give_up_ns = 6 * std.time.ns_per_s;
-/// A probe blocks the supervisor for up to ~0.4 s; while unanswered, retry it
-/// at most this often however many hidraw nodes the device has.
+/// A probe blocks the supervisor for up to ~0.4 s.
 const probe_retry_ns = std.time.ns_per_s;
 
 const SelectionLog = struct {
@@ -128,14 +119,10 @@ const SelectionLog = struct {
     at_ns: u64,
 };
 
-/// Repeat a selection explanation for the same device only after this long,
-/// e.g. on a later replug.
 const selection_log_quiet_ns = 5 * std.time.ns_per_s;
 
 const ConfigMeta = struct {
-    /// Owned.
     path: []u8,
-    /// Loaded from a user/system dir that takes priority over the builtin one.
     is_override: bool,
 };
 
@@ -290,14 +277,11 @@ pub const Supervisor = struct {
     config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
-    // Source of configs.items[i]; kept in lockstep with configs.
     config_meta: std.ArrayList(ConfigMeta) = .{},
-    // sysfs root for reading USB layouts (ADR-029); tests point it at a fixture.
+    // sysfs root for reading USB layouts; tests point it at a fixture.
     sys_root: []const u8 = "/sys",
-    // Last logged config selection, so a device's hidraw nodes (which hotplug
-    // one by one) explain the choice once. Owned.
+    // A device's hidraw nodes hotplug one by one; explain its selection once.
     last_selection_log: ?SelectionLog = null,
-    // Model probe results per "VID:PID@phys" (ADR-030). Keys owned.
     probe_state: std.StringHashMapUnmanaged(ProbeState) = .{},
     // Where to look for the probe's hidraw node; tests point it at a fixture.
     probe_dev_root: []const u8 = "/dev",
@@ -2535,10 +2519,8 @@ pub const Supervisor = struct {
         try self.bindOnlineDevices(first, dev_root);
     }
 
-    /// Parse every *.toml under dir_path into `configs`. Within a dir the order
-    /// stays the filesystem walk order: 04b4:2412 has two builtin configs with
-    /// identical layouts, and sorting would silently change which one existing
-    /// installs get (ADR-029).
+    /// Unsorted on purpose: sorting would change which of two same-layout
+    /// builtins (04b4:2412) existing installs get.
     fn loadConfigsFromDir(self: *Supervisor, dir_path: []const u8, is_override: bool) !void {
         var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
@@ -2575,9 +2557,7 @@ pub const Supervisor = struct {
         }
     }
 
-    /// Pick the config for the physical device behind a hidraw node among all
-    /// loaded configs with its VID/PID, using the device's USB layout
-    /// (ADR-029). Null when no config has this VID/PID or none matches.
+    /// Null when no loaded config has this VID/PID or none fits the device.
     fn selectConfigFor(self: *Supervisor, devname: []const u8, vid: u16, pid: u16) !?*const DeviceConfig {
         var candidates = std.ArrayList(usb_layout.Candidate){};
         defer candidates.deinit(self.allocator);
@@ -2597,13 +2577,12 @@ pub const Supervisor = struct {
         const layout_ptr: ?*const usb_layout.UsbLayout = if (layout) |*l| l else null;
         var idx = usb_layout.select(candidates.items, layout_ptr);
 
-        // Several configs fit the same layout: ask the device which model it is.
         var model: ?struct { choice: usb_layout.ModelChoice, outcome: ProbeOutcome } = null;
         if (layout_ptr) |l| if (idx != null) {
             var matched_buf: [16]usize = undefined;
             const matched = usb_layout.matching(candidates.items, l, &matched_buf);
             // A leading user/system override without ids wins whatever the
-            // model (ADR-029 priority), so there is nothing to ask.
+            // model, so there is nothing to ask.
             const lead = candidates.items[matched[0]];
             const lead_has_ids = if (lead.cfg.device.probe) |p| p.ids.len > 0 else false;
             const override_leads = lead.is_override and !lead_has_ids;
@@ -2625,9 +2604,7 @@ pub const Supervisor = struct {
         return if (idx) |i| candidates.items[i].cfg else null;
     }
 
-    /// Run (or reuse) the model probe for the physical device behind `devname`.
-    /// error.HotplugTransient while an unanswered probe is still within its
-    /// retry window; afterwards an outcome without an ID.
+    /// error.HotplugTransient while an unanswered probe is within its retry window.
     fn probeModel(self: *Supervisor, devname: []const u8, vid: u16, pid: u16, probe: *const config_device.ProbeConfig) !ProbeOutcome {
         const phys = try readPhysicalPath(self.allocator, devname);
         defer self.allocator.free(phys);
@@ -2646,8 +2623,7 @@ pub const Supervisor = struct {
             if (now -| t < probe_cache_ns) return .{ .id = null, .reason = "no reply", .command = probe.command };
             st.* = .{};
         }
-        // Failures from an earlier plug that never reached give-up (unplugged
-        // mid-retry) must not shorten this plug's retry window.
+        // Stale failures from an earlier plug must not shorten this one's window.
         if (st.first_fail_ns != null and now -| st.last_try_ns > probe_give_up_ns) st.* = .{};
 
         if (st.first_fail_ns != null and now -| st.last_try_ns < probe_retry_ns and
@@ -2667,8 +2643,7 @@ pub const Supervisor = struct {
             std.log.debug("{x:0>4}:{x:0>4}: model probe got no reply ({s}); retrying", .{ vid, pid, outcome.reason });
             return error.HotplugTransient;
         }
-        // Give up for this plug; a later replug probes afresh. A pad that
-        // answered just once (slow pads may) is taken at its word, flagged.
+        // A pad that answered just once is taken at its word, flagged.
         if (st.tally.lone()) |id| {
             st.* = .{ .id = id, .at_ns = now, .unconfirmed = true };
             outcome.id = id;
@@ -2760,10 +2735,7 @@ pub const Supervisor = struct {
         return true;
     }
 
-    /// selectConfigFor for the cold scan: a selection that must wait (model
-    /// probe unanswered) hands this node to the hotplug retry path and
-    /// returns error.Deferred. It is not cached, so each of the device's
-    /// nodes queues its own retry; the one carrying a declared interface binds.
+    /// Not cached on deferral, so every node of the device queues its own retry.
     fn selectOrDefer(self: *Supervisor, hidraw_path: []const u8, vid: u16, pid: u16) !?*const DeviceConfig {
         return self.selectConfigFor(hidraw_path, vid, pid) catch |err| switch (err) {
             error.HotplugTransient => {
@@ -2774,9 +2746,6 @@ pub const Supervisor = struct {
         };
     }
 
-    /// Bind online devices for configs[first..]. A hidraw node is handled by
-    /// the config selected for its physical device, which may come from an
-    /// earlier or later file than the one being scanned.
     fn bindOnlineDevices(self: *Supervisor, first: usize, dev_root: []const u8) !void {
         // seen deduplicates by physical path across all configs; owns the key bytes.
         var seen = std.StringHashMap(void).init(self.allocator);
@@ -2785,8 +2754,7 @@ pub const Supervisor = struct {
             while (kit.next()) |k| self.allocator.free(k.*);
             seen.deinit();
         }
-        // One selection per physical device, so skip/no-match warnings print
-        // once rather than per (config, hidraw node) pair. Owns the key bytes.
+        // Owns the key bytes.
         var selected_for = std.StringHashMap(?*const DeviceConfig).init(self.allocator);
         defer {
             var kit = selected_for.keyIterator();
@@ -2822,8 +2790,7 @@ pub const Supervisor = struct {
             var spawned: usize = 0;
             for (paths) |hidraw_path| {
                 const selected = blk: {
-                    // Composite receivers expose children with other PIDs
-                    // under one physical path, so the key includes VID:PID.
+                    // Composite receivers put several PIDs under one path.
                     const key = blk2: {
                         const phys = readPhysicalPath(self.allocator, hidraw_path) catch break :blk self.selectOrDefer(hidraw_path, vid, pid) catch |err| switch (err) {
                             error.Deferred => continue,
@@ -2949,13 +2916,11 @@ pub const Supervisor = struct {
                 continue;
             };
             std.log.info("scanning config dir '{s}'", .{dir});
-            // The last dir is the builtin one (config_paths.builtinDir).
             self.loadConfigsFromDir(dir, di + 1 < dirs.len) catch |err| {
                 std.log.warn("failed to scan config dir '{s}': {}", .{ dir, err });
             };
         }
-        // Bind once all dirs are loaded so a higher-priority config that does
-        // not match the device can fall through to a lower-priority one.
+        // After all dirs, so a non-matching override can fall through.
         self.bindOnlineDevices(first, "/dev") catch |err| {
             std.log.warn("failed to bind online devices: {}", .{err});
         };
@@ -6728,7 +6693,7 @@ test "supervisor: DUMP STATUS reply carries flight recorder fields" {
     );
 }
 
-test "supervisor: same-VID/PID configs are selected by USB layout across dirs (ADR-029)" {
+test "supervisor: same-VID/PID configs are selected by USB layout across dirs" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6785,7 +6750,6 @@ test "supervisor: same-VID/PID configs are selected by USB layout across dirs (A
     // No sysfs layout (e.g. Bluetooth): first candidate, as before.
     const no_layout = (try sup.selectConfigFor("/dev/hidraw3", 0x37d7, 0x2401)) orelse return error.NoSelection;
     try testing.expectEqual(&sup.configs.items[0].value, no_layout);
-    // Unknown VID/PID.
     try testing.expect((try sup.selectConfigFor("/dev/hidraw7", 0x1234, 0x5678)) == null);
 }
 
@@ -6799,14 +6763,13 @@ test "supervisor: a device's selection is explained once per plug" {
     try testing.expect(!sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, 1));
     // Another PID under the same physical path: explain it too.
     try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2402, 1));
-    // Different outcome: explain again.
     try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, null));
     // Same outcome after the quiet window (a later replug): explain again.
     sup.test_now_override_ns = 1_000 + selection_log_quiet_ns;
     try testing.expect(sup.shouldLogSelection("/dev/hidraw40", 0x37d7, 0x2401, null));
 }
 
-test "supervisor: an unanswered model probe retries, then gives up for the plug (ADR-030)" {
+test "supervisor: an unanswered model probe retries, then gives up for the plug" {
     var sup = try Supervisor.initForTest(testing.allocator);
     defer sup.deinit();
     sup.probe_dev_root = "/nonexistent_dev_root_xyz";
@@ -6837,7 +6800,7 @@ test "supervisor: an unanswered model probe retries, then gives up for the plug 
     try testing.expectError(error.HotplugTransient, sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe));
 }
 
-test "supervisor: a leading override without ids is chosen without probing (ADR-030)" {
+test "supervisor: a leading override without ids is chosen without probing" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

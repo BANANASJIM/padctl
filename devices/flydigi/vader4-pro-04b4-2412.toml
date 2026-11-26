@@ -10,7 +10,7 @@ class = "hid"
 
 # Every V1 pad shares this dongle identity and USB layout; padctl asks the pad
 # for its model (SDL_hidapi_flydigi.c: report 05 ec, reply byte 15 = 0xec,
-# model ID at byte 3) to pick the right config (ADR-030).
+# model ID at byte 3) to pick the right config.
 [device.probe]
 interface = 2
 command = "05 ec 00 00 00 00 00 00 00 00 00 00"

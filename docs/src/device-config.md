@@ -518,16 +518,16 @@ Touchpad output device.
 IMU (accelerometer + gyroscope) output via a separate UHID node for generic
 output protocols. When declared, padctl creates a second UHID device that
 shares the same `uniq` as the primary gamepad output, enabling SDL3 to pair the
-IMU sensor with the controller automatically (ADR-015 UHID IMU migration; see
-PR #159). Native `dualsense-edge-usb` is different: its single gamepad report
+IMU sensor with the controller automatically (see PR #159). Native
+`dualsense-edge-usb` is different: its single gamepad report
 already carries motion sensors, and the validator rejects a companion
 `[output.imu]`.
 
-> **Validation rule:** when `[output.imu]` is present, `backend` must be `"uhid"`. The validator rejects `"uinput"` per ADR-015 — UHID is the only supported backend for IMU output. Omitting `[output.imu]` entirely keeps the legacy uinput-primary path.
+> **Validation rule:** when `[output.imu]` is present, `backend` must be `"uhid"`. The validator rejects `"uinput"` — UHID is the only supported backend for IMU output. Omitting `[output.imu]` entirely keeps the legacy uinput-primary path.
 
 > **Distinction from `[output.aux]`:** `[output.imu]` is the gamepad's accelerometer/gyroscope UHID node; `[output.aux]` is a secondary uinput device for mouse/keyboard remapping. They serve different purposes and can coexist.
 
-See ADR-015 for the design rationale. This section enables SDL3-visible sensor pairing on Steam games.
+This section enables SDL3-visible sensor pairing on Steam games.
 
 > **Force feedback limitation:** enabling `[output.imu] backend="uhid"` places the primary gamepad on the UHID backend. On current kernels, evdev force feedback is unavailable for UHID devices unless the kernel's `hid-universal-pidff` module recognises the device VID/PID — generic UHID nodes get `capabilities/ff=0`. Wine/Lutris evdev rumble will not work in this mode. Rumble via SDL or Steam (HIDAPI path) is unaffected.
 

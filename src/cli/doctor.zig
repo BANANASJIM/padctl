@@ -456,8 +456,6 @@ fn firstOverlapping(matches: []const ConfigMatch, idx: usize) ?usize {
     return null;
 }
 
-/// With the device present, report which file the daemon selects by USB
-/// layout (ADR-029) and why each other file was skipped.
 pub fn printLayoutSelection(allocator: std.mem.Allocator, writer: anytype, matches: []const ConfigMatch, layout: *const usb_layout.UsbLayout) !void {
     var selected = false;
     for (matches) |m| {

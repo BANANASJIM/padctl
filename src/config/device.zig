@@ -49,23 +49,16 @@ pub const InitConfig = struct {
     feature_report: ?[]const i64 = null,
 };
 
-/// Model query that tells apart configs sharing a VID/PID and USB layout, e.g.
-/// pads behind one shared receiver (ADR-030). Sent on the interface's hidraw
-/// node before any config is chosen.
+/// Sent on the interface's hidraw node before any config is chosen.
 pub const ProbeConfig = struct {
     interface: i64,
     /// Hex bytes, report ID first.
     command: []const u8,
-    /// Identifies the reply among other frames.
     reply: MatchConfig,
-    /// Exact reply length, when the device's other frames could match `reply`.
     reply_size: ?i64 = null,
-    /// Frames matching this are never the reply, e.g. the device's input
-    /// report header when an input field can take the reply's match value.
+    /// e.g. the input report header, when an input field can equal `reply`.
     reply_exclude: ?MatchConfig = null,
-    /// Byte of the reply holding the model ID.
     id_offset: i64,
-    /// Model IDs this config is for.
     ids: []const i64 = &.{},
 };
 

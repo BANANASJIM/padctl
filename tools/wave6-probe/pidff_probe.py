@@ -9,7 +9,7 @@ Strategy:
   4. Inspect /sys/class/input/event*/device/capabilities/ff for EV_FF capability
   5. Emit structured verdict
 
-This probe is ADR-015 Stage 3 entry-condition verification (issue #82).
+This probe verifies the UHID force-feedback entry conditions (issue #82).
 Target kernel: host (6.18.9 Arch) + any containerised kernel (Docker shares host kernel).
 
 Dependencies: python3, hid-tools, /dev/uhid, CAP_SYS_ADMIN (root or cap-add).

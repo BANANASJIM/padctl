@@ -203,7 +203,7 @@ test "uhid: full pipeline hidraw read through interpreter" {
 // and the evdev node reports capabilities/ff = 0 — Wine/Lutris evdev force
 // feedback then silently no-ops. Full analysis: decisions/025-uhid-rumble-ff-kernel-wall.md.
 
-const FF_TEST_VID: u16 = 0xFADE; // padctl's virtual device identity (ADR-025: FADE:C001),
+const FF_TEST_VID: u16 = 0xFADE; // padctl's virtual device identity (FADE:C001),
 const FF_TEST_PID: u16 = 0xC001; // not in the hid-universal-pidff allowlist.
 
 const ff_wall_toml =
@@ -264,7 +264,7 @@ fn findEvdevByVidPid(vid: u16, pid: u16) !?[64]u8 {
     return null;
 }
 
-test "uhid: rumble gamepad exposes capabilities/ff=0 — #444 kernel FF wall (ADR-025)" {
+test "uhid: rumble gamepad exposes capabilities/ff=0 — #444 kernel FF wall" {
     const allocator = testing.allocator;
 
     // Build the descriptor through padctl's real imu=uhid rumble path.
