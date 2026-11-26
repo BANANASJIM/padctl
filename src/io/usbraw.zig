@@ -8,6 +8,7 @@ const build_options = @import("build_options");
 // True when the binary was compiled with real libusb. When false the compat
 // stub is linked and any USB-claiming path fails fast with LibusbUnavailable.
 pub const have_libusb = build_options.use_libusb;
+pub const UsbAddress = @import("hidraw.zig").UsbAddress;
 
 // Zig's futex-based Mutex lacks TSan annotations, so pthread_mutex is
 // used when ThreadSanitizer is active to provide proper happens-before edges.
@@ -90,7 +91,7 @@ pub const RingBuffer = struct {
 
 // libusb_open_device_with_vid_pid returns NULL for every failure, so a device
 // whose node the daemon may not open looked identical to an unplugged one.
-fn openByVidPid(ctx: *c.libusb_context, vid: u16, pid: u16) !*c.libusb_device_handle {
+fn openByVidPid(ctx: *c.libusb_context, vid: u16, pid: u16, at: ?UsbAddress) !*c.libusb_device_handle {
     var list: [*c]?*c.libusb_device = undefined;
     const count = c.libusb_get_device_list(ctx, &list);
     if (count < 0) return error.NotFound;
@@ -102,6 +103,9 @@ fn openByVidPid(ctx: *c.libusb_context, vid: u16, pid: u16) !*c.libusb_device_ha
         var desc: c.libusb_device_descriptor = undefined;
         if (c.libusb_get_device_descriptor(dev, &desc) != 0) continue;
         if (desc.idVendor != vid or desc.idProduct != pid) continue;
+        if (at) |a| {
+            if (c.libusb_get_bus_number(dev) != a.bus or c.libusb_get_device_address(dev) != a.addr) continue;
+        }
         var handle: ?*c.libusb_device_handle = null;
         open_rc = c.libusb_open(dev, &handle);
         if (open_rc == 0) return handle.?;
@@ -113,7 +117,7 @@ fn openByVidPid(ctx: *c.libusb_context, vid: u16, pid: u16) !*c.libusb_device_ha
 // interface. On any failure the partially-acquired state is rolled back and
 // the error is returned; on success the caller owns ctx + handle and the
 // claimed interface.
-fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
+fn libusbOpenAndClaim(vid: u16, pid: u16, at: ?UsbAddress, interface_id: u8) !struct {
     ctx: *c.libusb_context,
     handle: *c.libusb_device_handle,
 } {
@@ -122,7 +126,7 @@ fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
     var ctx: ?*c.libusb_context = null;
     if (c.libusb_init(&ctx) != 0) return error.LibusbInit;
 
-    const handle = openByVidPid(ctx.?, vid, pid) catch |err| {
+    const handle = openByVidPid(ctx.?, vid, pid, at) catch |err| {
         c.libusb_exit(ctx);
         return err;
     };
@@ -238,11 +242,12 @@ pub const UsbrawDevice = struct {
         alloc: std.mem.Allocator,
         vid: u16,
         pid: u16,
+        at: ?UsbAddress,
         interface_id: u8,
         ep_in: ?u8,
         ep_out: ?u8,
     ) !*UsbrawDevice {
-        const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
+        const claimed = try libusbOpenAndClaim(vid, pid, at, interface_id);
         const ctx = claimed.ctx;
         const handle = claimed.handle;
 
@@ -417,9 +422,10 @@ pub const UsbrawSuppress = struct {
         alloc: std.mem.Allocator,
         vid: u16,
         pid: u16,
+        at: ?UsbAddress,
         interface_id: u8,
     ) !*UsbrawSuppress {
-        const claimed = try libusbOpenAndClaim(vid, pid, interface_id);
+        const claimed = try libusbOpenAndClaim(vid, pid, at, interface_id);
         const ctx = claimed.ctx;
         const handle = claimed.handle;
 
