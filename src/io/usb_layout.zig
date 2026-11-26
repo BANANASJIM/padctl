@@ -278,8 +278,8 @@ pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: 
 /// first config that claims nothing through libusb, since a wrong hidraw-only
 /// guess only misreads input while a wrong libusb one also takes the
 /// interfaces (and the kernel driver) from the right config. Otherwise the
-/// first match. An override without ids ahead of every listing config wins
-/// before this, whether or not the model was identified.
+/// first match. An override without ids wins before this unless an earlier
+/// config lists the probed ID (with no ID, none can).
 fn guess(candidates: []const Candidate, matched: []const usize) usize {
     for (matched) |idx| {
         if (!config_device.usesLibusb(candidates[idx].cfg)) return idx;
@@ -620,8 +620,8 @@ test "usb_layout: an unknown model falls back to the least invasive config" {
     };
     try testing.expectEqual(@as(usize, 1), chooseByModel(&user_v3, &matched, 22).unlisted);
 
-    // An override without ids ahead of the listing configs wins even when the
-    // model is unknown, so the choice doesn't depend on whether the pad answered.
+    // An override without ids wins unless an earlier config lists the probed
+    // ID, so the choice doesn't depend on whether the pad answered.
     const hid_override = testConfig(&hid2);
     const two_overrides = [_]Candidate{
         .{ .cfg = &vader3, .path = "user/a.toml", .is_override = true },
