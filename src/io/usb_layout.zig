@@ -258,7 +258,6 @@ pub const ModelChoice = union(enum) {
 /// for this device before probing existed, so it wins over listed builtins.
 pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: ?u8) ModelChoice {
     std.debug.assert(matched.len > 0);
-    const model = id orelse return .{ .unidentified = guess(candidates, matched) };
     for (matched) |idx| {
         const c = candidates[idx];
         const ids: []const i64 = if (c.cfg.device.probe) |p| p.ids else &.{};
@@ -266,10 +265,12 @@ pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: 
             if (c.is_override) return .{ .override = idx };
             continue;
         }
+        const model = id orelse continue;
         for (ids) |listed| {
             if (listed == model) return .{ .listed = idx };
         }
     }
+    if (id == null) return .{ .unidentified = guess(candidates, matched) };
     return .{ .unlisted = guess(candidates, matched) };
 }
 
@@ -277,7 +278,8 @@ pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: 
 /// first config that claims nothing through libusb, since a wrong hidraw-only
 /// guess only misreads input while a wrong libusb one also takes the
 /// interfaces (and the kernel driver) from the right config. Otherwise the
-/// first match. (An override without ids never gets here: it wins earlier.)
+/// first match. An override without ids ahead of every listing config wins
+/// before this, whether or not the model was identified.
 fn guess(candidates: []const Candidate, matched: []const usize) usize {
     for (matched) |idx| {
         if (!config_device.usesLibusb(candidates[idx].cfg)) return idx;
@@ -617,6 +619,17 @@ test "usb_layout: an unknown model falls back to the least invasive config" {
         .{ .cfg = &apex, .path = "apex4.toml" },
     };
     try testing.expectEqual(@as(usize, 1), chooseByModel(&user_v3, &matched, 22).unlisted);
+
+    // An override without ids ahead of the listing configs wins even when the
+    // model is unknown, so the choice doesn't depend on whether the pad answered.
+    const hid_override = testConfig(&hid2);
+    const two_overrides = [_]Candidate{
+        .{ .cfg = &vader3, .path = "user/a.toml", .is_override = true },
+        .{ .cfg = &hid_override, .path = "user/b.toml", .is_override = true },
+        .{ .cfg = &apex, .path = "apex4.toml" },
+    };
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&two_overrides, &.{ 0, 1, 2 }, null).override);
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&two_overrides, &.{ 0, 1, 2 }, 84).override);
 
     // All candidates use libusb: first match.
     const both_libusb = [_]Candidate{
