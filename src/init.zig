@@ -179,10 +179,13 @@ fn logAckFailure(
         );
         return;
     }
+    // An ACK must start with both prefixes; the command prefix normally
+    // begins with the response prefix, so the longer one says it all.
+    const expected = if (command_prefix.len > response_prefix.len) command_prefix else response_prefix;
     std.log.warn(
-        "init: no ACK for {s} {d} ({s}) on {s} within {d} ms; expected a reply starting {f} / {f}, " ++
+        "init: no ACK for {s} {d} ({s}) on {s} within {d} ms; expected a reply starting {f}, " ++
             "got {d} other frame(s), last ({d} bytes): {f}",
-        .{ kind, index, cmd_hex, iface, diag.timeout_ms, hexBytes(response_prefix), hexBytes(command_prefix), diag.frames, diag.last_len, hexBytes(diag.last()) },
+        .{ kind, index, cmd_hex, iface, diag.timeout_ms, hexBytes(expected), diag.frames, diag.last_len, hexBytes(diag.last()) },
     );
 }
 

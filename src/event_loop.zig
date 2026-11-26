@@ -468,22 +468,36 @@ pub fn applyAdaptiveTrigger(
     } else |_| {}
 }
 
-fn logUnmatchedReports(tag: []const u8, interface_id: u8, expected: *const device_cfg.ReportConfig, w: *const report_watch.ReportWatch) void {
-    var match_buf: [96]u8 = undefined;
-    const match_desc: []const u8 = blk: {
-        const m = expected.match orelse break :blk "no match bytes";
-        var fbs = std.io.fixedBufferStream(&match_buf);
-        const wr = fbs.writer();
-        wr.print("bytes", .{}) catch {};
-        for (m.expect) |b| wr.print(" {x:0>2}", .{@as(u8, @intCast(b))}) catch {};
-        wr.print(" at offset {d}", .{m.offset}) catch {};
-        break :blk fbs.getWritten();
-    };
-    std.log.warn(
-        "[{s}] interface {d}: {d} reports received and none matched a [[report]] (\"{s}\" expects {s}, size >= {d}); " ++
-            "last ({d} bytes): {f}. The report format likely differs from the device config.",
-        .{ tag, interface_id, report_watch.threshold, expected.name, match_desc, expected.size, w.last_len, hexBytes(w.last()) },
-    );
+fn logUnmatchedReports(tag: []const u8, interface_id: u8, reason: interpreter_mod.NoMatch, w: *const report_watch.ReportWatch) void {
+    const head = "[{s}] interface {d}: {d} reports received, none usable; ";
+    const tail = " Last frame ({d} bytes): {f}.";
+    switch (reason) {
+        .too_short => |r| std.log.warn(
+            head ++ "they match [[report]] \"{s}\" but are shorter than its size {d}; the firmware sends a shorter report." ++ tail,
+            .{ tag, interface_id, report_watch.threshold, r.name, r.size, w.last_len, hexBytes(w.last()) },
+        ),
+        .bad_checksum => |r| std.log.warn(
+            head ++ "they match [[report]] \"{s}\" but fail its checksum; check [report.checksum]." ++ tail,
+            .{ tag, interface_id, report_watch.threshold, r.name, w.last_len, hexBytes(w.last()) },
+        ),
+        .no_bytes_match => |r| {
+            var match_buf: [96]u8 = undefined;
+            const match_desc: []const u8 = blk: {
+                const m = r.match orelse break :blk "no match bytes";
+                var fbs = std.io.fixedBufferStream(&match_buf);
+                const wr = fbs.writer();
+                wr.print("bytes", .{}) catch {};
+                for (m.expect) |b| wr.print(" {x:0>2}", .{@as(u8, @intCast(b))}) catch {};
+                wr.print(" at offset {d}", .{m.offset}) catch {};
+                break :blk fbs.getWritten();
+            };
+            std.log.warn(
+                head ++ "none matches a [[report]] (\"{s}\" expects {s}). If the controller is on and inputs " ++
+                    "do not work, its report format likely differs from the device config." ++ tail,
+                .{ tag, interface_id, report_watch.threshold, r.name, match_desc, w.last_len, hexBytes(w.last()) },
+            );
+        },
+    }
 }
 
 pub const EventLoop = struct {
@@ -1073,7 +1087,9 @@ pub const EventLoop = struct {
                         if (interpreted and i < MAX_DEVICE_INTERFACES) {
                             if (ctx.interpreter.firstReportFor(interface_id)) |expected| {
                                 if (self.report_watch[i].observe(maybe_delta != null, buf[0..n])) {
-                                    logUnmatchedReports(ctx.device_tag, interface_id, expected, &self.report_watch[i]);
+                                    const reason = ctx.interpreter.explainNoMatch(interface_id, buf[0..n]) orelse
+                                        interpreter_mod.NoMatch{ .no_bytes_match = expected };
+                                    logUnmatchedReports(ctx.device_tag, interface_id, reason, &self.report_watch[i]);
                                 }
                             }
                         }
