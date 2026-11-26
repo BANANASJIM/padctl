@@ -159,8 +159,10 @@ pub const HidrawDevice = struct {
             defer allocator.free(node_phys);
             if (std.mem.eql(u8, node_phys, phys)) return allocator.dupe(u8, p);
         }
-        // `phys` may not be a HID_PHYS (no sysfs); behave as before.
-        return discover(allocator, vid, pid, interface_id);
+        // A node path stands in for phys when sysfs had none; behave as before.
+        // Otherwise the node may just not exist yet: let hotplug retry.
+        if (std.mem.startsWith(u8, phys, "/")) return discover(allocator, vid, pid, interface_id);
+        return error.NotFound;
     }
 
     /// Open the hidraw node at path.
