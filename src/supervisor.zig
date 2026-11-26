@@ -2714,6 +2714,9 @@ pub const Supervisor = struct {
             );
         } else if (err == error.LibusbInit) {
             std.log.warn("libusb context initialization failed ({})", .{err});
+        } else if (err == error.EndpointNotOnInterface) {
+            // usbraw already logged the endpoint and interface details.
+            std.log.warn("device \"{s}\" not bound: its USB endpoints do not match the device config", .{cfg.device.name});
         } else if (config_device.usesLibusb(cfg) and isLibusbClaimError(err)) {
             std.log.warn(
                 "cannot claim \"{s}\" via libusb ({}): the raw USB device node is not accessible. " ++
