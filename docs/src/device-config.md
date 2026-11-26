@@ -17,9 +17,19 @@ Device configs are TOML files in `devices/<vendor>/<model>.toml`.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | integer | yes | USB interface number |
-| `class` | string | yes | `"hid"` or `"vendor"` |
+| `class` | string | yes | `"hid"`, `"vendor"` or `"suppress"` |
 | `ep_in` | integer | no | IN endpoint number |
 | `ep_out` | integer | no | OUT endpoint number |
+
+A `vendor` interface is claimed through libusb, which detaches the kernel driver
+and removes its hidraw/evdev nodes. It may declare only `ep_in` (read-only:
+reports, no commands or init) or only `ep_out` (write-only: commands, no
+reports). A `suppress` interface is claimed only to hide its nodes.
+
+Some firmware streams one interface only while another is being read (the
+Flydigi Vader 3 in DInput mode sends nothing on IF0 unless IF2 is read too).
+Declare the gating interface as well: padctl keeps reading every `hid`
+interface and every `vendor` interface with `ep_in`.
 
 ### `[device.init]`
 
