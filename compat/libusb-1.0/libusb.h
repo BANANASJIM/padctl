@@ -36,3 +36,25 @@ static inline int libusb_interrupt_transfer(
     (void)h; (void)ep; (void)data; (void)length; (void)transferred; (void)timeout;
     return -1;
 }
+
+typedef struct libusb_device libusb_device;
+struct libusb_endpoint_descriptor { uint8_t bEndpointAddress; };
+struct libusb_interface_descriptor {
+    uint8_t bInterfaceNumber;
+    uint8_t bNumEndpoints;
+    const struct libusb_endpoint_descriptor *endpoint;
+};
+struct libusb_interface {
+    const struct libusb_interface_descriptor *altsetting;
+    int num_altsetting;
+};
+struct libusb_config_descriptor {
+    uint8_t bNumInterfaces;
+    const struct libusb_interface *interface;
+};
+static inline libusb_device *libusb_get_device(libusb_device_handle *h) { (void)h; return 0; }
+static inline int libusb_get_active_config_descriptor(
+    libusb_device *d, struct libusb_config_descriptor **cfg) {
+    (void)d; (void)cfg; return -1;
+}
+static inline void libusb_free_config_descriptor(struct libusb_config_descriptor *cfg) { (void)cfg; }

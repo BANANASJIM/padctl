@@ -119,6 +119,78 @@ fn libusbOpenAndClaim(vid: u16, pid: u16, interface_id: u8) !struct {
     return .{ .ctx = ctx.?, .handle = handle };
 }
 
+// One endpoint of the active configuration (altsetting 0) and the interface
+// that owns it.
+const EndpointRef = struct { interface: u8, address: u8 };
+
+const EndpointCheck = union(enum) {
+    ok,
+    on_other_interface: u8,
+    absent,
+};
+
+// Firmware revisions can move endpoints between interfaces. Claiming only the
+// configured interface then makes transfers on a foreign endpoint fail with
+// EIO, so confirm ownership up front.
+fn checkEndpointOwnership(refs: []const EndpointRef, interface_id: u8, ep: u8) EndpointCheck {
+    var other: ?u8 = null;
+    for (refs) |r| {
+        if (r.address != ep) continue;
+        if (r.interface == interface_id) return .ok;
+        if (other == null) other = r.interface;
+    }
+    if (other) |o| return .{ .on_other_interface = o };
+    return .absent;
+}
+
+const max_endpoint_refs = 128;
+
+fn verifyEndpointsOnInterface(handle: *c.libusb_device_handle, vid: u16, pid: u16, interface_id: u8, eps: []const ?u8) !void {
+    var cfg: ?*c.struct_libusb_config_descriptor = null;
+    if (c.libusb_get_active_config_descriptor(c.libusb_get_device(handle), &cfg) != 0) {
+        // Cannot inspect; let the transfers decide rather than block a working device.
+        return;
+    }
+    defer c.libusb_free_config_descriptor(cfg);
+
+    var refs: [max_endpoint_refs]EndpointRef = undefined;
+    var n: usize = 0;
+    const ifaces = cfg.?.interface[0..cfg.?.bNumInterfaces];
+    for (ifaces) |iface| {
+        if (iface.num_altsetting < 1) continue;
+        const alt = iface.altsetting[0];
+        for (alt.endpoint[0..alt.bNumEndpoints]) |ep| {
+            if (n == refs.len) break;
+            refs[n] = .{ .interface = alt.bInterfaceNumber, .address = ep.bEndpointAddress };
+            n += 1;
+        }
+    }
+
+    for (eps) |maybe_ep| {
+        const ep = maybe_ep orelse continue;
+        switch (checkEndpointOwnership(refs[0..n], interface_id, ep)) {
+            .ok => {},
+            .on_other_interface => |owner| {
+                std.log.warn(
+                    "endpoint 0x{x:0>2} is not on configured interface {d} but on interface {d} " ++
+                        "(device {x:0>4}:{x:0>4}): the firmware likely differs from the device config; " ++
+                        "please share `lsusb -v -d {x:0>4}:{x:0>4}`",
+                    .{ ep, interface_id, owner, vid, pid, vid, pid },
+                );
+                return error.EndpointNotOnInterface;
+            },
+            .absent => {
+                std.log.warn(
+                    "endpoint 0x{x:0>2} not found on any interface (configured interface {d}, device {x:0>4}:{x:0>4}): " ++
+                        "the firmware likely differs from the device config; please share `lsusb -v -d {x:0>4}:{x:0>4}`",
+                    .{ ep, interface_id, vid, pid, vid, pid },
+                );
+                return error.EndpointNotOnInterface;
+            },
+        }
+    }
+}
+
 pub const UsbrawDevice = struct {
     handle: *c.libusb_device_handle,
     ctx: *c.libusb_context,
@@ -156,6 +228,8 @@ pub const UsbrawDevice = struct {
             c.libusb_close(handle);
             c.libusb_exit(ctx);
         }
+
+        try verifyEndpointsOnInterface(handle, vid, pid, interface_id, &.{ ep_in, ep_out });
 
         const pipe_fds = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
         errdefer std.posix.close(pipe_fds[0]);
@@ -348,6 +422,23 @@ pub const UsbrawSuppress = struct {
 };
 
 // --- Tests ---
+
+test "usbraw: endpoint present on configured interface" {
+    const refs = [_]EndpointRef{ .{ .interface = 1, .address = 0x82 }, .{ .interface = 1, .address = 0x06 } };
+    try std.testing.expectEqual(EndpointCheck.ok, checkEndpointOwnership(&refs, 1, 0x82));
+}
+
+test "usbraw: endpoint owned by another interface reports the owner" {
+    const refs = [_]EndpointRef{ .{ .interface = 0, .address = 0x05 }, .{ .interface = 2, .address = 0x06 } };
+    const r = checkEndpointOwnership(&refs, 1, 0x06);
+    try std.testing.expectEqual(@as(u8, 2), r.on_other_interface);
+}
+
+test "usbraw: endpoint absent from every interface" {
+    const refs = [_]EndpointRef{.{ .interface = 0, .address = 0x05 }};
+    try std.testing.expectEqual(EndpointCheck.absent, checkEndpointOwnership(&refs, 1, 0x82));
+    try std.testing.expectEqual(EndpointCheck.absent, checkEndpointOwnership(&.{}, 1, 0x82));
+}
 
 test "usbraw: interrupt write result accepts exact transfer" {
     try checkInterruptWriteResult(0, 32, 32);
