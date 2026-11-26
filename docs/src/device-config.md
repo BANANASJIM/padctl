@@ -31,6 +31,17 @@ Flydigi Vader 3 in DInput mode sends nothing on IF0 unless IF2 is read too).
 Declare the gating interface as well: padctl keeps reading every `hid`
 interface and every `vendor` interface with `ep_in`.
 
+#### Several configs for one VID/PID
+
+When firmware revisions move endpoints between interfaces, add one config per
+layout with the same `vid`, `pid` and `name`. padctl reads the device's USB
+descriptors and binds the first config whose interfaces exist, whose `hid`
+interfaces are HID class, and whose `vendor` endpoints sit on the declared
+interface. Configs in `~/.config/padctl/devices` are tried before
+`/etc/padctl/devices`, then the builtin ones. A user config that does not
+match is skipped with a warning. `padctl doctor`
+shows which file was selected and why the others were skipped.
+
 ### `[device.init]`
 
 Optional initialization sequence sent after device open.

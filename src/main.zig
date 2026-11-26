@@ -85,6 +85,7 @@ pub const io = struct {
     pub const write_exact = @import("io/write_exact.zig");
     pub const netlink = @import("io/netlink.zig");
     pub const shadow_grab = @import("io/shadow_grab.zig");
+    pub const usb_layout = @import("io/usb_layout.zig");
     pub const ffb_forwarder = @import("io/ffb_forwarder.zig");
 };
 
