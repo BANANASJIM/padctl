@@ -23,6 +23,7 @@ pub const Result = union(enum) {
 };
 
 pub const NoReply = struct {
+    writes_failed: bool = false,
     frames: usize = 0,
     last_buf: [16]u8 = undefined,
     last_shown: usize = 0,
@@ -43,6 +44,7 @@ pub const NoReply = struct {
 /// The model ID in `frame` if it is the probe's reply.
 pub fn parseReply(probe: *const ProbeConfig, frame: []const u8) ?u8 {
     if (probe.reply_size) |n| if (frame.len != @as(usize, @intCast(n))) return null;
+    if (probe.reply_exclude) |ex| if (matches(ex, frame)) return null;
     const off: usize = @intCast(probe.reply.offset);
     if (frame.len < off + probe.reply.expect.len) return null;
     for (probe.reply.expect, 0..) |b, i| {
@@ -51,6 +53,15 @@ pub fn parseReply(probe: *const ProbeConfig, frame: []const u8) ?u8 {
     const id_off: usize = @intCast(probe.id_offset);
     if (frame.len <= id_off) return null;
     return frame[id_off];
+}
+
+fn matches(m: config_device.MatchConfig, frame: []const u8) bool {
+    const off: usize = @intCast(m.offset);
+    if (frame.len < off + m.expect.len) return false;
+    for (m.expect, 0..) |b, i| {
+        if (frame[off + i] != @as(u8, @intCast(b))) return false;
+    }
+    return true;
 }
 
 /// Encode `probe.command` into `buf`; validation guarantees it fits in 64 bytes.
@@ -87,10 +98,11 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64) Re
     var seen_ids: [attempts * 2]u8 = undefined;
     var seen_counts: [attempts * 2]u8 = undefined;
     var seen: usize = 0;
-    var single: ?u8 = null;
+    var writes_ok: usize = 0;
     for (0..attempts) |_| {
         // Writes occasionally fail on these receivers; resend (as SDL does).
         device.write(cmd) catch continue;
+        writes_ok += 1;
         var timer = std.time.Timer.start() catch return .{ .no_reply = none };
         while (timer.read() < window_ms * std.time.ns_per_ms) {
             const n = device.read(&read_buf) catch |err| switch (err) {
@@ -117,12 +129,12 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64) Re
                 seen_counts[k] += 1;
                 if (seen_counts[k] >= confirmations) return .{ .id = id };
             }
-            if (single == null) single = id;
             break; // next send
         }
     }
-    // A device that answered only once: trust a lone ID, not a conflict.
-    if (seen == 1) return .{ .id = single.? };
+    // A lone match is not trusted: it may be an input frame that fits the
+    // reply pattern by chance. The caller retries.
+    none.writes_failed = writes_ok == 0;
     return .{ .no_reply = none };
 }
 
@@ -229,6 +241,36 @@ test "model_probe: reply_size rejects frames of another length" {
     const reply = flydigiReply(84);
     try testing.expectEqual(@as(?u8, 84), parseReply(&sized, &reply));
     try testing.expectEqual(@as(?u8, null), parseReply(&sized, reply[0..20]));
+}
+
+test "model_probe: a lone match is not trusted" {
+    const reply = flydigiReply(84);
+    var mock = ReplyMock.init(testing.allocator, &.{}, &.{&reply});
+    defer mock.deinit();
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5);
+    try testing.expect(r == .no_reply);
+}
+
+test "model_probe: reply_exclude drops input frames that fit the reply pattern" {
+    var excl = flydigi_probe;
+    excl.reply_exclude = .{ .offset = 1, .expect = &.{0xfe} };
+    var input = flydigiReply(0x80);
+    input[1] = 0xfe; // 04 fe ... input report, byte 15 happens to be 0xec
+    try testing.expectEqual(@as(?u8, null), parseReply(&excl, &input));
+    try testing.expectEqual(@as(?u8, 84), parseReply(&excl, &flydigiReply(84)));
+
+    // A resting pad can repeat the same input frame; it must not confirm itself.
+    var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &input, &input, &input, &input });
+    defer mock.deinit();
+    try testing.expect(runWithWindow(mock.deviceIO(), &excl, 5) == .no_reply);
+}
+
+test "model_probe: all writes failing is reported" {
+    var mock = ReplyMock.init(testing.allocator, &.{}, &.{});
+    mock.fail_writes = attempts;
+    defer mock.deinit();
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5);
+    try testing.expect(r.no_reply.writes_failed);
 }
 
 test "model_probe: a failed write is retried" {

@@ -34,6 +34,9 @@ interface = 2
 command = "05 ec 00 00 00 00 00 00 00 00 00 00"
 reply = { offset = 15, expect = [0xec] }
 reply_size = 32
+# Input reports (04 fe ...) are also 32 bytes and byte 15 is accelerometer
+# data, so it can read 0xec; never take one for the reply.
+reply_exclude = { offset = 1, expect = [0xfe] }
 id_offset = 3
 ids = [84]
 

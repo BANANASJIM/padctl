@@ -110,7 +110,7 @@ const probe_cache_ns = 5 * std.time.ns_per_s;
 /// Keep retrying an unanswered probe this long (within the hotplug retry
 /// budget) before guessing; covers a pad that is still waking up.
 const probe_give_up_ns = 6 * std.time.ns_per_s;
-/// A probe blocks the supervisor for up to ~300 ms; while unanswered, retry it
+/// A probe blocks the supervisor for up to ~0.4 s; while unanswered, retry it
 /// at most this often however many hidraw nodes the device has.
 const probe_retry_ns = std.time.ns_per_s;
 
@@ -2596,7 +2596,13 @@ pub const Supervisor = struct {
         if (layout_ptr) |l| if (idx != null) {
             var matched_buf: [16]usize = undefined;
             const matched = usb_layout.matching(candidates.items, l, &matched_buf);
-            if (usb_layout.probeFor(candidates.items, matched)) |probe| {
+            // A leading user/system override without ids wins whatever the
+            // model (ADR-029 priority), so there is nothing to ask.
+            const lead = candidates.items[matched[0]];
+            const lead_has_ids = if (lead.cfg.device.probe) |p| p.ids.len > 0 else false;
+            const override_leads = lead.is_override and !lead_has_ids;
+            const probe_cfg = if (override_leads) null else usb_layout.probeFor(candidates.items, matched);
+            if (probe_cfg) |probe| {
                 const outcome = try self.probeModel(devname, vid, pid, probe);
                 const choice = usb_layout.chooseByModel(candidates.items, matched, outcome.id);
                 idx = switch (choice) {
@@ -2685,7 +2691,11 @@ pub const Supervisor = struct {
             defer io.close();
             return switch (model_probe.run(io, probe)) {
                 .id => |id| .{ .id = id },
-                .no_reply => |nr| .{ .id = null, .no_reply = nr, .reason = if (nr.frames == 0) "no data on the probe interface" else "no matching reply" },
+                .no_reply => |nr| .{
+                    .id = null,
+                    .no_reply = nr,
+                    .reason = if (nr.writes_failed) "writing the probe failed" else if (nr.frames == 0) "no data on the probe interface" else "no confirmed reply",
+                },
             };
         }
         return .{ .id = null, .reason = "probe interface has no hidraw node" };
@@ -6800,4 +6810,58 @@ test "supervisor: an unanswered model probe retries, then gives up for the plug 
     // A later replug probes afresh.
     sup.test_now_override_ns = 2 + probe_give_up_ns + probe_cache_ns;
     try testing.expectError(error.HotplugTransient, sup.probeModel("hidraw7", 0x04b4, 0x2412, &probe));
+}
+
+test "supervisor: a leading override without ids is chosen without probing (ADR-030)" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const user_toml =
+        \\[device]
+        \\name = "My V1 pad"
+        \\vid = 0x04b4
+        \\pid = 0x2412
+        \\[[device.interface]]
+        \\id = 2
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 2
+        \\size = 32
+    ;
+    const apex = try std.fs.cwd().readFileAlloc(allocator, "devices/flydigi/apex4-dinput.toml", 1 << 20);
+    defer allocator.free(apex);
+    const vader4 = try std.fs.cwd().readFileAlloc(allocator, "devices/flydigi/vader4-pro-04b4-2412.toml", 1 << 20);
+    defer allocator.free(vader4);
+    try tmp.dir.makePath("user");
+    try tmp.dir.makePath("builtin");
+    try tmp.dir.writeFile(.{ .sub_path = "user/mine.toml", .data = user_toml });
+    try tmp.dir.writeFile(.{ .sub_path = "builtin/apex4.toml", .data = apex });
+    try tmp.dir.writeFile(.{ .sub_path = "builtin/vader4.toml", .data = vader4 });
+    try tmp.dir.makePath("sys");
+    var sys_dir = try tmp.dir.openDir("sys", .{});
+    defer sys_dir.close();
+    // Any layout with a HID IF2 fits all three configs.
+    try usb_layout.fixtures.writeSysfs(sys_dir, "hidraw7", "1-4", &usb_layout.fixtures.vader5_old_firmware);
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const user_dir = try std.fs.path.join(allocator, &.{ root, "user" });
+    defer allocator.free(user_dir);
+    const builtin_dir = try std.fs.path.join(allocator, &.{ root, "builtin" });
+    defer allocator.free(builtin_dir);
+    const sys_root = try std.fs.path.join(allocator, &.{ root, "sys" });
+    defer allocator.free(sys_root);
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+    sup.sys_root = sys_root;
+    sup.probe_dev_root = "/nonexistent_dev_root_xyz";
+    try sup.startFromDirsWithRoot(&.{ user_dir, builtin_dir }, "/nonexistent_dev_root_xyz");
+
+    // Without the override this would wait on the (unanswerable) probe.
+    const chosen = (try sup.selectConfigFor("/dev/hidraw7", 0x04b4, 0x2412)) orelse return error.NoSelection;
+    try testing.expectEqualStrings("My V1 pad", chosen.device.name);
+    try testing.expectEqual(@as(u32, 0), sup.probe_state.count());
 }
