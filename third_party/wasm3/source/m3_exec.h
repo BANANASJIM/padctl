@@ -71,6 +71,22 @@ d_m3BeginExternC
     #define forwardTrap(err)                return err
 #endif
 
+// Trap before a non-tail Wasm call (op_Call/op_CallIndirect) would drive the
+// native C stack past runtime->stackLimit. Reads the current stack pointer via
+// a frame-address probe and compares against the low-water mark set by
+// d_m3StackLimitEnter. Only non-tail calls are guarded; op_ReturnCall runs in
+// constant native stack and is intentionally left unbounded.
+#if d_m3MaxNativeStack > 0
+#   define d_m3CheckNativeStack()                                               \
+        do {                                                                    \
+            void * _m3Limit = m3MemRuntime (_mem)->stackLimit;                  \
+            if (M3_UNLIKELY (_m3Limit && m3_NativeStackPtr () < _m3Limit))      \
+                newTrap (m3Err_trapStackOverflow);                              \
+        } while (0)
+#else
+#   define d_m3CheckNativeStack()           do {} while (0)
+#endif
+
 
 #if d_m3EnableStrace == 1
     // Flat trace
@@ -284,7 +300,11 @@ d_m3UnaryOp_f (f32, Floor,      floorf);        d_m3UnaryOp_f (f64, Floor,      
 d_m3UnaryOp_f (f32, Trunc,      truncf);        d_m3UnaryOp_f (f64, Trunc,      trunc);
 d_m3UnaryOp_f (f32, Sqrt,       sqrtf);         d_m3UnaryOp_f (f64, Sqrt,       sqrt);
 d_m3UnaryOp_f (f32, Nearest,    rintf);         d_m3UnaryOp_f (f64, Nearest,    rint);
+#if defined(M3_COMPILER_TCC)
+d_m3UnaryOp_f (f32, Negate,     m3_negf);       d_m3UnaryOp_f (f64, Negate,     m3_neg);
+#else
 d_m3UnaryOp_f (f32, Negate,     -);             d_m3UnaryOp_f (f64, Negate,     -);
+#endif
 #endif
 
 #define OP_EQZ(x) ((x) == 0)
@@ -541,6 +561,8 @@ d_m3Op  (SetGlobal_i64)
 
 d_m3Op  (Call)
 {
+    d_m3CheckNativeStack ();
+
     pc_t callPC                 = immediate (pc_t);
     i32 stackOffset             = immediate (i32);
     IM3Memory memory            = m3MemInfo (_mem);
@@ -565,10 +587,13 @@ d_m3Op  (Call)
 }
 
 
-d_m3Op  (CallIndirect)
+// call_ref / return_call_ref: like the indirect calls, except the callee comes
+// straight off the stack instead of out of a table, so there is no bounds check
+// and no index. The type still has to match: a (ref null $t) can hold a
+// reference the validator only knows as $t, and null has to trap.
+d_m3Op  (CallRef)
 {
-    u32 tableIndex              = slot (u32);
-    IM3Module module            = immediate (IM3Module);
+    IM3Function function        = slot (IM3Function);
     IM3FuncType type            = immediate (IM3FuncType);
     i32 stackOffset             = immediate (i32);
     IM3Memory memory            = m3MemInfo (_mem);
@@ -577,9 +602,72 @@ d_m3Op  (CallIndirect)
 
     m3ret_t r = m3Err_none;
 
-    if (M3_LIKELY(tableIndex < module->table0Size))
+    if (M3_LIKELY(function))
     {
-        IM3Function function = module->table0 [tableIndex];
+        if (M3_LIKELY(type == function->funcType))
+        {
+            if (M3_UNLIKELY(not function->compiled))
+                r = CompileFunction (function);
+
+            if (M3_LIKELY(not r))
+            {
+# if (d_m3EnableOpProfiling || d_m3EnableOpTracing)
+                r = Call (function->compiled, sp, _mem, d_m3OpDefaultArgs, d_m3BaseCstr);
+# else
+                r = Call (function->compiled, sp, _mem, d_m3OpDefaultArgs);
+# endif
+
+                _mem = memory->mallocated;
+
+                if (M3_LIKELY(not r))
+                    nextOpDirect ();
+                else
+                {
+                    pushBacktraceFrame ();
+                    forwardTrap (r);
+                }
+            }
+        }
+        else r = m3Err_trapIndirectCallTypeMismatch;
+    }
+    else r = m3Err_trapNullFunctionRef;
+
+    if (M3_UNLIKELY(r))
+        newTrap (r);
+    else forwardTrap (r);
+}
+
+
+// ref.as_non_null is a null check and nothing else: the value stays put, so
+// there is no destination slot, only the trap.
+d_m3Op  (RefAsNonNull)
+{
+    IM3Function reference = slot (IM3Function);
+
+    if (M3_UNLIKELY(not reference))
+        newTrap (m3Err_trapNullReference);
+
+    nextOp ();
+}
+
+
+d_m3Op  (CallIndirect)
+{
+    d_m3CheckNativeStack ();
+
+    u32 tableIndex              = slot (u32);
+    M3Table * table             = immediate (M3Table *);
+    IM3FuncType type            = immediate (IM3FuncType);
+    i32 stackOffset             = immediate (i32);
+    IM3Memory memory            = m3MemInfo (_mem);
+
+    m3stack_t sp = _sp + stackOffset;
+
+    m3ret_t r = m3Err_none;
+
+    if (M3_LIKELY(tableIndex < table->size))
+    {
+        IM3Function function = (IM3Function) table->elements [tableIndex];
 
         if (M3_LIKELY(function))
         {
@@ -617,6 +705,115 @@ d_m3Op  (CallIndirect)
     if (M3_UNLIKELY(r))
         newTrap (r);
     else forwardTrap (r);
+}
+
+
+// return_call / return_call_indirect: the callee takes over this function's stack frame
+// instead of getting one of its own.  The spec guarantees the callee returns exactly what
+// the enclosing function returns, so the two frames share their return slots and only the
+// arguments have to be relocated: the compiler stages them above the caller's stack (they
+// can still read the args/locals they're about to overwrite) and the op slides them down
+// onto the frame base.  The jump is a tail call, so neither the m3 stack nor the native
+// stack grows -- a tail-recursive loop runs in constant space.
+# define d_m3TailCallArgs(RETURNSLOTS, STACKOFFSET, NUMARGSLOTS)                     \
+    memmove ((void *) (_sp + (RETURNSLOTS)), (const void *) (_sp + (STACKOFFSET)),   \
+             (size_t) (NUMARGSLOTS) * sizeof (m3slot_t))
+
+d_m3Op  (ReturnCall)
+{
+    pc_t callPC                 = immediate (pc_t);
+    i32 stackOffset             = immediate (i32);
+    i32 returnSlots             = immediate (i32);
+    u32 numArgSlots             = immediate (u32);
+
+    m3ret_t possible_trap = m3_Yield ();
+    if (M3_UNLIKELY(possible_trap))
+        newTrap (possible_trap);
+
+    d_m3TailCallArgs (returnSlots, stackOffset, numArgSlots);
+
+    jumpOpDirect (callPC);
+}
+
+
+d_m3Op  (ReturnCallRef)
+{
+    IM3Function function        = slot (IM3Function);
+    IM3FuncType type            = immediate (IM3FuncType);
+    i32 stackOffset             = immediate (i32);
+    i32 returnSlots             = immediate (i32);
+    u32 numArgSlots             = immediate (u32);
+
+    m3ret_t r = m3Err_none;
+
+    if (M3_LIKELY(function))
+    {
+        if (M3_LIKELY(type == function->funcType))
+        {
+            if (M3_UNLIKELY(not function->compiled))
+                r = CompileFunction (function);
+
+            if (M3_LIKELY(not r))
+            {
+                r = m3_Yield ();
+
+                if (M3_LIKELY(not r))
+                {
+                    d_m3TailCallArgs (returnSlots, stackOffset, numArgSlots);
+
+                    jumpOpDirect (function->compiled);
+                }
+            }
+        }
+        else r = m3Err_trapIndirectCallTypeMismatch;
+    }
+    else r = m3Err_trapNullFunctionRef;
+
+    newTrap (r);
+}
+
+
+d_m3Op  (ReturnCallIndirect)
+{
+    u32 tableIndex              = slot (u32);
+    M3Table * table             = immediate (M3Table *);
+    IM3FuncType type            = immediate (IM3FuncType);
+    i32 stackOffset             = immediate (i32);
+    i32 returnSlots             = immediate (i32);
+    u32 numArgSlots             = immediate (u32);
+
+    m3ret_t r = m3Err_none;
+
+    if (M3_LIKELY(tableIndex < table->size))
+    {
+        IM3Function function = (IM3Function) table->elements [tableIndex];
+
+        if (M3_LIKELY(function))
+        {
+            if (M3_LIKELY(type == function->funcType))
+            {
+                if (M3_UNLIKELY(not function->compiled))
+                    r = CompileFunction (function);
+
+                if (M3_LIKELY(not r))
+                {
+                    r = m3_Yield ();
+
+                    if (M3_LIKELY(not r))
+                    {
+                        d_m3TailCallArgs (returnSlots, stackOffset, numArgSlots);
+
+                        jumpOpDirect (function->compiled);
+                    }
+                }
+            }
+            else r = m3Err_trapIndirectCallTypeMismatch;
+        }
+        else r = m3Err_trapTableElementIsNull;
+    }
+    else r = m3Err_trapTableIndexOutOfRange;
+
+    newTrap (r);
 }
 
 
@@ -770,6 +967,189 @@ d_m3Op  (MemFill)
 }
 
 
+d_m3Op  (MemInit)
+{
+    M3DataSegment * segment = immediate (M3DataSegment *);
+
+    u32 size = (u32) _r0;
+    u64 source = slot (u32);
+    u64 destination = slot (u32);
+
+    u64 available = segment->dropped ? 0 : segment->size;
+
+    if (M3_LIKELY(destination + size <= _mem->length))
+    {
+        if (M3_LIKELY(source + size <= available))
+        {
+            memcpy (m3MemData (_mem) + destination, segment->data + source, size);
+            nextOp ();
+        }
+        else d_outOfBoundsMemOp (source, size);
+    }
+    else d_outOfBoundsMemOp (destination, size);
+}
+
+
+d_m3Op  (DataDrop)
+{
+    M3DataSegment * segment = immediate (M3DataSegment *);
+    segment->dropped = true;
+
+    nextOp ();
+}
+
+
+#if d_m3HasRefTypes
+
+d_m3Op  (TableGet)
+{
+    M3Table * table = immediate (M3Table *);
+    u32 index       = slot (u32);
+
+    if (M3_LIKELY(index < table->size))
+    {
+        _r0 = (u64) (uintptr_t) table->elements [index];
+        nextOp ();
+    }
+    else newTrap (m3Err_trapTableOutOfBounds);
+}
+
+
+d_m3Op  (TableSet)
+{
+    M3Table * table = immediate (M3Table *);
+    void * value    = slot (void *);
+    u32 index       = slot (u32);
+
+    if (M3_LIKELY(index < table->size))
+    {
+        table->elements [index] = value;
+        nextOp ();
+    }
+    else newTrap (m3Err_trapTableOutOfBounds);
+}
+
+
+d_m3Op  (TableSize)
+{
+    M3Table * table = immediate (M3Table *);
+
+    _r0 = table->size;
+
+    nextOp ();
+}
+
+
+d_m3Op  (TableGrow)
+{
+    M3Table * table = immediate (M3Table *);
+    u32 delta       = slot (u32);
+    void * value    = slot (void *);
+
+    u32 oldSize = table->size;
+    u64 newSize = (u64) oldSize + delta;
+    u32 maxSize = table->maxSize ? table->maxSize : d_m3MaxSaneTableSize;
+
+    if (newSize == oldSize)         // a zero delta never reallocates, and the table may have no storage yet
+    {
+        _r0 = oldSize;
+        nextOp ();
+    }
+
+    if (newSize <= maxSize)
+    {
+        void ** elements = m3_ReallocArray (void *, table->elements, (size_t) newSize, oldSize);
+
+        if (elements)
+        {
+            table->elements = elements;
+            table->size = (u32) newSize;
+
+            for (u32 i = oldSize; i < table->size; ++i)
+                table->elements [i] = value;
+
+            _r0 = oldSize;
+            nextOp ();
+        }
+    }
+
+    // spec: a failed grow returns -1 and leaves the table alone
+    _r0 = (u32) -1;
+
+    nextOp ();
+}
+
+
+d_m3Op  (TableInit)
+{
+    M3Table * table             = immediate (M3Table *);
+    M3ElementSegment * segment  = immediate (M3ElementSegment *);
+    u32 count                   = slot (u32);
+    u32 source                  = slot (u32);
+    u32 destination             = slot (u32);
+
+    u64 available = segment->dropped ? 0 : segment->numElements;
+
+    if (M3_LIKELY((u64) destination + count <= table->size and
+                  (u64) source + count <= available))
+    {
+        for (u32 i = 0; i < count; ++i)
+            table->elements [destination + i] = segment->resolved [source + i];
+
+        nextOp ();
+    }
+    else newTrap (m3Err_trapTableOutOfBounds);
+}
+
+
+d_m3Op  (ElemDrop)
+{
+    M3ElementSegment * segment = immediate (M3ElementSegment *);
+    segment->dropped = true;
+
+    nextOp ();
+}
+
+
+d_m3Op  (TableCopy)
+{
+    M3Table * dst   = immediate (M3Table *);
+    M3Table * src   = immediate (M3Table *);
+    u32 count       = slot (u32);
+    u32 source      = slot (u32);
+    u32 destination = slot (u32);
+
+    if (M3_LIKELY((u64) destination + count <= dst->size and
+                  (u64) source + count <= src->size))
+    {
+        memmove (dst->elements + destination, src->elements + source, count * sizeof (void *));
+
+        nextOp ();
+    }
+    else newTrap (m3Err_trapTableOutOfBounds);
+}
+
+
+d_m3Op  (TableFill)
+{
+    M3Table * table = immediate (M3Table *);
+    u32 count       = slot (u32);
+    void * value    = slot (void *);
+    u32 index       = slot (u32);
+
+    if (M3_LIKELY((u64) index + count <= table->size))
+    {
+        for (u32 i = 0; i < count; ++i)
+            table->elements [index + i] = value;
+
+        nextOp ();
+    }
+    else newTrap (m3Err_trapTableOutOfBounds);
+}
+
+#endif // d_m3HasRefTypes
+
+
 // it's a debate: should the compilation be trigger be the caller or callee page.
 // it's a much easier to put it in the caller pager. if it's in the callee, either the entire page
 // has be left dangling or it's just a stub that jumps to a newly acquired page.  In Gestalt, I opted
@@ -798,6 +1178,29 @@ d_m3Op  (Compile)
 }
 
 
+// same as op_Compile, for a call site that was emitted as a tail call
+d_m3Op  (CompileReturnCall)
+{
+    rewrite_op (op_ReturnCall);
+
+    IM3Function function        = immediate (IM3Function);
+
+    m3ret_t result = m3Err_none;
+
+    if (M3_UNLIKELY(not function->compiled))
+        result = CompileFunction (function);
+
+    if (not result)
+    {
+        // patch up compiled pc and call rewritten op_ReturnCall
+        * ((void**) --_pc) = (void*) (function->compiled);
+        --_pc;
+        nextOpDirect ();
+    }
+
+    newTrap (result);
+}
+
 
 d_m3Op  (Entry)
 {
@@ -806,7 +1209,9 @@ d_m3Op  (Entry)
     d_m3TracePrepare
 
     IM3Function function = immediate (IM3Function);
+#if d_m3EntryKeepsFrame
     IM3Memory memory = m3MemInfo (_mem);
+#endif
 
 #if d_m3SkipStackCheck
     if (true)
@@ -826,6 +1231,12 @@ d_m3Op  (Entry)
         {
             memcpy (stack, function->constants, function->numConstantBytes);
         }
+
+#if !d_m3EntryKeepsFrame
+        // there's nothing left to do once the body returns, so hand this native frame
+        // over to it. That's what lets op_ReturnCall tail-call in constant native stack.
+        nextOpDirect ();
+#else
 
 #if d_m3EnableStrace >= 2
         d_m3TracePrint("%s %s {", m3_GetFunctionName(function), SPrintFunctionArgList (function, _sp + function->numRetSlots));
@@ -856,6 +1267,7 @@ d_m3Op  (Entry)
             fillBacktraceFrame ();
         }
         forwardTrap (r);
+#endif // d_m3EntryKeepsFrame
     }
     else newTrap (m3Err_trapStackOverflow);
 }

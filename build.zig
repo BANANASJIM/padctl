@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
     // real root cause of issue #214 (crash at m3_FindFunction → CompileFunction,
     // not a missing export). Exempt only this third-party translation unit set
     // from UBSan-trap; all first-party code keeps the strict sanitizer.
-    const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0", "-fno-sanitize=undefined" };
+    const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-D_GNU_SOURCE", "-DDEBUG=0", "-Dd_m3HasWASI=0", "-fno-sanitize=undefined" };
 
     const zon = @import("build.zig.zon");
     const version_override = b.option([]const u8, "version", "Override version string (default: build.zig.zon)");
@@ -59,21 +59,15 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "use_libusb", use_libusb);
     build_opts.addOption([]const u8, "version", version);
 
-    // Vendored static libusb (allyourcodebase/libusb, v1.0.26). musl static
-    // builds skip libudev (netlink hotplug); sanitize_c is disabled on the C
+    // Vendored static libusb. musl static builds skip libudev (netlink
+    // hotplug); sanitize_c is disabled on the C
     // artifact because UBSan-call mode leaves __ubsan_handle_* undefined at the
     // final test link, same treatment wasm3 already gets. The dependency ships
     // its header at libusb/libusb.h; padctl @cIncludes libusb-1.0/libusb.h, so
     // a WriteFiles shim re-exposes it under the expected prefix.
     const vendored: ?VendorLib = if (use_libusb) blk: {
-        const dep = b.dependency("libusb", .{
-            .target = target,
-            .optimize = optimize,
-            .@"system-libudev" = false,
-            .linkage = std.builtin.LinkMode.static,
-        });
-        const lib = dep.artifact("usb");
-        lib.root_module.sanitize_c = .off;
+        const dep = b.dependency("libusb", .{});
+        const lib = @import("tools/build_libusb.zig").build(b, dep, target, optimize);
         const wf = b.addWriteFiles();
         _ = wf.addCopyFile(dep.path("libusb/libusb.h"), "libusb-1.0/libusb.h");
         break :blk .{ .lib = lib, .inc = wf.getDirectory() };
@@ -165,6 +159,13 @@ pub fn build(b: *std.Build) void {
     if (coverage) unit_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     const test_step = b.step("test", "Run Layer 0 + Layer 1 tests (CI)");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+    const native_security_step = b.step("test-native-security", "Run native dependency security regressions");
+    if (use_libusb) {
+        const descriptor_test = @import("tools/build_libusb.zig").descriptorTest(b, b.dependency("libusb", .{}), target, optimize);
+        const run_descriptor_test = b.addRunArtifact(descriptor_test);
+        native_security_step.dependOn(&run_descriptor_test.step);
+        test_step.dependOn(&run_descriptor_test.step);
+    }
 
     // test-tsan: ThreadSanitizer-enabled test run (local dev)
     const tsan_mod = createTestRootModule(b, target, optimize, true, toml_mod, capture_analyse_mod, capture_toml_gen_mod, capture_resolve_mod, build_opts);
@@ -608,6 +609,7 @@ fn addWasm3(b: *std.Build, mod: *std.Build.Module, c_flags: []const []const u8) 
             "m3_info.c",
             "m3_module.c",
             "m3_parse.c",
+            "m3_validate.c",
         },
         .flags = c_flags,
     });

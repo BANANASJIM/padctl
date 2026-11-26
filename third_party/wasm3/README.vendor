@@ -1,1 +1,2 @@
-wasm3 @ 79d412ea5fcf92f0efe658d52827a0e0a96ff442 https://github.com/wasm3/wasm3
+wasm3 v0.9.0 @ 0cd38327f0c721e75172f4f1eeb55854dc0517af https://github.com/wasm3/wasm3
+Unmodified upstream source; validation enabled by default.

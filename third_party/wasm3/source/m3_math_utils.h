@@ -78,6 +78,76 @@ int __builtin_clzll(uint64_t value) {
 
 #endif // defined(M3_COMPILER_MSVC)
 
+#if defined(M3_COMPILER_TCC)
+
+// TinyCC provides none of the bit-counting builtins the interpreter uses
+
+static inline
+int __builtin_popcount(uint32_t x) {
+    x = x - ((x >> 1) & 0x55555555u);
+    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
+    x = (x + (x >> 4)) & 0x0f0f0f0fu;
+    return (int)((x * 0x01010101u) >> 24);
+}
+
+static inline
+int __builtin_ctz(uint32_t x) {
+    //if (x == 0) return 32; // Note: ctz(0) result is undefined anyway
+    return __builtin_popcount((x & (~x + 1u)) - 1);
+}
+
+static inline
+int __builtin_clz(uint32_t x) {
+    //if (x == 0) return 32; // Note: clz(0) result is undefined anyway
+    x |= x >> 1;  x |= x >> 2;  x |= x >> 4;  x |= x >> 8;  x |= x >> 16;
+    return 32 - __builtin_popcount(x);
+}
+
+static inline
+int __builtin_popcountll(uint64_t value) {
+    return __builtin_popcount((uint32_t)(value & 0xFFFFFFFF)) +
+           __builtin_popcount((uint32_t)(value >> 32));
+}
+
+static inline
+int __builtin_ctzll(uint64_t value) {
+    uint32_t msh = (uint32_t)(value >> 32);
+    uint32_t lsh = (uint32_t)(value & 0xFFFFFFFF);
+    if (lsh != 0) return __builtin_ctz(lsh);
+    return 32 + __builtin_ctz(msh);
+}
+
+static inline
+int __builtin_clzll(uint64_t value) {
+    uint32_t msh = (uint32_t)(value >> 32);
+    uint32_t lsh = (uint32_t)(value & 0xFFFFFFFF);
+    if (msh != 0) return __builtin_clz(msh);
+    return 32 + __builtin_clz(lsh);
+}
+
+
+// TinyCC compiles -x on floats as an arithmetic negation, which quiets signaling
+// NaNs; f32.neg/f64.neg must only flip the sign bit and leave the payload alone
+
+static inline
+f32 m3_negf(f32 x) {
+    u32 bits;
+    memcpy(&bits, &x, sizeof(bits));
+    bits ^= 0x80000000u;
+    memcpy(&x, &bits, sizeof(x));
+    return x;
+}
+
+static inline
+f64 m3_neg(f64 x) {
+    u64 bits;
+    memcpy(&bits, &x, sizeof(bits));
+    bits ^= 0x8000000000000000ull;
+    memcpy(&x, &bits, sizeof(x));
+    return x;
+}
+
+#endif // defined(M3_COMPILER_TCC)
 
 // TODO: not sure why, signbit is actually defined in math.h
 #if (defined(ESP8266) || defined(ESP32)) && !defined(signbit)
@@ -109,10 +179,38 @@ double rint( double arg ) {
   return (double)lrint(arg);
 }
 
-//TODO
 static inline
 uint64_t strtoull(const char* str, char** endptr, int base) {
-  return 0;
+  uint64_t result = 0;
+  const char* p = str;
+
+  while (*p == ' ' || *p == '\t') p++;
+
+  if (base == 0) {
+    if (*p == '0' && (*(p+1) == 'x' || *(p+1) == 'X')) {
+      base = 16; p += 2;
+    } else if (*p == '0') {
+      base = 8; p++;
+    } else {
+      base = 10;
+    }
+  } else if (base == 16 && *p == '0' && (*(p+1) == 'x' || *(p+1) == 'X')) {
+    p += 2;
+  }
+
+  while (*p) {
+    int digit;
+    if (*p >= '0' && *p <= '9') digit = *p - '0';
+    else if (*p >= 'a' && *p <= 'f') digit = *p - 'a' + 10;
+    else if (*p >= 'A' && *p <= 'F') digit = *p - 'A' + 10;
+    else break;
+    if (digit >= base) break;
+    result = result * base + digit;
+    p++;
+  }
+
+  if (endptr) *endptr = (char*)p;
+  return result;
 }
 
 #endif
@@ -236,30 +334,50 @@ u64 rotr64(u64 n, unsigned c) {
 
 #include <math.h>
 
+// Propagate a NaN operand the way the arithmetic ops do.
+// keep its sign and payload, but force the quiet bit, since the spec requires
+// min/max to produce an arithmetic NaN.
+
+static inline
+f32 quiet_nan_f32(f32 arg) {
+    union { f32 f; u32 i; } u;
+    u.f = arg;
+    u.i |= 0x00400000;
+    return u.f;
+}
+
+static inline
+f64 quiet_nan_f64(f64 arg) {
+    union { f64 f; u64 i; } u;
+    u.f = arg;
+    u.i |= 0x0008000000000000ULL;
+    return u.f;
+}
+
 static inline
 f32 min_f32(f32 a, f32 b) {
-    if (M3_UNLIKELY(isnan(a) or isnan(b))) return NAN;
+    if (M3_UNLIKELY(isnan(a) or isnan(b))) return quiet_nan_f32(isnan(a) ? a : b);
     if (M3_UNLIKELY(a == 0 and a == b)) return signbit(a) ? a : b;
     return a > b ? b : a;
 }
 
 static inline
 f32 max_f32(f32 a, f32 b) {
-    if (M3_UNLIKELY(isnan(a) or isnan(b))) return NAN;
+    if (M3_UNLIKELY(isnan(a) or isnan(b))) return quiet_nan_f32(isnan(a) ? a : b);
     if (M3_UNLIKELY(a == 0 and a == b)) return signbit(a) ? b : a;
     return a > b ? a : b;
 }
 
 static inline
 f64 min_f64(f64 a, f64 b) {
-    if (M3_UNLIKELY(isnan(a) or isnan(b))) return NAN;
+    if (M3_UNLIKELY(isnan(a) or isnan(b))) return quiet_nan_f64(isnan(a) ? a : b);
     if (M3_UNLIKELY(a == 0 and a == b)) return signbit(a) ? a : b;
     return a > b ? b : a;
 }
 
 static inline
 f64 max_f64(f64 a, f64 b) {
-    if (M3_UNLIKELY(isnan(a) or isnan(b))) return NAN;
+    if (M3_UNLIKELY(isnan(a) or isnan(b))) return quiet_nan_f64(isnan(a) ? a : b);
     if (M3_UNLIKELY(a == 0 and a == b)) return signbit(a) ? b : a;
     return a > b ? a : b;
 }
