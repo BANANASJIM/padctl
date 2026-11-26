@@ -2619,7 +2619,13 @@ pub const Supervisor = struct {
             var spawned: usize = 0;
             for (paths) |hidraw_path| {
                 const selected = blk: {
-                    const key = readPhysicalPath(self.allocator, hidraw_path) catch break :blk try self.selectConfigFor(hidraw_path, vid, pid);
+                    // Composite receivers expose children with other PIDs
+                    // under one physical path, so the key includes VID:PID.
+                    const key = blk2: {
+                        const phys = readPhysicalPath(self.allocator, hidraw_path) catch break :blk try self.selectConfigFor(hidraw_path, vid, pid);
+                        defer self.allocator.free(phys);
+                        break :blk2 try std.fmt.allocPrint(self.allocator, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys });
+                    };
                     const gop = selected_for.getOrPut(key) catch |err| {
                         self.allocator.free(key);
                         return err;

@@ -622,11 +622,17 @@ fn printSupportedDevices(allocator: std.mem.Allocator, status_devices: []const S
                 const usb_dir = std.fmt.bufPrint(&dir_buf, "/sys/bus/usb/devices/{s}", .{p.bus_id}) catch break :blk null;
                 break :blk usb_layout.readFromUsbDeviceDir(usb_dir);
             };
-            if (layout) |*l| {
+            const connected = if (presence) |p| p.present else false;
+            if (ms.len == 0) {
+                try writer.writeAll("  config: none in the daemon's config dirs; padctl will not bind this device\n");
+            } else if (layout) |*l| {
                 try printLayoutSelection(allocator, writer, ms, l);
             } else {
                 try printProvenance(writer, ms);
-                if (ms.len > 1) try writer.writeAll("  note: with the device connected, padctl picks among these by USB layout\n");
+                if (ms.len > 1) try writer.writeAll(if (connected)
+                    "  note: USB layout unreadable; padctl uses the first config listed\n"
+                else
+                    "  note: with the device connected, padctl picks among these by USB layout\n");
             }
         }
 
