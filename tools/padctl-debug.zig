@@ -102,7 +102,7 @@ fn createDeviceIO(
     } else if (std.mem.eql(u8, iface.class, "vendor")) {
         const ep_in: u8 = @intCast(iface.ep_in orelse return error.MissingEndpoint);
         const ep_out: u8 = @intCast(iface.ep_out orelse return error.MissingEndpoint);
-        const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
+        const dev = try UsbrawDevice.open(allocator, vid, pid, null, @intCast(iface.id), ep_in, ep_out);
         return dev.deviceIO();
     }
     return error.UnknownInterfaceClass;

@@ -146,6 +146,25 @@ pub const HidrawDevice = struct {
         return paths.toOwnedSlice(allocator);
     }
 
+    /// Like `discover`, restricted to the physical device `phys`. Caller frees.
+    pub fn discoverForPhys(allocator: std.mem.Allocator, vid: u16, pid: u16, interface_id: u8, phys: []const u8) ![]const u8 {
+        const paths = try discoverAll(allocator, vid, pid);
+        defer {
+            for (paths) |p| allocator.free(p);
+            allocator.free(paths);
+        }
+        for (paths) |p| {
+            if (readInterfaceId(p) != interface_id) continue;
+            const node_phys = readPhysicalPath(allocator, p) catch continue;
+            defer allocator.free(node_phys);
+            if (std.mem.eql(u8, node_phys, phys)) return allocator.dupe(u8, p);
+        }
+        // A node path stands in for phys when sysfs had none; behave as before.
+        // Otherwise the node may just not exist yet: let hotplug retry.
+        if (std.mem.startsWith(u8, phys, "/")) return discover(allocator, vid, pid, interface_id);
+        return error.NotFound;
+    }
+
     /// Open the hidraw node at path.
     pub fn open(self: *HidrawDevice, path: []const u8) !void {
         self.fd = try posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0);
@@ -372,6 +391,37 @@ fn readPhysFromSysfs(path: []const u8, buf: *[1024]u8, sys_root: []const u8) ?[]
         }
     }
     return null;
+}
+
+pub const UsbAddress = struct { bus: u8, addr: u8 };
+
+/// Bus number and device address of the USB device whose hidraw nodes carry
+/// `phys`, so libusb opens that device and not another with the same VID/PID.
+pub fn usbAddressForPhys(phys: []const u8, sys_root: []const u8) ?UsbAddress {
+    var cbuf: [256]u8 = undefined;
+    const class_dir = std.fmt.bufPrint(&cbuf, "{s}/class/hidraw", .{sys_root}) catch return null;
+    var dir = std.fs.openDirAbsolute(class_dir, .{ .iterate = true }) catch return null;
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        var pbuf: [1024]u8 = undefined;
+        const node_phys = readPhysFromSysfs(entry.name, &pbuf, sys_root) orelse continue;
+        if (!std.mem.eql(u8, stripInputSuffix(node_phys), phys)) continue;
+        var ubuf: [std.fs.max_path_bytes]u8 = undefined;
+        const usb_dir = std.fmt.bufPrint(&ubuf, "{s}/{s}/device/../..", .{ class_dir, entry.name }) catch continue;
+        const bus = readSysfsDecimal(usb_dir, "busnum") orelse continue;
+        const addr = readSysfsDecimal(usb_dir, "devnum") orelse continue;
+        return .{ .bus = bus, .addr = addr };
+    }
+    return null;
+}
+
+fn readSysfsDecimal(dir_path: []const u8, name: []const u8) ?u8 {
+    var dir = std.fs.openDirAbsolute(dir_path, .{}) catch return null;
+    defer dir.close();
+    var buf: [16]u8 = undefined;
+    const text = dir.readFile(name, &buf) catch return null;
+    return std.fmt.parseInt(u8, std.mem.trim(u8, text, " \t\r\n"), 10) catch null;
 }
 
 /// Strip trailing "/inputN" suffix from a physical path for dedup.
@@ -605,4 +655,40 @@ test "hidraw: evdevGrabErrno surfaces ioctl errno on bad fd" {
     const e = evdevGrabErrno(-1);
     try std.testing.expect(e != .SUCCESS);
     try std.testing.expectEqual(linux.E.BADF, e);
+}
+
+test "hidraw: usbAddressForPhys finds the USB device behind matching hidraw nodes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Dev = struct { node: []const u8, usb: []const u8, phys: []const u8, bus: []const u8, addr: []const u8 };
+    const devs = [_]Dev{
+        .{ .node = "hidraw1", .usb = "1-4", .phys = "usb-0000:00:14.0-4/input2", .bus = "1\n", .addr = "7\n" },
+        .{ .node = "hidraw5", .usb = "3-2", .phys = "usb-0000:05:00.0-2/input2", .bus = "3\n", .addr = "12\n" },
+    };
+    for (devs) |d| {
+        var b1: [128]u8 = undefined;
+        const hid = try std.fmt.bufPrint(&b1, "devices/{s}/{s}:1.2/0003:04B4:2412.0001", .{ d.usb, d.usb });
+        try tmp.dir.makePath(hid);
+        var b2: [128]u8 = undefined;
+        try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&b2, "{s}/uevent", .{hid}), .data = try std.fmt.bufPrint(&b1, "HID_PHYS={s}\n", .{d.phys}) });
+        var b3: [128]u8 = undefined;
+        try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&b3, "devices/{s}/busnum", .{d.usb}), .data = d.bus });
+        try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&b3, "devices/{s}/devnum", .{d.usb}), .data = d.addr });
+        var b4: [128]u8 = undefined;
+        const cls = try std.fmt.bufPrint(&b4, "class/hidraw/{s}", .{d.node});
+        try tmp.dir.makePath(cls);
+        var b5: [128]u8 = undefined;
+        var b6: [160]u8 = undefined;
+        const target = try std.fmt.bufPrint(&b6, "../../../devices/{s}/{s}:1.2/0003:04B4:2412.0001", .{ d.usb, d.usb });
+        try tmp.dir.symLink(target, try std.fmt.bufPrint(&b5, "{s}/device", .{cls}), .{ .is_directory = true });
+    }
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmp.dir.realpath(".", &root_buf);
+
+    const second = usbAddressForPhys("usb-0000:05:00.0-2", root) orelse return error.NotFound;
+    try std.testing.expectEqual(@as(u8, 3), second.bus);
+    try std.testing.expectEqual(@as(u8, 12), second.addr);
+    const first = usbAddressForPhys("usb-0000:00:14.0-4", root) orelse return error.NotFound;
+    try std.testing.expectEqual(@as(u8, 7), first.addr);
+    try std.testing.expect(usbAddressForPhys("usb-0000:00:14.0-9", root) == null);
 }

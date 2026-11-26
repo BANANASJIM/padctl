@@ -6,6 +6,20 @@ const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const UsbrawDevice = @import("io/usbraw.zig").UsbrawDevice;
 const UsbrawSuppress = @import("io/usbraw.zig").UsbrawSuppress;
+const hidraw_mod = @import("io/hidraw.zig");
+
+/// Which physical device to open; several can share a VID/PID.
+pub const DeviceTarget = struct {
+    vid: u16,
+    pid: u16,
+    phys: ?[]const u8 = null,
+    usb: ?hidraw_mod.UsbAddress = null,
+
+    pub fn forPhys(vid: u16, pid: u16, phys: ?[]const u8, sys_root: []const u8) DeviceTarget {
+        const usb = if (phys) |p| hidraw_mod.usbAddressForPhys(p, sys_root) else null;
+        return .{ .vid = vid, .pid = pid, .phys = phys, .usb = usb };
+    }
+};
 const uinput = @import("io/uinput.zig");
 const UinputDevice = uinput.UinputDevice;
 const AuxDevice = uinput.AuxDevice;
@@ -81,11 +95,15 @@ fn initTargetsInterface(init_cfg: device_cfg.InitConfig, iface: InterfaceConfig)
 fn createDeviceIO(
     allocator: std.mem.Allocator,
     iface: InterfaceConfig,
-    vid: u16,
-    pid: u16,
+    target: DeviceTarget,
 ) !DeviceIO {
+    const vid = target.vid;
+    const pid = target.pid;
     if (std.mem.eql(u8, iface.class, "hid")) {
-        const path = try HidrawDevice.discover(allocator, vid, pid, @intCast(iface.id));
+        const path = if (target.phys) |p|
+            try HidrawDevice.discoverForPhys(allocator, vid, pid, @intCast(iface.id), p)
+        else
+            try HidrawDevice.discover(allocator, vid, pid, @intCast(iface.id));
         defer allocator.free(path);
         var dev = try allocator.create(HidrawDevice);
         dev.* = HidrawDevice.init(allocator);
@@ -100,7 +118,7 @@ fn createDeviceIO(
         const ep_in: ?u8 = if (iface.ep_in) |e| @intCast(e) else null;
         const ep_out: ?u8 = if (iface.ep_out) |e| @intCast(e) else null;
         if (ep_in == null and ep_out == null) return error.MissingEndpoint;
-        const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
+        const dev = try UsbrawDevice.open(allocator, vid, pid, target.usb, @intCast(iface.id), ep_in, ep_out);
         return dev.deviceIO();
     }
     return error.UnknownInterfaceClass;
@@ -112,10 +130,9 @@ fn createDeviceIO(
 pub fn openDeviceWithRetry(
     allocator: std.mem.Allocator,
     iface: InterfaceConfig,
-    vid: u16,
-    pid: u16,
+    target: DeviceTarget,
 ) !DeviceIO {
-    return createDeviceIO(allocator, iface, vid, pid);
+    return createDeviceIO(allocator, iface, target);
 }
 
 /// Primary output ownership. T3 introduces the union so T4 can route the
@@ -298,16 +315,18 @@ pub const DeviceInstance = struct {
         errdefer for (suppress_devs[0..suppressed]) |sd| sd.close();
 
         if (!override_active) {
+            // Resolve the USB address before any claim removes hidraw nodes.
+            const target = DeviceTarget.forPhys(vid, pid, phys_key, "/sys");
             // Pass 1: open hid/vendor interfaces into devices[] positionally.
             for (cfg.device.interface) |iface| {
                 if (device_cfg.isSuppressClass(iface.class)) continue;
-                devices[opened] = try openDeviceWithRetry(allocator, iface, vid, pid);
+                devices[opened] = try openDeviceWithRetry(allocator, iface, target);
                 opened += 1;
             }
             // Pass 2: claim suppress interfaces to remove their hidraw nodes.
             for (cfg.device.interface) |iface| {
                 if (!device_cfg.isSuppressClass(iface.class)) continue;
-                suppress_devs[suppressed] = try UsbrawSuppress.openSuppress(allocator, vid, pid, @intCast(iface.id));
+                suppress_devs[suppressed] = try UsbrawSuppress.openSuppress(allocator, vid, pid, target.usb, @intCast(iface.id));
                 suppressed += 1;
             }
         }
@@ -1124,7 +1143,7 @@ test "openDeviceWithRetry: a vendor interface without ep_in is not rejected as a
     // Nothing is plugged in at 0xffff:0xffff, so the open must fail somewhere in
     // the USB layer. Which error that is depends on the environment; what must
     // never happen is a rejection on endpoint validation.
-    if (openDeviceWithRetry(testing.allocator, write_only, 0xffff, 0xffff)) |dev| {
+    if (openDeviceWithRetry(testing.allocator, write_only, .{ .vid = 0xffff, .pid = 0xffff })) |dev| {
         dev.close();
         return error.UnexpectedOpenSuccess;
     } else |err| {
@@ -1135,7 +1154,7 @@ test "openDeviceWithRetry: a vendor interface without ep_in is not rejected as a
     no_endpoints.ep_out = null;
     try testing.expectError(
         error.MissingEndpoint,
-        openDeviceWithRetry(testing.allocator, no_endpoints, 0xffff, 0xffff),
+        openDeviceWithRetry(testing.allocator, no_endpoints, .{ .vid = 0xffff, .pid = 0xffff }),
     );
 }
 
@@ -1147,7 +1166,7 @@ test "openDeviceWithRetry: a vendor interface without ep_out is not rejected as 
         .ep_in = 0x81,
         .ep_out = null,
     };
-    if (openDeviceWithRetry(testing.allocator, read_only, 0xffff, 0xffff)) |dev| {
+    if (openDeviceWithRetry(testing.allocator, read_only, .{ .vid = 0xffff, .pid = 0xffff })) |dev| {
         dev.close();
         return error.UnexpectedOpenSuccess;
     } else |err| {
@@ -2021,7 +2040,7 @@ test "openDeviceWithRetry returns promptly on a failing open (no in-thread sleep
     const iface = InterfaceConfig{ .id = 0, .class = "hid" };
 
     var timer = try std.time.Timer.start();
-    const result = openDeviceWithRetry(allocator, iface, 0xFFFF, 0xFFFF);
+    const result = openDeviceWithRetry(allocator, iface, .{ .vid = 0xFFFF, .pid = 0xFFFF });
     const elapsed_ns = timer.read();
 
     try testing.expectError(error.NotFound, result);

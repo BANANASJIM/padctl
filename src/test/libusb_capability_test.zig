@@ -48,13 +48,13 @@ test "libusb: vendored context init reaches real backend in real-libusb lane" {
 
 test "libusb: stub UsbrawDevice.open returns LibusbUnavailable" {
     if (usbraw.have_libusb) return error.SkipZigTest;
-    const result = usbraw.UsbrawDevice.open(testing.allocator, 0x1234, 0x5678, 0, 0x81, 0x01);
+    const result = usbraw.UsbrawDevice.open(testing.allocator, 0x1234, 0x5678, null, 0, 0x81, 0x01);
     try testing.expectError(error.LibusbUnavailable, result);
 }
 
 test "libusb: stub openSuppress returns LibusbUnavailable" {
     if (usbraw.have_libusb) return error.SkipZigTest;
-    const result = usbraw.UsbrawSuppress.openSuppress(testing.allocator, 0x1234, 0x5678, 0);
+    const result = usbraw.UsbrawSuppress.openSuppress(testing.allocator, 0x1234, 0x5678, null, 0);
     try testing.expectError(error.LibusbUnavailable, result);
 }
 

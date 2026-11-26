@@ -33,22 +33,22 @@ const flight_recorder = @import("diagnostics/flight_recorder.zig");
 const socket_client = @import("cli/socket_client.zig");
 const event_loop = @import("event_loop.zig");
 
+const DeviceTarget = device_instance_mod.DeviceTarget;
+
 const RebindDeviceOpener = *const fn (
     ctx: *anyopaque,
     allocator: std.mem.Allocator,
     iface: config_device.InterfaceConfig,
-    vid: u16,
-    pid: u16,
+    target: DeviceTarget,
 ) anyerror!DeviceIO;
 
 fn openDeviceWithRetryForRebind(
     _: *anyopaque,
     allocator: std.mem.Allocator,
     iface: config_device.InterfaceConfig,
-    vid: u16,
-    pid: u16,
+    target: DeviceTarget,
 ) !DeviceIO {
-    return openDeviceWithRetry(allocator, iface, vid, pid);
+    return openDeviceWithRetry(allocator, iface, target);
 }
 
 /// True when a client-supplied absolute mapping path resides directly in one of
@@ -3196,9 +3196,10 @@ pub const Supervisor = struct {
                     self.allocator.free(new_devices);
                 }
             }
+            const target = DeviceTarget.forPhys(vid, pid, m.phys_key, self.sys_root);
             for (mcfg.device.interface) |iface| {
                 if (config_device.isSuppressClass(iface.class)) continue;
-                new_devices[opened] = opener(opener_ctx, self.allocator, iface, vid, pid) catch |err| {
+                new_devices[opened] = opener(opener_ctx, self.allocator, iface, target) catch |err| {
                     std.log.warn("rebind: open interface {d} failed: {}", .{ iface.id, err });
                     for (new_devices[0..opened]) |dev| dev.close();
                     self.allocator.free(new_devices);
@@ -3398,8 +3399,7 @@ const TestRebindOpenCtx = struct {
         ptr: *anyopaque,
         _: std.mem.Allocator,
         _: config_device.InterfaceConfig,
-        _: u16,
-        _: u16,
+        _: DeviceTarget,
     ) !DeviceIO {
         const self: *TestRebindOpenCtx = @ptrCast(@alignCast(ptr));
         if (self.fail) |err| return err;
