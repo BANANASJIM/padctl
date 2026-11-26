@@ -247,9 +247,9 @@ pub const ModelChoice = union(enum) {
     listed: usize,
     /// A user/system override without `ids` ahead of any listing candidate.
     override: usize,
-    /// The model was identified but no candidate lists it; first match is a guess.
+    /// The model was identified but no candidate lists it; a guess (see `guess`).
     unlisted: usize,
-    /// No model ID; first match is a guess.
+    /// No model ID; a guess (see `guess`).
     unidentified: usize,
 };
 
@@ -273,15 +273,12 @@ pub fn chooseByModel(candidates: []const Candidate, matched: []const usize, id: 
     return .{ .unlisted = guess(candidates, matched) };
 }
 
-/// The candidate to fall back on when the model is unknown (ADR-030 §3): a
-/// user/system override first (it was chosen deliberately), then the first
-/// config that claims nothing through libusb, since a wrong hidraw-only guess
-/// only misreads input while a wrong libusb one also takes the interfaces
-/// (and the kernel driver) from the right config. Otherwise the first match.
+/// The candidate to fall back on when the model is unknown (ADR-030 §3): the
+/// first config that claims nothing through libusb, since a wrong hidraw-only
+/// guess only misreads input while a wrong libusb one also takes the
+/// interfaces (and the kernel driver) from the right config. Otherwise the
+/// first match. (An override without ids never gets here: it wins earlier.)
 fn guess(candidates: []const Candidate, matched: []const usize) usize {
-    for (matched) |idx| {
-        if (candidates[idx].is_override) return idx;
-    }
     for (matched) |idx| {
         if (!config_device.usesLibusb(candidates[idx].cfg)) return idx;
     }
@@ -613,12 +610,13 @@ test "usb_layout: an unknown model falls back to the least invasive config" {
     // A listed model still gets its config, libusb or not.
     try testing.expectEqual(@as(usize, 0), chooseByModel(&cands, &matched, 28).listed);
 
-    // An override is guessed before builtins, even one using libusb.
+    // An override whose ids exclude the model is known not to fit; it gets no
+    // priority in the guess.
     const user_v3 = [_]Candidate{
         .{ .cfg = &vader3, .path = "user/vader3.toml", .is_override = true },
         .{ .cfg = &apex, .path = "apex4.toml" },
     };
-    try testing.expectEqual(@as(usize, 0), chooseByModel(&user_v3, &matched, null).unidentified);
+    try testing.expectEqual(@as(usize, 1), chooseByModel(&user_v3, &matched, 22).unlisted);
 
     // All candidates use libusb: first match.
     const both_libusb = [_]Candidate{
