@@ -555,7 +555,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         if (!interfaceExists(cfg, probe.interface)) return error.InvalidConfig;
         const cmd_len = try initCommandByteLen(probe.command);
         if (cmd_len == 0 or cmd_len > MAX_INIT_COMMAND_SIZE) return error.InvalidConfig;
-        if (probe.reply.offset < 0 or probe.reply.expect.len == 0) return error.InvalidConfig;
+        if (probe.reply.offset < 0 or probe.reply.offset >= 64 or probe.reply.expect.len == 0) return error.InvalidConfig;
         for (probe.reply.expect) |b| if (b < 0 or b > 255) return error.InvalidConfig;
         if (probe.id_offset < 0 or probe.id_offset >= 64) return error.InvalidConfig;
         if (probe.reply_size) |n| {
@@ -563,7 +563,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             if (n <= probe.id_offset or n < match_end or n > 64) return error.InvalidConfig;
         }
         if (probe.reply_exclude) |ex| {
-            if (ex.offset < 0 or ex.expect.len == 0) return error.InvalidConfig;
+            if (ex.offset < 0 or ex.offset >= 64 or ex.expect.len == 0) return error.InvalidConfig;
             for (ex.expect) |b| if (b < 0 or b > 255) return error.InvalidConfig;
         }
         for (probe.ids) |id| if (id < 0 or id > 255) return error.InvalidConfig;

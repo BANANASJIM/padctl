@@ -94,10 +94,16 @@ const ProbeState = struct {
     last_try_ns: u64 = 0,
     /// Set when retries ran out, so the device's other nodes reuse the guess.
     gave_up_ns: ?u64 = null,
+    /// Replies seen across this plug's probe runs.
+    tally: model_probe.Tally = .{},
+    /// `id` was seen only once (taken at give-up).
+    unconfirmed: bool = false,
 };
 
 const ProbeOutcome = struct {
     id: ?u8,
+    /// The ID was seen in a single reply only.
+    unconfirmed: bool = false,
     /// The probe command, for the log. Borrowed from the config.
     command: []const u8 = "",
     no_reply: model_probe.NoReply = .{},
@@ -2634,7 +2640,7 @@ pub const Supervisor = struct {
         const st = gop.value_ptr;
         const now = self.nowNs();
         if (st.id) |id| {
-            if (now -| st.at_ns < probe_cache_ns) return .{ .id = id };
+            if (now -| st.at_ns < probe_cache_ns) return .{ .id = id, .unconfirmed = st.unconfirmed };
         }
         if (st.gave_up_ns) |t| {
             if (now -| t < probe_cache_ns) return .{ .id = null, .reason = "no reply", .command = probe.command };
@@ -2647,7 +2653,7 @@ pub const Supervisor = struct {
         if (st.first_fail_ns != null and now -| st.last_try_ns < probe_retry_ns and
             now -| st.first_fail_ns.? < probe_give_up_ns) return error.HotplugTransient;
         st.last_try_ns = now;
-        var outcome = self.runProbeOn(phys, vid, pid, probe);
+        var outcome = self.runProbeOn(phys, vid, pid, probe, &st.tally);
         outcome.command = probe.command;
         if (outcome.id) |id| {
             st.* = .{ .id = id, .at_ns = now };
@@ -2661,13 +2667,20 @@ pub const Supervisor = struct {
             std.log.debug("{x:0>4}:{x:0>4}: model probe got no reply ({s}); retrying", .{ vid, pid, outcome.reason });
             return error.HotplugTransient;
         }
-        // Give up for this plug; a later replug probes afresh.
+        // Give up for this plug; a later replug probes afresh. A pad that
+        // answered just once (slow pads may) is taken at its word, flagged.
+        if (st.tally.lone()) |id| {
+            st.* = .{ .id = id, .at_ns = now, .unconfirmed = true };
+            outcome.id = id;
+            outcome.unconfirmed = true;
+            return outcome;
+        }
         st.* = .{ .gave_up_ns = now };
         if (outcome.reason.len == 0) outcome.reason = "no reply";
         return outcome;
     }
 
-    fn runProbeOn(self: *Supervisor, phys: []const u8, vid: u16, pid: u16, probe: *const config_device.ProbeConfig) ProbeOutcome {
+    fn runProbeOn(self: *Supervisor, phys: []const u8, vid: u16, pid: u16, probe: *const config_device.ProbeConfig, tally: *model_probe.Tally) ProbeOutcome {
         const iface: u8 = std.math.cast(u8, probe.interface) orelse return .{ .id = null, .reason = "invalid probe interface" };
         const paths = HidrawDevice.discoverAllWithRoot(self.allocator, vid, pid, self.probe_dev_root) catch
             return .{ .id = null, .reason = "cannot list hidraw nodes" };
@@ -2689,7 +2702,7 @@ pub const Supervisor = struct {
             };
             const io = dev.deviceIO();
             defer io.close();
-            return switch (model_probe.run(io, probe)) {
+            return switch (model_probe.run(io, probe, tally)) {
                 .id => |id| .{ .id = id },
                 .no_reply => |nr| .{
                     .id = null,
@@ -2703,7 +2716,13 @@ pub const Supervisor = struct {
 
     fn logModelChoice(vid: u16, pid: u16, candidates: []const usb_layout.Candidate, choice: usb_layout.ModelChoice, outcome: ProbeOutcome) void {
         switch (choice) {
-            .listed => |i| std.log.info("{x:0>4}:{x:0>4}: model ID {d} -> {s}", .{ vid, pid, outcome.id.?, candidates[i].path }),
+            .listed => |i| if (outcome.unconfirmed)
+                std.log.warn(
+                    "{x:0>4}:{x:0>4}: model ID {d} seen in one reply only (unconfirmed) -> {s}. If inputs are wrong, replug with the controller on.",
+                    .{ vid, pid, outcome.id.?, candidates[i].path },
+                )
+            else
+                std.log.info("{x:0>4}:{x:0>4}: model ID {d} -> {s}", .{ vid, pid, outcome.id.?, candidates[i].path }),
             .override => |i| std.log.info(
                 "{x:0>4}:{x:0>4}: model ID {d}; keeping override {s} (it has no [device.probe] ids)",
                 .{ vid, pid, outcome.id.?, candidates[i].path },

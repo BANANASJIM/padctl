@@ -84,20 +84,45 @@ pub fn encodeCommand(probe: *const ProbeConfig, buf: *[64]u8) ?[]const u8 {
     return buf[0..n];
 }
 
-/// Send the query and wait for its reply, up to `attempts` times.
-pub fn run(device: DeviceIO, probe: *const ProbeConfig) Result {
-    return runWithWindow(device, probe, reply_window_ms);
+/// Model IDs seen across the probe runs of one plug. A slow pad may answer
+/// only once per run, so confirmation must not reset between retries.
+pub const Tally = struct {
+    ids: [8]u8 = undefined,
+    counts: [8]u8 = undefined,
+    n: usize = 0,
+
+    /// Count one reply; returns the ID once it has been seen `confirmations` times.
+    pub fn add(self: *Tally, id: u8) ?u8 {
+        const k = for (self.ids[0..self.n], 0..) |s, i| {
+            if (s == id) break i;
+        } else blk: {
+            if (self.n == self.ids.len) return null;
+            self.ids[self.n] = id;
+            self.counts[self.n] = 0;
+            self.n += 1;
+            break :blk self.n - 1;
+        };
+        self.counts[k] +|= 1;
+        return if (self.counts[k] >= confirmations) id else null;
+    }
+
+    /// The only ID ever seen, if exactly one was.
+    pub fn lone(self: *const Tally) ?u8 {
+        return if (self.n == 1) self.ids[0] else null;
+    }
+};
+
+/// Send the query and wait for its reply, up to `attempts` times, counting
+/// replies into `tally`. Returns an ID once `tally` confirms one.
+pub fn run(device: DeviceIO, probe: *const ProbeConfig, tally: *Tally) Result {
+    return runWithWindow(device, probe, reply_window_ms, tally);
 }
 
-fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64) Result {
+fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64, tally: *Tally) Result {
     var none = NoReply{};
     var cmd_buf: [64]u8 = undefined;
     const cmd = encodeCommand(probe, &cmd_buf) orelse return .{ .no_reply = none };
     var read_buf: [64]u8 = undefined;
-    // IDs seen so far and how often; a real reply repeats on every send.
-    var seen_ids: [attempts * 2]u8 = undefined;
-    var seen_counts: [attempts * 2]u8 = undefined;
-    var seen: usize = 0;
     var writes_ok: usize = 0;
     for (0..attempts) |_| {
         // Writes occasionally fail on these receivers; resend (as SDL does).
@@ -116,24 +141,12 @@ fn runWithWindow(device: DeviceIO, probe: *const ProbeConfig, window_ms: u64) Re
                 none.record(read_buf[0..n]);
                 continue;
             };
-            const slot = for (seen_ids[0..seen], 0..) |s, k| {
-                if (s == id) break k;
-            } else blk: {
-                if (seen == seen_ids.len) break :blk null;
-                seen_ids[seen] = id;
-                seen_counts[seen] = 0;
-                seen += 1;
-                break :blk seen - 1;
-            };
-            if (slot) |k| {
-                seen_counts[k] += 1;
-                if (seen_counts[k] >= confirmations) return .{ .id = id };
-            }
+            if (tally.add(id)) |confirmed| return .{ .id = confirmed };
             break; // next send
         }
     }
-    // A lone match is not trusted: it may be an input frame that fits the
-    // reply pattern by chance. The caller retries.
+    // A single match is not trusted yet: it may be an input frame that fits
+    // the reply pattern. The caller retries; the tally carries over.
     none.writes_failed = writes_ok == 0;
     return .{ .no_reply = none };
 }
@@ -219,7 +232,8 @@ test "model_probe: run returns the ID from the reply after other frames" {
     const reply = flydigiReply(28);
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &input, &reply, &input, &reply });
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20, &tally);
     try testing.expectEqual(@as(u8, 28), r.id);
 }
 
@@ -231,7 +245,8 @@ test "model_probe: an input frame that looks like a reply is outvoted" {
     const reply = flydigiReply(28);
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &fake, &reply, &reply });
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20, &tally);
     try testing.expectEqual(@as(u8, 28), r.id);
 }
 
@@ -243,11 +258,22 @@ test "model_probe: reply_size rejects frames of another length" {
     try testing.expectEqual(@as(?u8, null), parseReply(&sized, reply[0..20]));
 }
 
+test "model_probe: confirmation carries over between runs" {
+    const reply = flydigiReply(84);
+    var tally = Tally{};
+    var first = ReplyMock.init(testing.allocator, &.{}, &.{&reply});
+    try testing.expect(runWithWindow(first.deviceIO(), &flydigi_probe, 5, &tally) == .no_reply);
+    try testing.expectEqual(@as(?u8, 84), tally.lone());
+    var second = ReplyMock.init(testing.allocator, &.{}, &.{&reply});
+    try testing.expectEqual(@as(u8, 84), runWithWindow(second.deviceIO(), &flydigi_probe, 5, &tally).id);
+}
+
 test "model_probe: a lone match is not trusted" {
     const reply = flydigiReply(84);
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{&reply});
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5, &tally);
     try testing.expect(r == .no_reply);
 }
 
@@ -262,14 +288,16 @@ test "model_probe: reply_exclude drops input frames that fit the reply pattern" 
     // A resting pad can repeat the same input frame; it must not confirm itself.
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &input, &input, &input, &input });
     defer mock.deinit();
-    try testing.expect(runWithWindow(mock.deviceIO(), &excl, 5) == .no_reply);
+    var tally = Tally{};
+    try testing.expect(runWithWindow(mock.deviceIO(), &excl, 5, &tally) == .no_reply);
 }
 
 test "model_probe: all writes failing is reported" {
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{});
     mock.fail_writes = attempts;
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5, &tally);
     try testing.expect(r.no_reply.writes_failed);
 }
 
@@ -278,7 +306,8 @@ test "model_probe: a failed write is retried" {
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{ &reply, &reply });
     mock.fail_writes = 1;
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 20, &tally);
     try testing.expectEqual(@as(u8, 84), r.id);
 }
 
@@ -286,7 +315,8 @@ test "model_probe: run reports what arrived when no reply comes" {
     const input = [_]u8{ 0x04, 0xfe, 0x66, 0x00 };
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{&input});
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5, &tally);
     try testing.expect(r.no_reply.frames >= 1);
     try testing.expectEqualSlices(u8, &input, r.no_reply.last());
 }
@@ -294,6 +324,7 @@ test "model_probe: run reports what arrived when no reply comes" {
 test "model_probe: run on a silent device records no frames" {
     var mock = ReplyMock.init(testing.allocator, &.{}, &.{});
     defer mock.deinit();
-    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5);
+    var tally = Tally{};
+    const r = runWithWindow(mock.deviceIO(), &flydigi_probe, 5, &tally);
     try testing.expectEqual(@as(usize, 0), r.no_reply.frames);
 }
