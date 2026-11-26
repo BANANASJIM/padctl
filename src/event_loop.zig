@@ -32,6 +32,8 @@ const rumble_writer_mod = @import("core/rumble_writer.zig");
 const RumbleWriter = rumble_writer_mod.RumbleWriter;
 const rumble_log = std.log.scoped(.rumble);
 const input_trace = @import("diagnostics/input_trace.zig");
+const report_watch = @import("core/report_watch.zig");
+const hexBytes = @import("diagnostics/hex_bytes.zig").hex;
 const flight_recorder = @import("diagnostics/flight_recorder.zig");
 const socket_client = @import("cli/socket_client.zig");
 const uhid_mod = @import("io/uhid.zig");
@@ -466,10 +468,46 @@ pub fn applyAdaptiveTrigger(
     } else |_| {}
 }
 
+fn logUnmatchedReports(tag: []const u8, interface_id: u8, reason: interpreter_mod.NoMatch, w: *const report_watch.ReportWatch) void {
+    const head = "[{s}] interface {d}: {d} reports received, none usable; ";
+    const tail = " Last frame ({d} bytes): {f}.";
+    switch (reason) {
+        .too_short => |r| std.log.warn(
+            head ++ "the last one matches [[report]] \"{s}\" but is shorter than its size {d}. If the controller is on " ++
+                "and inputs do not work, the firmware likely sends a shorter report." ++ tail,
+            .{ tag, interface_id, report_watch.threshold, r.name, r.size, w.last_len, hexBytes(w.last()) },
+        ),
+        .bad_checksum => |r| std.log.warn(
+            head ++ "the last one matches [[report]] \"{s}\" but fails its checksum. If the controller is on " ++
+                "and inputs do not work, check [report.checksum]." ++ tail,
+            .{ tag, interface_id, report_watch.threshold, r.name, w.last_len, hexBytes(w.last()) },
+        ),
+        .no_bytes_match => |r| {
+            var match_buf: [96]u8 = undefined;
+            const match_desc: []const u8 = blk: {
+                const m = r.match orelse break :blk "no match bytes";
+                var fbs = std.io.fixedBufferStream(&match_buf);
+                const wr = fbs.writer();
+                wr.print("bytes", .{}) catch {};
+                for (m.expect) |b| wr.print(" {x:0>2}", .{@as(u8, @intCast(b))}) catch {};
+                wr.print(" at offset {d}", .{m.offset}) catch {};
+                break :blk fbs.getWritten();
+            };
+            std.log.warn(
+                head ++ "none matches a [[report]] (\"{s}\" expects {s}). If the controller is on and inputs " ++
+                    "do not work, its report format likely differs from the device config." ++ tail,
+                .{ tag, interface_id, report_watch.threshold, r.name, match_desc, w.last_len, hexBytes(w.last()) },
+            );
+        },
+    }
+}
+
 pub const EventLoop = struct {
     pollfds: [MAX_FDS]posix.pollfd,
     fd_count: usize,
     device_count: usize,
+    // Per device slot; reset when devices are reopened.
+    report_watch: [MAX_DEVICE_INTERFACES]report_watch.ReportWatch = [_]report_watch.ReportWatch{.{}} ** MAX_DEVICE_INTERFACES,
     signal_fd: posix.fd_t,
     stop_r: posix.fd_t,
     stop_w: posix.fd_t,
@@ -634,6 +672,7 @@ pub const EventLoop = struct {
         for (devices, 0..) |dev, i| {
             self.pollfds[self.device_base + i] = dev.pollfd();
         }
+        self.report_watch = [_]report_watch.ReportWatch{.{}} ** MAX_DEVICE_INTERFACES;
     }
 
     pub fn addUinputFf(self: *EventLoop, fd: posix.fd_t) !void {
@@ -1046,6 +1085,16 @@ pub const EventLoop = struct {
                             }
                             break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
                         };
+                        const interpreted = ctx.wasm_plugin == null or !ctx.wasm_override_report;
+                        if (interpreted and i < MAX_DEVICE_INTERFACES) {
+                            if (ctx.interpreter.firstReportFor(interface_id)) |expected| {
+                                if (self.report_watch[i].observe(maybe_delta != null, buf[0..n])) {
+                                    const reason = ctx.interpreter.explainNoMatch(interface_id, buf[0..n]) orelse
+                                        interpreter_mod.NoMatch{ .no_bytes_match = expected };
+                                    logUnmatchedReports(ctx.device_tag, interface_id, reason, &self.report_watch[i]);
+                                }
+                            }
+                        }
                         if (maybe_delta) |delta| {
                             const input_buttons_before = self.gamepad_state.buttons;
                             self.gamepad_state.applyDelta(delta);
@@ -1967,6 +2016,57 @@ test "event_loop: EventLoop mini: device frame dispatched to interpreter and out
     try testing.expectEqual(@as(i16, 500), loop.gamepad_state.ax);
     try testing.expectEqual(@as(usize, 1), out.diffs.items.len);
     try testing.expectEqual(@as(?i16, 500), out.diffs.items[0].ax);
+}
+
+test "event_loop: reports that never match a [[report]] are flagged once" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    // minimal_toml matches byte 0x01; 0x02 frames never match.
+    const unmatched = [_]u8{ 0x02, 0x00, 0x00 };
+    var frames: [report_watch.threshold][]const u8 = undefined;
+    for (&frames) |*f| f.* = &unmatched;
+    var mock = try MockDeviceIO.init(allocator, &frames);
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+    try loop.addDevice(dev);
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var out = MockOutput.init(allocator);
+    defer out.deinit();
+
+    try mock.signal();
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        elc: EventLoopContext,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .elc = .{ .devices = &devs, .interpreter = &interp, .output = out.outputDevice(), .poll_timeout_ms = 100 },
+    };
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.elc);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    try testing.expect(loop.report_watch[0].warned);
+    try testing.expectEqualSlices(u8, &unmatched, loop.report_watch[0].last());
+
+    var replacement = [_]DeviceIO{dev};
+    try loop.rebindDevices(&replacement);
+    try testing.expect(!loop.report_watch[0].warned);
 }
 
 // --- Adaptive trigger tests ---

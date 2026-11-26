@@ -341,6 +341,13 @@ pub const CompiledButtonGroup = struct {
     count: u8,
 };
 
+pub const NoMatch = union(enum) {
+    /// No report's match bytes fit; carries the interface's first report.
+    no_bytes_match: *const ReportConfig,
+    too_short: *const ReportConfig,
+    bad_checksum: *const ReportConfig,
+};
+
 pub const CompiledReport = struct {
     src: *const ReportConfig,
     checksum: ?CompiledChecksum,
@@ -488,6 +495,32 @@ pub const Interpreter = struct {
         var delta = GamepadStateDelta{};
         extractAndFillCompiled(cr, raw, &delta);
         return delta;
+    }
+
+    /// First `[[report]]` declared for an interface; null when it has none.
+    pub fn firstReportFor(self: *const Interpreter, interface_id: u8) ?*const ReportConfig {
+        for (self.compiled[0..self.report_count]) |*cr| {
+            if (cr.src.interface == @as(i64, interface_id)) return cr.src;
+        }
+        return null;
+    }
+
+    /// Why `raw` produced no delta, for diagnostics. A report whose match bytes
+    /// fit but which is too short or fails its checksum is named over a plain
+    /// "nothing matched", since that points at the real cause. Null when the
+    /// interface has no [[report]].
+    pub fn explainNoMatch(self: *const Interpreter, interface_id: u8, raw: []const u8) ?NoMatch {
+        var first: ?*const ReportConfig = null;
+        for (self.compiled[0..self.report_count]) |*cr| {
+            if (cr.src.interface != @as(i64, interface_id)) continue;
+            if (first == null) first = cr.src;
+            if (cr.src.match) |m| {
+                if (!checkMatch(m, raw)) continue;
+            }
+            if (raw.len < @as(usize, @intCast(cr.src.size))) return .{ .too_short = cr.src };
+            verifyChecksumCompiled(cr, raw) catch return .{ .bad_checksum = cr.src };
+        }
+        return if (first) |f| .{ .no_bytes_match = f } else null;
     }
 
     pub fn matchReport(self: *const Interpreter, interface_id: u8, raw: []const u8) ?*const CompiledReport {
@@ -2138,4 +2171,39 @@ test "interpreter: readUintBytes rejects src_off+src_size > raw.len" {
     var delta = GamepadStateDelta{};
     extractAndFillCompiled(&cr, &raw, &delta);
     try testing.expectEqual(@as(?u64, null), delta.buttons);
+}
+
+test "interpreter: explainNoMatch names the real cause" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 6
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0xAA]
+        \\[report.checksum]
+        \\algo = "sum8"
+        \\range = [0, 4]
+        \\expect = { offset = 4, type = "u8" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    const other = [_]u8{ 0xBB, 0, 0, 0, 0, 0 };
+    try testing.expectEqualStrings("r", interp.explainNoMatch(0, &other).?.no_bytes_match.name);
+    const short = [_]u8{ 0xAA, 1, 2 };
+    try testing.expectEqualStrings("r", interp.explainNoMatch(0, &short).?.too_short.name);
+    const bad_sum = [_]u8{ 0xAA, 0x01, 0x02, 0x03, 0x00, 0x00 };
+    try testing.expectEqualStrings("r", interp.explainNoMatch(0, &bad_sum).?.bad_checksum.name);
+    try testing.expect(interp.explainNoMatch(1, &other) == null);
 }

@@ -67,6 +67,8 @@ pub const core = struct {
     pub const command = @import("core/command.zig");
     pub const macro = @import("core/macro.zig");
     pub const timer_queue = @import("core/timer_queue.zig");
+    pub const report_watch = @import("core/report_watch.zig");
+    pub const hex_bytes = @import("diagnostics/hex_bytes.zig");
     pub const macro_player = @import("core/macro_player.zig");
     pub const rumble_scheduler = @import("core/rumble_scheduler.zig");
 };
