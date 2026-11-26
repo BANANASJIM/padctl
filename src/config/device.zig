@@ -427,6 +427,15 @@ fn isWriteOnlyInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
 
 /// Interfaces that produce input: everything opened into devices[] except
 /// write-only vendor interfaces. A hid interface always reads from its node.
+fn isReadOnlyInterface(cfg: *const DeviceConfig, iface_id: i64) bool {
+    for (cfg.device.interface) |iface| {
+        if (iface.id != iface_id) continue;
+        return std.mem.eql(u8, iface.class, "vendor") and
+            iface.ep_in != null and iface.ep_out == null;
+    }
+    return false;
+}
+
 fn readableInterfaceCount(cfg: *const DeviceConfig) usize {
     var n: usize = 0;
     for (cfg.device.interface) |iface| {
@@ -515,6 +524,7 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         while (it.next()) |entry| {
             if (!interfaceExists(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
+            if (isReadOnlyInterface(cfg, entry.value_ptr.interface)) return error.InvalidConfig;
             if (entry.value_ptr.min_interval_ms) |interval_ms| {
                 if (interval_ms <= 0 or interval_ms > 1000) return error.InvalidConfig;
             }
@@ -524,8 +534,9 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         if (init_cfg.interface) |iface_id| {
             if (!interfaceExists(cfg, iface_id)) return error.InvalidConfig;
             if (isSuppressInterface(cfg, iface_id)) return error.InvalidConfig;
-            // The init sequence reads acknowledgements back.
+            // The init sequence writes commands and reads acknowledgements back.
             if (isWriteOnlyInterface(cfg, iface_id)) return error.InvalidConfig;
+            if (isReadOnlyInterface(cfg, iface_id)) return error.InvalidConfig;
         }
         const has_response_prefix = if (init_cfg.response_prefix) |prefix|
             prefix.len > 0
@@ -2175,6 +2186,93 @@ test "device: validate rejects init running on a write-only vendor interface" {
         \\[report.match]
         \\offset = 0
         \\expect = [0x00]
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+// issue #528: a vendor interface may omit ep_out to become read-only, so it can
+// be claimed (evicting usbhid) while only streaming input reports.
+test "device: validate accepts a read-only vendor interface feeding a report" {
+    const allocator = std.testing.allocator;
+    const good =
+        \\[device]
+        \\name = "T"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_in = 0x81
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 9
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+    ;
+    const parsed = try parseString(allocator, good);
+    defer parsed.deinit();
+}
+
+test "device: validate rejects a command targeting a read-only vendor interface" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "T"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_in = 0x81
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 9
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[commands.rumble]
+        \\interface = 0
+        \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
+}
+
+test "device: validate rejects init running on a read-only vendor interface" {
+    const allocator = std.testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "T"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "vendor"
+        \\ep_in = 0x81
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 9
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[device.init]
+        \\interface = 0
+        \\report_size = 8
+        \\commands = ["0102"]
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
