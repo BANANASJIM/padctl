@@ -87,6 +87,20 @@ pub const ManagedInstance = struct {
 };
 
 /// Config snapshot used for hot-reload diffing.
+const InitFailure = struct {
+    count: u8,
+    next_ns: u64,
+};
+
+// Short enough that a replug or a pad switched on later binds within seconds.
+const init_backoff_max_s = 8;
+
+fn initBackoffNs(failures: u8) u64 {
+    const shift: u6 = @intCast(@min(failures -| 1, 5));
+    const secs: u64 = @min(@as(u64, 1) << shift, init_backoff_max_s);
+    return secs * std.time.ns_per_s;
+}
+
 const ProbeState = struct {
     id: ?u8 = null,
     at_ns: u64 = 0,
@@ -274,6 +288,13 @@ pub const Supervisor = struct {
     // vanished (libusb claim removed it, or the device unplugged); lets the
     // retry give-up log at debug instead of a misleading warning.
     last_attach_node_gone: bool = false,
+    // Set by attachWithRoot when it deferred to a device's init backoff; the
+    // retry is rescheduled to this deadline without spending a retry.
+    last_attach_backoff_until: ?u64 = null,
+    // Init failures per "VID:PID@phys". Each failed init releases the
+    // interfaces, the kernel recreates their hidraw nodes, and those hotplug
+    // events would retry at once, forever. Keys owned.
+    init_failures: std.StringHashMapUnmanaged(InitFailure) = .{},
     config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
@@ -549,6 +570,9 @@ pub const Supervisor = struct {
         var pit = self.probe_state.keyIterator();
         while (pit.next()) |k| self.allocator.free(k.*);
         self.probe_state.deinit(self.allocator);
+        var fit = self.init_failures.keyIterator();
+        while (fit.next()) |k| self.allocator.free(k.*);
+        self.init_failures.deinit(self.allocator);
         var it = self.devname_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -1649,7 +1673,15 @@ pub const Supervisor = struct {
                 }
                 continue;
             }
+            self.last_attach_backoff_until = null;
             self.attach(name) catch |err| {
+                if (err == error.HotplugTransient) {
+                    if (self.last_attach_backoff_until) |until| {
+                        p.next_deadline_ns = until;
+                        i += 1;
+                        continue;
+                    }
+                }
                 if (err != error.HotplugTransient) {
                     std.log.warn("hotplug retry {s}: {}, dropping", .{ name, err });
                     _ = self.hotplug_pending.swapRemove(i);
@@ -2862,6 +2894,7 @@ pub const Supervisor = struct {
                 const inst_ptr = try self.allocator.create(DeviceInstance);
                 inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
                     logBindFailure(&cfg_ptr.value, hidraw_path, err);
+                    if (err == error.InitFailed) self.recordInitFailure(&cfg_ptr.value, vid, pid, phys);
                     if (isTransientOpenError(err)) self.enqueueHotplugRetryForPath(hidraw_path);
                     self.allocator.destroy(inst_ptr);
                     if (default_pr_ptr) |p| {
@@ -3109,6 +3142,12 @@ pub const Supervisor = struct {
 
         if (self.hasLiveDuplicate(devname, phys, cfg.?)) return;
 
+        if (self.initBackoffUntil(vid, pid, phys)) |until| {
+            std.log.debug("hotplug: {s} waiting for init backoff", .{devname});
+            self.last_attach_backoff_until = until;
+            return error.HotplugTransient;
+        }
+
         const default_dm = self.buildDefaultMapping(cfg.?.device.name);
         const default_pr_ptr: ?*mapping_cfg.ParseResult = if (default_dm) |d| d.pr else null;
         const default_stem: ?[]u8 = if (default_dm) |d| d.stem else null;
@@ -3117,6 +3156,7 @@ pub const Supervisor = struct {
         const inst_ptr = try self.allocator.create(DeviceInstance);
         inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
             logBindFailure(cfg.?, path, err);
+            if (err == error.InitFailed) self.recordInitFailure(cfg.?, vid, pid, phys);
             self.allocator.destroy(inst_ptr);
             if (default_pr_ptr) |p| {
                 p.deinit();
@@ -3149,6 +3189,7 @@ pub const Supervisor = struct {
         if (default_stem) |s| {
             self.managed.items[self.managed.items.len - 1].default_mapping_stem = s;
         }
+        self.clearInitFailures(vid, pid, phys);
         std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
         // Log FF config for rumble diagnostics.
         if (cfg.?.output) |out| {
@@ -3158,6 +3199,38 @@ pub const Supervisor = struct {
                 });
             }
         }
+    }
+
+    fn initFailureKey(self: *Supervisor, vid: u16, pid: u16, phys: []const u8) ![]u8 {
+        return std.fmt.allocPrint(self.allocator, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys });
+    }
+
+    fn initBackoffUntil(self: *Supervisor, vid: u16, pid: u16, phys: []const u8) ?u64 {
+        var buf: [320]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys }) catch return null;
+        const f = self.init_failures.get(key) orelse return null;
+        return if (self.nowNs() < f.next_ns) f.next_ns else null;
+    }
+
+    fn recordInitFailure(self: *Supervisor, cfg: *const DeviceConfig, vid: u16, pid: u16, phys: []const u8) void {
+        const key = self.initFailureKey(vid, pid, phys) catch return;
+        const gop = self.init_failures.getOrPut(self.allocator, key) catch {
+            self.allocator.free(key);
+            return;
+        };
+        if (gop.found_existing) self.allocator.free(key) else gop.value_ptr.* = .{ .count = 0, .next_ns = 0 };
+        gop.value_ptr.count +|= 1;
+        const delay = initBackoffNs(gop.value_ptr.count);
+        gop.value_ptr.next_ns = self.nowNs() + delay;
+        std.log.warn("device \"{s}\": init failed {d} time(s) in a row; retrying in {d} s", .{
+            cfg.device.name, gop.value_ptr.count, delay / std.time.ns_per_s,
+        });
+    }
+
+    fn clearInitFailures(self: *Supervisor, vid: u16, pid: u16, phys: []const u8) void {
+        var buf: [320]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "{x:0>4}:{x:0>4}@{s}", .{ vid, pid, phys }) catch return;
+        if (self.init_failures.fetchRemove(key)) |kv| self.allocator.free(kv.key);
     }
 
     fn tryResumeSuspendedInstance(
@@ -6860,4 +6933,39 @@ test "supervisor: logModelChoice handles an override chosen without a model ID" 
     const cands = [_]usb_layout.Candidate{.{ .cfg = &cfg, .path = "user/t.toml", .is_override = true }};
     Supervisor.logModelChoice(1, 2, &cands, .{ .override = 0 }, .{ .id = null, .reason = "no reply" });
     Supervisor.logModelChoice(1, 2, &cands, .{ .override = 0 }, .{ .id = 84 });
+}
+
+test "supervisor: init backoff doubles up to its cap" {
+    const s = std.time.ns_per_s;
+    try testing.expectEqual(@as(u64, 1 * s), initBackoffNs(1));
+    try testing.expectEqual(@as(u64, 2 * s), initBackoffNs(2));
+    try testing.expectEqual(@as(u64, 4 * s), initBackoffNs(3));
+    try testing.expectEqual(@as(u64, init_backoff_max_s * s), initBackoffNs(4));
+    try testing.expectEqual(@as(u64, init_backoff_max_s * s), initBackoffNs(255));
+}
+
+test "supervisor: a failed init defers the device's next attempt until it is cleared" {
+    var sup = try Supervisor.initForTest(testing.allocator);
+    defer sup.deinit();
+    const hid2 = [_]config_device.InterfaceConfig{.{ .id = 2, .class = "hid" }};
+    const cfg = DeviceConfig{ .device = .{ .name = "T", .vid = 0x37d7, .pid = 0x2401, .interface = &hid2 }, .report = &.{} };
+    const phys = "usb-0000:16:00.0-4.3";
+    const s = std.time.ns_per_s;
+
+    sup.test_now_override_ns = 10 * s;
+    try testing.expect(sup.initBackoffUntil(0x37d7, 0x2401, phys) == null);
+    sup.recordInitFailure(&cfg, 0x37d7, 0x2401, phys);
+    try testing.expectEqual(@as(?u64, 11 * s), sup.initBackoffUntil(0x37d7, 0x2401, phys));
+    // Another device on another port is unaffected.
+    try testing.expect(sup.initBackoffUntil(0x37d7, 0x2401, "usb-0000:16:00.0-4.4") == null);
+
+    sup.test_now_override_ns = 11 * s;
+    try testing.expect(sup.initBackoffUntil(0x37d7, 0x2401, phys) == null);
+    sup.recordInitFailure(&cfg, 0x37d7, 0x2401, phys);
+    try testing.expectEqual(@as(?u64, 13 * s), sup.initBackoffUntil(0x37d7, 0x2401, phys));
+
+    sup.clearInitFailures(0x37d7, 0x2401, phys);
+    try testing.expect(sup.initBackoffUntil(0x37d7, 0x2401, phys) == null);
+    sup.recordInitFailure(&cfg, 0x37d7, 0x2401, phys);
+    try testing.expectEqual(@as(?u64, 12 * s), sup.initBackoffUntil(0x37d7, 0x2401, phys));
 }
