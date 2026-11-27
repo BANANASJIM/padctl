@@ -95,6 +95,12 @@ const InitFailure = struct {
 // Short enough that a replug or a pad switched on later binds within seconds.
 const init_backoff_max_s = 8;
 
+/// Failures after the interfaces were claimed: releasing them makes the kernel
+/// recreate the hidraw nodes, which would retry at once.
+fn countsAsInitFailure(err: anyerror) bool {
+    return err == error.InitFailed or err == error.Io;
+}
+
 fn initBackoffNs(failures: u8) u64 {
     const shift: u6 = @intCast(@min(failures -| 1, 5));
     const secs: u64 = @min(@as(u64, 1) << shift, init_backoff_max_s);
@@ -1692,7 +1698,7 @@ pub const Supervisor = struct {
                     if (self.last_attach_node_gone) {
                         std.log.debug("hotplug: {s} removed before attach (claimed or unplugged), giving up", .{name});
                     } else {
-                        std.log.warn("hotplug: giving up on {s} after {d} retries", .{ name, p.retries });
+                        std.log.warn("hotplug: giving up on {s} after {d} retries; replug the device to try again", .{ name, p.retries });
                     }
                     _ = self.hotplug_pending.swapRemove(i);
                 } else {
@@ -2878,6 +2884,11 @@ pub const Supervisor = struct {
                     self.allocator.free(phys);
                     continue;
                 }
+                if (self.initBackoffUntil(vid, pid, phys) != null) {
+                    self.enqueueHotplugRetryForPath(hidraw_path);
+                    self.allocator.free(phys);
+                    continue;
+                }
 
                 const gop = try seen.getOrPut(phys);
                 if (gop.found_existing) {
@@ -2894,7 +2905,7 @@ pub const Supervisor = struct {
                 const inst_ptr = try self.allocator.create(DeviceInstance);
                 inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
                     logBindFailure(&cfg_ptr.value, hidraw_path, err);
-                    if (err == error.InitFailed) self.recordInitFailure(&cfg_ptr.value, vid, pid, phys);
+                    if (countsAsInitFailure(err)) self.recordInitFailure(&cfg_ptr.value, vid, pid, phys);
                     if (isTransientOpenError(err)) self.enqueueHotplugRetryForPath(hidraw_path);
                     self.allocator.destroy(inst_ptr);
                     if (default_pr_ptr) |p| {
@@ -2926,6 +2937,7 @@ pub const Supervisor = struct {
                 self.bindManagedDevname(&self.managed.items[self.managed.items.len - 1], devname, phys) catch |err|
                     std.log.warn("bindManagedDevname failed for {s}: {s}", .{ phys, @errorName(err) });
                 // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
+                self.clearInitFailures(vid, pid, phys);
                 spawned += 1;
             }
 
@@ -3130,6 +3142,12 @@ pub const Supervisor = struct {
             devname, vid, pid, phys, iface_id,
         });
 
+        if (self.initBackoffUntil(vid, pid, phys)) |until| {
+            std.log.debug("hotplug: {s} waiting for init backoff", .{devname});
+            self.last_attach_backoff_until = until;
+            return error.HotplugTransient;
+        }
+
         var opener_ctx: u8 = 0;
         if (try self.tryResumeSuspendedInstance(
             devname,
@@ -3142,12 +3160,6 @@ pub const Supervisor = struct {
 
         if (self.hasLiveDuplicate(devname, phys, cfg.?)) return;
 
-        if (self.initBackoffUntil(vid, pid, phys)) |until| {
-            std.log.debug("hotplug: {s} waiting for init backoff", .{devname});
-            self.last_attach_backoff_until = until;
-            return error.HotplugTransient;
-        }
-
         const default_dm = self.buildDefaultMapping(cfg.?.device.name);
         const default_pr_ptr: ?*mapping_cfg.ParseResult = if (default_dm) |d| d.pr else null;
         const default_stem: ?[]u8 = if (default_dm) |d| d.stem else null;
@@ -3156,7 +3168,7 @@ pub const Supervisor = struct {
         const inst_ptr = try self.allocator.create(DeviceInstance);
         inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping, phys, &self.daemon_uniq_counter, .{}) catch |err| {
             logBindFailure(cfg.?, path, err);
-            if (err == error.InitFailed) self.recordInitFailure(cfg.?, vid, pid, phys);
+            if (countsAsInitFailure(err)) self.recordInitFailure(cfg.?, vid, pid, phys);
             self.allocator.destroy(inst_ptr);
             if (default_pr_ptr) |p| {
                 p.deinit();
@@ -3290,6 +3302,7 @@ pub const Supervisor = struct {
             rerunInitAfterRebind(m) catch |err| {
                 m.instance.closeDeviceIO();
                 std.log.warn("hotplug: suspended instance resume aborted: re-init failed: {}", .{err});
+                if (countsAsInitFailure(err)) self.recordInitFailure(mcfg, vid, pid, phys);
                 if (isTransientOpenError(err)) return error.HotplugTransient;
                 return true;
             };
@@ -3304,6 +3317,7 @@ pub const Supervisor = struct {
                 return true;
             };
             std.log.info("hotplug: resumed suspended instance (phys_key/VID/PID match) for {s}", .{devname});
+            self.clearInitFailures(vid, pid, phys);
             std.log.info("device resumed: \"{s}\" {s}", .{ mcfg.device.name, devname });
             return true;
         }
@@ -6936,6 +6950,9 @@ test "supervisor: logModelChoice handles an override chosen without a model ID" 
 }
 
 test "supervisor: init backoff doubles up to its cap" {
+    try testing.expect(countsAsInitFailure(error.InitFailed));
+    try testing.expect(countsAsInitFailure(error.Io));
+    try testing.expect(!countsAsInitFailure(error.AccessDenied));
     const s = std.time.ns_per_s;
     try testing.expectEqual(@as(u64, 1 * s), initBackoffNs(1));
     try testing.expectEqual(@as(u64, 2 * s), initBackoffNs(2));
